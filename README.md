@@ -35,7 +35,28 @@ tools/check_symbols.sh  guards what the Wii staticlib may import
 ```
 How the Rust/Wii build works and why: [docs/wii-build.md](docs/wii-build.md).
 
-## Building
+## Building on Windows
+Double-click **`build.bat`**. It updates from GitHub, builds the game and puts it in
+**`dist\apps\flatground`**. Copy that folder into the SD card's `apps` folder.
+
+It needs either devkitPro with "Wii Development" ticked
+([installer](https://github.com/devkitPro/installer/releases/latest), installed to `X:\devkitPro` on any
+drive; `build.bat` offers to install Rust for you), or Docker Desktop.
+
+| Command | Does |
+|---|---|
+| `build.bat` | update, build, package |
+| `build.bat noupdate` | build and package without updating |
+| `build.bat clean` | delete the build output |
+| `build.bat nopause` | don't wait for a key at the end |
+
+Switches combine. Optional settings: `set FG_SD=E:` also copies the app to `E:\apps\flatground`;
+`FG_DEVKITPRO` points at devkitPro if it's somewhere unusual; `FG_ASSUME_YES=1` installs Rust without asking.
+
+On Linux/macOS with Docker: `./build.sh`. No installs at all: download `flatground-sd-card` from the newest
+**ci** run under the repo's Actions tab.
+
+## Building by hand
 Host checks (any OS with Rust):
 ```bash
 cargo test

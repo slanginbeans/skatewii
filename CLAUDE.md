@@ -20,7 +20,10 @@ An original skateboarding game for the Nintendo Wii, written in Rust (see README
 - Wii CPU: `cargo test -p game_core --target powerpc-unknown-linux-gnu` (needs qemu-user + powerpc cross gcc).
 - Wii staticlib: `cargo build --release -p fg_game --target powerpc-unknown-linux-gnu`, then
   `tools/check_symbols.sh target/powerpc-unknown-linux-gnu/release/libfg_game.a`.
-- `.dol`: `make -C wii package` (needs devkitPro). Without it, CI's `wii` job builds it.
+- `.dol`: `make -C wii package` (needs devkitPro), or `./build.sh` (Docker). Without either, CI's `wii` job builds it.
+- Windows users run `build.bat` (finds devkitPro's msys2 on any drive and runs `tools/winbuild.sh` in it, else
+  Docker via `tools/docker-build.sh`). Keep `.bat` files ASCII with CRLF endings (`.gitattributes`); CI's
+  `windows-bat` job checks its switches and the no-tools message.
 - Look at frames: `cargo run --release -p fg_preview -- out/preview` (PNG output, git-ignored).
 
 ## Conventions

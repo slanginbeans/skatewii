@@ -44,6 +44,39 @@ jobs:
       - name: Only expected external symbols
         run: tools/check_symbols.sh target/powerpc-unknown-linux-gnu/release/libfg_game.a
 
+  docker-route:
+    name: build.sh (Docker route, as a user runs it)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./build.sh
+      - run: test -s dist/apps/flatground/boot.dol && test -s dist/apps/flatground/meta.xml
+
+  windows-bat:
+    name: build.bat switches and no-tools message
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Switches
+        shell: cmd
+        run: |
+          call build.bat showargs > args1.txt
+          findstr /c:"TARGET=package UPDATE=1 PAUSE=0" args1.txt || exit /b 1
+          call build.bat noupdate nopause showargs > args2.txt
+          findstr /c:"TARGET=package UPDATE=0 PAUSE=0" args2.txt || exit /b 1
+          call build.bat clean showargs > args3.txt
+          findstr /c:"TARGET=clean UPDATE=0" args3.txt || exit /b 1
+          type args1.txt args2.txt args3.txt
+      - name: Without devkitPro or Docker it fails with instructions
+        shell: cmd
+        env:
+          FG_NO_DOCKER: "1"
+        run: |
+          call build.bat noupdate nopause > notools.txt
+          if not errorlevel 1 exit /b 1
+          type notools.txt
+          findstr /c:"No Wii build tools found" notools.txt || exit /b 1
+
   wii:
     name: Wii .dol (devkitPPC)
     runs-on: ubuntu-latest
