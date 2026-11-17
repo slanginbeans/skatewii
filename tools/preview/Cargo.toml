@@ -1,0 +1,10 @@
+[package]
+name = "fg_preview"
+version = "0.1.0"
+description = "Host tool: runs the game with scripted input through a software rasteriser and writes PNG frames."
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+game_core = { path = "../../game_core" }
+png = "0.17"

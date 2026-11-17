@@ -1,0 +1,9 @@
+[package]
+name = "game_core"
+version = "0.1.0"
+description = "The game itself: no_std + alloc, host-tested, draws only through the Gfx trait."
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+libm = "0.2"

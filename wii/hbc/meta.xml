@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+  <name>flatground</name>
+  <coder>flatground contributors</coder>
+  <version>0.1.0 (@BUILD_ID@)</version>
+  <short_description>Skateboarding with flick-stick tricks</short_description>
+  <long_description>An original skateboarding game for the Wii. Plug a GameCube controller into port 1. A to push, B to brake, the stick steers and spins, the C-stick does tricks: pull back, then flick up. HOME (Wii Remote) or START+Z quits.</long_description>
+  <no_ios_reload/>
+</app>
