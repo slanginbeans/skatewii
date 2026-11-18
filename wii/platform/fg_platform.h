@@ -1,5 +1,5 @@
 // flatground platform layer: the whole API between the Rust game and libogc.
-// Keep in sync with wii/game/src/ffi.rs and game_core::{gfx::Vertex, input::PadRaw}.
+// Keep in sync with wii/game/src/ffi.rs and game_core::{gfx::Vertex, gfx::TexVertex, input::PadRaw}.
 #ifndef FG_PLATFORM_H
 #define FG_PLATFORM_H
 
@@ -10,6 +10,24 @@ typedef struct {
     float pos[3];
     uint32_t rgba;
 } FgVertex;
+
+// Vertex of an indexed mesh: position, pre-lit colour (multiplied with the texture), texture coordinate.
+// 24 bytes (game_core::gfx::TexVertex).
+typedef struct {
+    float pos[3];
+    uint32_t rgba;
+    float uv[2];
+} FgTexVertex;
+
+// A texture already in a GX format, in main memory: 32-byte aligned and flushed from the CPU cache
+// (data from fg_load_file is both). 12 bytes (wii/game/src/ffi.rs FgTexture).
+typedef struct {
+    const void *data;
+    uint16_t width, height;
+    uint8_t format;     // GX_TF_*
+    uint8_t alpha_test; // 1: discard texels with alpha < 128
+    uint16_t _pad;
+} FgTexture;
 
 // Pad state for one frame (game_core::input::PadRaw). 16 bytes.
 typedef struct {
@@ -52,6 +70,14 @@ void fg_begin_frame(const float eye[3], const float target[3], float fov_y_deg, 
 void fg_draw_tris(const FgVertex *verts, uint32_t count, const float model[3][4]);
 // Screen-space triangle list in a 640x480 virtual screen, origin top-left, drawn over the scene.
 void fg_draw_2d(const FgVertex *verts, uint32_t count);
+// Indexed triangle list (index_count a multiple of 3, at most 65535; indices < vert_count <= 65536) placed
+// by a row-major 3x4 model matrix, coloured by the vertex colour times `tex` (NULL: vertex colour only).
+// The vertices are copied, so the caller's buffer only has to live for the call.
+void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
+                     uint32_t index_count, const FgTexture *tex, const float model[3][4]);
+// Reads a whole file (e.g. "sd:/flatground/skater.fgpak") into 32-byte aligned memory that is never
+// freed, flushed for the GPU. NULL if there is no such file or no SD/USB storage.
+void *fg_load_file(const char *path, uint32_t *size);
 void fg_end_frame(void);
 // Shows the message on screen and waits for HOME / START to return to the loader.
 void fg_panic(const char *msg, uint32_t len) __attribute__((noreturn));

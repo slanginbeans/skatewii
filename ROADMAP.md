@@ -31,6 +31,14 @@ content second.
 
 ## Phase 3: Content pipeline
 - [ ] PC-side converter: your own glTF/Blender levels and models to a big-endian Wii pack read in place
+- [x] `fg_import`: disc image → BIG/RefPack → RW4 textures → GX `.fgpak` (player-supplied data, docs/importing.md)
+- [x] `fg_import`: skeleton, clips and poses from VBR `.abin` banks; water and menu tables from a player-decrypted executable
+- [x] `fg_import`: default skater as skinned meshes + textures, clips composed onto the bind pose (PNG previews)
+- [ ] `fg_import`: world meshes, collision and rails, RAW-codec animation, skater tints/morphs/outfits
+- [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
+  GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
+- [x] GX textures read in place from a `.fgpak` loaded from SD/USB (`sd:/flatground/skater.fgpak`)
+- [ ] Load texture packs and other `.fgpak` content from SD
 - [ ] Collision mesh + grind rails authored in the level files
 - [ ] Load parks from SD
 

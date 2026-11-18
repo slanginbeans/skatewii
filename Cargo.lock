@@ -46,6 +46,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fg_import"
+version = "0.1.0"
+dependencies = [
+ "game_core",
+ "miniz_oxide 0.8.9",
+ "png",
+]
+
+[[package]]
 name = "fg_preview"
 version = "0.1.0"
 dependencies = [

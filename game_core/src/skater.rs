@@ -68,6 +68,7 @@ pub enum Mode {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ActiveTrick {
+    pub flick: Flick,
     pub def: TrickDef,
     pub t: f32,
 }
@@ -112,6 +113,8 @@ pub struct Skater {
     pub fakie: bool,
     takeoff_fakie: bool,
     push_cooldown: f32,
+    /// Seconds since the last push (drawn: plays the push animation).
+    pub since_push: f32,
     /// 0..1, how far the skater is crouched (drawn; also used for the push animation later).
     pub crouch: f32,
 }
@@ -131,6 +134,7 @@ impl Skater {
             fakie: false,
             takeoff_fakie: false,
             push_cooldown: 0.0,
+            since_push: f32::INFINITY,
             crouch: 0.0,
         }
     }
@@ -157,6 +161,7 @@ impl Skater {
         events: &mut alloc::vec::Vec<Event>,
     ) {
         self.crouch += ((if loaded { 1.0 } else { 0.0 }) - self.crouch) * smooth(18.0, dt);
+        self.since_push += dt;
         match self.mode {
             Mode::Rolling => self.roll(park, pad, flick, dt, events),
             Mode::Air { time } => self.fly(park, pad, time + dt, dt, events),
@@ -194,6 +199,7 @@ impl Skater {
         if pad.was_pressed(btn::A) && self.push_cooldown == 0.0 && self.speed < PUSH_MAX {
             self.speed = (self.speed + PUSH_KICK).min(PUSH_MAX);
             self.push_cooldown = PUSH_COOLDOWN;
+            self.since_push = 0.0;
         }
         if pad.is_held(btn::B) {
             self.speed = approach(self.speed, 0.0, BRAKE * dt);
@@ -261,6 +267,7 @@ impl Skater {
         self.spin_rate = 0.0;
         self.takeoff_fakie = self.fakie;
         self.trick = f.map(|f| ActiveTrick {
+            flick: f,
             def: trick_def(f),
             t: 0.0,
         });

@@ -10,8 +10,10 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod anim;
 pub mod autoplay;
 pub mod camera;
+pub mod character;
 pub mod flick;
 pub mod game;
 pub mod gfx;
@@ -19,7 +21,10 @@ pub mod hud;
 pub mod input;
 pub mod math;
 pub mod model;
+pub mod pack;
 pub mod park;
+pub mod rider;
 pub mod skater;
+pub mod skinned;
 
 pub use game::Game;

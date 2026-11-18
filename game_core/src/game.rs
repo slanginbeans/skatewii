@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::camera::ChaseCam;
+use crate::character::{self, Character};
 use crate::flick::FlickReader;
 use crate::gfx::{Gfx, MeshBuilder, SCREEN_W, Vertex, rgb};
 use crate::hud;
@@ -12,9 +13,12 @@ use crate::input::{Pad, PadRaw, flag};
 use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
 use crate::model::Models;
 use crate::park::Park;
-use crate::skater::{Event, Mode, Skater};
+use crate::rider::{self, Rider};
+use crate::skater::{Event, GRAVITY, Mode, Skater};
 
 const SKY: u32 = rgb(150, 196, 232);
+/// Imported character space (Skate 3: Y up, travelling along +Z) to board space (+Z nose, Y up).
+const IMPORTED_TO_BOARD: Mat3 = Mat3::IDENTITY;
 const POPUP_TIME: f32 = 1.8;
 const HINT_TIME: f32 = 12.0;
 
@@ -29,6 +33,8 @@ pub struct Game {
     pub park: Park,
     park_mesh: Vec<Vertex>,
     models: Models,
+    /// The player's imported skater, drawn instead of the box placeholder when loaded.
+    rider: Option<Rider>,
     pub skater: Skater,
     flick: FlickReader,
     cam: ChaseCam,
@@ -64,7 +70,19 @@ impl Game {
             clock: 0.0,
             connected: true,
             events: Vec::new(),
+            rider: None,
         }
+    }
+
+    /// Uses an imported skater pack (`fg_import skater`) instead of the placeholder model. The bytes stay
+    /// borrowed for the rest of the game (the Wii reads its textures in place).
+    pub fn load_skater(&mut self, pack: &'static [u8]) -> Result<(), character::Error> {
+        self.rider = Some(Rider::new(Character::parse(pack)?));
+        Ok(())
+    }
+
+    pub fn rider(&self) -> Option<&Rider> {
+        self.rider.as_ref()
     }
 
     /// One fixed step (1/60 s on NTSC and PAL60, 1/50 s on PAL50).
@@ -82,6 +100,15 @@ impl Game {
         self.skater
             .step(&self.park, &pad, flick, loaded, dt, &mut self.events);
         self.cam.update(&self.skater, &self.park, dt);
+        if self.rider.is_some() {
+            let rot = self.imported_xform().rot;
+            let s = &self.skater;
+            let ground = self.park.surface(s.pos.x, s.pos.z).height;
+            let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, GRAVITY);
+            if let Some(r) = &mut self.rider {
+                r.update(&self.skater, self.clock, land_in, dt, rot);
+            }
+        }
 
         for e in &self.events {
             match e {
@@ -121,13 +148,37 @@ impl Game {
         gfx.end_frame();
     }
 
-    fn draw_skater(&self, gfx: &mut dyn Gfx) {
+    /// The skater's board-space frame in the world (heading, spin, stance, slope).
+    fn skater_base(&self) -> Xform {
         let s = &self.skater;
         let stance = if s.fakie { PI } else { 0.0 };
-        let base = Xform::new(
+        Xform::new(
             Mat3::yaw_on_surface(s.heading + s.spin + stance, s.normal),
             s.pos,
-        );
+        )
+    }
+
+    /// Where the imported character is drawn: board space, tipped over on a bail.
+    fn imported_xform(&self) -> Xform {
+        let tip = match self.skater.mode {
+            Mode::Bailed { time } => Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
+            _ => Mat3::IDENTITY,
+        };
+        self.skater_base()
+            .then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
+            .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, 0.0, 0.0)))
+    }
+
+    fn draw_skater(&self, gfx: &mut dyn Gfx) {
+        if let Some(r) = &self.rider {
+            let m = self.imported_xform().to_mat34();
+            for p in &r.character.parts {
+                gfx.draw_indexed(&p.out, &p.indices, p.texture.as_ref(), &m);
+            }
+            return;
+        }
+        let s = &self.skater;
+        let base = self.skater_base();
 
         // Board: lifts and turns under the feet while a trick plays.
         let (mut lift, mut board_rot) = (0.0, Mat3::IDENTITY);

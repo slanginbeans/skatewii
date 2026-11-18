@@ -1,8 +1,10 @@
 // flatground platform layer over libogc: video + GX setup, a vertex-colour 3D pass, a 2D overlay
-// pass, GameCube pad + Wii Remote HOME input, and a panic screen.
+// pass, indexed textured meshes (imported characters), file loading from SD/USB, GameCube pad + Wii
+// Remote HOME input, and a panic screen.
 
 #include <gccore.h>
 #include <wiiuse/wpad.h>
+#include <fat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +13,8 @@
 #include "fg_platform.h"
 
 #define FIFO_SIZE (256 * 1024)
+// Per-frame copies of indexed vertex arrays (the GPU reads them after fg_draw_indexed returns).
+#define ARENA_SIZE (1024 * 1024)
 
 static GXRModeObj *rmode;
 static void *xfb[2];
@@ -19,6 +23,12 @@ static float aspect = 4.0f / 3.0f;
 static Mtx view;
 static Mtx44 proj;
 static int in_2d;
+static u8 *arena;
+static u32 arena_used;
+// Which vertex/TEV setup is loaded: direct colour, indexed colour, or indexed textured.
+enum { MODE_DIRECT, MODE_INDEXED, MODE_TEXTURED };
+static int mode = MODE_DIRECT;
+static int alpha_test_on;
 
 void fg_platform_init(void) {
     VIDEO_Init();
@@ -65,6 +75,13 @@ void fg_platform_init(void) {
     GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
     GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
     GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    // Vertex format 1: the same plus an f32 texture coordinate, read through 16-bit indices from
+    // FgTexVertex arrays (fg_draw_indexed).
+    GX_SetVtxAttrFmt(GX_VTXFMT1, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GX_SetVtxAttrFmt(GX_VTXFMT1, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    GX_SetVtxAttrFmt(GX_VTXFMT1, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+    GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+    arena = memalign(32, ARENA_SIZE);
     GX_SetNumChans(1);
     GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
     GX_SetNumTexGens(0);
@@ -135,9 +152,53 @@ void fg_begin_frame(const float eye[3], const float target[3], float fov_y_deg, 
     GX_LoadProjectionMtx(proj, GX_PERSPECTIVE);
     GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
     in_2d = 0;
+    // Last frame finished in fg_end_frame (GX_DrawDone): its vertex copies can be reused.
+    arena_used = 0;
+    GX_InvalidateTexAll();
+}
+
+// Switches the vertex descriptors and TEV between direct colour triangles and indexed meshes.
+static void set_mode(int m, int alpha_test) {
+    if (m != mode) {
+        GX_ClearVtxDesc();
+        if (m == MODE_DIRECT) {
+            GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+            GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+        } else {
+            GX_SetVtxDesc(GX_VA_POS, GX_INDEX16);
+            GX_SetVtxDesc(GX_VA_CLR0, GX_INDEX16);
+            if (m == MODE_TEXTURED) {
+                GX_SetVtxDesc(GX_VA_TEX0, GX_INDEX16);
+            }
+        }
+        if (m == MODE_TEXTURED) {
+            // Texture times vertex colour.
+            GX_SetNumTexGens(1);
+            GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+            GX_SetTevOp(GX_TEVSTAGE0, GX_MODULATE);
+        } else {
+            GX_SetNumTexGens(0);
+            GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+            GX_SetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+        }
+        mode = m;
+    }
+    alpha_test = alpha_test && m == MODE_TEXTURED;
+    if (alpha_test != alpha_test_on) {
+        if (alpha_test) {
+            // Discard see-through texels, and test depth after texturing so they write no depth.
+            GX_SetAlphaCompare(GX_GREATER, 127, GX_AOP_AND, GX_ALWAYS, 0);
+            GX_SetZCompLoc(GX_FALSE);
+        } else {
+            GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
+            GX_SetZCompLoc(GX_TRUE);
+        }
+        alpha_test_on = alpha_test;
+    }
 }
 
 static void emit(const FgVertex *v, uint32_t count) {
+    set_mode(MODE_DIRECT, 0);
     GX_Begin(GX_TRIANGLES, GX_VTXFMT0, (u16)count);
     for (uint32_t i = 0; i < count; i++) {
         GX_Position3f32(v[i].pos[0], v[i].pos[1], v[i].pos[2]);
@@ -157,6 +218,91 @@ void fg_draw_tris(const FgVertex *verts, uint32_t count, const float model[3][4]
     guMtxConcat(view, m, mv);
     GX_LoadPosMtxImm(mv, GX_PNMTX0);
     emit(verts, count);
+}
+
+void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
+                     uint32_t index_count, const FgTexture *tex, const float model[3][4]) {
+    if (vert_count == 0 || index_count == 0 || index_count > 0xFFFF || vert_count > 0x10000) {
+        return;
+    }
+    // Copy the vertices where the GPU can read them until the frame is done.
+    u32 bytes = vert_count * sizeof(FgTexVertex);
+    u32 need = (bytes + 31) & ~31u;
+    if (!arena || arena_used + need > ARENA_SIZE) {
+        return; // over budget this frame: skip rather than overwrite what the GPU still reads
+    }
+    u8 *buf = arena + arena_used;
+    arena_used += need;
+    memcpy(buf, verts, bytes);
+    DCFlushRange(buf, need);
+
+    if (in_2d) {
+        GX_LoadProjectionMtx(proj, GX_PERSPECTIVE);
+        GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+        in_2d = 0;
+    }
+    Mtx m, mv;
+    memcpy(m, model, sizeof(Mtx));
+    guMtxConcat(view, m, mv);
+    GX_LoadPosMtxImm(mv, GX_PNMTX0);
+
+    int textured = tex && tex->data;
+    if (textured) {
+        GXTexObj obj;
+        GX_InitTexObj(&obj, (void *)tex->data, tex->width, tex->height, tex->format, GX_REPEAT, GX_REPEAT,
+                      GX_FALSE);
+        GX_InitTexObjLOD(&obj, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
+        GX_LoadTexObj(&obj, GX_TEXMAP0);
+    }
+    set_mode(textured ? MODE_TEXTURED : MODE_INDEXED, textured && tex->alpha_test);
+    GX_SetArray(GX_VA_POS, buf, sizeof(FgTexVertex));
+    GX_SetArray(GX_VA_CLR0, buf + 12, sizeof(FgTexVertex));
+    GX_SetArray(GX_VA_TEX0, buf + 16, sizeof(FgTexVertex));
+    GX_InvVtxCache();
+
+    GX_Begin(GX_TRIANGLES, GX_VTXFMT1, (u16)index_count);
+    for (uint32_t i = 0; i < index_count; i++) {
+        u16 idx = indices[i];
+        GX_Position1x16(idx);
+        GX_Color1x16(idx);
+        if (textured) {
+            GX_TexCoord1x16(idx);
+        }
+    }
+    GX_End();
+}
+
+void *fg_load_file(const char *path, uint32_t *size) {
+    static int fat_state; // 0 untried, 1 mounted, -1 no storage
+    if (fat_state == 0) {
+        fat_state = fatInitDefault() ? 1 : -1;
+    }
+    if (fat_state < 0) {
+        return NULL;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    void *buf = NULL;
+    long n = -1;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        n = ftell(f);
+    }
+    if (n > 0 && fseek(f, 0, SEEK_SET) == 0) {
+        u32 padded = ((u32)n + 31) & ~31u;
+        buf = memalign(32, padded);
+        if (buf && fread(buf, 1, (size_t)n, f) == (size_t)n) {
+            memset((u8 *)buf + n, 0, padded - (u32)n);
+            DCFlushRange(buf, padded);
+            *size = (uint32_t)n;
+        } else {
+            free(buf);
+            buf = NULL;
+        }
+    }
+    fclose(f);
+    return buf;
 }
 
 void fg_draw_2d(const FgVertex *verts, uint32_t count) {

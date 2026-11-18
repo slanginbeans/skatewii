@@ -26,14 +26,21 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
   skater.rs        board physics, landing rules, trick scoring
   park.rs          height-field park made of blocks and ramps (placeholder geometry in code)
   game.rs          update + render loop; draws only through gfx::Gfx
+  character.rs     imported skinned character: pack parsing, clip sampling, CPU skinning
+  rider.rs         picks and crossfades the imported skater's clips from the game state
 wii/
   game/            Rust staticlib for the Wii: Gfx over the C layer, allocator, panic screen
   platform/        C layer over libogc (video/GX, pads, panic console) + main()
   Makefile         links flatground.dol with devkitPPC
 tools/preview/     PC tool: runs the game with scripted input through a software rasteriser to PNGs
+tools/import/      PC tool: converts assets from your own Skate 3 disc image into Wii packs (docs/importing.md)
 tools/check_symbols.sh  guards what the Wii staticlib may import
 ```
 How the Rust/Wii build works and why: [docs/wii-build.md](docs/wii-build.md).
+
+The game ships with original placeholder art only. If you own Skate 3 for Xbox 360, `fg_import` can convert
+assets from your own disc image for your own use: see [docs/importing.md](docs/importing.md). No game data
+is ever included in this repository.
 
 ## Building on Windows
 Double-click **`build.bat`**. It updates from GitHub, builds the game and puts it in
@@ -63,6 +70,10 @@ cargo test
 ```
 ```bash
 cargo run --release -p fg_preview -- out/preview
+```
+With a skater pack you converted from your own disc (`--every N` adds close-ups every N frames):
+```bash
+cargo run --release -p fg_preview -- out/preview --skater imported/skater.fgpak
 ```
 Game logic on an emulated Wii CPU (Debian/Ubuntu: `qemu-user gcc-powerpc-linux-gnu libc6-dev-powerpc-cross`):
 ```bash
