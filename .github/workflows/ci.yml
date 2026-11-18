@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Toolchain (from rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
+      - name: No game data in the repo (CLAUDE.md rule 1)
+        run: bash tools/check_no_game_data.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test

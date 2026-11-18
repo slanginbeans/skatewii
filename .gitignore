@@ -3,3 +3,11 @@
 /dist
 /wii/build
 /.toolchain
+
+# Game data from the player's own disc never enters the repo (CLAUDE.md rule 1).
+/imported
+*.iso
+*.xex
+*.big
+*.rx2
+*.fgpak

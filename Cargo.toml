@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["game_core", "wii/game", "tools/preview"]
+members = ["game_core", "wii/game", "tools/preview", "tools/import"]
 # `fg_game` is a Wii-only staticlib (no_std + panic handler); host builds and tests skip it.
-default-members = ["game_core", "tools/preview"]
+default-members = ["game_core", "tools/preview", "tools/import"]
 
 [workspace.package]
 edition = "2024"

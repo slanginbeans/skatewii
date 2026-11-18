@@ -14,6 +14,29 @@ pub struct Vertex {
     pub rgba: u32,
 }
 
+/// Vertex of an indexed, optionally textured mesh: position, pre-lit RGBA colour (multiplied with the
+/// texture), texture coordinate. Same layout as `FgTexVertex` in `fg_platform.h` (24 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TexVertex {
+    pub pos: [f32; 3],
+    pub rgba: u32,
+    pub uv: [f32; 2],
+}
+
+/// A texture already in a GX format (from an imported `.fgpak`), read in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Texture<'a> {
+    /// GX texture data; 32-byte aligned on the Wii (pack data is).
+    pub data: &'a [u8],
+    pub width: u16,
+    pub height: u16,
+    /// `GX_TF_*` (CMPR, RGB5A3, RGBA8, ...).
+    pub format: u8,
+    /// Discard texels with alpha below one half (hair cards).
+    pub alpha_test: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     pub eye: Vec3,
@@ -33,6 +56,15 @@ pub trait Gfx {
     fn begin_frame(&mut self, cam: &Camera, clear_rgba: u32);
     /// Triangle list (3 vertices per triangle) in model space, placed by `model`.
     fn draw_tris(&mut self, verts: &[Vertex], model: &Mat34);
+    /// Indexed triangle list (3 indices per triangle) in model space, placed by `model`, coloured by the
+    /// vertex colour times `texture` when given. The data only has to live for the call.
+    fn draw_indexed(
+        &mut self,
+        verts: &[TexVertex],
+        indices: &[u16],
+        texture: Option<&Texture>,
+        model: &Mat34,
+    );
     /// Triangle list in screen space ([`SCREEN_W`] x [`SCREEN_H`], z ignored), drawn over the 3D scene.
     fn draw_2d(&mut self, verts: &[Vertex]);
     fn end_frame(&mut self);
@@ -52,7 +84,7 @@ pub fn shade(rgba: u32, k: f32) -> u32 {
 }
 
 /// Fixed sun used to pre-light geometry until the GX lighting path exists (ROADMAP phase 2).
-const SUN: Vec3 = Vec3 {
+pub const SUN: Vec3 = Vec3 {
     x: 0.42,
     y: 0.82,
     z: 0.39,
@@ -162,6 +194,9 @@ mod tests {
     fn vertex_layout_matches_c_header() {
         assert_eq!(core::mem::size_of::<Vertex>(), 16);
         assert_eq!(core::mem::offset_of!(Vertex, rgba), 12);
+        assert_eq!(core::mem::size_of::<TexVertex>(), 24);
+        assert_eq!(core::mem::offset_of!(TexVertex, rgba), 12);
+        assert_eq!(core::mem::offset_of!(TexVertex, uv), 16);
     }
 
     #[test]

@@ -3,10 +3,14 @@
 An original skateboarding game for the Nintendo Wii, written in Rust (see README.md, ROADMAP.md).
 
 ## Hard rules
-1. **Original content only.** No code, data, assets, level layouts, characters, names, logos, UI or audio from
-   any commercial game, and nothing extracted from game discs or ports. Generic skateboarding (trick names, park
-   features, flick-stick controls as a genre mechanic) is fine. Placeholder art is built in code or authored
-   for this project.
+1. **The repo holds original content only; game data comes from the player's own disc.** Nothing from a
+   commercial game is ever committed or shipped: no extracted or converted files, textures, meshes, level
+   layouts, audio, UI, logos, `.xex` code, and no excerpts of them in tests, fixtures, docs or CI artifacts.
+   Players supply data by running `tools/import` (`fg_import`) on a Skate 3 (Xbox 360) disc image they own.
+   Its output goes outside the repo or to git-ignored `/imported`, and `tools/check_no_game_data.sh` (CI) must
+   pass. Importer tests use synthetic data built in the test. Format knowledge from public research (notably
+   SK8-ENGINE/skate-3-rust-engine, GPL-3.0) is fine, with credit. `fg_import` is GPL-3.0-only. The game must
+   still boot and play with its built-in placeholder art when no imported data is present.
 2. **`game_core` stays `no_std` + `alloc`** and platform-free: it draws only through `gfx::Gfx` and reads
    only `input::PadRaw`. Use `libm`, not float intrinsics that need a C math library.
 3. **The C/Rust boundary is `wii/platform/fg_platform.h`.** Change it, `wii/game/src/ffi.rs` and the
