@@ -18,7 +18,8 @@ const BANK: &str = "data/big/miscload.big::data/anim/OnBoard.abin";
 /// `--anim role=clip` picks another, `--anim role=` drops one. Tricks play `pop` (leaving the ground), `air`
 /// (into the trick), `flip` and `out` (the catch) back to back, skipping the ones that are empty.
 pub const CLIPS: &[(&str, &str)] = &[
-    ("idle", "r_stand_idle_mongo_0_cyc"),
+    // Riding: both feet on the board.
+    ("idle", "r_idle_ride_n_0_cyc"),
     ("crouch", "r_antic_crouch_ollie_n_0_into"),
     ("push", "r_pushlsp_lstr_mongo_left_cyc2"),
     ("ollie/pop", "ollie_low_g"),
@@ -45,6 +46,26 @@ pub const CLIPS: &[(&str, &str)] = &[
     ("fsshuvit/air", "fspopshuvit_d_low_a"),
     ("fsshuvit/flip", ""),
     ("fsshuvit/out", ""),
+    // Steering lean: single poses blended over the riding clip by how hard the player steers
+    // (hcom: standing tall; lcom: crouched).
+    ("lean/left", "r_idle_hcom_n100"),
+    ("lean/right", "r_idle_hcom_p100"),
+    ("lean/crouch_left", "r_idle_lcom_n100"),
+    ("lean/crouch_right", "r_idle_lcom_p100"),
+    // Landings: clean, a big drop, and a crooked (sketchy) catch.
+    ("land/clean", "l_hcom_limp"),
+    ("land/heavy", "l_hcom_himp"),
+    ("land/sketchy", "l_sketch_fs_hcom_limp"),
+    // Manuals (on the back wheels, on the front wheels).
+    ("manual", "m_idle_n_0_cyc"),
+    ("nosemanual", "m_noseidle_n_0_cyc"),
+    // Grabs, held in the air.
+    ("grab/fs", "gr_grab_n_fs_0_cyc"),
+    ("grab/bs", "gr_grab_n_bs_0_cyc"),
+    ("grab/mute", "gr_mutegrab_n_0_cyc"),
+    // Bails: the fall, then getting up.
+    ("bail/fall", "w_brace_lean090twist000_n_0_n"),
+    ("bail/getup", "w_recovery_onfront_n_0_n"),
 ];
 
 struct Options {

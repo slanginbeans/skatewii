@@ -197,8 +197,13 @@ impl Game {
 
     /// Where the imported character is drawn: board space, tipped over on a bail.
     fn imported_xform(&self) -> Xform {
+        // Without bail clips in the pack, show a bail by tipping the rider over.
+        let animated = self
+            .rider
+            .as_ref()
+            .is_some_and(|r| r.character.has_clip("bail/fall"));
         let tip = match self.skater.mode {
-            Mode::Bailed { time } => Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
+            Mode::Bailed { time } if !animated => Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
             _ => Mat3::IDENTITY,
         };
         self.skater_base()
@@ -305,7 +310,7 @@ impl Game {
         if let Some(n) = &self.notice
             && self.clock < HINT_TIME
         {
-            hud::text_centered(&mut m, SCREEN_W / 2.0, 396.0, 3.0, n, rgb(255, 230, 90));
+            hud::text_centered(&mut m, SCREEN_W / 2.0, 366.0, 3.0, n, rgb(255, 230, 90));
         }
         if !self.connected {
             hud::text_centered(
@@ -320,7 +325,7 @@ impl Game {
             hud::text_centered(
                 &mut m,
                 SCREEN_W / 2.0,
-                420.0,
+                392.0,
                 3.0,
                 "A PUSH   B BRAKE   STICK STEER AND SPIN",
                 white,
@@ -328,7 +333,7 @@ impl Game {
             hud::text_centered(
                 &mut m,
                 SCREEN_W / 2.0,
-                440.0,
+                410.0,
                 3.0,
                 "C-STICK: PULL BACK THEN FLICK UP TO OLLIE",
                 white,
@@ -336,11 +341,27 @@ impl Game {
             hud::text_centered(
                 &mut m,
                 SCREEN_W / 2.0,
-                456.0,
+                428.0,
                 3.0,
                 "FLICK UP-LEFT KICKFLIP / UP-RIGHT HEELFLIP",
                 white,
             );
+            hud::text_centered(
+                &mut m,
+                SCREEN_W / 2.0,
+                446.0,
+                3.0,
+                "STICK DOWN/UP MANUAL   L/R IN THE AIR GRAB",
+                white,
+            );
+        }
+        if let Some(man) = &self.skater.manual {
+            // Balance meter: keep the marker in the middle.
+            let (w, x, y) = (160.0, SCREEN_W / 2.0 - 80.0, 300.0);
+            m.rect_2d(x, y, w, 8.0, rgb(30, 30, 30));
+            m.rect_2d(x + w / 2.0 - 12.0, y, 24.0, 8.0, rgb(70, 140, 70));
+            let at = x + w / 2.0 + man.balance.clamp(-1.0, 1.0) * (w / 2.0) - 3.0;
+            m.rect_2d(at, y - 4.0, 6.0, 16.0, rgb(255, 230, 90));
         }
         gfx.draw_2d(&m.verts);
     }

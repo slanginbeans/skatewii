@@ -17,6 +17,8 @@ and on an emulated Wii CPU. **Not yet run on a Wii or in Dolphin.** Plan: [ROADM
 | ... flick up-left / up-right | Kickflip / heelflip |
 | ... roll around the left / right edge up | Pop shove-it / FS shove-it |
 | C-stick: push forward, then flick down | Nollie |
+| Control stick down / up while rolling | Manual / nose manual (keep the balance marker centred) |
+| R / L / both triggers in the air | Indy / melon / mute grab (let go before landing) |
 | HOME (Wii Remote) or START + Z | Quit to the Homebrew Channel |
 
 ## Layout

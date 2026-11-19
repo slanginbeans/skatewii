@@ -16,9 +16,12 @@ content second.
 
 ## Phase 1: Feel
 - [ ] Tune flick thresholds on a real C-stick (its range and gate differ from the main stick)
-- [ ] Pushing animation and timing, carve lean, speed wobble
-- [ ] Better landings: slope matching, sketchy landings instead of only clean/bail
-- [ ] Manuals (tip the flick stick), reverts, grabs on the triggers
+- [x] Pushing animation, carve lean (imported skater)
+- [ ] Speed wobble
+- [x] Sketchy and heavy landings besides clean/bail
+- [ ] Slope matching on landing
+- [x] Manuals and nose manuals (main stick, with a balance meter), grabs on the triggers
+- [ ] Reverts
 - [ ] Ramps and quarter pipes you can go vertical on (needs a real surface model, not only a height field)
 - [ ] Scripted Dolphin runs from `game_core::autoplay`, with screenshots in CI-like checks
 

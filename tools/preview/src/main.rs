@@ -1,7 +1,7 @@
 //! Host preview: runs the real game with the scripted kicker run and renders chosen frames through a
 //! small software rasteriser (same `Gfx` trait as the Wii) into PNGs.
 //!
-//!     cargo run -p fg_preview -- [out_dir] [--wide] [--skater imported/skater.fgpak] [--every N]
+//!     cargo run -p fg_preview -- [out_dir] [--wide] [--skater imported/skater.fgpak] [--every N] [--tour]
 //!
 //! Writes `frame_NNNN.png` for a few interesting moments plus the event log to stdout. It is a
 //! stand-in for looking at the game until Dolphin runs are scripted; colours and framing match the Wii
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use game_core::Game;
-use game_core::autoplay::KickerRun;
+use game_core::autoplay::{KickerRun, TrickTour};
 mod gxtex;
 
 use game_core::gfx::{Camera, Gfx, SCREEN_H, SCREEN_W, TexVertex, Texture, Vertex};
@@ -368,14 +368,30 @@ fn main() {
         game.load_skater(bytes).expect("skater pack");
         println!("using imported skater {path}");
     }
-    let mut script = KickerRun::new();
+    // --tour: the whole move set (carves, manual, grab, bail) after the kicker run.
+    let tour = args.iter().any(|a| a == "--tour");
+    let mut kicker = KickerRun::new();
+    let mut trick_tour = TrickTour::new();
+    let mut done_at: Option<u32> = None;
     let dt = 1.0 / 60.0;
 
     let mut shots: Vec<(u32, &str)> = vec![(45, "rolling")];
     let mut took_air = false;
     let mut took_land = false;
-    for frame in 0..(60 * 7) {
-        let pad = script.next(&game);
+    let frames = if tour { 60 * 20 } else { 60 * 7 };
+    for frame in 0..frames {
+        let pad = if tour {
+            trick_tour.next(&game)
+        } else {
+            kicker.next(&game)
+        };
+        if trick_tour.done() {
+            // Let the bail play out, then stop.
+            let at = *done_at.get_or_insert(frame);
+            if frame > at + 150 {
+                break;
+            }
+        }
         game.update(&pad, dt);
         for e in &game.events {
             println!("{:>5.2}s  {e:?}", frame as f32 * dt);

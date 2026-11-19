@@ -70,7 +70,7 @@ cargo run --release -p fg_import -- skater path/to/skate3.iso --lod 2
 ```
 Builds the default skater from the disc's fallback recipe (`data/cacrecipes/SavedRecipeFallbackMale.bin`).
 That is 10 parts: arms, feet, hair, eyes/teeth, shirt, pants, head, deck, trucks and wheels. Writes
-`imported/skater.fgpak` (about 640 KiB at `--lod 2`):
+`imported/skater.fgpak` (about 1.1 MiB at `--lod 2`):
 
 | Entry | Kind |
 |---|---|
@@ -95,9 +95,14 @@ deck is at its start and end):
 
 | Role | Default clip | When |
 |---|---|---|
-| `idle` | `r_stand_idle_mongo_0_cyc` | rolling, and the fallback for anything missing |
+| `idle` | `r_idle_ride_n_0_cyc` | rolling, and the fallback for anything missing |
 | `crouch` | `r_antic_crouch_ollie_n_0_into` | flick stick held back (frame follows the crouch amount) |
 | `push` | `r_pushlsp_lstr_mongo_left_cyc2` | after A, while the clip lasts |
+| `lean/left`, `lean/right` | `r_idle_hcom_n100`, `r_idle_hcom_p100` | single poses blended over the riding clips by how hard you steer (`lean/crouch_*`: `r_idle_lcom_*`, while crouched) |
+| `land/clean`, `land/heavy`, `land/sketchy` | `l_hcom_limp`, `l_hcom_himp`, `l_sketch_fs_hcom_limp` | after touching down: a normal landing, a big drop, a crooked catch |
+| `manual`, `nosemanual` | `m_idle_n_0_cyc`, `m_noseidle_n_0_cyc` | main stick held down / up while rolling |
+| `grab/fs`, `grab/bs`, `grab/mute` | `gr_grab_n_fs_0_cyc`, `gr_grab_n_bs_0_cyc`, `gr_mutegrab_n_0_cyc` | R, L, or both triggers held in the air |
+| `bail/fall`, `bail/getup` | `w_brace_lean090twist000_n_0_n`, `w_recovery_onfront_n_0_n` | after a bail, one after the other |
 | `<trick>/pop`, `/air`, `/flip`, `/out` | e.g. `kickflip_in_low_g`, `kickflip_in_low_a`, `t_low_kick_cyc1`, `t_low_kick_out4` | in the air, back to back |
 
 Tricks are `ollie`, `nollie`, `kickflip`, `heelflip`, `popshuvit` and `fsshuvit`. `--anim role=clip`
@@ -167,8 +172,8 @@ plenty for an offline converter.
   normal and specular maps.
 - Game side: the imported skater is skinned on the CPU (GX transforms each vertex by one matrix, so it
   can't blend bone weights). It is checked in the PC preview only, not yet in Dolphin or on hardware, and
-  its frame cost on the Wii is unmeasured (the HUD now shows it). Bails show the idle pose tipped over (no fall clips), and there is
-  no lean, steering pose or landing clip yet.
+  its frame cost on the Wii is unmeasured (the HUD now shows it). Bails are clip-based: Skate 3 plays its
+  wipeout clips over a physics ragdoll, which is not ported, so a bail is a step-off and a get-up.
 - World geometry: district streams (`ATOC`/`SFIL` inside `worldDIST_*.big`) and RW4 meshes (vertex
   descriptors, index buffers) to Wii display lists.
 - Collision (RW ClusteredMesh) and grind rails.
