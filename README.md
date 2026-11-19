@@ -46,6 +46,11 @@ is ever included in this repository.
 Double-click **`build.bat`**. It updates from GitHub, builds the game and puts it in
 **`dist\apps\flatground`**. Copy that folder into the SD card's `apps` folder.
 
+If you own Skate 3 for Xbox 360 and keep an `.iso` of your disc next to this folder (or one folder down), the
+build also converts what the game uses from it (the skater, for now) into `dist\apps\flatground\data`. It only
+converts what is missing or out of date, so later builds take seconds. Details:
+[docs/importing.md](docs/importing.md).
+
 It needs either devkitPro with "Wii Development" ticked
 ([installer](https://github.com/devkitPro/installer/releases/latest), installed to `X:\devkitPro` on any
 drive; `build.bat` offers to install Rust for you), or Docker Desktop.
@@ -56,9 +61,11 @@ drive; `build.bat` offers to install Rust for you), or Docker Desktop.
 | `build.bat noupdate` | build and package without updating |
 | `build.bat clean` | delete the build output |
 | `build.bat nopause` | don't wait for a key at the end |
+| `build.bat dolphin` | build, then start the game in Dolphin (`dist` as its SD card) |
 
 Switches combine. Optional settings: `set FG_SD=E:` also copies the app to `E:\apps\flatground`;
-`FG_DEVKITPRO` points at devkitPro if it's somewhere unusual; `FG_ASSUME_YES=1` installs Rust without asking.
+`FG_DEVKITPRO` points at devkitPro if it's somewhere unusual; `FG_ASSUME_YES=1` installs Rust without asking;
+`FG_ISO` picks your disc image; `FG_NO_ASSETS=1` skips converting; `FG_DOLPHIN` points at `Dolphin.exe`.
 
 On Linux/macOS with Docker: `./build.sh`. No installs at all: download `flatground-sd-card` from the newest
 **ci** run under the repo's Actions tab.
@@ -86,4 +93,5 @@ make -C wii package
 Then copy `dist/apps/flatground` to `SD:/apps/`. No local devkitPro? Every CI run builds the `.dol`: download
 the `flatground-sd-card` artifact from the run's page.
 
-To try it in Dolphin, open `wii/build/flatground.dol` and map a GameCube controller to port 1.
+To try it in Dolphin: `build.bat dolphin` (Windows), or open `dist/apps/flatground/boot.dol` with Dolphin's
+SD card set to sync from the `dist` folder (Config, Wii, SD Card). Map a GameCube controller to port 1.

@@ -4,8 +4,31 @@ flatground ships only original content. Players who own Skate 3 (Xbox 360) can c
 own disc image with `fg_import` (`tools/import`) and load them into the game. Nothing converted ever goes
 into this repository (CLAUDE.md rule 1, enforced by `tools/check_no_game_data.sh` in CI).
 
-## Use
-Make an `.iso` of your disc (a full XGD image or a plain XDVDFS image both work), then:
+## With the game's build (the usual way)
+Make an `.iso` of your disc (a full XGD image or a plain XDVDFS image both work) and put it next to the repo
+folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg_import build`, which:
+
+- finds the disc image: `FG_ISO`, else `iso=<path>` in a git-ignored `fg_local.txt` at the repo root, else the
+  one `.iso` in the repo folder, the folder holding it, or a folder directly inside either (two or more:
+  it asks you to pick one with `FG_ISO` or `fg_local.txt`). None: the game builds with its placeholder art.
+- converts each pack the game loads into `imported/build/` (kept across `make clean`), and only when it is
+  missing or out of date. Each pack has a `.stamp` next to it recording the converter's source hash, the disc
+  image's size and modification time, and the conversion options; a different stamp means convert again. So
+  pulling a converter fix re-converts once, and an unchanged build skips straight past.
+- copies each pack into `dist/apps/flatground/data/` unless the copy there is already the same version.
+
+Copy `dist/apps/flatground` to the SD card's `apps` folder and the game finds its packs at
+`sd:/apps/flatground/data/` (or `usb:/`). `FG_NO_ASSETS=1` skips all of this. The Docker route only sees files
+inside the repo folder, so put the image there (`*.iso` is git-ignored) or point `FG_ISO` at a path inside it.
+
+`build.bat dolphin` then starts the game in Dolphin (the regular build from dolphin-emu.org) with its own
+profile in `out/dolphin` and `dist/` as the virtual SD card, so it loads the same files a Wii would.
+
+The game shows on start-up whether the imported skater loaded, and its CPU time per frame (average and the
+worst frame of the last second; the budget at 60 Hz is 16.7 ms) in the top left corner.
+
+## By hand
+The converters can also be run one at a time:
 
 ```bash
 cargo run --release -p fg_import -- textures path/to/skate3.iso --from data/content/parkassets.big --png
@@ -61,9 +84,10 @@ skins on its CPU every frame). `--max` sets the texture size. `--png` renders fr
 pose, plus frames of `--clip` (`--frame N` for one frame).
 
 #### Playing it on the Wii
-Copy `imported/skater.fgpak` to `sd:/flatground/skater.fgpak` (or `usb:/flatground/skater.fgpak`). The game
-loads it at start-up and draws it instead of the box skater; without it, or if it doesn't parse, the
-placeholder stays. To look at it on the PC first, run the game's preview with
+The build puts it in the app folder for you (above). By hand: copy `imported/skater.fgpak` to
+`sd:/apps/flatground/data/skater.fgpak` (the older `sd:/flatground/skater.fgpak` works too; `usb:/` as well).
+The game loads it at start-up and draws it instead of the box skater; without it, or if it doesn't parse, the
+placeholder stays and a line on the start screen says why. To look at it on the PC first, run the game's preview with
 `cargo run --release -p fg_preview -- out/preview --skater imported/skater.fgpak --every 6`.
 
 The clip roles and their defaults from `OnBoard.abin` (the importer prints each clip and how upright the
@@ -143,7 +167,7 @@ plenty for an offline converter.
   normal and specular maps.
 - Game side: the imported skater is skinned on the CPU (GX transforms each vertex by one matrix, so it
   can't blend bone weights). It is checked in the PC preview only, not yet in Dolphin or on hardware, and
-  its frame cost on the Wii is unmeasured. Bails show the idle pose tipped over (no fall clips), and there is
+  its frame cost on the Wii is unmeasured (the HUD now shows it). Bails show the idle pose tipped over (no fall clips), and there is
   no lean, steering pose or landing clip yet.
 - World geometry: district streams (`ATOC`/`SFIL` inside `worldDIST_*.big`) and RW4 meshes (vertex
   descriptors, index buffers) to Wii display lists.

@@ -27,7 +27,8 @@ content second.
 - [ ] GX hardware lighting with vertex normals instead of pre-lit colours
 - [ ] Textures (GX formats, CMPR) and a simple shadow blob under the skater
 - [ ] Widescreen setup (VI width) and a proper HUD font texture
-- [ ] Frame timing and memory readout in a debug overlay
+- [x] CPU time per frame on the HUD (average + worst of the last second)
+- [ ] Memory readout in a debug overlay
 
 ## Phase 3: Content pipeline
 - [ ] PC-side converter: your own glTF/Blender levels and models to a big-endian Wii pack read in place
@@ -38,6 +39,8 @@ content second.
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
 - [x] GX textures read in place from a `.fgpak` loaded from SD/USB (`sd:/flatground/skater.fgpak`)
+- [x] The build converts from the player's disc (only what is missing or out of date) into the app folder's
+  `data/`; the game loads from `sd:/apps/flatground/data/`; `build.bat dolphin` runs it with `dist/` as the SD card
 - [ ] Load texture packs and other `.fgpak` content from SD
 - [ ] Collision mesh + grind rails authored in the level files
 - [ ] Load parks from SD

@@ -75,7 +75,9 @@ void fg_draw_2d(const FgVertex *verts, uint32_t count);
 // The vertices are copied, so the caller's buffer only has to live for the call.
 void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
                      uint32_t index_count, const FgTexture *tex, const float model[3][4]);
-// Reads a whole file (e.g. "sd:/flatground/skater.fgpak") into 32-byte aligned memory that is never
+// Microseconds from a free-running CPU timer (wraps every ~71 minutes; subtract with wrap-around).
+uint32_t fg_time_us(void);
+// Reads a whole file (e.g. "sd:/apps/flatground/data/skater.fgpak") into 32-byte aligned memory that is never
 // freed, flushed for the GPU. NULL if there is no such file or no SD/USB storage.
 void *fg_load_file(const char *path, uint32_t *size);
 void fg_end_frame(void);

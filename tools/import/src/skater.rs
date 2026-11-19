@@ -213,8 +213,20 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let rig = skin::Rig::new(&skeleton, &models, rest.as_deref());
     let mut unbound = Vec::new();
     for p in &parts {
+        // Only bones that move vertices matter (the *Hlp helpers carry no weight in the stock parts).
+        let weighted = |name: &str| {
+            let Some(i) = p.model.bones.iter().position(|b| b.name == name) else {
+                return false;
+            };
+            p.model.meshes.iter().any(|m| {
+                m.skin_bones
+                    .iter()
+                    .zip(&m.skin_weights)
+                    .any(|(b, w)| (0..4).any(|k| b[k] as usize == i && w[k] > 0.0))
+            })
+        };
         for (bone, driver) in skin::coverage(&rig, &p.model) {
-            if driver.is_none() {
+            if driver.is_none() && weighted(&bone) {
                 unbound.push(format!("{}:{bone}", p.slot));
             }
         }

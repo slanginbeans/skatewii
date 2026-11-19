@@ -18,6 +18,7 @@ rem    build.bat            update, build and package
 rem    build.bat noupdate   the same without updating
 rem    build.bat clean      delete the build output
 rem    build.bat nopause    don't wait for a key at the end
+rem    build.bat dolphin    build, then start the game in Dolphin (tools\dolphin.ps1)
 rem  Switches combine (build.bat noupdate nopause).
 rem
 rem  Optional settings (set them before running, e.g. set FG_SD=E:):
@@ -25,6 +26,10 @@ rem    FG_SD=E:                   also copy the app to E:\apps\flatground
 rem    FG_DEVKITPRO=D:\devkitPro  where devkitPro is (default: searched on every drive)
 rem    FG_ASSUME_YES=1            install Rust without asking
 rem    FG_NO_DOCKER=1             never fall back to Docker
+rem    FG_ISO=D:\skate3.iso       your Skate 3 disc image (default: the one .iso found next to
+rem                               this folder or one folder down; or iso=<path> in fg_local.txt)
+rem    FG_NO_ASSETS=1             don't convert anything from the disc
+rem    FG_DOLPHIN=C:\...\Dolphin.exe   where Dolphin is, if it isn't found by itself
 rem
 rem  The approach (devkitPro's msys2 shell, Docker fallback) follows modernwiifare's build.bat.
 rem ---------------------------------------------------------------------------
@@ -35,16 +40,18 @@ set "TARGET=package"
 set "UPDATE=1"
 rem Wait for a key at the end only when double-clicked (no arguments).
 set "PAUSE=1"
+set "DOLPHIN=0"
 if not "%~1"=="" set "PAUSE=0"
 for %%A in (%*) do (
     if /i "%%~A"=="clean" set "TARGET=clean"
     if /i "%%~A"=="clean" set "UPDATE=0"
     if /i "%%~A"=="noupdate" set "UPDATE=0"
     if /i "%%~A"=="nopause" set "PAUSE=0"
+    if /i "%%~A"=="dolphin" set "DOLPHIN=1"
     if /i "%%~A"=="showargs" set "SHOWARGS=1"
 )
 if defined SHOWARGS (
-    echo TARGET=%TARGET% UPDATE=%UPDATE% PAUSE=%PAUSE% SD=%FG_SD%
+    echo TARGET=%TARGET% UPDATE=%UPDATE% PAUSE=%PAUSE% DOLPHIN=%DOLPHIN% SD=%FG_SD%
     endlocal
     exit /b 0
 )
@@ -200,7 +207,14 @@ if defined FG_SD call :copy_sd
 echo Done. Copy this folder into the "apps" folder on the Wii's SD card:
 echo   %cd%\dist\apps\flatground
 echo ^(so the card has apps\flatground\boot.dol^), then launch it from the Homebrew Channel.
+echo Converted packs from your own disc ^(if any^) are in its data folder.
+if "%DOLPHIN%"=="1" call :run_dolphin
 goto finish
+
+rem ---- optional: start the game in Dolphin -------------------------------------
+:run_dolphin
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\dolphin.ps1"
+exit /b 0
 
 rem ---- optional: copy to the SD card ------------------------------------------
 :copy_sd

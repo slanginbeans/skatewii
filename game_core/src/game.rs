@@ -22,6 +22,37 @@ const IMPORTED_TO_BOARD: Mat3 = Mat3::IDENTITY;
 const POPUP_TIME: f32 = 1.8;
 const HINT_TIME: f32 = 12.0;
 
+/// CPU time per frame (update + render), measured by the platform: a running average and the worst frame
+/// of the last second.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameCost {
+    pub avg_us: f32,
+    /// Worst frame of the last full window.
+    pub peak_us: u32,
+    window_peak: u32,
+    frames: u32,
+}
+
+impl FrameCost {
+    /// Frames per peak window (one second at 60 Hz).
+    const WINDOW: u32 = 60;
+
+    pub fn add(&mut self, us: u32) {
+        self.avg_us = if self.frames == 0 && self.peak_us == 0 {
+            us as f32
+        } else {
+            self.avg_us + (us as f32 - self.avg_us) * 0.05
+        };
+        self.window_peak = self.window_peak.max(us);
+        self.frames += 1;
+        if self.frames == Self::WINDOW {
+            self.peak_us = self.window_peak;
+            self.window_peak = 0;
+            self.frames = 0;
+        }
+    }
+}
+
 struct Popup {
     title: String,
     detail: String,
@@ -45,6 +76,10 @@ pub struct Game {
     connected: bool,
     /// Events from the last `update` (cleared every frame). Handy for tests and the preview tool.
     pub events: Vec<Event>,
+    /// Set by the platform each frame when it measures CPU time; shown in a corner of the HUD.
+    pub frame_cost: Option<FrameCost>,
+    /// A status line shown under the controls hint (for example whether the imported skater loaded).
+    pub notice: Option<String>,
 }
 
 impl Default for Game {
@@ -70,6 +105,8 @@ impl Game {
             clock: 0.0,
             connected: true,
             events: Vec::new(),
+            frame_cost: None,
+            notice: None,
             rider: None,
         }
     }
@@ -249,6 +286,27 @@ impl Game {
                 );
             }
         }
+        if let Some(c) = &self.frame_cost {
+            // Budget: 16.7 ms a frame at 60 Hz.
+            let ms = |us: f32| us / 1000.0;
+            let line = format!(
+                "CPU {:.1} MS  PEAK {:.1}",
+                ms(c.avg_us),
+                ms(c.peak_us as f32)
+            );
+            let over = c.avg_us > 14_000.0 || c.peak_us > 16_600;
+            let colour = if over {
+                rgb(255, 120, 100)
+            } else {
+                rgb(200, 255, 200)
+            };
+            hud::text(&mut m, 24.0, 52.0, 2.5, &line, colour);
+        }
+        if let Some(n) = &self.notice
+            && self.clock < HINT_TIME
+        {
+            hud::text_centered(&mut m, SCREEN_W / 2.0, 396.0, 3.0, n, rgb(255, 230, 90));
+        }
         if !self.connected {
             hud::text_centered(
                 &mut m,
@@ -285,5 +343,27 @@ impl Game {
             );
         }
         gfx.draw_2d(&m.verts);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_cost_averages_and_keeps_last_seconds_peak() {
+        let mut c = FrameCost::default();
+        c.add(4000);
+        assert_eq!(c.avg_us, 4000.0, "first sample starts the average");
+        for _ in 1..59 {
+            c.add(4000);
+        }
+        c.add(9000); // frame 60 closes the window
+        assert_eq!(c.peak_us, 9000);
+        assert!(c.avg_us > 4000.0 && c.avg_us < 4500.0, "{}", c.avg_us);
+        for _ in 0..60 {
+            c.add(4000);
+        }
+        assert_eq!(c.peak_us, 4000, "the spike has left the window");
     }
 }

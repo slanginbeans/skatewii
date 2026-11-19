@@ -5,6 +5,7 @@
 //! Format knowledge comes from SK8-ENGINE/skate-3-rust-engine (GPL-3.0); this tool is GPL-3.0-only too.
 
 mod anim;
+mod assets;
 mod big;
 mod cac;
 mod gx;
@@ -27,6 +28,8 @@ use std::process::ExitCode;
 use xdvdfs::{Disc, DiscFile};
 
 const USAGE: &str = "usage:
+  fg_import build    [options]                    convert what the game loads into the app folder (only
+                                                  what is missing or out of date; `fg_import build -h`)
   fg_import ls       <disc.iso> [dir]             list a directory on the disc
   fg_import tree     <disc.iso>                   list every file on the disc with its size
   fg_import big      <disc.iso> <file.big>        list the entries of a BIG archive on the disc
@@ -76,6 +79,9 @@ fn run(args: &[String]) -> Res<()> {
     if cmd == "-h" || cmd == "--help" {
         println!("{USAGE}");
         return Ok(());
+    }
+    if cmd == "build" {
+        return assets::run(rest);
     }
     if cmd == "info" {
         return info(rest);

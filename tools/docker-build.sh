@@ -33,7 +33,7 @@ status=0
 make -C wii "$@" || status=$?
 
 if [ -n "${HOST_UID:-}" ]; then
-	for d in target dist wii/build .toolchain; do
+	for d in target dist wii/build .toolchain imported; do
 		[ -e "$d" ] && chown -R "$HOST_UID:${HOST_GID:-$HOST_UID}" "$d"
 	done
 fi
