@@ -8,7 +8,9 @@ use alloc::string::String;
 use crate::flick::Flick;
 use crate::input::{Pad, btn};
 use crate::math::{PI, Vec3, atan2f, clamp, sinf, smooth, wrap_angle, yaw_dir};
+#[cfg(test)]
 use crate::park::Park;
+use crate::park::Terrain;
 
 /// Gravity in the air (a bit above 9.81 for a snappier feel).
 pub const GRAVITY: f32 = 14.0;
@@ -217,10 +219,11 @@ pub struct Skater {
 }
 
 impl Skater {
-    pub fn spawn(park: &Park) -> Skater {
+    pub fn spawn(park: &dyn Terrain) -> Skater {
+        let (pos, heading) = park.spawn();
         Skater {
-            pos: park.spawn,
-            heading: park.spawn_yaw,
+            pos,
+            heading,
             speed: 0.0,
             vel: Vec3::ZERO,
             normal: Vec3::UP,
@@ -256,7 +259,7 @@ impl Skater {
     /// stick is held back (crouch).
     pub fn step(
         &mut self,
-        park: &Park,
+        park: &dyn Terrain,
         pad: &Pad,
         flick: Option<Flick>,
         loaded: bool,
@@ -286,7 +289,9 @@ impl Skater {
                 let h = self.vel.horizontal() * (1.0 - smooth(3.0, dt));
                 self.vel = Vec3 { y: 0.0, ..h };
                 self.try_move(park, self.vel * dt);
-                self.pos.y = park.surface(self.pos.x, self.pos.z).height;
+                self.pos.y = park
+                    .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
+                    .height;
                 if time >= BAIL_TIME {
                     *self = Skater::spawn(park);
                     events.push(Event::Respawned);
@@ -299,7 +304,7 @@ impl Skater {
 
     fn roll(
         &mut self,
-        park: &Park,
+        park: &dyn Terrain,
         pad: &Pad,
         flick: Option<Flick>,
         dt: f32,
@@ -339,7 +344,7 @@ impl Skater {
         if !self.try_move(park, delta) {
             self.speed *= -0.15; // bump off the wall
         }
-        let s = park.surface(self.pos.x, self.pos.z);
+        let s = park.ground(self.pos.x, self.pos.z, self.pos.y + STEP);
         if s.height < expected_y - 0.06 {
             // The ground fell away faster than the board's path: off a lip or a ledge.
             self.pos.y = expected_y;
@@ -354,8 +359,12 @@ impl Skater {
 
     /// Moves horizontally by `delta`, refusing to go into anything more than a step up.
     /// Slides along a wall when only one axis is blocked. Returns false when fully blocked.
-    fn try_move(&mut self, park: &Park, delta: Vec3) -> bool {
-        let ok = |x: f32, z: f32| park.surface(x, z).height <= self.pos.y + STEP;
+    fn try_move(&mut self, park: &dyn Terrain, delta: Vec3) -> bool {
+        let here = self.pos;
+        let ok = |x: f32, z: f32| {
+            park.ground(x, z, here.y + STEP).height <= here.y + STEP
+                && !park.blocked(here, Vec3 { x, y: here.y, z })
+        };
         let (nx, nz) = (self.pos.x + delta.x, self.pos.z + delta.z);
         if ok(nx, nz) {
             self.pos.x = nx;
@@ -446,7 +455,7 @@ impl Skater {
 
     fn fly(
         &mut self,
-        park: &Park,
+        park: &dyn Terrain,
         pad: &Pad,
         time: f32,
         dt: f32,
@@ -459,6 +468,9 @@ impl Skater {
         }
         self.update_grab(pad, dt);
         self.vel.y -= GRAVITY * dt;
+        // Look for ground from where the board was before this frame's drop: falling fast it can
+        // pass more than a step below a surface in one frame.
+        let top = self.pos.y.max(self.pos.y + self.vel.y * dt);
         self.pos.y += self.vel.y * dt;
         if !self.try_move(park, self.vel.horizontal() * dt) {
             // Hit a wall in the air: lose the horizontal speed.
@@ -474,11 +486,11 @@ impl Skater {
             .lerp(Vec3::UP, smooth(4.0, dt))
             .normalize_or(Vec3::UP);
 
-        let s = park.surface(self.pos.x, self.pos.z);
+        let s = park.ground(self.pos.x, self.pos.z, top + STEP);
         if self.pos.y <= s.height && self.vel.y <= 0.0 {
             self.pos.y = s.height;
             self.land(s.normal, time, events);
-        } else if self.pos.y < -5.0 {
+        } else if self.pos.y < park.kill_height() {
             // Fell out of the world: start over.
             *self = Skater::spawn(park);
             events.push(Event::Respawned);

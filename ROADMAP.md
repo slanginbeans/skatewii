@@ -38,15 +38,15 @@ content second.
 - [x] `fg_import`: disc image → BIG/RefPack → RW4 textures → GX `.fgpak` (player-supplied data, docs/importing.md)
 - [x] `fg_import`: skeleton, clips and poses from VBR `.abin` banks; water and menu tables from a player-decrypted executable
 - [x] `fg_import`: default skater as skinned meshes + textures, clips composed onto the bind pose (PNG previews)
-- [ ] `fg_import`: world meshes, collision and rails, RAW-codec animation, skater tints/morphs/outfits
+- [x] `fg_import park`: district streams (ATOC/SFIL) and ClusteredMesh collision, spawn point
+- [ ] `fg_import`: park models and textures, grind rails, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
 - [x] GX textures read in place from a `.fgpak` loaded from SD/USB (`sd:/flatground/skater.fgpak`)
 - [x] The build converts from the player's disc (only what is missing or out of date) into the app folder's
   `data/`; the game loads from `sd:/apps/flatground/data/`; `build.bat dolphin` runs it with `dist/` as the SD card
 - [ ] Load texture packs and other `.fgpak` content from SD
-- [ ] Collision mesh + grind rails authored in the level files
-- [ ] Load parks from SD
+- [x] Imported park collision: triangle ground and walls (`game_core::collision`), loaded from SD
 
 ## Phase 4: Game
 - [ ] Grinds and slides on ledges and rails

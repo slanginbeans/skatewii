@@ -49,7 +49,7 @@ Double-click **`build.bat`**. It updates from GitHub, builds the game and puts i
 **`dist\apps\flatground`**. Copy that folder into the SD card's `apps` folder.
 
 If you own Skate 3 for Xbox 360 and keep an `.iso` of your disc next to this folder (or one folder down), the
-build also converts what the game uses from it (the skater, for now) into `dist\apps\flatground\data`. It only
+build also converts what the game uses from it (the skater and a park; `FG_PARK` picks which) into `dist\apps\flatground\data`. It only
 converts what is missing or out of date, so later builds take seconds. Details:
 [docs/importing.md](docs/importing.md).
 
@@ -67,7 +67,8 @@ drive; `build.bat` offers to install Rust for you), or Docker Desktop.
 
 Switches combine. Optional settings: `set FG_SD=E:` also copies the app to `E:\apps\flatground`;
 `FG_DEVKITPRO` points at devkitPro if it's somewhere unusual; `FG_ASSUME_YES=1` installs Rust without asking;
-`FG_ISO` picks your disc image; `FG_NO_ASSETS=1` skips converting; `FG_DOLPHIN` points at `Dolphin.exe`.
+`FG_ISO` picks your disc image; `FG_PARK` the park (default BlackBoxPark); `FG_NO_ASSETS=1` skips converting;
+`FG_DOLPHIN` points at `Dolphin.exe`.
 
 On Linux/macOS with Docker: `./build.sh`. No installs at all: download `flatground-sd-card` from the newest
 **ci** run under the repo's Actions tab.

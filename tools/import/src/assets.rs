@@ -7,7 +7,7 @@
 //! so the game builds with its placeholder art (CLAUDE.md rule 1).
 
 use crate::xdvdfs::Disc;
-use crate::{Res, skater};
+use crate::{Res, park, skater};
 use std::path::{Path, PathBuf};
 
 /// The converter's source hash, from `build.rs`.
@@ -18,16 +18,33 @@ struct Job {
     name: &'static str,
     /// Files the job writes into its output directory, all copied to the app folder.
     files: &'static [&'static str],
-    args: &'static [&'static str],
+    args: Vec<String>,
 }
 
-/// What the game loads. Grows with the game (park, collision, ...).
-const JOBS: &[Job] = &[Job {
-    name: "skater",
-    files: &["skater.fgpak"],
-    // LOD 2: the Wii skins on its CPU every frame.
-    args: &["--lod", "2"],
-}];
+/// The park the build converts unless `FG_PARK` names another (`fg_import park` lists them).
+/// StartPark, the first district, is an empty warehouse; BlackBoxPark is a full skate park.
+pub const DEFAULT_PARK: &str = "BlackBoxPark";
+
+/// What the game loads.
+fn jobs() -> Vec<Job> {
+    let park = std::env::var("FG_PARK")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| DEFAULT_PARK.to_string());
+    vec![
+        Job {
+            name: "skater",
+            files: &["skater.fgpak"],
+            // LOD 2: the Wii skins on its CPU every frame.
+            args: vec!["--lod".into(), "2".into()],
+        },
+        Job {
+            name: "park",
+            files: &["park.fgpak"],
+            args: vec!["--park".into(), park],
+        },
+    ]
+}
 
 const BUILD_USAGE: &str = "usage:
   fg_import build [options]       convert what the game loads and put it in the app folder
@@ -187,10 +204,11 @@ fn install(cache: &Path, dest: &Path, job: &Job, want: &str) -> Res<bool> {
 
 fn convert(iso: &Path, job: &Job, out: &Path) -> Res<()> {
     let mut disc = Disc::open(iso)?;
-    let mut args: Vec<String> = job.args.iter().map(|s| s.to_string()).collect();
+    let mut args = job.args.clone();
     args.extend(["--out".to_string(), out.display().to_string()]);
     match job.name {
         "skater" => skater::run(&mut disc, &args),
+        "park" => park::run(&mut disc, &args),
         other => Err(format!("unknown job {other}").into()),
     }
 }
@@ -204,7 +222,7 @@ pub fn run(args: &[String]) -> Res<()> {
         return Err(format!("disc image {} not found", iso.display()).into());
     }
     println!("[assets] Disc image: {}", iso.display());
-    for job in JOBS {
+    for job in &jobs() {
         let want = stamp(&iso, job)?;
         if up_to_date(&o.cache, job, &want) {
             println!("[assets] {}: up to date", job.name);
@@ -238,42 +256,45 @@ mod tests {
         d
     }
 
-    const JOB: Job = Job {
-        name: "thing",
-        files: &["a.fgpak", "b.fgpak"],
-        args: &["--x"],
-    };
+    fn job() -> Job {
+        Job {
+            name: "thing",
+            files: &["a.fgpak", "b.fgpak"],
+            args: vec!["--x".into()],
+        }
+    }
 
     #[test]
     fn stamps_decide_conversion_and_copying() {
+        let job = job();
         let root = tmp("stamps");
         let iso = root.join("disc.iso");
         std::fs::write(&iso, b"not really a disc").unwrap();
         let (cache, dest) = (root.join("cache"), root.join("dest"));
-        let want = stamp(&iso, &JOB).unwrap();
+        let want = stamp(&iso, &job).unwrap();
         assert!(want.contains(SRC_HASH) && want.contains("17 bytes") && want.contains("thing --x"));
 
         // Nothing there yet.
-        assert!(!up_to_date(&cache, &JOB, &want));
+        assert!(!up_to_date(&cache, &job, &want));
         std::fs::create_dir_all(&cache).unwrap();
-        for f in JOB.files {
+        for f in job.files {
             std::fs::write(cache.join(f), b"pack").unwrap();
         }
         // Files without a stamp are not trusted.
-        assert!(!up_to_date(&cache, &JOB, &want));
-        std::fs::write(stamp_path(&cache, &JOB), &want).unwrap();
-        assert!(up_to_date(&cache, &JOB, &want));
+        assert!(!up_to_date(&cache, &job, &want));
+        std::fs::write(stamp_path(&cache, &job), &want).unwrap();
+        assert!(up_to_date(&cache, &job, &want));
         // A different disc or converter means a new stamp.
-        assert!(!up_to_date(&cache, &JOB, "other"));
+        assert!(!up_to_date(&cache, &job, "other"));
 
         // First install copies, the second doesn't.
-        assert!(install(&cache, &dest, &JOB, &want).unwrap());
-        assert!(!install(&cache, &dest, &JOB, &want).unwrap());
+        assert!(install(&cache, &dest, &job, &want).unwrap());
+        assert!(!install(&cache, &dest, &job, &want).unwrap());
         // A missing or changed file in the app folder is copied again.
         std::fs::remove_file(dest.join("a.fgpak")).unwrap();
-        assert!(install(&cache, &dest, &JOB, &want).unwrap());
+        assert!(install(&cache, &dest, &job, &want).unwrap());
         std::fs::write(dest.join("b.fgpak"), b"truncated?").unwrap();
-        assert!(install(&cache, &dest, &JOB, &want).unwrap());
+        assert!(install(&cache, &dest, &job, &want).unwrap());
         assert_eq!(std::fs::read(dest.join("b.fgpak")).unwrap(), b"pack");
         let _ = std::fs::remove_dir_all(&root);
     }

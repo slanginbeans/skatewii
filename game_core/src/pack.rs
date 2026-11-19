@@ -31,6 +31,8 @@ pub enum Kind {
     Animation = 4,
     /// `game_core::skinned::SkinnedMesh`
     SkinnedMesh = 5,
+    /// `game_core::collision::TriMesh` triangles (`park/collision`)
+    Collision = 6,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

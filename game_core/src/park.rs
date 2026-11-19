@@ -37,6 +37,38 @@ pub struct Surface {
     pub normal: Vec3,
 }
 
+/// What the board rides on: the built-in demo park (a height field) or an imported park
+/// (`collision::TriMesh`, triangles at any level).
+pub trait Terrain {
+    /// The surface at (x, z) that the board would stand on: the highest one no higher than `max`. A
+    /// height field has one surface per point and ignores `max` (anything above `max` there is a wall).
+    /// Nothing below `max`: height `f32::MIN`.
+    fn ground(&self, x: f32, z: f32, max: f32) -> Surface;
+    /// Is a move from `a` to `b` (board positions) blocked by a wall?
+    fn blocked(&self, _a: Vec3, _b: Vec3) -> bool {
+        false
+    }
+    /// Is there a wall on the straight line from `p` to `q` (the camera's line of sight)?
+    fn occluded(&self, _p: Vec3, _q: Vec3) -> bool {
+        false
+    }
+    /// Where the skater starts: position and yaw.
+    fn spawn(&self) -> (Vec3, f32);
+    /// Falling below this means out of the world.
+    fn kill_height(&self) -> f32 {
+        -5.0
+    }
+}
+
+impl Terrain for Park {
+    fn ground(&self, x: f32, z: f32, _max: f32) -> Surface {
+        self.surface(x, z)
+    }
+    fn spawn(&self) -> (Vec3, f32) {
+        (self.spawn, self.spawn_yaw)
+    }
+}
+
 pub struct Park {
     pub shapes: Vec<Shape>,
     /// Rideable area is `-half_size..half_size` in x and z; outside it is a wall.

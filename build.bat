@@ -28,6 +28,7 @@ rem    FG_ASSUME_YES=1            install Rust without asking
 rem    FG_NO_DOCKER=1             never fall back to Docker
 rem    FG_ISO=D:\skate3.iso       your Skate 3 disc image (default: the one .iso found next to
 rem                               this folder or one folder down; or iso=<path> in fg_local.txt)
+rem    FG_PARK=MegaPark           which park to convert (default BlackBoxPark)
 rem    FG_NO_ASSETS=1             don't convert anything from the disc
 rem    FG_DOLPHIN=C:\...\Dolphin.exe   where Dolphin is, if it isn't found by itself
 rem

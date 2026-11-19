@@ -100,6 +100,12 @@ const SKATER_PACKS: &[&CStr] = &[
     c"usb:/flatground/skater.fgpak",
 ];
 
+/// The park `fg_import park` converts from the player's disc (collision; drawn from it for now).
+const PARK_PACKS: &[&CStr] = &[
+    c"sd:/apps/flatground/data/park.fgpak",
+    c"usb:/apps/flatground/data/park.fgpak",
+];
+
 /// The first of `paths` that exists, read whole. Loaded once and kept for the rest of the game: the GPU
 /// reads textures straight out of it.
 fn load_first(paths: &[&CStr]) -> Option<&'static [u8]> {
@@ -117,14 +123,22 @@ static mut GAME: *mut Game = ptr::null_mut();
 #[unsafe(no_mangle)]
 pub extern "C" fn fg_rust_init() {
     let mut game = Box::new(Game::new());
-    // Without a pack (or with one that doesn't parse) the placeholder skater stays; say which.
-    game.notice = Some(match load_first(SKATER_PACKS) {
+    // Without a pack (or with one that doesn't parse) the placeholder stays; say which.
+    let skater: String = match load_first(SKATER_PACKS) {
         Some(pack) => match game.load_skater(pack) {
-            Ok(()) => "IMPORTED SKATER LOADED".into(),
-            Err(e) => format!("SKATER PACK UNREADABLE: {}", error_text(e)),
+            Ok(()) => "IMPORTED".into(),
+            Err(e) => format!("UNREADABLE: {}", error_text(e)),
         },
-        None => "NO IMPORTED SKATER: PLACEHOLDER ART".into(),
-    });
+        None => "PLACEHOLDER".into(),
+    };
+    let park: String = match load_first(PARK_PACKS) {
+        Some(pack) => match game.load_park(pack) {
+            Ok(()) => "IMPORTED".into(),
+            Err(_) => "UNREADABLE".into(),
+        },
+        None => "DEMO".into(),
+    };
+    game.notice = Some(format!("SKATER: {skater}   PARK: {park}"));
     game.frame_cost = Some(FrameCost::default());
     unsafe { GAME = Box::into_raw(game) };
 }

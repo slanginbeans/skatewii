@@ -14,6 +14,7 @@ pub mod anim;
 pub mod autoplay;
 pub mod camera;
 pub mod character;
+pub mod collision;
 pub mod flick;
 pub mod game;
 pub mod gfx;
@@ -26,5 +27,6 @@ pub mod park;
 pub mod rider;
 pub mod skater;
 pub mod skinned;
+pub mod world;
 
 pub use game::Game;

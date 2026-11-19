@@ -11,12 +11,14 @@ mod cac;
 mod gx;
 mod mesh;
 mod pack;
+mod park;
 mod raster;
 mod refpack;
 mod rw4;
 mod skater;
 mod skin;
 mod texture;
+mod world;
 mod xdvdfs;
 mod xex;
 
@@ -41,6 +43,10 @@ const USAGE: &str = "usage:
       --max <n>         largest texture edge kept on the Wii (default 256, at most 1024)
       --png             also write PNG previews (for checking on the PC)
       --rgba8           keep textures with alpha at full 8-bit precision (twice the memory of RGB5A3)
+  fg_import park     <disc.iso> [options]         a skate park district (collision, spawn) as park.fgpak
+      --park <name>     StartPark, MegaPark, BlackBoxPark (default), IndustrialSkatePark,
+                        DownTownSkatePark, SkateSchool or MaloofMoneyCup
+      --out <dir>       output directory (default: imported)
   fg_import skater   <disc.iso> [options]         the default skater as skinned meshes + textures
       --lod <0|2>       model detail (default 0)
       --png             front/side previews; --clip <name> [--frame <n>] also renders that clip
@@ -170,6 +176,7 @@ fn run(args: &[String]) -> Res<()> {
         "textures" => textures(&mut disc, &rest[1..])?,
         "anims" => anims(&mut disc, &rest[1..])?,
         "skater" => skater::run(&mut disc, &rest[1..])?,
+        "park" => park::run(&mut disc, &rest[1..])?,
         _ => return Err(USAGE.into()),
     }
     Ok(())

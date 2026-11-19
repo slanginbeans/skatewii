@@ -6,15 +6,17 @@ use alloc::vec::Vec;
 
 use crate::camera::ChaseCam;
 use crate::character::{self, Character};
+use crate::collision;
 use crate::flick::FlickReader;
 use crate::gfx::{Gfx, MeshBuilder, SCREEN_W, Vertex, rgb};
 use crate::hud;
 use crate::input::{Pad, PadRaw, flag};
 use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
 use crate::model::Models;
-use crate::park::Park;
+use crate::park::{Park, Terrain};
 use crate::rider::{self, Rider};
-use crate::skater::{Event, GRAVITY, Mode, Skater};
+use crate::skater::{Event, GRAVITY, Mode, STEP, Skater};
+use crate::world::ImportedPark;
 
 const SKY: u32 = rgb(150, 196, 232);
 /// Imported character space (Skate 3: Y up, travelling along +Z) to board space (+Z nose, Y up).
@@ -63,6 +65,8 @@ struct Popup {
 pub struct Game {
     pub park: Park,
     park_mesh: Vec<Vertex>,
+    /// A park imported from the player's disc, ridden and drawn instead of the demo park when loaded.
+    imported_park: Option<ImportedPark>,
     models: Models,
     /// The player's imported skater, drawn instead of the box placeholder when loaded.
     rider: Option<Rider>,
@@ -80,6 +84,15 @@ pub struct Game {
     pub frame_cost: Option<FrameCost>,
     /// A status line shown under the controls hint (for example whether the imported skater loaded).
     pub notice: Option<String>,
+}
+
+/// The imported park if there is one, else the demo park (a free function so callers can borrow other
+/// fields of the game at the same time).
+fn terrain<'a>(imported: &'a Option<ImportedPark>, park: &'a Park) -> &'a dyn Terrain {
+    match imported {
+        Some(p) => &p.mesh,
+        None => park,
+    }
 }
 
 impl Default for Game {
@@ -108,6 +121,7 @@ impl Game {
             frame_cost: None,
             notice: None,
             rider: None,
+            imported_park: None,
         }
     }
 
@@ -122,6 +136,24 @@ impl Game {
         self.rider.as_ref()
     }
 
+    /// Rides an imported park (`fg_import park`) instead of the demo park, starting at its spawn.
+    pub fn load_park(&mut self, pack: &[u8]) -> Result<(), collision::Error> {
+        let p = ImportedPark::parse(pack)?;
+        self.skater = Skater::spawn(&p.mesh);
+        self.cam = ChaseCam::new(&self.skater);
+        self.imported_park = Some(p);
+        Ok(())
+    }
+
+    pub fn imported_park(&self) -> Option<&ImportedPark> {
+        self.imported_park.as_ref()
+    }
+
+    /// What the skater rides on: the imported park if there is one, else the demo park.
+    pub fn terrain(&self) -> &dyn Terrain {
+        terrain(&self.imported_park, &self.park)
+    }
+
     /// One fixed step (1/60 s on NTSC and PAL60, 1/50 s on PAL50).
     pub fn update(&mut self, raw: &PadRaw, dt: f32) {
         let pad = Pad::from_raw(raw, self.prev_held);
@@ -134,13 +166,14 @@ impl Game {
         let rolling = self.skater.mode == Mode::Rolling;
         let flick = if rolling { flick } else { None };
         let loaded = rolling && self.flick.is_loaded();
+        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
         self.skater
-            .step(&self.park, &pad, flick, loaded, dt, &mut self.events);
-        self.cam.update(&self.skater, &self.park, dt);
+            .step(ground, &pad, flick, loaded, dt, &mut self.events);
+        self.cam.update(&self.skater, ground, dt);
         if self.rider.is_some() {
             let rot = self.imported_xform().rot;
             let s = &self.skater;
-            let ground = self.park.surface(s.pos.x, s.pos.z).height;
+            let ground = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
             let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, GRAVITY);
             if let Some(r) = &mut self.rider {
                 r.update(&self.skater, self.clock, land_in, dt, rot);
@@ -179,7 +212,10 @@ impl Game {
 
     pub fn render(&self, gfx: &mut dyn Gfx) {
         gfx.begin_frame(&self.cam.camera(), SKY);
-        gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34());
+        match &self.imported_park {
+            Some(p) => p.draw(gfx, self.cam.camera().eye),
+            None => gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34()),
+        }
         self.draw_skater(gfx);
         self.draw_hud(gfx);
         gfx.end_frame();

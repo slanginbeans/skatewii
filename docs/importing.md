@@ -126,6 +126,29 @@ How the skinning fits together, all checked against the previews:
   cross(tangent, binormal).
 - Only the hair's alpha is coverage. The other diffuse textures keep masks in alpha, which is dropped.
 
+### A park
+```bash
+cargo run --release -p fg_import -- park path/to/skate3.iso --park BlackBoxPark
+```
+Writes `imported/park.fgpak` (about 500 KB): `park/collision` (every collision triangle, format in
+`game_core/src/collision.rs`) and `park/spawn`. The build converts `BlackBoxPark` unless `FG_PARK` names
+another. Parks small enough for the Wii: `StartPark` (the opening warehouse: an empty floor), `MegaPark`,
+`BlackBoxPark`, `IndustrialSkatePark`, `DownTownSkatePark`, `SkateSchool` and `MaloofMoneyCup`. The city
+districts are hundreds of MB each.
+
+A district's assets sit in streams inside `worldDIST_<park>.big`: an `ATOC` table
+(`DIST_<park>_<stream>.xst`) and `SFIL` stream files (`c<stream>_*.xsf`, RefPack-compressed sections). The
+`Sim` stream holds RW4 arenas with RenderWare ClusteredMesh collision (`tools/import/src/world.rs`), already in
+world space: Y up, metres. 16-bit compressed vertex offsets are unsigned, as the game reads them (SK8's
+correction; signed, big clusters wrap by 65.5 m). The start is the broad flat face nearest the district
+origin on the main floor (the lowest height band holding at least 30% of the flat area), facing the middle.
+
+In the game, walkable triangles (normal at least 0.35 up, about 70°) are ground and steeper ones are walls. The
+board stands on the highest walkable triangle under it no higher than a step above it, so ledges and
+overhangs work at any level. The park is drawn from its collision for now (flat shaded, coloured by surface,
+in 16 m chunks within 90 m of the camera); its own textured models come next. Transitions steeper than about
+70° are walls until vert riding exists.
+
 ### Water and menu tables (from the executable)
 Two tables exist only inside the game's code: the ocean PCA water animation and the front-end menu tables.
 **fg_import never decrypts executables and contains no console keys.** It reads them from an image you
@@ -174,10 +197,10 @@ plenty for an offline converter.
   can't blend bone weights). It is checked in the PC preview only, not yet in Dolphin or on hardware, and
   its frame cost on the Wii is unmeasured (the HUD now shows it). Bails are clip-based: Skate 3 plays its
   wipeout clips over a physics ragdoll, which is not ported, so a bail is a step-off and a get-up.
-- World geometry: district streams (`ATOC`/`SFIL` inside `worldDIST_*.big`) and RW4 meshes (vertex
-  descriptors, index buffers) to Wii display lists.
-- Collision (RW ClusteredMesh) and grind rails.
+- Park visuals: the park's own RW4 models from the `Pres` stream (vertex descriptors, index buffers) to Wii
+  display lists, with their textures. Until then the collision is drawn.
+- Grind rails (the `Sim` stream's spline sections) and grinding.
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
 - Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
-- Game side: only `skater.fgpak` is loaded and drawn. Texture packs, animation packs and the executable
+- Game side: `skater.fgpak` and `park.fgpak` are loaded. Texture packs, animation packs and the executable
   tables are parsed and validated, but nothing uses them yet.
