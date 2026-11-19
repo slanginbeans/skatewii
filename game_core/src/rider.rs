@@ -13,7 +13,7 @@ use crate::character::{Character, Local};
 use crate::flick::Flick;
 use crate::gfx::SUN;
 use crate::math::{Mat3, sqrtf, v3};
-use crate::skater::{GrabKind, LandKind, Mode, Skater};
+use crate::skater::{GrabKind, GrindKind, LandKind, Mode, Skater};
 
 /// Crossfade time between clips (s).
 const FADE: f32 = 0.12;
@@ -97,6 +97,20 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                     role: "bail/fall",
                     time: fall,
                 }
+            } else {
+                idle
+            }
+        }
+        Mode::Grind => {
+            let Some(g) = &s.grind else {
+                return idle;
+            };
+            let role = match g.kind {
+                GrindKind::FiftyFifty => "grind/5050",
+                GrindKind::Boardslide => "grind/bslide",
+            };
+            if has(role) {
+                Pick { role, time: g.time }
             } else {
                 idle
             }

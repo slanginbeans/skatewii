@@ -9,6 +9,7 @@
 //! - `park/collision`: `u32` triangle count, then per triangle 9 `f32` (three XYZ corners), `u16` surface
 //!   id, `u16` flags; all big-endian.
 //! - `park/spawn`: 4 `f32`: spawn X, Y, Z and yaw.
+//! - `park/rails` (optional): grind rails, see `rails.rs`.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -16,6 +17,7 @@ use alloc::vec::Vec;
 use crate::math::{Vec3, v3};
 use crate::pack::{Kind, Pack};
 use crate::park::{Surface, Terrain};
+use crate::rails::{self, Rail};
 
 /// Size of a grid cell (m).
 pub const CELL: f32 = 4.0;
@@ -50,6 +52,8 @@ pub struct TriMesh {
     cell_start: Vec<u32>,
     cell_tris: Vec<u32>,
     spawn: (Vec3, f32),
+    /// Grind rails (`park/rails`, optional).
+    pub rails: Vec<Rail>,
 }
 
 fn be32(b: &[u8], at: usize) -> u32 {
@@ -90,7 +94,11 @@ impl TriMesh {
             v3(bef(s.data, 0), bef(s.data, 4), bef(s.data, 8)),
             bef(s.data, 12),
         );
-        TriMesh::parse(c.data, spawn)
+        let mut m = TriMesh::parse(c.data, spawn)?;
+        if let Some(r) = pack.find("park/rails") {
+            m.rails = rails::parse(r.data).ok_or(Error::Bad)?;
+        }
+        Ok(m)
     }
 
     pub fn parse(data: &[u8], spawn: (Vec3, f32)) -> Result<TriMesh, Error> {
@@ -153,6 +161,7 @@ impl TriMesh {
             cell_start: Vec::new(),
             cell_tris: Vec::new(),
             spawn,
+            rails: Vec::new(),
         };
         // Two passes: count per cell, then fill.
         let mut counts = vec![0u32; cols * rows];
@@ -313,6 +322,10 @@ impl Terrain for TriMesh {
 
     fn spawn(&self) -> (Vec3, f32) {
         self.spawn
+    }
+
+    fn rails(&self) -> &[Rail] {
+        &self.rails
     }
 
     fn kill_height(&self) -> f32 {

@@ -50,6 +50,17 @@ const MANUAL_POINTS_PER_S: f32 = 120.0;
 const GRAB_TRIGGER: f32 = 0.5;
 const GRAB_POINTS: u32 = 200;
 const GRAB_POINTS_PER_S: f32 = 150.0;
+/// How close (m, seen from above) the board has to come down to a rail to lock on.
+const GRIND_REACH: f32 = 0.4;
+/// Board within this of the rail's direction: 50-50; within this of across it: boardslide.
+const GRIND_ALONG: f32 = 30.0 * PI / 180.0;
+const GRIND_ACROSS: f32 = 30.0 * PI / 180.0;
+const GRIND_FRICTION: f32 = 0.8;
+const GRIND_MIN_ENTRY: f32 = 1.5;
+const GRIND_MIN_SPEED: f32 = 0.6;
+const GRIND_MIN_TIME: f32 = 0.15;
+const GRIND_POINTS: u32 = 150;
+const GRIND_POINTS_PER_S: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrickDef {
@@ -84,8 +95,14 @@ pub fn trick_def(f: Flick) -> TrickDef {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
     Rolling,
-    Air { time: f32 },
-    Bailed { time: f32 },
+    Air {
+        time: f32,
+    },
+    Bailed {
+        time: f32,
+    },
+    /// On a rail (details in `Skater::grind`).
+    Grind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +233,43 @@ pub struct Skater {
     pub grab: Option<Grab>,
     /// The longest grab of this jump that was let go of (scored on landing).
     grabbed: Option<Grab>,
+    /// On a rail (with `Mode::Grind`).
+    pub grind: Option<Grind>,
+    /// The rail just left and how long until it can be locked onto again (so rolling off its end
+    /// doesn't snap straight back on).
+    regrind_block: Option<(usize, f32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrindKind {
+    /// Board along the rail, both trucks on it.
+    FiftyFifty,
+    /// Board across the rail.
+    Boardslide,
+}
+
+impl GrindKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            GrindKind::FiftyFifty => "50-50",
+            GrindKind::Boardslide => "BOARDSLIDE",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grind {
+    /// Index into the terrain's rails.
+    pub rail: usize,
+    /// Distance along the rail.
+    pub s: f32,
+    /// +1 travelling towards the rail's end, -1 towards its start.
+    pub dir: f32,
+    pub speed: f32,
+    pub kind: GrindKind,
+    pub time: f32,
+    /// The trick that took the skater onto the rail (named with the grind).
+    pub into: Option<TrickDef>,
 }
 
 impl Skater {
@@ -242,6 +296,8 @@ impl Skater {
             manual_lock: false,
             grab: None,
             grabbed: None,
+            grind: None,
+            regrind_block: None,
         }
     }
 
@@ -280,9 +336,16 @@ impl Skater {
                 self.landing = None;
             }
         }
+        if let Some((_, t)) = &mut self.regrind_block {
+            *t -= dt;
+            if *t <= 0.0 {
+                self.regrind_block = None;
+            }
+        }
         match self.mode {
             Mode::Rolling => self.roll(park, pad, flick, dt, events),
             Mode::Air { time } => self.fly(park, pad, time + dt, dt, events),
+            Mode::Grind => self.slide(park, flick, dt, events),
             Mode::Bailed { time } => {
                 let time = time + dt;
                 // Slide to a stop.
@@ -486,6 +549,9 @@ impl Skater {
             .lerp(Vec3::UP, smooth(4.0, dt))
             .normalize_or(Vec3::UP);
 
+        if self.try_grind(park) {
+            return;
+        }
         let s = park.ground(self.pos.x, self.pos.z, top + STEP);
         if self.pos.y <= s.height && self.vel.y <= 0.0 {
             self.pos.y = s.height;
@@ -497,6 +563,125 @@ impl Skater {
         } else {
             self.mode = Mode::Air { time };
         }
+    }
+
+    /// Coming down onto a rail with the board along it (50-50) or across it (boardslide) locks on.
+    fn try_grind(&mut self, park: &dyn Terrain) -> bool {
+        let free = self.trick.is_none_or(|t| t.progress() >= 1.0);
+        if self.vel.y > 0.0 || self.grab.is_some() || !free {
+            return false;
+        }
+        let facing = wrap_angle(self.heading + self.spin);
+        for (i, rail) in park.rails().iter().enumerate() {
+            if self.regrind_block.is_some_and(|(r, _)| r == i) {
+                continue;
+            }
+            let Some(n) = rail.nearest(self.pos) else {
+                continue;
+            };
+            let (p, d) = rail.at(n.s);
+            if n.dist_h > GRIND_REACH || !(-0.15..=0.3).contains(&(self.pos.y - p.y)) {
+                continue;
+            }
+            // Board angle to the rail, whichever way along it.
+            let rail_yaw = atan2f(d.x, d.z);
+            let mut a = wrap_angle(facing - rail_yaw).abs();
+            if a > PI / 2.0 {
+                a = PI - a;
+            }
+            let kind = if a < GRIND_ALONG {
+                GrindKind::FiftyFifty
+            } else if a > PI / 2.0 - GRIND_ACROSS {
+                GrindKind::Boardslide
+            } else {
+                continue;
+            };
+            let along = self.vel.horizontal().dot(d);
+            let dir = if along >= 0.0 { 1.0 } else { -1.0 };
+            self.heading = atan2f(d.x * dir, d.z * dir);
+            // Keep the board the way it came in: along the rail (either way round) or across it.
+            let rel = wrap_angle(facing - self.heading);
+            self.spin = match kind {
+                GrindKind::FiftyFifty if rel.abs() > PI / 2.0 => PI,
+                GrindKind::FiftyFifty => 0.0,
+                GrindKind::Boardslide => PI / 2.0 * rel.signum(),
+            };
+            self.spin_rate = 0.0;
+            self.pos = p;
+            self.grind = Some(Grind {
+                rail: i,
+                s: n.s,
+                dir,
+                speed: along.abs().max(GRIND_MIN_ENTRY),
+                kind,
+                time: 0.0,
+                into: self.trick.map(|t| t.def),
+            });
+            self.trick = None;
+            self.grabbed = None;
+            self.mode = Mode::Grind;
+            return true;
+        }
+        false
+    }
+
+    /// One step along the rail: gravity along it, a little friction; off the end, out of speed, or
+    /// popped off with a flick.
+    fn slide(
+        &mut self,
+        park: &dyn Terrain,
+        flick: Option<Flick>,
+        dt: f32,
+        events: &mut alloc::vec::Vec<Event>,
+    ) {
+        let (Some(mut g), Some(rail)) = (
+            self.grind,
+            self.grind.and_then(|g| park.rails().get(g.rail)),
+        ) else {
+            // The rail went away (a park reload): just drop.
+            self.grind = None;
+            self.take_off(None);
+            return;
+        };
+        let (_, d) = rail.at(g.s);
+        g.speed += (-GRAVITY * d.y * g.dir - GRIND_FRICTION) * dt;
+        g.s += g.dir * g.speed * dt;
+        g.time += dt;
+        let (p, d) = rail.at(g.s);
+        let travel = d * g.dir;
+        self.pos = p;
+        self.heading = atan2f(travel.x, travel.z);
+        self.speed = g.speed;
+        self.grind = Some(g);
+        let off_end = g.s <= 0.0 || g.s >= rail.length();
+        if flick.is_none() && !off_end && g.speed >= GRIND_MIN_SPEED {
+            return;
+        }
+        // Leaving the rail: score it, square the board back up and fly off along it.
+        if g.time >= GRIND_MIN_TIME {
+            let name = match g.into {
+                Some(t) => format!("{} {}", t.name, g.kind.name()),
+                None => g.kind.name().into(),
+            };
+            let points = g.into.map_or(0, |t| t.points)
+                + GRIND_POINTS
+                + (g.time * GRIND_POINTS_PER_S) as u32;
+            events.push(Event::Landed { name, points });
+        }
+        let spin = if self.spin.abs() > PI / 2.0 { PI } else { 0.0 };
+        self.grind = None;
+        self.regrind_block = Some((g.rail, 0.4));
+        self.vel = travel * g.speed.max(0.0);
+        self.pos += Vec3::UP * 0.02;
+        match flick {
+            Some(f) => {
+                self.vel += Vec3::UP * POP;
+                self.take_off(Some(f));
+                events.push(Event::Popped(f));
+            }
+            None => self.take_off(None),
+        }
+        self.spin = spin;
     }
 
     fn bail(&mut self, events: &mut alloc::vec::Vec<Event>) {
@@ -647,6 +832,7 @@ mod tests {
             wall_height: 2.0,
             spawn: Vec3::ZERO,
             spawn_yaw: 0.0,
+            rails: Vec::new(),
         }
     }
 
@@ -921,6 +1107,92 @@ mod tests {
         assert!(s.grab.is_none());
         steps(&mut s, &park, &grab(1.0), None, 25);
         assert!(s.grab.is_some());
+    }
+
+    /// Flat ground with a 0.5 m high rail along +Z from z = 0 to z = `len`.
+    fn rail_park(len: f32) -> Park {
+        let mut p = flat();
+        p.spawn = Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: -3.0,
+        };
+        p.rails = alloc::vec![crate::rails::Rail::new(alloc::vec![
+            Vec3 {
+                x: 0.0,
+                y: 0.5,
+                z: 0.0
+            },
+            Vec3 {
+                x: 0.0,
+                y: 0.5,
+                z: len
+            },
+        ])];
+        p
+    }
+
+    /// Ollies towards the rail; `spin` (rad) is set just after the pop.
+    fn ollie_at_rail(park: &Park, spin: f32) -> (Skater, Vec<Event>) {
+        let mut s = Skater::spawn(park);
+        s.speed = 5.0;
+        let mut ev = steps(&mut s, park, &Pad::default(), Some(Flick::Ollie), 1);
+        s.spin = spin;
+        for _ in 0..60 {
+            ev.extend(steps(&mut s, park, &Pad::default(), None, 1));
+            if s.mode == Mode::Grind {
+                break;
+            }
+        }
+        (s, ev)
+    }
+
+    #[test]
+    fn ollie_onto_a_rail_grinds_and_scores_off_the_end() {
+        let park = rail_park(4.0);
+        let (mut s, _) = ollie_at_rail(&park, 0.0);
+        assert_eq!(s.mode, Mode::Grind);
+        let g = s.grind.unwrap();
+        assert_eq!(g.kind, GrindKind::FiftyFifty);
+        assert!(g.dir > 0.0 && (s.pos.y - 0.5).abs() < 1e-5);
+        // Slide to the end, fly off and land on the ground.
+        let ev = steps(&mut s, &park, &Pad::default(), None, 120);
+        let names: Vec<&str> = ev
+            .iter()
+            .filter_map(|e| match e {
+                Event::Landed { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["OLLIE 50-50"], "{ev:?}");
+        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
+        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.pos.z > 4.0);
+    }
+
+    #[test]
+    fn board_across_the_rail_is_a_boardslide_and_a_flick_pops_off() {
+        let park = rail_park(20.0);
+        let (mut s, _) = ollie_at_rail(&park, PI / 2.0);
+        assert_eq!(s.grind.map(|g| g.kind), Some(GrindKind::Boardslide));
+        steps(&mut s, &park, &Pad::default(), None, 20);
+        assert_eq!(s.mode, Mode::Grind);
+        let ev = steps(&mut s, &park, &Pad::default(), Some(Flick::Ollie), 1);
+        assert!(
+            matches!(&ev[..], [Event::Landed { name, .. }, Event::Popped(Flick::Ollie)] if name == "OLLIE BOARDSLIDE"),
+            "{ev:?}"
+        );
+        assert!(s.is_airborne() && s.vel.y > 0.0);
+        // Squared back up off the rail, so it lands clean.
+        let ev = steps(&mut s, &park, &Pad::default(), None, 90);
+        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
+    }
+
+    #[test]
+    fn crooked_board_or_unfinished_flip_does_not_lock_on() {
+        let park = rail_park(10.0);
+        let (s, _) = ollie_at_rail(&park, 45.0 * PI / 180.0);
+        assert_ne!(s.mode, Mode::Grind);
     }
 
     #[test]

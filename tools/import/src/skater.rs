@@ -66,6 +66,9 @@ pub const CLIPS: &[(&str, &str)] = &[
     // Bails: the fall, then getting up.
     ("bail/fall", "w_brace_lean090twist000_n_0_n"),
     ("bail/getup", "w_recovery_onfront_n_0_n"),
+    // Grinds, held on a rail: board along it, board across it.
+    ("grind/5050", "g_5050_fs_low_0_cyc"),
+    ("grind/bslide", "g_bslide_fs_low_0_cyc"),
 ];
 
 struct Options {

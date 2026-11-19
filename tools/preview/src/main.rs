@@ -438,6 +438,33 @@ fn main() {
         raster.save(&path);
         println!("        wrote {}", path.display());
     }
+    // --grind-test: drop the skater onto the park's longest fairly level rail, moving along it.
+    if args.iter().any(|a| a == "--grind-test") {
+        let rails = game.terrain().rails();
+        let level = |r: &game_core::rails::Rail| {
+            let (a, b) = (r.points[0], *r.points.last().unwrap());
+            (b.y - a.y).abs() < 0.15 * r.length()
+        };
+        if let Some(r) = rails
+            .iter()
+            .filter(|r| level(r))
+            .max_by(|a, b| a.length().total_cmp(&b.length()))
+            .cloned()
+        {
+            let r = &r;
+            let (p, d) = r.at(0.5);
+            let s = &mut game.skater;
+            s.pos = p + d * -0.6 + v3(0.0, 0.25, 0.0);
+            s.heading = d.x.atan2(d.z);
+            s.vel = d * 5.0 + v3(0.0, -0.5, 0.0);
+            s.mode = Mode::Air { time: 0.5 };
+            println!(
+                "grind test: rail of {:.1} m starting at {:.1?}",
+                r.length(),
+                [p.x, p.y, p.z]
+            );
+        }
+    }
     // --tour: the whole move set (carves, manual, grab, bail) after the kicker run.
     let tour = args.iter().any(|a| a == "--tour");
     let mut kicker = KickerRun::new();
@@ -448,7 +475,10 @@ fn main() {
     let mut shots: Vec<(u32, &str)> = vec![(45, "rolling")];
     let mut took_air = false;
     let mut took_land = false;
-    let frames = if park.is_some() {
+    let grind_test = args.iter().any(|a| a == "--grind-test");
+    let frames = if grind_test {
+        60 * 6
+    } else if park.is_some() {
         60 * 30
     } else if tour {
         60 * 20
@@ -461,12 +491,16 @@ fn main() {
             let s = &game.skater;
             PadRaw {
                 flags: game_core::input::flag::CONNECTED,
-                buttons: if s.speed < 4.5 && frame % 30 == 0 {
+                buttons: if !grind_test && s.speed < 4.5 && frame % 30 == 0 {
                     game_core::input::btn::A
                 } else {
                     0
                 },
-                stick_x: (40.0 * (frame as f32 * 0.02).sin()) as i8,
+                stick_x: if grind_test {
+                    0
+                } else {
+                    (40.0 * (frame as f32 * 0.02).sin()) as i8
+                },
                 ..Default::default()
             }
         } else if tour {

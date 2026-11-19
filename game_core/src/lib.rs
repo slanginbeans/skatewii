@@ -24,6 +24,7 @@ pub mod math;
 pub mod model;
 pub mod pack;
 pub mod park;
+pub mod rails;
 pub mod rider;
 pub mod skater;
 pub mod skinned;

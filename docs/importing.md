@@ -103,6 +103,7 @@ deck is at its start and end):
 | `manual`, `nosemanual` | `m_idle_n_0_cyc`, `m_noseidle_n_0_cyc` | main stick held down / up while rolling |
 | `grab/fs`, `grab/bs`, `grab/mute` | `gr_grab_n_fs_0_cyc`, `gr_grab_n_bs_0_cyc`, `gr_mutegrab_n_0_cyc` | R, L, or both triggers held in the air |
 | `bail/fall`, `bail/getup` | `w_brace_lean090twist000_n_0_n`, `w_recovery_onfront_n_0_n` | after a bail, one after the other |
+| `grind/5050`, `grind/bslide` | `g_5050_fs_low_0_cyc`, `g_bslide_fs_low_0_cyc` | on a rail, board along it / across it |
 | `<trick>/pop`, `/air`, `/flip`, `/out` | e.g. `kickflip_in_low_g`, `kickflip_in_low_a`, `t_low_kick_cyc1`, `t_low_kick_out4` | in the air, back to back |
 
 Tricks are `ollie`, `nollie`, `kickflip`, `heelflip`, `popshuvit` and `fsshuvit`. `--anim role=clip`
@@ -131,7 +132,7 @@ How the skinning fits together, all checked against the previews:
 cargo run --release -p fg_import -- park path/to/skate3.iso --park BlackBoxPark
 ```
 Writes `imported/park.fgpak` (about 500 KB): `park/collision` (every collision triangle, format in
-`game_core/src/collision.rs`) and `park/spawn`. The build converts `BlackBoxPark` unless `FG_PARK` names
+`game_core/src/collision.rs`), `park/spawn` and `park/rails` (grind rails, `game_core/src/rails.rs`). The build converts `BlackBoxPark` unless `FG_PARK` names
 another. Parks small enough for the Wii: `StartPark` (the opening warehouse: an empty floor), `MegaPark`,
 `BlackBoxPark`, `IndustrialSkatePark`, `DownTownSkatePark`, `SkateSchool` and `MaloofMoneyCup`. The city
 districts are hundreds of MB each.
@@ -148,6 +149,13 @@ board stands on the highest walkable triangle under it no higher than a step abo
 overhangs work at any level. The park is drawn from its collision for now (flat shaded, coloured by surface,
 in 16 m chunks within 90 m of the camera); its own textured models come next. Transitions steeper than about
 70° are walls until vert riding exists.
+
+Grind rails are the game's spline sections (type `0x00EB0004`) in the same `Sim` assets: chains of cubic
+segments `D + C t + B t² + A t³`, sampled at 4 points per segment (SK8's `retail_grind_splines.py`).
+BlackBoxPark has 120 rails (about 1.35 km); MegaPark has none. Coming down within 0.4 m of a rail, with any
+flip finished and no grab held, locks on: a 50-50 with the board within 30° of the rail, a boardslide within
+30° of across it. On the rail gravity and a little friction act along it; the end of the rail, running out of
+speed or a flick takes you off, and that scores the grind.
 
 ### Water and menu tables (from the executable)
 Two tables exist only inside the game's code: the ocean PCA water animation and the front-end menu tables.
@@ -199,7 +207,6 @@ plenty for an offline converter.
   wipeout clips over a physics ragdoll, which is not ported, so a bail is a step-off and a get-up.
 - Park visuals: the park's own RW4 models from the `Pres` stream (vertex descriptors, index buffers) to Wii
   display lists, with their textures. Until then the collision is drawn.
-- Grind rails (the `Sim` stream's spline sections) and grinding.
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
 - Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
 - Game side: `skater.fgpak` and `park.fgpak` are loaded. Texture packs, animation packs and the executable

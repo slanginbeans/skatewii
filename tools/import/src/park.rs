@@ -91,23 +91,32 @@ pub fn load_stream<R: Read + Seek>(
     Ok(assets)
 }
 
-/// Every collision triangle of a district.
-pub fn collision<R: Read + Seek>(disc: &mut Disc<R>, park: &str) -> Res<Vec<Triangle>> {
-    let mut tris = Vec::new();
+/// A grind rail as sampled points.
+pub type RailPoints = Vec<[f32; 3]>;
+
+/// A district's simulation data: every collision triangle, and its grind rails as sampled points.
+pub fn simulation<R: Read + Seek>(
+    disc: &mut Disc<R>,
+    park: &str,
+) -> Res<(Vec<Triangle>, Vec<RailPoints>)> {
+    let (mut tris, mut rails) = (Vec::new(), Vec::new());
     for (r, data) in load_stream(disc, park, "Sim")? {
         let Ok(sections) = world::rx2_sections(&data) else {
             continue;
         };
+        let at = |e| format!("asset {:016x}: {e}", r.id);
         for (ty, bytes) in sections {
-            if ty == world::TYPE_CLUSTERED_MESH {
-                tris.extend(
-                    world::decode_clustered_mesh(bytes)
-                        .map_err(|e| format!("asset {:016x}: {e}", r.id))?,
-                );
+            match ty {
+                world::TYPE_CLUSTERED_MESH => {
+                    tris.extend(world::decode_clustered_mesh(bytes).map_err(at)?)
+                }
+                // Parks keep everything in their global stream, in world space.
+                world::TYPE_SPLINE_DATA => rails.extend(world::decode_splines(bytes).map_err(at)?),
+                _ => {}
             }
         }
     }
-    Ok(tris)
+    Ok((tris, rails))
 }
 
 /// Where to start: the centre of the broad, flat, upward face nearest the district origin (SK8's
@@ -166,8 +175,19 @@ pub fn spawn(tris: &[Triangle]) -> Option<[f32; 4]> {
 
 pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let o = options(args)?;
-    let tris = collision(disc, &o.park)?;
+    let (tris, rails) = simulation(disc, &o.park)?;
     let spawn = spawn(&tris).ok_or("no flat ground to start on")?;
+    let rail_m: f32 = rails
+        .iter()
+        .flat_map(|r| r.windows(2))
+        .map(|w| {
+            (0..3)
+                .map(|k| (w[1][k] - w[0][k]).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        })
+        .sum();
+    println!("{} grind rails, {:.0} m in all", rails.len(), rail_m);
     let encoded: Vec<([[f32; 3]; 3], u16, u16)> = tris
         .iter()
         .map(|t| (t.v, t.surface, t.flags as u16))
@@ -185,6 +205,14 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
             name: "park/spawn".into(),
             kind: Kind::Data,
             data: spawn.iter().flat_map(|f| f.to_be_bytes()).collect(),
+            width: 0,
+            height: 0,
+            gx_format: 0,
+        },
+        pack::Item {
+            name: "park/rails".into(),
+            kind: Kind::Data,
+            data: game_core::rails::encode(&rails),
             width: 0,
             height: 0,
             gx_format: 0,

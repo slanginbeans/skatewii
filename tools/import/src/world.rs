@@ -357,6 +357,66 @@ pub fn decode_clustered_mesh(d: &[u8]) -> Res<Vec<Triangle>> {
     Ok(out)
 }
 
+// ---- Grind rails -------------------------------------------------------------------------------------
+
+/// RW4 section type of the game's spline data (grind rails).
+pub const TYPE_SPLINE_DATA: u32 = 0x00eb_0004;
+const SPLINE_HEADER: usize = 16;
+const SPLINE_RAIL: usize = 32;
+const SPLINE_SEGMENT: usize = 144;
+/// Points sampled per cubic segment (plus the rail's last point).
+pub const SAMPLES_PER_SEGMENT: usize = 4;
+
+/// Every rail of one spline section, sampled into points. Each segment is a cubic
+/// `D + C t + B t^2 + A t^3` for t in 0..1 (A, B, C, D: XYZ vectors at 0, 16, 32, 48).
+pub fn decode_splines(d: &[u8]) -> Res<Vec<Vec<[f32; 3]>>> {
+    need(d.len() >= SPLINE_HEADER, "spline section too small")?;
+    let rails = be16(d, 2) as usize;
+    let segments = be32(d, 4) as usize;
+    let rail_table = be32(d, 8) as usize;
+    let seg_table = be32(d, 12) as usize;
+    need(
+        rail_table == SPLINE_HEADER
+            && seg_table == SPLINE_HEADER + rails * SPLINE_RAIL
+            && d.len() >= seg_table + segments * SPLINE_SEGMENT,
+        "spline section has an inconsistent layout",
+    )?;
+    let v = |at: usize| [bef(d, at), bef(d, at + 4), bef(d, at + 8)];
+    let mut out = Vec::with_capacity(rails);
+    for r in 0..rails {
+        let at = rail_table + r * SPLINE_RAIL;
+        // Rail record: u64 id, u64 type, u32 flags, u32 first segment, u32 last segment, u32.
+        let (first, last) = (be32(d, at + 20) as usize, be32(d, at + 24) as usize);
+        need(
+            first >= seg_table
+                && last >= first
+                && (first - seg_table).is_multiple_of(SPLINE_SEGMENT)
+                && (last - first).is_multiple_of(SPLINE_SEGMENT)
+                && last + SPLINE_SEGMENT <= d.len(),
+            "grind rail has bad segment links",
+        )?;
+        let mut pts = Vec::new();
+        let mut end = [0.0; 3];
+        for s in (first..=last).step_by(SPLINE_SEGMENT) {
+            let (a, b, c, dd) = (v(s), v(s + 16), v(s + 32), v(s + 48));
+            for i in 0..SAMPLES_PER_SEGMENT {
+                let t = i as f32 / SAMPLES_PER_SEGMENT as f32;
+                pts.push(std::array::from_fn(|k| {
+                    dd[k] + c[k] * t + b[k] * t * t + a[k] * t * t * t
+                }));
+            }
+            end = std::array::from_fn(|k| dd[k] + c[k] + b[k] + a[k]);
+        }
+        pts.push(end);
+        need(
+            pts.iter().flatten().all(|x| x.is_finite()),
+            "grind rail has non-finite points",
+        )?;
+        out.push(pts);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +484,39 @@ mod tests {
         // Quad split 0-1-2 then 3-2-1.
         assert!(close(tris[1].v[0], [41.0, 0.0, -1.0]));
         assert!(tris.iter().all(|t| t.surface == 7));
+    }
+
+    #[test]
+    fn samples_spline_rails() {
+        // One rail of two straight segments: (0,1,0) -> (2,1,0) -> (2,1,3).
+        let mut d = vec![0u8; 16];
+        d[2..4].copy_from_slice(&1u16.to_be_bytes());
+        d[4..8].copy_from_slice(&2u32.to_be_bytes());
+        d[8..12].copy_from_slice(&16u32.to_be_bytes());
+        let seg_table = 16 + 32;
+        d[12..16].copy_from_slice(&(seg_table as u32).to_be_bytes());
+        let mut rail = vec![0u8; 32];
+        rail[20..24].copy_from_slice(&(seg_table as u32).to_be_bytes());
+        rail[24..28].copy_from_slice(&((seg_table + 144) as u32).to_be_bytes());
+        d.extend_from_slice(&rail);
+        for (c, dd) in [
+            ([2.0f32, 0.0, 0.0], [0.0f32, 1.0, 0.0]),
+            ([0.0, 0.0, 3.0], [2.0, 1.0, 0.0]),
+        ] {
+            let mut s = vec![0u8; 144];
+            for k in 0..3 {
+                s[32 + 4 * k..36 + 4 * k].copy_from_slice(&c[k].to_be_bytes());
+                s[48 + 4 * k..52 + 4 * k].copy_from_slice(&dd[k].to_be_bytes());
+            }
+            d.extend_from_slice(&s);
+        }
+        let rails = decode_splines(&d).unwrap();
+        assert_eq!(rails.len(), 1);
+        let r = &rails[0];
+        assert_eq!(r.len(), 2 * SAMPLES_PER_SEGMENT + 1);
+        assert_eq!(r[0], [0.0, 1.0, 0.0]);
+        assert_eq!(r[2], [1.0, 1.0, 0.0]);
+        assert_eq!(*r.last().unwrap(), [2.0, 1.0, 3.0]);
     }
 
     #[test]

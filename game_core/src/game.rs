@@ -164,7 +164,8 @@ impl Game {
 
         let flick = self.flick.update(pad.flick, dt);
         let rolling = self.skater.mode == Mode::Rolling;
-        let flick = if rolling { flick } else { None };
+        let grinding = self.skater.mode == Mode::Grind;
+        let flick = if rolling || grinding { flick } else { None };
         let loaded = rolling && self.flick.is_loaded();
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
         self.skater

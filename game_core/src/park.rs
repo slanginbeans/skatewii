@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 use crate::gfx::{MeshBuilder, Vertex, rgb};
 use crate::math::{Vec3, v3};
+use crate::rails::Rail;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Axis {
@@ -58,6 +59,10 @@ pub trait Terrain {
     fn kill_height(&self) -> f32 {
         -5.0
     }
+    /// Grind rails.
+    fn rails(&self) -> &[Rail] {
+        &[]
+    }
 }
 
 impl Terrain for Park {
@@ -66,6 +71,9 @@ impl Terrain for Park {
     }
     fn spawn(&self) -> (Vec3, f32) {
         (self.spawn, self.spawn_yaw)
+    }
+    fn rails(&self) -> &[Rail] {
+        &self.rails
     }
 }
 
@@ -76,6 +84,8 @@ pub struct Park {
     pub wall_height: f32,
     pub spawn: Vec3,
     pub spawn_yaw: f32,
+    /// Grind rails (the ledge's top).
+    pub rails: Vec<Rail>,
 }
 
 fn inside(x: f32, z: f32, min: Vec3, max: Vec3) -> bool {
@@ -283,6 +293,11 @@ impl Park {
             wall_height: 1.2,
             spawn: v3(0.0, 0.0, -14.0),
             spawn_yaw: 0.0,
+            // Along the middle of the long ledge's top.
+            rails: alloc::vec![Rail::new(alloc::vec![
+                v3(-9.7, 0.4, -6.0),
+                v3(-9.7, 0.4, 6.0)
+            ])],
         }
     }
 
