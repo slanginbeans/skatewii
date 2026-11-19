@@ -12,6 +12,7 @@ mod gx;
 mod mesh;
 mod pack;
 mod park;
+mod parkmodel;
 mod raster;
 mod refpack;
 mod rw4;
@@ -43,9 +44,11 @@ const USAGE: &str = "usage:
       --max <n>         largest texture edge kept on the Wii (default 256, at most 1024)
       --png             also write PNG previews (for checking on the PC)
       --rgba8           keep textures with alpha at full 8-bit precision (twice the memory of RGB5A3)
-  fg_import park     <disc.iso> [options]         a skate park district (collision, spawn) as park.fgpak
+  fg_import park     <disc.iso> [options]         a skate park district (collision, rails, spawn, textured
+                                                  models) as park.fgpak
       --park <name>     StartPark, MegaPark, BlackBoxPark (default), IndustrialSkatePark,
                         DownTownSkatePark, SkateSchool or MaloofMoneyCup
+      --max <n>         largest texture edge for the models (default 128; 0: no models)
       --out <dir>       output directory (default: imported)
   fg_import skater   <disc.iso> [options]         the default skater as skinned meshes + textures
       --lod <0|2>       model detail (default 0)

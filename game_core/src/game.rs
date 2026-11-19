@@ -137,7 +137,7 @@ impl Game {
     }
 
     /// Rides an imported park (`fg_import park`) instead of the demo park, starting at its spawn.
-    pub fn load_park(&mut self, pack: &[u8]) -> Result<(), collision::Error> {
+    pub fn load_park(&mut self, pack: &'static [u8]) -> Result<(), collision::Error> {
         let p = ImportedPark::parse(pack)?;
         self.skater = Skater::spawn(&p.mesh);
         self.cam = ChaseCam::new(&self.skater);

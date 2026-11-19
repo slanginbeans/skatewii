@@ -40,7 +40,8 @@ content second.
 - [x] `fg_import`: default skater as skinned meshes + textures, clips composed onto the bind pose (PNG previews)
 - [x] `fg_import park`: district streams (ATOC/SFIL) and ClusteredMesh collision, spawn point
 - [x] `fg_import park`: grind rails from the spline sections
-- [ ] `fg_import`: park models and textures, RAW-codec animation, skater tints/morphs/outfits
+- [x] `fg_import park`: the park's textured models (Pres stream, material -> texture binding)
+- [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
 - [x] GX textures read in place from a `.fgpak` loaded from SD/USB (`sd:/flatground/skater.fgpak`)

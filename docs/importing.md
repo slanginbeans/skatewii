@@ -146,9 +146,16 @@ origin on the main floor (the lowest height band holding at least 30% of the fla
 
 In the game, walkable triangles (normal at least 0.35 up, about 70°) are ground and steeper ones are walls. The
 board stands on the highest walkable triangle under it no higher than a step above it, so ledges and
-overhangs work at any level. The park is drawn from its collision for now (flat shaded, coloured by surface,
-in 16 m chunks within 90 m of the camera); its own textured models come next. Transitions steeper than about
-70° are walls until vert riding exists.
+overhangs work at any level. Transitions steeper than about 70° are walls until vert riding exists.
+
+The park is drawn with its own models from the `Pres` stream (`tools/import/src/parkmodel.rs`): RW4 arenas of
+several meshes, already in world space, with float positions and half-float UVs. A mesh's texture comes
+through its material handle, the external-reference table (GUID to handle), the material whose `Name`
+carries that GUID, its `diffuse` name and the texture asset of that name (SK8's chain). Textures are
+shrunk to `--max` (default 128) and stored as CMPR, or RGB5A3 with alpha testing for cut-outs; lighting from
+the sun is baked into the vertex colours. BlackBoxPark: 132 meshes, 15,670 vertices, 20 textures, about
+1 MB in all. Meshes within 90 m of the camera are drawn. `--max 0` leaves the models out, and the collision
+is drawn instead (flat shaded, coloured by surface).
 
 Grind rails are the game's spline sections (type `0x00EB0004`) in the same `Sim` assets: chains of cubic
 segments `D + C t + B t² + A t³`, sampled at 4 points per segment (SK8's `retail_grind_splines.py`).
@@ -205,8 +212,8 @@ plenty for an offline converter.
   can't blend bone weights). It is checked in the PC preview only, not yet in Dolphin or on hardware, and
   its frame cost on the Wii is unmeasured (the HUD now shows it). Bails are clip-based: Skate 3 plays its
   wipeout clips over a physics ragdoll, which is not ported, so a bail is a step-off and a get-up.
-- Park visuals: the park's own RW4 models from the `Pres` stream (vertex descriptors, index buffers) to Wii
-  display lists, with their textures. Until then the collision is drawn.
+- Park visuals: lightmaps (the second UV set), display lists instead of copying vertices every frame, and
+  the city districts' streaming cells.
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
 - Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
 - Game side: `skater.fgpak` and `park.fgpak` are loaded. Texture packs, animation packs and the executable

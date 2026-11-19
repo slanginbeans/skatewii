@@ -398,8 +398,9 @@ fn main() {
     // --park: ride an imported park (fg_import park) instead of the demo park.
     let park = value("--park");
     if let Some(path) = park {
-        let bytes = fs::read(path).expect("read park pack");
-        game.load_park(&bytes).expect("park pack");
+        // Leaked like the Wii does: textures are read in place for the whole game.
+        let bytes: &'static [u8] = Vec::leak(fs::read(path).expect("read park pack"));
+        game.load_park(bytes).expect("park pack");
         let p = game.imported_park().expect("loaded");
         println!(
             "using imported park {path}: {} triangles, {} chunks, {} vertices drawn at most",

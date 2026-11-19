@@ -23,18 +23,22 @@ pub const PARKS: &[&str] = &[
 pub struct Options {
     pub park: String,
     pub out: PathBuf,
+    /// Largest texture edge kept for the park's models (0: no models, draw the collision).
+    pub max: usize,
 }
 
 pub fn options(args: &[String]) -> Res<Options> {
     let mut o = Options {
         park: crate::assets::DEFAULT_PARK.into(),
         out: PathBuf::from("imported"),
+        max: 128,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--park" => o.park = it.next().ok_or(USAGE)?.clone(),
             "--out" => o.out = PathBuf::from(it.next().ok_or(USAGE)?),
+            "--max" => o.max = it.next().ok_or(USAGE)?.parse::<usize>()?.min(1024),
             _ => return Err(format!("unknown option {a}\n{USAGE}").into()),
         }
     }
@@ -192,7 +196,7 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         .iter()
         .map(|t| (t.v, t.surface, t.flags as u16))
         .collect();
-    let items = vec![
+    let mut items = vec![
         pack::Item {
             name: "park/collision".into(),
             kind: Kind::Collision,
@@ -218,6 +222,18 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
             gx_format: 0,
         },
     ];
+    if o.max > 0 {
+        let pres = load_stream(disc, &o.park, "Pres")?;
+        let (models, r) = crate::parkmodel::convert(&pres, o.max);
+        println!(
+            "models: {} meshes, {} vertices, {} triangles, {} textures ({} meshes untextured)",
+            r.meshes, r.vertices, r.triangles, r.textures, r.untextured
+        );
+        for s in &r.skipped {
+            eprintln!("skipped {s}");
+        }
+        items.extend(models);
+    }
     std::fs::create_dir_all(&o.out)?;
     let bytes = pack::write(&items);
     let path = o.out.join("park.fgpak");
