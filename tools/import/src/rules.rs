@@ -1,0 +1,175 @@
+//! `fg_import rules`: Skate 3's riding rules from the player's disc as `rules.fgpak`: the tuning values
+//! flatground's skating reads (`game_core::tuning::PATHS`, from the `skatercollections` database) and
+//! the flick-stick shapes (`data/joystick/*.pat`).
+
+use crate::attrib::Database;
+use crate::xdvdfs::Disc;
+use crate::{Res, USAGE, pack, read_asset};
+use game_core::pack::Kind;
+use std::io::{Read, Seek};
+use std::path::PathBuf;
+
+const DB: &str = "data/big/db.big::data/db/";
+const JOYSTICK: &str = "data/big/miscload.big::data/joystick/";
+/// The gesture files, by the entry name the game reads (`rules/gestures/<name>`).
+const SHAPES: &[&str] = &[
+    "skater",
+    "skater90",
+    "skaterN90",
+    "skater_air",
+    "skater_fingerflip",
+    "skaterls",
+];
+
+/// A flick shape: name, tolerance radius, points.
+pub type Shape = (String, f32, Vec<[f32; 2]>);
+
+/// Parses a `.pat` file: `global_tolerance_dist`, then `pattern <name>` blocks of optional
+/// `tolerance_dist` and `coord x y` lines. Other directives (time, speed, delay) are read and ignored, as
+/// the game does.
+pub fn parse_pat(text: &str) -> Res<Vec<Shape>> {
+    let mut out: Vec<Shape> = Vec::new();
+    let mut global = None;
+    for (n, line) in text.lines().enumerate() {
+        let words: Vec<&str> = line
+            .split("//")
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        let Some(&first) = words.first() else {
+            continue;
+        };
+        let num = |i: usize| -> Res<f32> {
+            let v: f32 = words
+                .get(i)
+                .ok_or_else(|| format!("line {}: missing number", n + 1))?
+                .parse()
+                .map_err(|_| format!("line {}: bad number", n + 1))?;
+            if v.is_finite() {
+                Ok(v)
+            } else {
+                Err(format!("line {}: bad number", n + 1).into())
+            }
+        };
+        match first {
+            "global_tolerance_dist" => global = Some(num(1)?),
+            "global_tolerance_time"
+            | "global_tolerance_speed"
+            | "global_anticipation_delay"
+            | "tolerance_time" => {
+                num(1)?;
+            }
+            "pattern" => out.push((
+                words.get(1).ok_or("pattern without a name")?.to_string(),
+                global.ok_or("pattern before global_tolerance_dist")?,
+                Vec::new(),
+            )),
+            "tolerance_dist" => out.last_mut().ok_or("tolerance outside a pattern")?.1 = num(1)?,
+            "coord" => {
+                let p = [num(1)?, num(2)?];
+                out.last_mut().ok_or("coord outside a pattern")?.2.push(p);
+            }
+            other => return Err(format!("line {}: unknown directive {other}", n + 1).into()),
+        }
+    }
+    if let Some(p) = out.iter().find(|p| !(2..=15).contains(&p.2.len())) {
+        return Err(format!("pattern {} has {} points", p.0, p.2.len()).into());
+    }
+    Ok(out)
+}
+
+pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
+    let mut out = PathBuf::from("imported");
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--out" => out = PathBuf::from(it.next().ok_or(USAGE)?),
+            _ => return Err(format!("unknown option {a}\n{USAGE}").into()),
+        }
+    }
+    let file = |disc: &mut Disc<R>, name: &str| read_asset(disc, &format!("{DB}{name}"));
+    let db = Database::parse(
+        (
+            file(disc, "skaterschema.vlt")?,
+            file(disc, "skaterschema.bin")?,
+        ),
+        (
+            file(disc, "skatercollections.vlt")?,
+            file(disc, "skatercollections.bin")?,
+        ),
+    )?;
+    let mut values = Vec::new();
+    let mut missing = Vec::new();
+    for path in game_core::tuning::PATHS {
+        match db.values(path) {
+            Some(v) => values.push((*path, v)),
+            None => missing.push(*path),
+        }
+    }
+    for m in &missing {
+        eprintln!("tuning: {m} not found (the built-in value stays)");
+    }
+    let mut items = vec![pack::Item {
+        name: "rules/tuning".into(),
+        kind: Kind::Data,
+        data: game_core::tuning::encode(&values),
+        width: 0,
+        height: 0,
+        gx_format: 0,
+    }];
+    let mut shape_count = 0;
+    for name in SHAPES {
+        let text = read_asset(disc, &format!("{JOYSTICK}{name}.pat"))?;
+        let text = String::from_utf8_lossy(&text);
+        let shapes = parse_pat(&text).map_err(|e| format!("{name}.pat: {e}"))?;
+        shape_count += shapes.len();
+        items.push(pack::Item {
+            name: format!("rules/gestures/{name}"),
+            kind: Kind::Data,
+            data: game_core::gesture::encode(&shapes),
+            width: 0,
+            height: 0,
+            gx_format: 0,
+        });
+    }
+    std::fs::create_dir_all(&out)?;
+    let path = out.join("rules.fgpak");
+    let bytes = pack::write(&items);
+    std::fs::write(&path, &bytes)?;
+    println!(
+        "rules -> {} ({} bytes): {} of {} tuning values, {} flick shapes in {} files",
+        path.display(),
+        bytes.len(),
+        values.len(),
+        game_core::tuning::PATHS.len(),
+        shape_count,
+        SHAPES.len()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pattern_files() {
+        let text = "global_tolerance_dist 0.5\nglobal_tolerance_time 10.0 // ignored\n\
+                    pattern Up\n\ttolerance_dist 0.25\n\tcoord 0 1\n\tcoord 0 -1\n\
+                    pattern Across\n\tcoord -1 0\n\tcoord 1 0\n";
+        let p = parse_pat(text).unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0], ("Up".into(), 0.25, vec![[0.0, 1.0], [0.0, -1.0]]));
+        assert_eq!(p[1].1, 0.5, "global tolerance");
+        assert!(
+            parse_pat("pattern X\ncoord 0 1\ncoord 1 0").is_err(),
+            "no global tolerance"
+        );
+        assert!(
+            parse_pat("global_tolerance_dist 1\npattern X\ncoord 0 1").is_err(),
+            "one point"
+        );
+        assert!(parse_pat("global_tolerance_dist 1\npolar 1 2").is_err());
+    }
+}
