@@ -115,7 +115,7 @@ impl TrickTour {
         if rolling && !busy_stick && (s.pos.x.abs() > 6.0 || s.pos.z.abs() > 9.0) {
             let want = atan2f(-s.pos.x, -s.pos.z);
             let err = wrap_angle(want - s.travel_yaw());
-            pad.stick_x = (-err * 90.0).clamp(-72.0, 72.0) as i8;
+            pad.stick_x = (-err * 120.0).clamp(-100.0, 100.0) as i8;
         }
         match self.phase {
             Tour::Kicker => {
@@ -136,11 +136,11 @@ impl TrickTour {
                 }
                 let turned = wrap_angle(s.travel_yaw() - PI).abs() < 0.25;
                 pad.stick_x = if self.t < 12 {
-                    60
+                    85
                 } else if s.pos.z < 9.0 && self.t < 200 {
                     -10
                 } else if !turned && self.t < 300 {
-                    -72
+                    -100
                 } else {
                     0
                 };
@@ -153,8 +153,8 @@ impl TrickTour {
                 let b = s.manual.map_or(0.0, |m| m.balance);
                 let push = (0.55 - 1.2 * b).clamp(0.05, 0.95);
                 let gesture_y = 0.25 + push * 0.65;
-                // Undo the stick conditioning: 0.25 dead zone, full at 0.95 of 60.
-                pad.cstick_y = -((gesture_y * 0.7 + 0.25) * 60.0) as i8;
+                // Undo the stick conditioning: 0.25 dead zone, full at 0.95 of the C-stick's range.
+                pad.cstick_y = -((gesture_y * 0.7 + 0.25) * crate::input::C_RANGE) as i8;
                 if s.speed < 3.0 && s.manual.is_none() {
                     pad.buttons |= btn::A;
                 }
@@ -218,7 +218,7 @@ impl TrickTour {
             Tour::HalfCabAir => {
                 // Spin left to about half a turn, then let the stick go.
                 if s.spin < PI - 0.35 {
-                    pad.stick_x = -72;
+                    pad.stick_x = -100;
                 }
                 if rolling {
                     next(self, Tour::FakiePush);
@@ -238,7 +238,7 @@ impl TrickTour {
                     pad.buttons |= btn::A;
                 } else if self.t >= 60 && self.t < 100 {
                     // Main stick fully back and to the right.
-                    (pad.stick_x, pad.stick_y) = (40, -66);
+                    (pad.stick_x, pad.stick_y) = (50, -87);
                 }
                 if self.t > 120 {
                     next(self, Tour::Hippie);

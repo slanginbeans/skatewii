@@ -6,8 +6,11 @@ tricks on the C-stick, played on a GameCube controller. Runs from the Homebrew C
 Status: **skeleton**. One placeholder park (kicker, funbox, ledge, manual pad, bank) and Skate 3-style
 riding: goofy or regular, fakie and switch, held pushes and mongo pushes, foot and tail brakes,
 powerslides and reverts, kick turns, 30 flick tricks (every flip, shove-it and varial, and their nollie
-versions), held double and triple kickflips, air spins that reward a wind-up, grabs, manuals, hippie jumps,
-50-50s and boardslides. With your own Skate 3 disc the build also takes Skate 3's own riding numbers and
+versions), held double and triple kickflips, air spins that reward a wind-up, grabs, manuals, hippie jumps.
+The board follows any surface under its trucks: banks, curved transitions and vert (air out over the
+coping, land back in fakie), wallrides across steep faces, pumping, and grinds and slides chosen by how the
+board meets the rail (50-50, 5-0, nosegrind, crooked, willy, feeble, smith, boardslide, lipslide, noseslide,
+tailslide). Bails come from what the board hits: walls, hard or off-axis landings. With your own Skate 3 disc the build also takes Skate 3's own riding numbers and
 flick shapes from it. Tested on the PC and on an emulated Wii CPU. **Not yet run on a Wii or in Dolphin.**
 Plan: [ROADMAP.md](ROADMAP.md).
 
@@ -32,7 +35,8 @@ X, Y). The default stance is goofy, as in Skate 3.
 | C-stick: push forward, then flick back | Nollie, and the nollie version of each trick |
 | C-stick held lightly back / forward while rolling | Manual / nose manual (keep the balance marker centred); fully over drags the tail or nose to brake |
 | L / R in the air | Left-hand / right-hand grab (indy, melon; both: mute) |
-| Come down onto a rail (board along it / across it) | 50-50 / boardslide; flick to pop off |
+| Come down onto a rail | The grind or slide comes from how the board meets it: along it a 50-50 (C-stick held back: 5-0, forward: nosegrind), angled a crooked, willy, feeble or smith, across it a boardslide, lipslide, noseslide or tailslide. Flick to pop off |
+| C-stick held back on a transition, then let go | Pump (gain speed) |
 | Rolling tail first (fakie), push | The rider turns round and pushes switch |
 | HOME (Wii Remote) or START + Z | Quit to the Homebrew Channel |
 

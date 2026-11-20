@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use crate::math::{Vec3, v3};
 use crate::pack::{Kind, Pack};
-use crate::park::{Surface, Terrain};
+use crate::park::{Hit, Surface, Terrain};
 use crate::rails::{self, Rail};
 
 /// Size of a grid cell (m).
@@ -260,6 +260,63 @@ impl TriMesh {
         false
     }
 
+    /// The nearest triangle (either side) a ray from `from` along the unit `dir` meets within `max`.
+    pub fn ray(&self, from: Vec3, dir: Vec3, max: f32) -> Option<Hit> {
+        let to = from + dir * max;
+        let steps = (((to.x - from.x).abs().max((to.z - from.z).abs()) / (CELL * 0.5)) as usize
+            + 1)
+        .min(64);
+        let mut best: Option<(f32, usize)> = None;
+        let mut last = None;
+        for s in 0..=steps {
+            let at = from + (to - from) * (s as f32 / steps as f32);
+            let cell = self.cell_of(at.x, at.z);
+            if last == Some(cell) {
+                continue;
+            }
+            last = Some(cell);
+            for &i in self.cell(at.x, at.z) {
+                let t = &self.tris[i as usize];
+                if let Some(k) = TriMesh::segment_t(t, from, to)
+                    && best.is_none_or(|(b, _)| k < b)
+                {
+                    best = Some((k, i as usize));
+                }
+            }
+        }
+        let (k, i) = best?;
+        let n = self.tris[i].n;
+        Some(Hit {
+            t: k * max,
+            point: from + dir * (k * max),
+            normal: if n.dot(dir) > 0.0 { -n } else { n },
+        })
+    }
+
+    /// Where along p..q (0..1) the segment crosses triangle t, if it does. (Möller-Trumbore, both sides.)
+    fn segment_t(t: &Tri, p: Vec3, q: Vec3) -> Option<f32> {
+        let d = q - p;
+        let (e1, e2) = (t.v[1] - t.v[0], t.v[2] - t.v[0]);
+        let h = d.cross(e2);
+        let a = e1.dot(h);
+        if a.abs() < 1e-10 {
+            return None;
+        }
+        let f = 1.0 / a;
+        let s = p - t.v[0];
+        let u = f * s.dot(h);
+        if !(0.0..=1.0).contains(&u) {
+            return None;
+        }
+        let qv = s.cross(e1);
+        let v = f * d.dot(qv);
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        let k = f * e2.dot(qv);
+        (0.0..=1.0).contains(&k).then_some(k)
+    }
+
     /// Does the segment p..q cross triangle t? (Möller-Trumbore, both sides.)
     fn segment_hits(t: &Tri, p: Vec3, q: Vec3) -> bool {
         let d = q - p;
@@ -318,6 +375,10 @@ impl Terrain for TriMesh {
 
     fn occluded(&self, p: Vec3, q: Vec3) -> bool {
         self.wall_between(p, q)
+    }
+
+    fn raycast(&self, from: Vec3, dir: Vec3, max: f32) -> Option<Hit> {
+        self.ray(from, dir, max)
     }
 
     fn spawn(&self) -> (Vec3, f32) {

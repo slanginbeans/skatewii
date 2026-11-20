@@ -72,7 +72,7 @@ cargo run --release -p fg_import -- skater path/to/skate3.iso --lod 2
 ```
 Builds the default skater from the disc's fallback recipe (`data/cacrecipes/SavedRecipeFallbackMale.bin`).
 That is 10 parts: arms, feet, hair, eyes/teeth, shirt, pants, head, deck, trucks and wheels. Writes
-`imported/skater.fgpak` (about 2 MiB at `--lod 2`):
+`imported/skater.fgpak` (about 2.7 MiB at `--lod 2`):
 
 | Entry | Kind |
 |---|---|
@@ -112,7 +112,7 @@ deck is at its start and end):
 | `manual`, `nosemanual` | `m_idle_n_0_cyc`, `m_noseidle_n_0_cyc` | C-stick held lightly back / forward while rolling |
 | `grab/fs`, `grab/bs`, `grab/mute` | `gr_grab_n_fs_0_cyc`, `gr_grab_n_bs_0_cyc`, `gr_mutegrab_n_0_cyc` | rear hand, front hand, or both (L and R are the left and right hand; which is which depends on the stance) |
 | `bail/fall`, `bail/getup` | `w_brace_lean090twist000_n_0_n`, `w_recovery_onfront_n_0_n` | after a bail, one after the other |
-| `grind/5050`, `grind/bslide` | `g_5050_fs_low_0_cyc`, `g_bslide_fs_low_0_cyc` | on a rail, board along it / across it |
+| `grind/<kind>_fs`, `grind/<kind>_bs` | `g_<kind>_{fs,bs,bf}_low_0_cyc` | on a rail: `5050`, `50` (5-0), `ngrind`, `crooks`, `willy`, `feeble`, `smith`, `bslide`, `lipslide`, `nslide`, `tslide`, frontside and backside |
 | `<trick>/pop`, `/air`, `/flip`, `/out` | e.g. `kickflip_in_low_g`, `kickflip_in_low_a`, `t_low_kick_cyc1`, `t_low_kick_out4` | in the air, back to back |
 
 Tricks are `ollie`, `nollie`, `kickflip`, `heelflip`, `popshuvit`, `fspopshuvit`, `360popshuvit`,
