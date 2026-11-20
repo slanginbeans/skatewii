@@ -376,12 +376,15 @@ void fg_frame_stats(FgFrameStats *out) {
     out->_pad = 0;
 }
 
+// Milliseconds since the log was started (the CPU timer counts from 2000, not from power-on).
+static u64 log_epoch;
 static uint32_t boot_ms(void) {
-    return (uint32_t)(ticks_to_millisecs(gettime()));
+    return (uint32_t)(ticks_to_millisecs(gettime() - log_epoch));
 }
 
 void fg_log_start(const char *argv0) {
     char dir[128] = "sd:/apps/flatground";
+    log_epoch = gettime();
     log_set_clock(boot_ms);
     // The loader passes where boot.dol was started from ("sd:/apps/flatground/boot.dol"): log next to it.
     if (argv0 && strchr(argv0, ':')) {
