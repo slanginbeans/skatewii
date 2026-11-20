@@ -6,21 +6,54 @@ use alloc::vec::Vec;
 
 use crate::camera::ChaseCam;
 use crate::character::{self, Character};
+use crate::collision;
 use crate::flick::FlickReader;
 use crate::gfx::{Gfx, MeshBuilder, SCREEN_W, Vertex, rgb};
 use crate::hud;
 use crate::input::{Pad, PadRaw, flag};
 use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
 use crate::model::Models;
-use crate::park::Park;
+use crate::park::{Park, Terrain};
 use crate::rider::{self, Rider};
-use crate::skater::{Event, GRAVITY, Mode, Skater};
+use crate::skater::{Event, GRAVITY, Mode, STEP, Skater};
+use crate::world::ImportedPark;
 
 const SKY: u32 = rgb(150, 196, 232);
 /// Imported character space (Skate 3: Y up, travelling along +Z) to board space (+Z nose, Y up).
 const IMPORTED_TO_BOARD: Mat3 = Mat3::IDENTITY;
 const POPUP_TIME: f32 = 1.8;
 const HINT_TIME: f32 = 12.0;
+
+/// CPU time per frame (update + render), measured by the platform: a running average and the worst frame
+/// of the last second.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameCost {
+    pub avg_us: f32,
+    /// Worst frame of the last full window.
+    pub peak_us: u32,
+    window_peak: u32,
+    frames: u32,
+}
+
+impl FrameCost {
+    /// Frames per peak window (one second at 60 Hz).
+    const WINDOW: u32 = 60;
+
+    pub fn add(&mut self, us: u32) {
+        self.avg_us = if self.frames == 0 && self.peak_us == 0 {
+            us as f32
+        } else {
+            self.avg_us + (us as f32 - self.avg_us) * 0.05
+        };
+        self.window_peak = self.window_peak.max(us);
+        self.frames += 1;
+        if self.frames == Self::WINDOW {
+            self.peak_us = self.window_peak;
+            self.window_peak = 0;
+            self.frames = 0;
+        }
+    }
+}
 
 struct Popup {
     title: String,
@@ -32,6 +65,8 @@ struct Popup {
 pub struct Game {
     pub park: Park,
     park_mesh: Vec<Vertex>,
+    /// A park imported from the player's disc, ridden and drawn instead of the demo park when loaded.
+    imported_park: Option<ImportedPark>,
     models: Models,
     /// The player's imported skater, drawn instead of the box placeholder when loaded.
     rider: Option<Rider>,
@@ -45,6 +80,19 @@ pub struct Game {
     connected: bool,
     /// Events from the last `update` (cleared every frame). Handy for tests and the preview tool.
     pub events: Vec<Event>,
+    /// Set by the platform each frame when it measures CPU time; shown in a corner of the HUD.
+    pub frame_cost: Option<FrameCost>,
+    /// A status line shown under the controls hint (for example whether the imported skater loaded).
+    pub notice: Option<String>,
+}
+
+/// The imported park if there is one, else the demo park (a free function so callers can borrow other
+/// fields of the game at the same time).
+fn terrain<'a>(imported: &'a Option<ImportedPark>, park: &'a Park) -> &'a dyn Terrain {
+    match imported {
+        Some(p) => &p.mesh,
+        None => park,
+    }
 }
 
 impl Default for Game {
@@ -70,7 +118,10 @@ impl Game {
             clock: 0.0,
             connected: true,
             events: Vec::new(),
+            frame_cost: None,
+            notice: None,
             rider: None,
+            imported_park: None,
         }
     }
 
@@ -85,6 +136,24 @@ impl Game {
         self.rider.as_ref()
     }
 
+    /// Rides an imported park (`fg_import park`) instead of the demo park, starting at its spawn.
+    pub fn load_park(&mut self, pack: &'static [u8]) -> Result<(), collision::Error> {
+        let p = ImportedPark::parse(pack)?;
+        self.skater = Skater::spawn(&p.mesh);
+        self.cam = ChaseCam::new(&self.skater);
+        self.imported_park = Some(p);
+        Ok(())
+    }
+
+    pub fn imported_park(&self) -> Option<&ImportedPark> {
+        self.imported_park.as_ref()
+    }
+
+    /// What the skater rides on: the imported park if there is one, else the demo park.
+    pub fn terrain(&self) -> &dyn Terrain {
+        terrain(&self.imported_park, &self.park)
+    }
+
     /// One fixed step (1/60 s on NTSC and PAL60, 1/50 s on PAL50).
     pub fn update(&mut self, raw: &PadRaw, dt: f32) {
         let pad = Pad::from_raw(raw, self.prev_held);
@@ -95,15 +164,17 @@ impl Game {
 
         let flick = self.flick.update(pad.flick, dt);
         let rolling = self.skater.mode == Mode::Rolling;
-        let flick = if rolling { flick } else { None };
+        let grinding = self.skater.mode == Mode::Grind;
+        let flick = if rolling || grinding { flick } else { None };
         let loaded = rolling && self.flick.is_loaded();
+        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
         self.skater
-            .step(&self.park, &pad, flick, loaded, dt, &mut self.events);
-        self.cam.update(&self.skater, &self.park, dt);
+            .step(ground, &pad, flick, loaded, dt, &mut self.events);
+        self.cam.update(&self.skater, ground, dt);
         if self.rider.is_some() {
             let rot = self.imported_xform().rot;
             let s = &self.skater;
-            let ground = self.park.surface(s.pos.x, s.pos.z).height;
+            let ground = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
             let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, GRAVITY);
             if let Some(r) = &mut self.rider {
                 r.update(&self.skater, self.clock, land_in, dt, rot);
@@ -142,7 +213,10 @@ impl Game {
 
     pub fn render(&self, gfx: &mut dyn Gfx) {
         gfx.begin_frame(&self.cam.camera(), SKY);
-        gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34());
+        match &self.imported_park {
+            Some(p) => p.draw(gfx, self.cam.camera().eye),
+            None => gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34()),
+        }
         self.draw_skater(gfx);
         self.draw_hud(gfx);
         gfx.end_frame();
@@ -160,8 +234,13 @@ impl Game {
 
     /// Where the imported character is drawn: board space, tipped over on a bail.
     fn imported_xform(&self) -> Xform {
+        // Without bail clips in the pack, show a bail by tipping the rider over.
+        let animated = self
+            .rider
+            .as_ref()
+            .is_some_and(|r| r.character.has_clip("bail/fall"));
         let tip = match self.skater.mode {
-            Mode::Bailed { time } => Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
+            Mode::Bailed { time } if !animated => Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
             _ => Mat3::IDENTITY,
         };
         self.skater_base()
@@ -249,6 +328,27 @@ impl Game {
                 );
             }
         }
+        if let Some(c) = &self.frame_cost {
+            // Budget: 16.7 ms a frame at 60 Hz.
+            let ms = |us: f32| us / 1000.0;
+            let line = format!(
+                "CPU {:.1} MS  PEAK {:.1}",
+                ms(c.avg_us),
+                ms(c.peak_us as f32)
+            );
+            let over = c.avg_us > 14_000.0 || c.peak_us > 16_600;
+            let colour = if over {
+                rgb(255, 120, 100)
+            } else {
+                rgb(200, 255, 200)
+            };
+            hud::text(&mut m, 24.0, 52.0, 2.5, &line, colour);
+        }
+        if let Some(n) = &self.notice
+            && self.clock < HINT_TIME
+        {
+            hud::text_centered(&mut m, SCREEN_W / 2.0, 366.0, 3.0, n, rgb(255, 230, 90));
+        }
         if !self.connected {
             hud::text_centered(
                 &mut m,
@@ -262,7 +362,7 @@ impl Game {
             hud::text_centered(
                 &mut m,
                 SCREEN_W / 2.0,
-                420.0,
+                392.0,
                 3.0,
                 "A PUSH   B BRAKE   STICK STEER AND SPIN",
                 white,
@@ -270,7 +370,7 @@ impl Game {
             hud::text_centered(
                 &mut m,
                 SCREEN_W / 2.0,
-                440.0,
+                410.0,
                 3.0,
                 "C-STICK: PULL BACK THEN FLICK UP TO OLLIE",
                 white,
@@ -278,12 +378,50 @@ impl Game {
             hud::text_centered(
                 &mut m,
                 SCREEN_W / 2.0,
-                456.0,
+                428.0,
                 3.0,
                 "FLICK UP-LEFT KICKFLIP / UP-RIGHT HEELFLIP",
                 white,
             );
+            hud::text_centered(
+                &mut m,
+                SCREEN_W / 2.0,
+                446.0,
+                3.0,
+                "STICK DOWN/UP MANUAL   L/R IN THE AIR GRAB",
+                white,
+            );
+        }
+        if let Some(man) = &self.skater.manual {
+            // Balance meter: keep the marker in the middle.
+            let (w, x, y) = (160.0, SCREEN_W / 2.0 - 80.0, 300.0);
+            m.rect_2d(x, y, w, 8.0, rgb(30, 30, 30));
+            m.rect_2d(x + w / 2.0 - 12.0, y, 24.0, 8.0, rgb(70, 140, 70));
+            let at = x + w / 2.0 + man.balance.clamp(-1.0, 1.0) * (w / 2.0) - 3.0;
+            m.rect_2d(at, y - 4.0, 6.0, 16.0, rgb(255, 230, 90));
         }
         gfx.draw_2d(&m.verts);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_cost_averages_and_keeps_last_seconds_peak() {
+        let mut c = FrameCost::default();
+        c.add(4000);
+        assert_eq!(c.avg_us, 4000.0, "first sample starts the average");
+        for _ in 1..59 {
+            c.add(4000);
+        }
+        c.add(9000); // frame 60 closes the window
+        assert_eq!(c.peak_us, 9000);
+        assert!(c.avg_us > 4000.0 && c.avg_us < 4500.0, "{}", c.avg_us);
+        for _ in 0..60 {
+            c.add(4000);
+        }
+        assert_eq!(c.peak_us, 4000, "the spike has left the window");
     }
 }

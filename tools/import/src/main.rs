@@ -5,17 +5,21 @@
 //! Format knowledge comes from SK8-ENGINE/skate-3-rust-engine (GPL-3.0); this tool is GPL-3.0-only too.
 
 mod anim;
+mod assets;
 mod big;
 mod cac;
 mod gx;
 mod mesh;
 mod pack;
+mod park;
+mod parkmodel;
 mod raster;
 mod refpack;
 mod rw4;
 mod skater;
 mod skin;
 mod texture;
+mod world;
 mod xdvdfs;
 mod xex;
 
@@ -27,6 +31,8 @@ use std::process::ExitCode;
 use xdvdfs::{Disc, DiscFile};
 
 const USAGE: &str = "usage:
+  fg_import build    [options]                    convert what the game loads into the app folder (only
+                                                  what is missing or out of date; `fg_import build -h`)
   fg_import ls       <disc.iso> [dir]             list a directory on the disc
   fg_import tree     <disc.iso>                   list every file on the disc with its size
   fg_import big      <disc.iso> <file.big>        list the entries of a BIG archive on the disc
@@ -38,6 +44,12 @@ const USAGE: &str = "usage:
       --max <n>         largest texture edge kept on the Wii (default 256, at most 1024)
       --png             also write PNG previews (for checking on the PC)
       --rgba8           keep textures with alpha at full 8-bit precision (twice the memory of RGB5A3)
+  fg_import park     <disc.iso> [options]         a skate park district (collision, rails, spawn, textured
+                                                  models) as park.fgpak
+      --park <name>     StartPark, MegaPark, BlackBoxPark (default), IndustrialSkatePark,
+                        DownTownSkatePark, SkateSchool or MaloofMoneyCup
+      --max <n>         largest texture edge for the models (default 128; 0: no models)
+      --out <dir>       output directory (default: imported)
   fg_import skater   <disc.iso> [options]         the default skater as skinned meshes + textures
       --lod <0|2>       model detail (default 0)
       --png             front/side previews; --clip <name> [--frame <n>] also renders that clip
@@ -76,6 +88,9 @@ fn run(args: &[String]) -> Res<()> {
     if cmd == "-h" || cmd == "--help" {
         println!("{USAGE}");
         return Ok(());
+    }
+    if cmd == "build" {
+        return assets::run(rest);
     }
     if cmd == "info" {
         return info(rest);
@@ -164,6 +179,7 @@ fn run(args: &[String]) -> Res<()> {
         "textures" => textures(&mut disc, &rest[1..])?,
         "anims" => anims(&mut disc, &rest[1..])?,
         "skater" => skater::run(&mut disc, &rest[1..])?,
+        "park" => park::run(&mut disc, &rest[1..])?,
         _ => return Err(USAGE.into()),
     }
     Ok(())

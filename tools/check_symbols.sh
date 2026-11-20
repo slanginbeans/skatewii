@@ -6,13 +6,14 @@ set -euo pipefail
 lib=${1:?usage: check_symbols.sh <libfg_game.a>}
 nm_bin=${NM:-powerpc-linux-gnu-nm}
 
-allowed='^(fg_[a-z0-9_]+|malloc|free|realloc|memalign|memcpy|memmove|memset|memcmp|bcmp|fmodf|fminf|fmaxf|_Unwind_Resume|rust_eh_personality)$'
+# calloc: LLVM fuses malloc + zero-fill (vec![0; n]) into one calloc call; newlib provides it.
+allowed='^(fg_[a-z0-9_]+|malloc|calloc|free|realloc|memalign|memcpy|memmove|memset|memcmp|bcmp|fmodf|fminf|fmaxf|_Unwind_Resume|rust_eh_personality)$'
 
 defined=$(mktemp)
 undefined=$(mktemp)
 trap 'rm -f "$defined" "$undefined"' EXIT
 "$nm_bin" "$lib" 2>/dev/null | awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /[TDRBWVtdrbwv]/ {print $3}' | sort -u >"$defined"
-"$nm_bin" -u "$lib" 2>/dev/null | awk '{print $NF}' | grep -v ':$' | sort -u >"$undefined"
+"$nm_bin" -u "$lib" 2>/dev/null | awk 'NF {print $NF}' | grep -v ':$' | sort -u >"$undefined"
 
 external=$(comm -23 "$undefined" "$defined")
 echo "External symbols:"

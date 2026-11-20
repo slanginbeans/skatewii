@@ -11,3 +11,6 @@
 *.big
 *.rx2
 *.fgpak
+
+# Local build settings (your disc image path), see docs/importing.md.
+/fg_local.txt

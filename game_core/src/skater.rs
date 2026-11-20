@@ -2,12 +2,15 @@
 //! field with a heading, gets launched off lips and ollies, spins in the air and has to land with the
 //! board lined up with where it is travelling.
 
+use alloc::format;
 use alloc::string::String;
 
 use crate::flick::Flick;
 use crate::input::{Pad, btn};
-use crate::math::{PI, Vec3, atan2f, clamp, smooth, wrap_angle, yaw_dir};
+use crate::math::{PI, Vec3, atan2f, clamp, sinf, smooth, wrap_angle, yaw_dir};
+#[cfg(test)]
 use crate::park::Park;
+use crate::park::Terrain;
 
 /// Gravity in the air (a bit above 9.81 for a snappier feel).
 pub const GRAVITY: f32 = 14.0;
@@ -27,7 +30,37 @@ const CARVE: f32 = 2.4;
 const AIR_SPIN: f32 = 7.0;
 /// How far off (rad) the board can be from the travel direction and still land.
 const LAND_TOLERANCE: f32 = 35.0 * PI / 180.0;
-const BAIL_TIME: f32 = 1.6;
+/// Down on the ground after a bail before respawning: long enough for the fall and get-up clips.
+const BAIL_TIME: f32 = 2.2;
+/// Landing further off than this (but still within `LAND_TOLERANCE`) is sketchy: slower, half points.
+const SKETCHY_ANGLE: f32 = 20.0 * PI / 180.0;
+/// Hitting the ground faster than this (m/s, downwards) is a heavy landing (a big drop).
+const HEAVY_IMPACT: f32 = 8.0;
+/// How long a landing is remembered (drawn: the landing clip).
+const LANDING_SHOW: f32 = 1.5;
+/// Main stick Y past this starts a manual (pulled down) or nose manual (pushed up) while rolling.
+const MANUAL_START: f32 = 0.5;
+/// Easing the stick back under this ends the manual (and scores it).
+const MANUAL_HOLD: f32 = 0.3;
+/// Where the stick balances a manual (0..1 of the way towards the wheels); further tips it over.
+const MANUAL_SWEET: f32 = 0.75;
+const MANUAL_MIN_TIME: f32 = 0.5;
+const MANUAL_POINTS_PER_S: f32 = 120.0;
+/// Analog trigger past this holds a grab.
+const GRAB_TRIGGER: f32 = 0.5;
+const GRAB_POINTS: u32 = 200;
+const GRAB_POINTS_PER_S: f32 = 150.0;
+/// How close (m, seen from above) the board has to come down to a rail to lock on.
+const GRIND_REACH: f32 = 0.4;
+/// Board within this of the rail's direction: 50-50; within this of across it: boardslide.
+const GRIND_ALONG: f32 = 30.0 * PI / 180.0;
+const GRIND_ACROSS: f32 = 30.0 * PI / 180.0;
+const GRIND_FRICTION: f32 = 0.8;
+const GRIND_MIN_ENTRY: f32 = 1.5;
+const GRIND_MIN_SPEED: f32 = 0.6;
+const GRIND_MIN_TIME: f32 = 0.15;
+const GRIND_POINTS: u32 = 150;
+const GRIND_POINTS_PER_S: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrickDef {
@@ -62,8 +95,75 @@ pub fn trick_def(f: Flick) -> TrickDef {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
     Rolling,
-    Air { time: f32 },
-    Bailed { time: f32 },
+    Air {
+        time: f32,
+    },
+    Bailed {
+        time: f32,
+    },
+    /// On a rail (details in `Skater::grind`).
+    Grind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandKind {
+    Clean,
+    /// A big drop.
+    Heavy,
+    /// Board a bit crooked to the travel direction.
+    Sketchy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Landing {
+    pub kind: LandKind,
+    /// Seconds since touching down.
+    pub time: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrabKind {
+    /// R trigger: frontside (toe-side) grab.
+    Indy,
+    /// L trigger: backside (heel-side) grab.
+    Melon,
+    /// Both triggers.
+    Mute,
+}
+
+impl GrabKind {
+    pub fn from_triggers(l: bool, r: bool) -> Option<GrabKind> {
+        match (l, r) {
+            (true, true) => Some(GrabKind::Mute),
+            (true, false) => Some(GrabKind::Melon),
+            (false, true) => Some(GrabKind::Indy),
+            (false, false) => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            GrabKind::Indy => "INDY",
+            GrabKind::Melon => "MELON",
+            GrabKind::Mute => "MUTE",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grab {
+    pub kind: GrabKind,
+    /// Seconds held.
+    pub time: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Manual {
+    /// On the front wheels.
+    pub nose: bool,
+    /// -1..1: 0 is balanced; reaching -1 or 1 drops the manual.
+    pub balance: f32,
+    pub time: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,9 +189,14 @@ impl ActiveTrick {
 pub enum Event {
     Popped(Flick),
     Launched,
-    Landed { name: String, points: u32 },
+    Landed {
+        name: String,
+        points: u32,
+    },
     Bailed,
     Respawned,
+    /// Tipped out of a manual (no points, a little speed lost).
+    ManualLost,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,13 +222,62 @@ pub struct Skater {
     pub since_push: f32,
     /// 0..1, how far the skater is crouched (drawn; also used for the push animation later).
     pub crouch: f32,
+    /// -1..1, the steering input, smoothed (drawn: the rider leans into turns).
+    pub steer: f32,
+    /// The last landing, for a moment after it (drawn).
+    pub landing: Option<Landing>,
+    pub manual: Option<Manual>,
+    /// After tipping out of a manual, the stick has to come back before another starts.
+    manual_lock: bool,
+    /// The grab being held in the air.
+    pub grab: Option<Grab>,
+    /// The longest grab of this jump that was let go of (scored on landing).
+    grabbed: Option<Grab>,
+    /// On a rail (with `Mode::Grind`).
+    pub grind: Option<Grind>,
+    /// The rail just left and how long until it can be locked onto again (so rolling off its end
+    /// doesn't snap straight back on).
+    regrind_block: Option<(usize, f32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrindKind {
+    /// Board along the rail, both trucks on it.
+    FiftyFifty,
+    /// Board across the rail.
+    Boardslide,
+}
+
+impl GrindKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            GrindKind::FiftyFifty => "50-50",
+            GrindKind::Boardslide => "BOARDSLIDE",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grind {
+    /// Index into the terrain's rails.
+    pub rail: usize,
+    /// Distance along the rail.
+    pub s: f32,
+    /// +1 travelling towards the rail's end, -1 towards its start.
+    pub dir: f32,
+    pub speed: f32,
+    pub kind: GrindKind,
+    pub time: f32,
+    /// The trick that took the skater onto the rail (named with the grind).
+    pub into: Option<TrickDef>,
 }
 
 impl Skater {
-    pub fn spawn(park: &Park) -> Skater {
+    pub fn spawn(park: &dyn Terrain) -> Skater {
+        let (pos, heading) = park.spawn();
         Skater {
-            pos: park.spawn,
-            heading: park.spawn_yaw,
+            pos,
+            heading,
             speed: 0.0,
             vel: Vec3::ZERO,
             normal: Vec3::UP,
@@ -136,6 +290,14 @@ impl Skater {
             push_cooldown: 0.0,
             since_push: f32::INFINITY,
             crouch: 0.0,
+            steer: 0.0,
+            landing: None,
+            manual: None,
+            manual_lock: false,
+            grab: None,
+            grabbed: None,
+            grind: None,
+            regrind_block: None,
         }
     }
 
@@ -153,7 +315,7 @@ impl Skater {
     /// stick is held back (crouch).
     pub fn step(
         &mut self,
-        park: &Park,
+        park: &dyn Terrain,
         pad: &Pad,
         flick: Option<Flick>,
         loaded: bool,
@@ -162,16 +324,37 @@ impl Skater {
     ) {
         self.crouch += ((if loaded { 1.0 } else { 0.0 }) - self.crouch) * smooth(18.0, dt);
         self.since_push += dt;
+        let steer_in = if self.mode == Mode::Rolling {
+            pad.stick[0]
+        } else {
+            0.0
+        };
+        self.steer += (steer_in - self.steer) * smooth(8.0, dt);
+        if let Some(l) = &mut self.landing {
+            l.time += dt;
+            if l.time > LANDING_SHOW {
+                self.landing = None;
+            }
+        }
+        if let Some((_, t)) = &mut self.regrind_block {
+            *t -= dt;
+            if *t <= 0.0 {
+                self.regrind_block = None;
+            }
+        }
         match self.mode {
             Mode::Rolling => self.roll(park, pad, flick, dt, events),
             Mode::Air { time } => self.fly(park, pad, time + dt, dt, events),
+            Mode::Grind => self.slide(park, flick, dt, events),
             Mode::Bailed { time } => {
                 let time = time + dt;
                 // Slide to a stop.
                 let h = self.vel.horizontal() * (1.0 - smooth(3.0, dt));
                 self.vel = Vec3 { y: 0.0, ..h };
                 self.try_move(park, self.vel * dt);
-                self.pos.y = park.surface(self.pos.x, self.pos.z).height;
+                self.pos.y = park
+                    .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
+                    .height;
                 if time >= BAIL_TIME {
                     *self = Skater::spawn(park);
                     events.push(Event::Respawned);
@@ -184,14 +367,17 @@ impl Skater {
 
     fn roll(
         &mut self,
-        park: &Park,
+        park: &dyn Terrain,
         pad: &Pad,
         flick: Option<Flick>,
         dt: f32,
         events: &mut alloc::vec::Vec<Event>,
     ) {
+        self.update_manual(pad, dt, events);
         // Carve: left stick X. Sharper at low speed, never zero so you can turn from a standstill.
-        let lock = clamp(1.4 - self.speed.abs() * 0.08, 0.6, 1.4);
+        // Half as sharp on two wheels.
+        let manual = if self.manual.is_some() { 0.5 } else { 1.0 };
+        let lock = clamp(1.4 - self.speed.abs() * 0.08, 0.6, 1.4) * manual;
         self.heading = wrap_angle(self.heading - pad.stick[0] * CARVE * lock * dt);
 
         // Push / brake.
@@ -221,7 +407,7 @@ impl Skater {
         if !self.try_move(park, delta) {
             self.speed *= -0.15; // bump off the wall
         }
-        let s = park.surface(self.pos.x, self.pos.z);
+        let s = park.ground(self.pos.x, self.pos.z, self.pos.y + STEP);
         if s.height < expected_y - 0.06 {
             // The ground fell away faster than the board's path: off a lip or a ledge.
             self.pos.y = expected_y;
@@ -236,8 +422,12 @@ impl Skater {
 
     /// Moves horizontally by `delta`, refusing to go into anything more than a step up.
     /// Slides along a wall when only one axis is blocked. Returns false when fully blocked.
-    fn try_move(&mut self, park: &Park, delta: Vec3) -> bool {
-        let ok = |x: f32, z: f32| park.surface(x, z).height <= self.pos.y + STEP;
+    fn try_move(&mut self, park: &dyn Terrain, delta: Vec3) -> bool {
+        let here = self.pos;
+        let ok = |x: f32, z: f32| {
+            park.ground(x, z, here.y + STEP).height <= here.y + STEP
+                && !park.blocked(here, Vec3 { x, y: here.y, z })
+        };
         let (nx, nz) = (self.pos.x + delta.x, self.pos.z + delta.z);
         if ok(nx, nz) {
             self.pos.x = nx;
@@ -254,7 +444,55 @@ impl Skater {
         }
     }
 
+    /// Starts, balances and ends manuals from the main stick's Y while rolling.
+    fn update_manual(&mut self, pad: &Pad, dt: f32, events: &mut alloc::vec::Vec<Event>) {
+        let y = pad.stick[1];
+        if y.abs() < MANUAL_HOLD {
+            self.manual_lock = false;
+        }
+        let Some(m) = &mut self.manual else {
+            if y.abs() > MANUAL_START && !self.manual_lock && self.speed.abs() > 0.5 {
+                self.manual = Some(Manual {
+                    nose: y > 0.0,
+                    balance: 0.0,
+                    time: 0.0,
+                });
+            }
+            return;
+        };
+        // How hard the stick leans towards the manual's wheels (0..1).
+        let push = if m.nose { y } else { -y };
+        if push < MANUAL_HOLD {
+            self.end_manual(events);
+            return;
+        }
+        m.time += dt;
+        // Unstable like a real manual: any tilt grows, the stick past its sweet spot tips you further
+        // over, and a steady wobble keeps you correcting.
+        m.balance +=
+            (m.balance * 1.6 + (push - MANUAL_SWEET) * 2.0 + 0.5 * sinf(m.time * 2.3)) * dt;
+        if m.balance.abs() >= 1.0 {
+            self.manual = None;
+            self.manual_lock = true;
+            self.speed *= 0.85;
+            events.push(Event::ManualLost);
+        }
+    }
+
+    /// Ends a manual on purpose (stick released, or popped out of): scores it if it was long enough.
+    fn end_manual(&mut self, events: &mut alloc::vec::Vec<Event>) {
+        if let Some(m) = self.manual.take()
+            && m.time >= MANUAL_MIN_TIME
+        {
+            events.push(Event::Landed {
+                name: (if m.nose { "NOSE MANUAL" } else { "MANUAL" }).into(),
+                points: (m.time * MANUAL_POINTS_PER_S) as u32,
+            });
+        }
+    }
+
     fn pop(&mut self, f: Flick, fwd: Vec3, events: &mut alloc::vec::Vec<Event>) {
+        self.end_manual(events);
         self.vel = fwd * self.speed + self.normal * POP;
         self.pos += self.normal * 0.02;
         self.take_off(Some(f));
@@ -263,6 +501,11 @@ impl Skater {
 
     fn take_off(&mut self, f: Option<Flick>) {
         self.mode = Mode::Air { time: 0.0 };
+        // Rolling off a ledge mid-manual just ends it (no points: it wasn't finished).
+        self.manual = None;
+        self.landing = None;
+        self.grab = None;
+        self.grabbed = None;
         self.spin = 0.0;
         self.spin_rate = 0.0;
         self.takeoff_fakie = self.fakie;
@@ -275,7 +518,7 @@ impl Skater {
 
     fn fly(
         &mut self,
-        park: &Park,
+        park: &dyn Terrain,
         pad: &Pad,
         time: f32,
         dt: f32,
@@ -286,7 +529,11 @@ impl Skater {
         if let Some(t) = &mut self.trick {
             t.t += dt;
         }
+        self.update_grab(pad, dt);
         self.vel.y -= GRAVITY * dt;
+        // Look for ground from where the board was before this frame's drop: falling fast it can
+        // pass more than a step below a surface in one frame.
+        let top = self.pos.y.max(self.pos.y + self.vel.y * dt);
         self.pos.y += self.vel.y * dt;
         if !self.try_move(park, self.vel.horizontal() * dt) {
             // Hit a wall in the air: lose the horizontal speed.
@@ -302,16 +549,173 @@ impl Skater {
             .lerp(Vec3::UP, smooth(4.0, dt))
             .normalize_or(Vec3::UP);
 
-        let s = park.surface(self.pos.x, self.pos.z);
+        if self.try_grind(park) {
+            return;
+        }
+        let s = park.ground(self.pos.x, self.pos.z, top + STEP);
         if self.pos.y <= s.height && self.vel.y <= 0.0 {
             self.pos.y = s.height;
             self.land(s.normal, time, events);
-        } else if self.pos.y < -5.0 {
+        } else if self.pos.y < park.kill_height() {
             // Fell out of the world: start over.
             *self = Skater::spawn(park);
             events.push(Event::Respawned);
         } else {
             self.mode = Mode::Air { time };
+        }
+    }
+
+    /// Coming down onto a rail with the board along it (50-50) or across it (boardslide) locks on.
+    fn try_grind(&mut self, park: &dyn Terrain) -> bool {
+        let free = self.trick.is_none_or(|t| t.progress() >= 1.0);
+        if self.vel.y > 0.0 || self.grab.is_some() || !free {
+            return false;
+        }
+        let facing = wrap_angle(self.heading + self.spin);
+        for (i, rail) in park.rails().iter().enumerate() {
+            if self.regrind_block.is_some_and(|(r, _)| r == i) {
+                continue;
+            }
+            let Some(n) = rail.nearest(self.pos) else {
+                continue;
+            };
+            let (p, d) = rail.at(n.s);
+            if n.dist_h > GRIND_REACH || !(-0.15..=0.3).contains(&(self.pos.y - p.y)) {
+                continue;
+            }
+            // Board angle to the rail, whichever way along it.
+            let rail_yaw = atan2f(d.x, d.z);
+            let mut a = wrap_angle(facing - rail_yaw).abs();
+            if a > PI / 2.0 {
+                a = PI - a;
+            }
+            let kind = if a < GRIND_ALONG {
+                GrindKind::FiftyFifty
+            } else if a > PI / 2.0 - GRIND_ACROSS {
+                GrindKind::Boardslide
+            } else {
+                continue;
+            };
+            let along = self.vel.horizontal().dot(d);
+            let dir = if along >= 0.0 { 1.0 } else { -1.0 };
+            self.heading = atan2f(d.x * dir, d.z * dir);
+            // Keep the board the way it came in: along the rail (either way round) or across it.
+            let rel = wrap_angle(facing - self.heading);
+            self.spin = match kind {
+                GrindKind::FiftyFifty if rel.abs() > PI / 2.0 => PI,
+                GrindKind::FiftyFifty => 0.0,
+                GrindKind::Boardslide => PI / 2.0 * rel.signum(),
+            };
+            self.spin_rate = 0.0;
+            self.pos = p;
+            self.grind = Some(Grind {
+                rail: i,
+                s: n.s,
+                dir,
+                speed: along.abs().max(GRIND_MIN_ENTRY),
+                kind,
+                time: 0.0,
+                into: self.trick.map(|t| t.def),
+            });
+            self.trick = None;
+            self.grabbed = None;
+            self.mode = Mode::Grind;
+            return true;
+        }
+        false
+    }
+
+    /// One step along the rail: gravity along it, a little friction; off the end, out of speed, or
+    /// popped off with a flick.
+    fn slide(
+        &mut self,
+        park: &dyn Terrain,
+        flick: Option<Flick>,
+        dt: f32,
+        events: &mut alloc::vec::Vec<Event>,
+    ) {
+        let (Some(mut g), Some(rail)) = (
+            self.grind,
+            self.grind.and_then(|g| park.rails().get(g.rail)),
+        ) else {
+            // The rail went away (a park reload): just drop.
+            self.grind = None;
+            self.take_off(None);
+            return;
+        };
+        let (_, d) = rail.at(g.s);
+        g.speed += (-GRAVITY * d.y * g.dir - GRIND_FRICTION) * dt;
+        g.s += g.dir * g.speed * dt;
+        g.time += dt;
+        let (p, d) = rail.at(g.s);
+        let travel = d * g.dir;
+        self.pos = p;
+        self.heading = atan2f(travel.x, travel.z);
+        self.speed = g.speed;
+        self.grind = Some(g);
+        let off_end = g.s <= 0.0 || g.s >= rail.length();
+        if flick.is_none() && !off_end && g.speed >= GRIND_MIN_SPEED {
+            return;
+        }
+        // Leaving the rail: score it, square the board back up and fly off along it.
+        if g.time >= GRIND_MIN_TIME {
+            let name = match g.into {
+                Some(t) => format!("{} {}", t.name, g.kind.name()),
+                None => g.kind.name().into(),
+            };
+            let points = g.into.map_or(0, |t| t.points)
+                + GRIND_POINTS
+                + (g.time * GRIND_POINTS_PER_S) as u32;
+            events.push(Event::Landed { name, points });
+        }
+        let spin = if self.spin.abs() > PI / 2.0 { PI } else { 0.0 };
+        self.grind = None;
+        self.regrind_block = Some((g.rail, 0.4));
+        self.vel = travel * g.speed.max(0.0);
+        self.pos += Vec3::UP * 0.02;
+        match flick {
+            Some(f) => {
+                self.vel += Vec3::UP * POP;
+                self.take_off(Some(f));
+                events.push(Event::Popped(f));
+            }
+            None => self.take_off(None),
+        }
+        self.spin = spin;
+    }
+
+    fn bail(&mut self, events: &mut alloc::vec::Vec<Event>) {
+        self.mode = Mode::Bailed { time: 0.0 };
+        self.trick = None;
+        self.grab = None;
+        self.grabbed = None;
+        self.manual = None;
+        self.landing = None;
+        events.push(Event::Bailed);
+    }
+
+    /// Holds a grab while a trigger is down (once any flip has finished). Letting go keeps the longest
+    /// grab of the jump for the score.
+    fn update_grab(&mut self, pad: &Pad, dt: f32) {
+        let held = GrabKind::from_triggers(pad.trig_l > GRAB_TRIGGER, pad.trig_r > GRAB_TRIGGER);
+        let free = self.trick.is_none_or(|t| t.progress() >= 1.0);
+        match (&mut self.grab, held) {
+            (Some(g), Some(kind)) => {
+                g.time += dt;
+                // Adding the second trigger turns it into a mute grab.
+                if kind == GrabKind::Mute {
+                    g.kind = kind;
+                }
+            }
+            (Some(g), None) => {
+                let g = *g;
+                if self.grabbed.is_none_or(|b| g.time > b.time) {
+                    self.grabbed = Some(g);
+                }
+                self.grab = None;
+            }
+            (None, Some(kind)) if free => self.grab = Some(Grab { kind, time: 0.0 }),
+            (None, _) => {}
         }
     }
 
@@ -327,25 +731,48 @@ impl Skater {
         let trick_done = self.trick.is_none_or(|t| t.progress() >= 1.0);
         let straight = off <= LAND_TOLERANCE;
         let switched = (PI - off) <= LAND_TOLERANCE;
+        let impact = -self.vel.y;
         self.normal = normal;
-        if !trick_done || !(straight || switched) {
-            self.mode = Mode::Bailed { time: 0.0 };
-            self.trick = None;
-            events.push(Event::Bailed);
+        // Still holding a grab when the wheels touch down also takes you out.
+        if !trick_done || !(straight || switched) || self.grab.is_some() {
+            self.bail(events);
             return;
         }
+        let crooked = if straight { off } else { PI - off };
+        let kind = if crooked > SKETCHY_ANGLE {
+            LandKind::Sketchy
+        } else if impact > HEAVY_IMPACT {
+            LandKind::Heavy
+        } else {
+            LandKind::Clean
+        };
+        self.landing = Some(Landing { kind, time: 0.0 });
         self.heading = travel;
-        self.speed = h.length() * 0.95;
+        let keep = if kind == LandKind::Sketchy { 0.8 } else { 0.95 };
+        self.speed = h.length() * keep;
         // Half-turns spun with the body. A shove-it alone turns the board, not the rider.
         let halves = libm::roundf(self.spin / PI) as i32;
         if halves.rem_euclid(2) == 1 {
             self.fakie = !self.fakie;
         }
-        if let Some(name) = landed_name(self.trick.map(|t| t.def), halves, self.takeoff_fakie) {
+        let grab = self.grabbed.take();
+        if let Some(name) = landed_name(
+            self.trick.map(|t| t.def),
+            halves,
+            self.takeoff_fakie,
+            grab.map(|g| g.kind),
+        ) {
             let base = self.trick.map_or(0, |t| t.def.points);
             let spin_bonus = halves.unsigned_abs() * 150;
+            let grab_bonus = grab.map_or(0, |g| GRAB_POINTS + (g.time * GRAB_POINTS_PER_S) as u32);
             let air_bonus = 1.0 + air_time.min(2.0);
-            let points = ((base + spin_bonus) as f32 * air_bonus) as u32;
+            let mut points = ((base + spin_bonus + grab_bonus) as f32 * air_bonus) as u32;
+            let name = if kind == LandKind::Sketchy {
+                points /= 2;
+                format!("SKETCHY {name}")
+            } else {
+                name
+            };
             events.push(Event::Landed { name, points });
         }
         self.mode = Mode::Rolling;
@@ -362,8 +789,14 @@ fn approach(v: f32, target: f32, by: f32) -> f32 {
     }
 }
 
-/// "FAKIE 360 KICKFLIP" style names. `None` for nothing worth naming (rolled off a lip, no spin).
-fn landed_name(def: Option<TrickDef>, halves: i32, fakie: bool) -> Option<String> {
+/// "FAKIE 360 KICKFLIP INDY" style names. `None` for nothing worth naming (rolled off a lip, no spin, no
+/// grab).
+fn landed_name(
+    def: Option<TrickDef>,
+    halves: i32,
+    fakie: bool,
+    grab: Option<GrabKind>,
+) -> Option<String> {
     use core::fmt::Write;
     let mut s = String::new();
     if fakie {
@@ -373,10 +806,14 @@ fn landed_name(def: Option<TrickDef>, halves: i32, fakie: bool) -> Option<String
         let dir = if halves > 0 { "BS" } else { "FS" };
         let _ = write!(s, "{dir} {} ", halves.unsigned_abs() * 180);
     }
-    match def {
-        Some(d) => s.push_str(d.name),
-        None if halves != 0 => s.push_str("AIR"),
-        None => return None,
+    match (def, grab) {
+        (Some(d), Some(g)) => {
+            let _ = write!(s, "{} {}", d.name, g.name());
+        }
+        (Some(d), None) => s.push_str(d.name),
+        (None, Some(g)) => s.push_str(g.name()),
+        (None, None) if halves != 0 => s.push_str("AIR"),
+        (None, None) => return None,
     }
     Some(s)
 }
@@ -395,6 +832,7 @@ mod tests {
             wall_height: 2.0,
             spawn: Vec3::ZERO,
             spawn_yaw: 0.0,
+            rails: Vec::new(),
         }
     }
 
@@ -519,15 +957,259 @@ mod tests {
         assert!(s.pos.z <= park.half_size + 0.01);
     }
 
+    /// Pops an ollie, steps once, then sets the air spin directly (no stick, so it stays put).
+    fn ollie_with_spin(s: &mut Skater, park: &Park, spin: f32) -> Vec<Event> {
+        let mut ev = steps(s, park, &Pad::default(), Some(Flick::Ollie), 1);
+        s.spin = spin;
+        ev.extend(steps(s, park, &Pad::default(), None, 80));
+        ev
+    }
+
+    #[test]
+    fn slightly_crooked_landing_is_sketchy() {
+        let park = flat();
+        let mut s = Skater::spawn(&park);
+        s.speed = 5.0;
+        let ev = ollie_with_spin(&mut s, &park, 25.0 * PI / 180.0);
+        let Some(Event::Landed { name, points }) =
+            ev.iter().find(|e| matches!(e, Event::Landed { .. }))
+        else {
+            panic!("{ev:?}");
+        };
+        assert_eq!(name, "SKETCHY OLLIE");
+        // Half points, and slower than a clean landing keeps.
+        let mut clean = Skater::spawn(&park);
+        clean.speed = 5.0;
+        let cev = ollie_with_spin(&mut clean, &park, 0.0);
+        let Some(Event::Landed { points: full, .. }) =
+            cev.iter().find(|e| matches!(e, Event::Landed { .. }))
+        else {
+            panic!("{cev:?}");
+        };
+        assert_eq!(*points, full / 2);
+        assert!(s.speed < clean.speed);
+        assert!(clean.landing.is_some());
+        steps(&mut clean, &park, &Pad::default(), None, 100);
+        assert!(clean.landing.is_none(), "forgotten after a while");
+    }
+
+    #[test]
+    fn landing_kinds() {
+        let park = flat();
+        let mut s = Skater::spawn(&park);
+        s.speed = 5.0;
+        steps(&mut s, &park, &Pad::default(), Some(Flick::Ollie), 1);
+        steps(&mut s, &park, &Pad::default(), None, 20);
+        assert!(s.is_airborne());
+        steps(&mut s, &park, &Pad::default(), None, 40);
+        assert_eq!(s.landing.map(|l| l.kind), Some(LandKind::Clean));
+        // Dropped from 3 m: ~9 m/s on impact.
+        let mut s = Skater::spawn(&park);
+        s.pos.y = 3.0;
+        s.take_off(None);
+        steps(&mut s, &park, &Pad::default(), None, 60);
+        assert_eq!(s.landing.map(|l| l.kind), Some(LandKind::Heavy));
+    }
+
+    /// Holds a manual (main stick down) for `secs`, correcting the balance when `correct`.
+    fn hold_manual(s: &mut Skater, park: &Park, secs: f32, correct: bool) -> Vec<Event> {
+        let mut ev = Vec::new();
+        for _ in 0..(secs / DT) as usize {
+            s.speed = 5.0; // stay rolling
+            let b = s.manual.map_or(0.0, |m| m.balance);
+            let push = if correct {
+                MANUAL_SWEET - 1.2 * b
+            } else {
+                MANUAL_SWEET
+            };
+            let pad = Pad {
+                stick: [0.0, -push.clamp(MANUAL_HOLD + 0.01, 1.0)],
+                ..Default::default()
+            };
+            s.step(park, &pad, None, false, DT, &mut ev);
+        }
+        ev
+    }
+
+    #[test]
+    fn manuals_score_when_balanced_and_tip_over_when_not() {
+        let park = flat();
+        let mut s = Skater::spawn(&park);
+        let ev = hold_manual(&mut s, &park, 2.0, true);
+        assert!(!ev.contains(&Event::ManualLost), "{ev:?}");
+        let m = s.manual.expect("in a manual");
+        assert!(!m.nose && m.time > 1.9);
+        // Let go: scored.
+        let ev = steps(&mut s, &park, &Pad::default(), None, 1);
+        assert!(
+            matches!(&ev[..], [Event::Landed { name, points }] if name == "MANUAL" && *points >= 230),
+            "{ev:?}"
+        );
+        assert!(s.manual.is_none());
+
+        // Never correcting: the wobble grows until it tips over.
+        let ev = hold_manual(&mut s, &park, 5.0, false);
+        assert!(ev.contains(&Event::ManualLost), "{ev:?}");
+        // Still holding the stick doesn't start another until it comes back.
+        let pad = Pad {
+            stick: [0.0, -0.8],
+            ..Default::default()
+        };
+        if s.manual.is_none() {
+            steps(&mut s, &park, &pad, None, 5);
+            assert!(s.manual.is_none());
+        }
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        s.speed = 5.0;
+        // Stick up: nose manual.
+        let up = Pad {
+            stick: [0.0, 0.8],
+            ..Default::default()
+        };
+        steps(&mut s, &park, &up, None, 1);
+        assert!(s.manual.is_some_and(|m| m.nose));
+    }
+
+    #[test]
+    fn grabs_score_and_landing_while_grabbing_bails() {
+        let park = flat();
+        let grab = |trig_r: f32| Pad {
+            trig_r,
+            ..Default::default()
+        };
+        // Grab for ~0.3 s mid-air, let go, land.
+        let mut s = Skater::spawn(&park);
+        s.speed = 5.0;
+        let mut ev = steps(&mut s, &park, &Pad::default(), Some(Flick::Ollie), 5);
+        ev.extend(steps(&mut s, &park, &grab(1.0), None, 18));
+        assert_eq!(s.grab.map(|g| g.kind), Some(GrabKind::Indy));
+        ev.extend(steps(&mut s, &park, &grab(0.0), None, 60));
+        let landed = ev.iter().find_map(|e| match e {
+            Event::Landed { name, points } => Some((name.clone(), *points)),
+            _ => None,
+        });
+        let (name, points) = landed.expect("landed");
+        assert_eq!(name, "OLLIE INDY");
+        assert!(points > 2 * 100, "grab bonus on top of the ollie: {points}");
+
+        // Still holding it when the wheels touch down.
+        let mut s = Skater::spawn(&park);
+        s.speed = 5.0;
+        steps(&mut s, &park, &Pad::default(), Some(Flick::Ollie), 5);
+        let ev = steps(&mut s, &park, &grab(1.0), None, 60);
+        assert!(ev.contains(&Event::Bailed), "{ev:?}");
+
+        // No grabbing until the flip has finished.
+        let mut s = Skater::spawn(&park);
+        s.speed = 5.0;
+        steps(&mut s, &park, &Pad::default(), Some(Flick::Kickflip), 1);
+        steps(&mut s, &park, &grab(1.0), None, 3);
+        assert!(s.grab.is_none());
+        steps(&mut s, &park, &grab(1.0), None, 25);
+        assert!(s.grab.is_some());
+    }
+
+    /// Flat ground with a 0.5 m high rail along +Z from z = 0 to z = `len`.
+    fn rail_park(len: f32) -> Park {
+        let mut p = flat();
+        p.spawn = Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: -3.0,
+        };
+        p.rails = alloc::vec![crate::rails::Rail::new(alloc::vec![
+            Vec3 {
+                x: 0.0,
+                y: 0.5,
+                z: 0.0
+            },
+            Vec3 {
+                x: 0.0,
+                y: 0.5,
+                z: len
+            },
+        ])];
+        p
+    }
+
+    /// Ollies towards the rail; `spin` (rad) is set just after the pop.
+    fn ollie_at_rail(park: &Park, spin: f32) -> (Skater, Vec<Event>) {
+        let mut s = Skater::spawn(park);
+        s.speed = 5.0;
+        let mut ev = steps(&mut s, park, &Pad::default(), Some(Flick::Ollie), 1);
+        s.spin = spin;
+        for _ in 0..60 {
+            ev.extend(steps(&mut s, park, &Pad::default(), None, 1));
+            if s.mode == Mode::Grind {
+                break;
+            }
+        }
+        (s, ev)
+    }
+
+    #[test]
+    fn ollie_onto_a_rail_grinds_and_scores_off_the_end() {
+        let park = rail_park(4.0);
+        let (mut s, _) = ollie_at_rail(&park, 0.0);
+        assert_eq!(s.mode, Mode::Grind);
+        let g = s.grind.unwrap();
+        assert_eq!(g.kind, GrindKind::FiftyFifty);
+        assert!(g.dir > 0.0 && (s.pos.y - 0.5).abs() < 1e-5);
+        // Slide to the end, fly off and land on the ground.
+        let ev = steps(&mut s, &park, &Pad::default(), None, 120);
+        let names: Vec<&str> = ev
+            .iter()
+            .filter_map(|e| match e {
+                Event::Landed { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["OLLIE 50-50"], "{ev:?}");
+        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
+        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.pos.z > 4.0);
+    }
+
+    #[test]
+    fn board_across_the_rail_is_a_boardslide_and_a_flick_pops_off() {
+        let park = rail_park(20.0);
+        let (mut s, _) = ollie_at_rail(&park, PI / 2.0);
+        assert_eq!(s.grind.map(|g| g.kind), Some(GrindKind::Boardslide));
+        steps(&mut s, &park, &Pad::default(), None, 20);
+        assert_eq!(s.mode, Mode::Grind);
+        let ev = steps(&mut s, &park, &Pad::default(), Some(Flick::Ollie), 1);
+        assert!(
+            matches!(&ev[..], [Event::Landed { name, .. }, Event::Popped(Flick::Ollie)] if name == "OLLIE BOARDSLIDE"),
+            "{ev:?}"
+        );
+        assert!(s.is_airborne() && s.vel.y > 0.0);
+        // Squared back up off the rail, so it lands clean.
+        let ev = steps(&mut s, &park, &Pad::default(), None, 90);
+        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
+    }
+
+    #[test]
+    fn crooked_board_or_unfinished_flip_does_not_lock_on() {
+        let park = rail_park(10.0);
+        let (s, _) = ollie_at_rail(&park, 45.0 * PI / 180.0);
+        assert_ne!(s.mode, Mode::Grind);
+    }
+
     #[test]
     fn names() {
         let kf = trick_def(Flick::Kickflip);
-        assert_eq!(landed_name(Some(kf), 0, false).as_deref(), Some("KICKFLIP"));
         assert_eq!(
-            landed_name(Some(kf), -2, true).as_deref(),
+            landed_name(Some(kf), 0, false, None).as_deref(),
+            Some("KICKFLIP")
+        );
+        assert_eq!(
+            landed_name(Some(kf), -2, true, None).as_deref(),
             Some("FAKIE FS 360 KICKFLIP")
         );
-        assert_eq!(landed_name(None, 1, false).as_deref(), Some("BS 180 AIR"));
-        assert_eq!(landed_name(None, 0, false), None);
+        assert_eq!(
+            landed_name(None, 1, false, None).as_deref(),
+            Some("BS 180 AIR")
+        );
+        assert_eq!(landed_name(None, 0, false, None), None);
     }
 }

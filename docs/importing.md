@@ -4,8 +4,31 @@ flatground ships only original content. Players who own Skate 3 (Xbox 360) can c
 own disc image with `fg_import` (`tools/import`) and load them into the game. Nothing converted ever goes
 into this repository (CLAUDE.md rule 1, enforced by `tools/check_no_game_data.sh` in CI).
 
-## Use
-Make an `.iso` of your disc (a full XGD image or a plain XDVDFS image both work), then:
+## With the game's build (the usual way)
+Make an `.iso` of your disc (a full XGD image or a plain XDVDFS image both work) and put it next to the repo
+folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg_import build`, which:
+
+- finds the disc image: `FG_ISO`, else `iso=<path>` in a git-ignored `fg_local.txt` at the repo root, else the
+  one `.iso` in the repo folder, the folder holding it, or a folder directly inside either (two or more:
+  it asks you to pick one with `FG_ISO` or `fg_local.txt`). None: the game builds with its placeholder art.
+- converts each pack the game loads into `imported/build/` (kept across `make clean`), and only when it is
+  missing or out of date. Each pack has a `.stamp` next to it recording the converter's source hash, the disc
+  image's size and modification time, and the conversion options; a different stamp means convert again. So
+  pulling a converter fix re-converts once, and an unchanged build skips straight past.
+- copies each pack into `dist/apps/flatground/data/` unless the copy there is already the same version.
+
+Copy `dist/apps/flatground` to the SD card's `apps` folder and the game finds its packs at
+`sd:/apps/flatground/data/` (or `usb:/`). `FG_NO_ASSETS=1` skips all of this. The Docker route only sees files
+inside the repo folder, so put the image there (`*.iso` is git-ignored) or point `FG_ISO` at a path inside it.
+
+`build.bat dolphin` then starts the game in Dolphin (the regular build from dolphin-emu.org) with its own
+profile in `out/dolphin` and `dist/` as the virtual SD card, so it loads the same files a Wii would.
+
+The game shows on start-up whether the imported skater loaded, and its CPU time per frame (average and the
+worst frame of the last second; the budget at 60 Hz is 16.7 ms) in the top left corner.
+
+## By hand
+The converters can also be run one at a time:
 
 ```bash
 cargo run --release -p fg_import -- textures path/to/skate3.iso --from data/content/parkassets.big --png
@@ -47,7 +70,7 @@ cargo run --release -p fg_import -- skater path/to/skate3.iso --lod 2
 ```
 Builds the default skater from the disc's fallback recipe (`data/cacrecipes/SavedRecipeFallbackMale.bin`).
 That is 10 parts: arms, feet, hair, eyes/teeth, shirt, pants, head, deck, trucks and wheels. Writes
-`imported/skater.fgpak` (about 640 KiB at `--lod 2`):
+`imported/skater.fgpak` (about 1.1 MiB at `--lod 2`):
 
 | Entry | Kind |
 |---|---|
@@ -61,9 +84,10 @@ skins on its CPU every frame). `--max` sets the texture size. `--png` renders fr
 pose, plus frames of `--clip` (`--frame N` for one frame).
 
 #### Playing it on the Wii
-Copy `imported/skater.fgpak` to `sd:/flatground/skater.fgpak` (or `usb:/flatground/skater.fgpak`). The game
-loads it at start-up and draws it instead of the box skater; without it, or if it doesn't parse, the
-placeholder stays. To look at it on the PC first, run the game's preview with
+The build puts it in the app folder for you (above). By hand: copy `imported/skater.fgpak` to
+`sd:/apps/flatground/data/skater.fgpak` (the older `sd:/flatground/skater.fgpak` works too; `usb:/` as well).
+The game loads it at start-up and draws it instead of the box skater; without it, or if it doesn't parse, the
+placeholder stays and a line on the start screen says why. To look at it on the PC first, run the game's preview with
 `cargo run --release -p fg_preview -- out/preview --skater imported/skater.fgpak --every 6`.
 
 The clip roles and their defaults from `OnBoard.abin` (the importer prints each clip and how upright the
@@ -71,9 +95,15 @@ deck is at its start and end):
 
 | Role | Default clip | When |
 |---|---|---|
-| `idle` | `r_stand_idle_mongo_0_cyc` | rolling, and the fallback for anything missing |
+| `idle` | `r_idle_ride_n_0_cyc` | rolling, and the fallback for anything missing |
 | `crouch` | `r_antic_crouch_ollie_n_0_into` | flick stick held back (frame follows the crouch amount) |
 | `push` | `r_pushlsp_lstr_mongo_left_cyc2` | after A, while the clip lasts |
+| `lean/left`, `lean/right` | `r_idle_hcom_n100`, `r_idle_hcom_p100` | single poses blended over the riding clips by how hard you steer (`lean/crouch_*`: `r_idle_lcom_*`, while crouched) |
+| `land/clean`, `land/heavy`, `land/sketchy` | `l_hcom_limp`, `l_hcom_himp`, `l_sketch_fs_hcom_limp` | after touching down: a normal landing, a big drop, a crooked catch |
+| `manual`, `nosemanual` | `m_idle_n_0_cyc`, `m_noseidle_n_0_cyc` | main stick held down / up while rolling |
+| `grab/fs`, `grab/bs`, `grab/mute` | `gr_grab_n_fs_0_cyc`, `gr_grab_n_bs_0_cyc`, `gr_mutegrab_n_0_cyc` | R, L, or both triggers held in the air |
+| `bail/fall`, `bail/getup` | `w_brace_lean090twist000_n_0_n`, `w_recovery_onfront_n_0_n` | after a bail, one after the other |
+| `grind/5050`, `grind/bslide` | `g_5050_fs_low_0_cyc`, `g_bslide_fs_low_0_cyc` | on a rail, board along it / across it |
 | `<trick>/pop`, `/air`, `/flip`, `/out` | e.g. `kickflip_in_low_g`, `kickflip_in_low_a`, `t_low_kick_cyc1`, `t_low_kick_out4` | in the air, back to back |
 
 Tricks are `ollie`, `nollie`, `kickflip`, `heelflip`, `popshuvit` and `fsshuvit`. `--anim role=clip`
@@ -96,6 +126,43 @@ How the skinning fits together, all checked against the previews:
 - Character positions are int16 × 2⁻¹⁴ with +0.8 m on Y (fixed by the game's shader). Normals are
   cross(tangent, binormal).
 - Only the hair's alpha is coverage. The other diffuse textures keep masks in alpha, which is dropped.
+
+### A park
+```bash
+cargo run --release -p fg_import -- park path/to/skate3.iso --park BlackBoxPark
+```
+Writes `imported/park.fgpak` (about 500 KB): `park/collision` (every collision triangle, format in
+`game_core/src/collision.rs`), `park/spawn` and `park/rails` (grind rails, `game_core/src/rails.rs`). The build converts `BlackBoxPark` unless `FG_PARK` names
+another. Parks small enough for the Wii: `StartPark` (the opening warehouse: an empty floor), `MegaPark`,
+`BlackBoxPark`, `IndustrialSkatePark`, `DownTownSkatePark`, `SkateSchool` and `MaloofMoneyCup`. The city
+districts are hundreds of MB each.
+
+A district's assets sit in streams inside `worldDIST_<park>.big`: an `ATOC` table
+(`DIST_<park>_<stream>.xst`) and `SFIL` stream files (`c<stream>_*.xsf`, RefPack-compressed sections). The
+`Sim` stream holds RW4 arenas with RenderWare ClusteredMesh collision (`tools/import/src/world.rs`), already in
+world space: Y up, metres. 16-bit compressed vertex offsets are unsigned, as the game reads them (SK8's
+correction; signed, big clusters wrap by 65.5 m). The start is the broad flat face nearest the district
+origin on the main floor (the lowest height band holding at least 30% of the flat area), facing the middle.
+
+In the game, walkable triangles (normal at least 0.35 up, about 70°) are ground and steeper ones are walls. The
+board stands on the highest walkable triangle under it no higher than a step above it, so ledges and
+overhangs work at any level. Transitions steeper than about 70° are walls until vert riding exists.
+
+The park is drawn with its own models from the `Pres` stream (`tools/import/src/parkmodel.rs`): RW4 arenas of
+several meshes, already in world space, with float positions and half-float UVs. A mesh's texture comes
+through its material handle, the external-reference table (GUID to handle), the material whose `Name`
+carries that GUID, its `diffuse` name and the texture asset of that name (SK8's chain). Textures are
+shrunk to `--max` (default 128) and stored as CMPR, or RGB5A3 with alpha testing for cut-outs; lighting from
+the sun is baked into the vertex colours. BlackBoxPark: 132 meshes, 15,670 vertices, 20 textures, about
+1 MB in all. Meshes within 90 m of the camera are drawn. `--max 0` leaves the models out, and the collision
+is drawn instead (flat shaded, coloured by surface).
+
+Grind rails are the game's spline sections (type `0x00EB0004`) in the same `Sim` assets: chains of cubic
+segments `D + C t + B t² + A t³`, sampled at 4 points per segment (SK8's `retail_grind_splines.py`).
+BlackBoxPark has 120 rails (about 1.35 km); MegaPark has none. Coming down within 0.4 m of a rail, with any
+flip finished and no grab held, locks on: a 50-50 with the board within 30° of the rail, a boardslide within
+30° of across it. On the rail gravity and a little friction act along it; the end of the rail, running out of
+speed or a flick takes you off, and that scores the grind.
 
 ### Water and menu tables (from the executable)
 Two tables exist only inside the game's code: the ocean PCA water animation and the front-end menu tables.
@@ -143,12 +210,11 @@ plenty for an offline converter.
   normal and specular maps.
 - Game side: the imported skater is skinned on the CPU (GX transforms each vertex by one matrix, so it
   can't blend bone weights). It is checked in the PC preview only, not yet in Dolphin or on hardware, and
-  its frame cost on the Wii is unmeasured. Bails show the idle pose tipped over (no fall clips), and there is
-  no lean, steering pose or landing clip yet.
-- World geometry: district streams (`ATOC`/`SFIL` inside `worldDIST_*.big`) and RW4 meshes (vertex
-  descriptors, index buffers) to Wii display lists.
-- Collision (RW ClusteredMesh) and grind rails.
+  its frame cost on the Wii is unmeasured (the HUD now shows it). Bails are clip-based: Skate 3 plays its
+  wipeout clips over a physics ragdoll, which is not ported, so a bail is a step-off and a get-up.
+- Park visuals: lightmaps (the second UV set), display lists instead of copying vertices every frame, and
+  the city districts' streaming cells.
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
 - Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
-- Game side: only `skater.fgpak` is loaded and drawn. Texture packs, animation packs and the executable
+- Game side: `skater.fgpak` and `park.fgpak` are loaded. Texture packs, animation packs and the executable
   tables are parsed and validated, but nothing uses them yet.

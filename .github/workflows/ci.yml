@@ -53,6 +53,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./build.sh
       - run: test -s dist/apps/flatground/boot.dol && test -s dist/apps/flatground/meta.xml
+      - name: No disc image on CI, so nothing converted (CLAUDE.md rule 1)
+        run: test ! -e dist/apps/flatground/data
 
   windows-bat:
     name: build.bat switches and no-tools message
@@ -68,7 +70,9 @@ jobs:
           findstr /c:"TARGET=package UPDATE=0 PAUSE=0" args2.txt || exit /b 1
           call build.bat clean showargs > args3.txt
           findstr /c:"TARGET=clean UPDATE=0" args3.txt || exit /b 1
-          type args1.txt args2.txt args3.txt
+          call build.bat dolphin showargs > args4.txt
+          findstr /c:"TARGET=package UPDATE=1 PAUSE=0 DOLPHIN=1" args4.txt || exit /b 1
+          type args1.txt args2.txt args3.txt args4.txt
       - name: Without devkitPro or Docker it fails with instructions
         shell: cmd
         env:
@@ -95,6 +99,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           rustup show active-toolchain || rustup toolchain install
           make -C wii package
+          test ! -e dist/apps/flatground/data
       - uses: actions/upload-artifact@v4
         with:
           name: flatground-sd-card

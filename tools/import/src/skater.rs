@@ -18,7 +18,8 @@ const BANK: &str = "data/big/miscload.big::data/anim/OnBoard.abin";
 /// `--anim role=clip` picks another, `--anim role=` drops one. Tricks play `pop` (leaving the ground), `air`
 /// (into the trick), `flip` and `out` (the catch) back to back, skipping the ones that are empty.
 pub const CLIPS: &[(&str, &str)] = &[
-    ("idle", "r_stand_idle_mongo_0_cyc"),
+    // Riding: both feet on the board.
+    ("idle", "r_idle_ride_n_0_cyc"),
     ("crouch", "r_antic_crouch_ollie_n_0_into"),
     ("push", "r_pushlsp_lstr_mongo_left_cyc2"),
     ("ollie/pop", "ollie_low_g"),
@@ -45,6 +46,29 @@ pub const CLIPS: &[(&str, &str)] = &[
     ("fsshuvit/air", "fspopshuvit_d_low_a"),
     ("fsshuvit/flip", ""),
     ("fsshuvit/out", ""),
+    // Steering lean: single poses blended over the riding clip by how hard the player steers
+    // (hcom: standing tall; lcom: crouched).
+    ("lean/left", "r_idle_hcom_n100"),
+    ("lean/right", "r_idle_hcom_p100"),
+    ("lean/crouch_left", "r_idle_lcom_n100"),
+    ("lean/crouch_right", "r_idle_lcom_p100"),
+    // Landings: clean, a big drop, and a crooked (sketchy) catch.
+    ("land/clean", "l_hcom_limp"),
+    ("land/heavy", "l_hcom_himp"),
+    ("land/sketchy", "l_sketch_fs_hcom_limp"),
+    // Manuals (on the back wheels, on the front wheels).
+    ("manual", "m_idle_n_0_cyc"),
+    ("nosemanual", "m_noseidle_n_0_cyc"),
+    // Grabs, held in the air.
+    ("grab/fs", "gr_grab_n_fs_0_cyc"),
+    ("grab/bs", "gr_grab_n_bs_0_cyc"),
+    ("grab/mute", "gr_mutegrab_n_0_cyc"),
+    // Bails: the fall, then getting up.
+    ("bail/fall", "w_brace_lean090twist000_n_0_n"),
+    ("bail/getup", "w_recovery_onfront_n_0_n"),
+    // Grinds, held on a rail: board along it, board across it.
+    ("grind/5050", "g_5050_fs_low_0_cyc"),
+    ("grind/bslide", "g_bslide_fs_low_0_cyc"),
 ];
 
 struct Options {
@@ -213,8 +237,20 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let rig = skin::Rig::new(&skeleton, &models, rest.as_deref());
     let mut unbound = Vec::new();
     for p in &parts {
+        // Only bones that move vertices matter (the *Hlp helpers carry no weight in the stock parts).
+        let weighted = |name: &str| {
+            let Some(i) = p.model.bones.iter().position(|b| b.name == name) else {
+                return false;
+            };
+            p.model.meshes.iter().any(|m| {
+                m.skin_bones
+                    .iter()
+                    .zip(&m.skin_weights)
+                    .any(|(b, w)| (0..4).any(|k| b[k] as usize == i && w[k] > 0.0))
+            })
+        };
         for (bone, driver) in skin::coverage(&rig, &p.model) {
-            if driver.is_none() {
+            if driver.is_none() && weighted(&bone) {
                 unbound.push(format!("{}:{bone}", p.slot));
             }
         }

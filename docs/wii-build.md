@@ -26,7 +26,7 @@ describes it); this project's code is written independently.
 
 ## Verified so far
 - `game_core` tests pass on x86-64 and on qemu emulating a 750CL (big-endian, same float behaviour).
-- The staticlib's only external symbols are newlib (`malloc`, `free`, `realloc`, `memcpy`, `memset`),
+- The staticlib's only external symbols are newlib (`malloc`, `calloc`, `free`, `realloc`, `memcpy`, `memset`),
   the `fg_*` C functions and the two weak unwind stubs (`tools/check_symbols.sh`).
 - `fg_platform.c` type-checks against the current libogc headers with warnings on.
 - **Not yet verified:** the devkitPPC link (CI `wii` job), Dolphin, hardware.

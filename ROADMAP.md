@@ -16,9 +16,12 @@ content second.
 
 ## Phase 1: Feel
 - [ ] Tune flick thresholds on a real C-stick (its range and gate differ from the main stick)
-- [ ] Pushing animation and timing, carve lean, speed wobble
-- [ ] Better landings: slope matching, sketchy landings instead of only clean/bail
-- [ ] Manuals (tip the flick stick), reverts, grabs on the triggers
+- [x] Pushing animation, carve lean (imported skater)
+- [ ] Speed wobble
+- [x] Sketchy and heavy landings besides clean/bail
+- [ ] Slope matching on landing
+- [x] Manuals and nose manuals (main stick, with a balance meter), grabs on the triggers
+- [ ] Reverts
 - [ ] Ramps and quarter pipes you can go vertical on (needs a real surface model, not only a height field)
 - [ ] Scripted Dolphin runs from `game_core::autoplay`, with screenshots in CI-like checks
 
@@ -27,23 +30,29 @@ content second.
 - [ ] GX hardware lighting with vertex normals instead of pre-lit colours
 - [ ] Textures (GX formats, CMPR) and a simple shadow blob under the skater
 - [ ] Widescreen setup (VI width) and a proper HUD font texture
-- [ ] Frame timing and memory readout in a debug overlay
+- [x] CPU time per frame on the HUD (average + worst of the last second)
+- [ ] Memory readout in a debug overlay
 
 ## Phase 3: Content pipeline
 - [ ] PC-side converter: your own glTF/Blender levels and models to a big-endian Wii pack read in place
 - [x] `fg_import`: disc image → BIG/RefPack → RW4 textures → GX `.fgpak` (player-supplied data, docs/importing.md)
 - [x] `fg_import`: skeleton, clips and poses from VBR `.abin` banks; water and menu tables from a player-decrypted executable
 - [x] `fg_import`: default skater as skinned meshes + textures, clips composed onto the bind pose (PNG previews)
-- [ ] `fg_import`: world meshes, collision and rails, RAW-codec animation, skater tints/morphs/outfits
+- [x] `fg_import park`: district streams (ATOC/SFIL) and ClusteredMesh collision, spawn point
+- [x] `fg_import park`: grind rails from the spline sections
+- [x] `fg_import park`: the park's textured models (Pres stream, material -> texture binding)
+- [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
 - [x] GX textures read in place from a `.fgpak` loaded from SD/USB (`sd:/flatground/skater.fgpak`)
+- [x] The build converts from the player's disc (only what is missing or out of date) into the app folder's
+  `data/`; the game loads from `sd:/apps/flatground/data/`; `build.bat dolphin` runs it with `dist/` as the SD card
 - [ ] Load texture packs and other `.fgpak` content from SD
-- [ ] Collision mesh + grind rails authored in the level files
-- [ ] Load parks from SD
+- [x] Imported park collision: triangle ground and walls (`game_core::collision`), loaded from SD
 
 ## Phase 4: Game
-- [ ] Grinds and slides on ledges and rails
+- [x] Grinds: 50-50 and boardslide on rails (imported parks and the demo ledge)
+- [ ] More grinds and slides (5-0, nosegrind, crooked, lipslide...) and balance
 - [ ] Skater animation (skinned, original)
 - [ ] Session goals, combo system, replay
 - [ ] Sound (ASND): rolling, pop, landing

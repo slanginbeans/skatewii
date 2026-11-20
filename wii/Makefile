@@ -2,6 +2,8 @@
 #   Needs devkitPro (devkitPPC + libogc, the "wii-dev" group) and the Rust toolchain from rust-toolchain.toml.
 #   make            -> build/flatground.dol
 #   make package    -> ../dist/apps/flatground/{boot.dol,meta.xml}: copy that folder to SD:/apps/
+#                      plus data/ with the packs converted from your own Skate 3 disc image, when one is
+#                      found (fg_import build: converts only what is missing or out of date; FG_NO_ASSETS=1 skips)
 #   make run WIILOAD=tcp:<wii-ip>   -> send to a Wii running the Homebrew Channel
 
 ifeq ($(strip $(DEVKITPRO)),)
@@ -26,7 +28,7 @@ BUILD_ID    ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo dev)
 BUILD := build
 OBJS  := $(BUILD)/main.o $(BUILD)/fg_platform.o
 
-.PHONY: all package run clean rustlib
+.PHONY: all package assets run clean rustlib
 all: $(BUILD)/flatground.dol
 
 # Cargo tracks its own dependencies; always ask it.
@@ -47,11 +49,24 @@ $(BUILD)/flatground.dol: $(BUILD)/flatground.elf
 	$(ELF2DOL) $< $@
 
 DIST := ../dist
+REPO := $(abspath ..)
+# Where fg_import looks for a disc image (and fg_local.txt): this repo and the folder holding it (not /).
+ISO_SEARCH := $(REPO) $(filter-out /,$(abspath $(REPO)/..))
+
+# Converted packs are cached in imported/build (survives make clean) and copied into the app folder.
+assets:
+ifeq ($(FG_NO_ASSETS),1)
+	@echo "[assets] FG_NO_ASSETS=1: not converting."
+else
+	cargo run --release -q -p fg_import -- build $(addprefix --search ,$(ISO_SEARCH)) --cache $(REPO)/imported/build --dest $(DIST)/apps/flatground/data
+endif
+
 package: all
 	mkdir -p $(DIST)/apps/flatground $(DIST)/debug
 	cp $(BUILD)/flatground.dol $(DIST)/apps/flatground/boot.dol
 	sed "s/@BUILD_ID@/$(BUILD_ID)/" hbc/meta.xml > $(DIST)/apps/flatground/meta.xml
 	cp $(BUILD)/flatground.elf $(DIST)/debug/flatground.elf
+	$(MAKE) --no-print-directory assets
 	@echo "Copy dist/apps/flatground to the SD card's apps/ folder."
 
 run: $(BUILD)/flatground.dol

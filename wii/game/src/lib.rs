@@ -12,10 +12,13 @@ mod ffi;
 mod rt;
 
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
 use core::ffi::CStr;
 use core::ptr;
 
-use game_core::Game;
+use game_core::character;
+use game_core::game::{FrameCost, Game};
 use game_core::gfx::{Camera, Gfx, TexVertex, Texture, Vertex};
 use game_core::input::PadRaw;
 use game_core::math::Mat34;
@@ -88,10 +91,19 @@ impl Gfx for WiiGfx {
     }
 }
 
-/// Where players put the pack `fg_import skater` makes from their own disc (see docs/importing.md).
+/// Where the build puts the pack `fg_import` makes from the player's own disc (the app folder's `data/`),
+/// then the older location (see docs/importing.md).
 const SKATER_PACKS: &[&CStr] = &[
+    c"sd:/apps/flatground/data/skater.fgpak",
+    c"usb:/apps/flatground/data/skater.fgpak",
     c"sd:/flatground/skater.fgpak",
     c"usb:/flatground/skater.fgpak",
+];
+
+/// The park `fg_import park` converts from the player's disc (collision; drawn from it for now).
+const PARK_PACKS: &[&CStr] = &[
+    c"sd:/apps/flatground/data/park.fgpak",
+    c"usb:/apps/flatground/data/park.fgpak",
 ];
 
 /// The first of `paths` that exists, read whole. Loaded once and kept for the rest of the game: the GPU
@@ -111,11 +123,34 @@ static mut GAME: *mut Game = ptr::null_mut();
 #[unsafe(no_mangle)]
 pub extern "C" fn fg_rust_init() {
     let mut game = Box::new(Game::new());
-    if let Some(pack) = load_first(SKATER_PACKS) {
-        // A pack that does not parse leaves the placeholder skater in place.
-        let _ = game.load_skater(pack);
-    }
+    // Without a pack (or with one that doesn't parse) the placeholder stays; say which.
+    let skater: String = match load_first(SKATER_PACKS) {
+        Some(pack) => match game.load_skater(pack) {
+            Ok(()) => "IMPORTED".into(),
+            Err(e) => format!("UNREADABLE: {}", error_text(e)),
+        },
+        None => "PLACEHOLDER".into(),
+    };
+    let park: String = match load_first(PARK_PACKS) {
+        Some(pack) => match game.load_park(pack) {
+            Ok(()) => "IMPORTED".into(),
+            Err(_) => "UNREADABLE".into(),
+        },
+        None => "DEMO".into(),
+    };
+    game.notice = Some(format!("SKATER: {skater}   PARK: {park}"));
+    game.frame_cost = Some(FrameCost::default());
     unsafe { GAME = Box::into_raw(game) };
+}
+
+/// Short, HUD-font-safe (upper case) reason a pack was rejected.
+fn error_text(e: character::Error) -> String {
+    match e {
+        character::Error::Pack => "NOT A PACK OR OLD VERSION".into(),
+        character::Error::NoSkeleton => "NO SKELETON".into(),
+        character::Error::NoParts => "NO MESHES".into(),
+        character::Error::Bad(name) => format!("BAD ENTRY {}", name.to_ascii_uppercase()),
+    }
 }
 
 /// One fixed step plus one rendered frame.
@@ -126,6 +161,12 @@ pub extern "C" fn fg_rust_init() {
 pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
     let game = unsafe { &mut *GAME };
     let pad = unsafe { &*pad };
+    let start = unsafe { ffi::fg_time_us() };
     game.update(pad, dt);
     game.render(&mut WiiGfx);
+    // CPU time of this frame (the GPU works on in parallel), shown from the next frame on.
+    let spent = unsafe { ffi::fg_time_us() }.wrapping_sub(start);
+    if let Some(c) = &mut game.frame_cost {
+        c.add(spent);
+    }
 }

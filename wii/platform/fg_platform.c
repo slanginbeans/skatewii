@@ -5,6 +5,7 @@
 #include <gccore.h>
 #include <wiiuse/wpad.h>
 #include <fat.h>
+#include <ogc/lwp_watchdog.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -270,6 +271,10 @@ void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16
         }
     }
     GX_End();
+}
+
+uint32_t fg_time_us(void) {
+    return (uint32_t)ticks_to_microsecs(gettime());
 }
 
 void *fg_load_file(const char *path, uint32_t *size) {

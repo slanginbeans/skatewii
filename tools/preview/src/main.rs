@@ -1,7 +1,7 @@
 //! Host preview: runs the real game with the scripted kicker run and renders chosen frames through a
 //! small software rasteriser (same `Gfx` trait as the Wii) into PNGs.
 //!
-//!     cargo run -p fg_preview -- [out_dir] [--wide] [--skater imported/skater.fgpak] [--every N]
+//!     cargo run -p fg_preview -- [out_dir] [--wide] [--skater imported/skater.fgpak] [--every N] [--tour]
 //!
 //! Writes `frame_NNNN.png` for a few interesting moments plus the event log to stdout. It is a
 //! stand-in for looking at the game until Dolphin runs are scripted; colours and framing match the Wii
@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use game_core::Game;
-use game_core::autoplay::KickerRun;
+use game_core::autoplay::{KickerRun, TrickTour};
+use game_core::input::PadRaw;
 mod gxtex;
 
 use game_core::gfx::{Camera, Gfx, SCREEN_H, SCREEN_W, TexVertex, Texture, Vertex};
@@ -334,6 +335,32 @@ impl Gfx for CloseUp<'_> {
     fn end_frame(&mut self) {}
 }
 
+/// Wraps the rasteriser with a fixed camera (overviews), drawing the world without the HUD.
+struct Fixed<'a> {
+    inner: &'a mut Raster,
+    cam: Camera,
+}
+
+impl Gfx for Fixed<'_> {
+    fn begin_frame(&mut self, _cam: &Camera, clear_rgba: u32) {
+        self.inner.begin_frame(&self.cam, clear_rgba);
+    }
+    fn draw_tris(&mut self, verts: &[Vertex], model: &Mat34) {
+        self.inner.draw_tris(verts, model)
+    }
+    fn draw_indexed(
+        &mut self,
+        verts: &[TexVertex],
+        indices: &[u16],
+        texture: Option<&Texture>,
+        model: &Mat34,
+    ) {
+        self.inner.draw_indexed(verts, indices, texture, model)
+    }
+    fn draw_2d(&mut self, _verts: &[Vertex]) {}
+    fn end_frame(&mut self) {}
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let wide = args.iter().any(|a| a == "--wide");
@@ -368,14 +395,127 @@ fn main() {
         game.load_skater(bytes).expect("skater pack");
         println!("using imported skater {path}");
     }
-    let mut script = KickerRun::new();
+    // --park: ride an imported park (fg_import park) instead of the demo park.
+    let park = value("--park");
+    if let Some(path) = park {
+        // Leaked like the Wii does: textures are read in place for the whole game.
+        let bytes: &'static [u8] = Vec::leak(fs::read(path).expect("read park pack"));
+        game.load_park(bytes).expect("park pack");
+        let p = game.imported_park().expect("loaded");
+        println!(
+            "using imported park {path}: {} triangles, {} chunks, {} vertices drawn at most",
+            p.mesh.tris.len(),
+            p.chunks.len(),
+            p.vertex_count()
+        );
+        // Overview from high above the middle, looking down.
+        let (min, max) = (p.mesh.min, p.mesh.max);
+        let mid = (min + max) * 0.5;
+        let span = (max.x - min.x).max(max.z - min.z);
+        let cam = Camera {
+            eye: v3(mid.x, max.y + span * 0.9, mid.z - span * 0.45),
+            target: v3(mid.x, min.y, mid.z),
+            fov_y_deg: 60.0,
+            near: 1.0,
+            far: span * 4.0,
+        };
+        // Without the roof: only triangles below 10 m above the start.
+        let cut = game.terrain().spawn().0.y + 10.0;
+        let low: Vec<Vertex> = p
+            .chunks
+            .iter()
+            .flat_map(|c| c.verts.chunks_exact(3))
+            .filter(|t| t.iter().all(|v| v.pos[1] < cut))
+            .flatten()
+            .copied()
+            .collect();
+        let mut fixed = Fixed {
+            inner: &mut raster,
+            cam,
+        };
+        fixed.begin_frame(&cam, 0x202430ff);
+        fixed.draw_tris(&low, &game_core::math::Xform::IDENTITY.to_mat34());
+        let path = out.join("park_overview.png");
+        raster.save(&path);
+        println!("        wrote {}", path.display());
+    }
+    // --grind-test: drop the skater onto the park's longest fairly level rail, moving along it.
+    if args.iter().any(|a| a == "--grind-test") {
+        let rails = game.terrain().rails();
+        let level = |r: &game_core::rails::Rail| {
+            let (a, b) = (r.points[0], *r.points.last().unwrap());
+            (b.y - a.y).abs() < 0.15 * r.length()
+        };
+        if let Some(r) = rails
+            .iter()
+            .filter(|r| level(r))
+            .max_by(|a, b| a.length().total_cmp(&b.length()))
+            .cloned()
+        {
+            let r = &r;
+            let (p, d) = r.at(0.5);
+            let s = &mut game.skater;
+            s.pos = p + d * -0.6 + v3(0.0, 0.25, 0.0);
+            s.heading = d.x.atan2(d.z);
+            s.vel = d * 5.0 + v3(0.0, -0.5, 0.0);
+            s.mode = Mode::Air { time: 0.5 };
+            println!(
+                "grind test: rail of {:.1} m starting at {:.1?}",
+                r.length(),
+                [p.x, p.y, p.z]
+            );
+        }
+    }
+    // --tour: the whole move set (carves, manual, grab, bail) after the kicker run.
+    let tour = args.iter().any(|a| a == "--tour");
+    let mut kicker = KickerRun::new();
+    let mut trick_tour = TrickTour::new();
+    let mut done_at: Option<u32> = None;
     let dt = 1.0 / 60.0;
 
     let mut shots: Vec<(u32, &str)> = vec![(45, "rolling")];
     let mut took_air = false;
     let mut took_land = false;
-    for frame in 0..(60 * 7) {
-        let pad = script.next(&game);
+    let grind_test = args.iter().any(|a| a == "--grind-test");
+    let frames = if grind_test {
+        60 * 6
+    } else if park.is_some() {
+        60 * 30
+    } else if tour {
+        60 * 20
+    } else {
+        60 * 7
+    };
+    for frame in 0..frames {
+        let pad = if park.is_some() {
+            // Push up to a cruise and weave gently: enough to see the park and its collision.
+            let s = &game.skater;
+            PadRaw {
+                flags: game_core::input::flag::CONNECTED,
+                buttons: if !grind_test && s.speed < 4.5 && frame % 30 == 0 {
+                    game_core::input::btn::A
+                } else {
+                    0
+                },
+                stick_x: if grind_test {
+                    0
+                } else {
+                    (40.0 * (frame as f32 * 0.02).sin()) as i8
+                },
+                ..Default::default()
+            }
+        } else if tour {
+            trick_tour.next(&game)
+        } else {
+            kicker.next(&game)
+        };
+        if trick_tour.done() {
+            // Let the bail play out, then stop.
+            let at = *done_at.get_or_insert(frame);
+            if frame > at + 150 {
+                break;
+            }
+        }
         game.update(&pad, dt);
         for e in &game.events {
             println!("{:>5.2}s  {e:?}", frame as f32 * dt);
@@ -401,7 +541,7 @@ fn main() {
                 .rider()
                 .map(|r| format!(", clip {} @ {:.2}s", r.current().role, r.current().time))
                 .unwrap_or_default();
-            if label != "every" {
+            if label != "every" || park.is_some() {
                 game.render(&mut raster);
                 let path = out.join(format!("frame_{frame:04}.png"));
                 raster.save(&path);

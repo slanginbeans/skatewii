@@ -2,6 +2,8 @@
 //! crossfades between clips, poses and skins it once per step.
 //!
 //! Clip roles are the `skater/clip/<role>` entries `fg_import skater` writes: `idle`, `crouch`, `push`,
+//! `land/*`, `manual`, `nosemanual`, `grab/*`, `bail/fall` + `bail/getup`, `lean/*` (single poses blended
+//! over the riding clips by steering),
 //! and `<trick>/pop` + `<trick>/air` for each flick trick. A missing clip falls back to `idle`.
 
 use alloc::vec;
@@ -11,7 +13,7 @@ use crate::character::{Character, Local};
 use crate::flick::Flick;
 use crate::gfx::SUN;
 use crate::math::{Mat3, sqrtf, v3};
-use crate::skater::{Mode, Skater};
+use crate::skater::{GrabKind, GrindKind, LandKind, Mode, Skater};
 
 /// Crossfade time between clips (s).
 const FADE: f32 = 0.12;
@@ -20,6 +22,8 @@ const CROUCH_MIN: f32 = 0.05;
 /// Playback speed limits when fitting a trick into the flight.
 const MIN_SPEED: f32 = 0.6;
 const MAX_SPEED: f32 = 2.5;
+/// How far full steering blends towards the lean pose.
+const LEAN_WEIGHT: f32 = 0.85;
 
 /// Which clip to show and how far into it (seconds).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,8 +79,49 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
     };
     let has = |r: &str| duration(r) > 0.0;
     match s.mode {
-        Mode::Bailed { .. } => idle,
+        Mode::Bailed { time } => {
+            // The fall, then getting up (holding its last frame until the respawn).
+            let fall = duration("bail/fall");
+            if time < fall {
+                Pick {
+                    role: "bail/fall",
+                    time,
+                }
+            } else if has("bail/getup") {
+                Pick {
+                    role: "bail/getup",
+                    time: time - fall,
+                }
+            } else if has("bail/fall") {
+                Pick {
+                    role: "bail/fall",
+                    time: fall,
+                }
+            } else {
+                idle
+            }
+        }
+        Mode::Grind => {
+            let Some(g) = &s.grind else {
+                return idle;
+            };
+            let role = match g.kind {
+                GrindKind::FiftyFifty => "grind/5050",
+                GrindKind::Boardslide => "grind/bslide",
+            };
+            if has(role) {
+                Pick { role, time: g.time }
+            } else {
+                idle
+            }
+        }
         Mode::Air { time } => {
+            if let Some(g) = &s.grab {
+                let role = grab_role(g.kind);
+                if has(role) {
+                    return Pick { role, time: g.time };
+                }
+            }
             let Some(t) = &s.trick else {
                 return idle;
             };
@@ -118,11 +163,20 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
             last.unwrap_or(idle)
         }
         Mode::Rolling => {
+            if let Some(m) = &s.manual {
+                let role = if m.nose { "nosemanual" } else { "manual" };
+                if has(role) {
+                    return Pick { role, time: m.time };
+                }
+            }
+            let landing = s.landing.map(|l| (land_role(l.kind), l.time));
             if s.crouch > CROUCH_MIN && has("crouch") {
                 Pick {
                     role: "crouch",
                     time: s.crouch.min(1.0) * duration("crouch"),
                 }
+            } else if let Some((role, time)) = landing.filter(|(r, t)| *t < duration(r)) {
+                Pick { role, time }
             } else if s.since_push < duration("push") {
                 Pick {
                     role: "push",
@@ -135,12 +189,49 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
     }
 }
 
+pub fn grab_role(k: GrabKind) -> &'static str {
+    match k {
+        GrabKind::Indy => "grab/fs",
+        GrabKind::Melon => "grab/bs",
+        GrabKind::Mute => "grab/mute",
+    }
+}
+
+pub fn land_role(k: LandKind) -> &'static str {
+    match k {
+        LandKind::Clean => "land/clean",
+        LandKind::Heavy => "land/heavy",
+        LandKind::Sketchy => "land/sketchy",
+    }
+}
+
+/// The steering lean laid over the riding clips: which pose to blend towards, and how far (0..1).
+/// `None` when the skater is doing anything but rolling along (manuals, tricks, bails, landings) or
+/// the pack has no lean poses.
+pub fn lean(s: &Skater, base: &str, has: &dyn Fn(&str) -> bool) -> Option<(&'static str, f32)> {
+    if s.mode != Mode::Rolling || s.manual.is_some() || !matches!(base, "idle" | "push" | "crouch")
+    {
+        return None;
+    }
+    let crouched = base == "crouch";
+    // Stick right (positive) turns the board right.
+    let role = match (s.steer >= 0.0, crouched) {
+        (true, false) => "lean/right",
+        (false, false) => "lean/left",
+        (true, true) => "lean/crouch_right",
+        (false, true) => "lean/crouch_left",
+    };
+    let w = (s.steer.abs() * LEAN_WEIGHT).min(1.0);
+    (w > 0.02 && has(role)).then_some((role, w))
+}
+
 pub struct Rider {
     pub character: Character,
     cur: Pick,
     /// The clip faded out from, frozen where it was left.
     prev: Option<Pick>,
     fade: f32,
+    lean: Option<(&'static str, f32)>,
     a: Vec<Local>,
     b: Vec<Local>,
 }
@@ -156,6 +247,7 @@ impl Rider {
             },
             prev: None,
             fade: FADE,
+            lean: None,
             a: vec![Local::IDENTITY; n],
             b: vec![Local::IDENTITY; n],
         };
@@ -167,6 +259,11 @@ impl Rider {
         self.cur
     }
 
+    /// The lean pose blended over the current clip, and how far.
+    pub fn lean(&self) -> Option<(&'static str, f32)> {
+        self.lean
+    }
+
     /// One step: choose the clip, blend, pose and skin. `rot` is the character's world rotation (for
     /// lighting).
     pub fn update(&mut self, s: &Skater, clock: f32, land_in: f32, dt: f32, rot: Mat3) {
@@ -176,6 +273,7 @@ impl Rider {
             // Another push while the last one plays: keep the cycle going instead of restarting it.
             next.time = (self.cur.time + dt) % ch.duration("push");
         }
+        self.lean = lean(s, next.role, &|r| ch.has_clip(r));
         if next.role != self.cur.role {
             self.prev = Some(self.cur);
             self.fade = 0.0;
@@ -196,6 +294,14 @@ impl Rider {
             let k = self.fade / FADE;
             for (a, b) in self.a.iter_mut().zip(&self.b) {
                 *a = b.blend(a, k);
+            }
+        }
+        // The lean poses are single frames: blend the whole body part way towards one.
+        if let Some((role, w)) = self.lean
+            && ch.sample(role, 0.0, &mut self.b)
+        {
+            for (a, b) in self.a.iter_mut().zip(&self.b) {
+                *a = a.blend(b, w);
             }
         }
         ch.pose(&self.a);
@@ -316,5 +422,110 @@ mod fit_tests {
         let p = pick(&s, 0.0, 9.0, &dur);
         assert_eq!(p.role, "kickflip/out");
         assert!((p.time - 0.2).abs() < 1e-4, "{p:?}");
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+    use crate::park::Park;
+    use crate::skater::{Grab, Landing, Manual};
+
+    fn dur(r: &str) -> f32 {
+        match r {
+            "idle" => 2.0,
+            "push" => 0.7,
+            "land/clean" => 0.6,
+            "land/sketchy" => 1.0,
+            "manual" => 3.0,
+            "grab/fs" => 1.0,
+            "bail/fall" => 0.6,
+            "bail/getup" => 1.5,
+            "lean/left" | "lean/right" => 3.0,
+            _ => 0.0,
+        }
+    }
+
+    #[test]
+    fn landings_manuals_grabs_and_bails() {
+        let park = Park::demo();
+        let mut s = Skater::spawn(&park);
+        s.landing = Some(Landing {
+            kind: LandKind::Sketchy,
+            time: 0.4,
+        });
+        assert_eq!(
+            pick(&s, 0.0, 0.0, &dur),
+            Pick {
+                role: "land/sketchy",
+                time: 0.4
+            }
+        );
+        // Past the clip's end: back to riding. A missing clip (heavy) is skipped too.
+        s.landing = Some(Landing {
+            kind: LandKind::Clean,
+            time: 0.7,
+        });
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
+        s.landing = Some(Landing {
+            kind: LandKind::Heavy,
+            time: 0.1,
+        });
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
+
+        s.manual = Some(Manual {
+            nose: false,
+            balance: 0.0,
+            time: 1.2,
+        });
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "manual");
+        // No nose manual clip in this pack: plain riding.
+        s.manual = Some(Manual {
+            nose: true,
+            balance: 0.0,
+            time: 1.2,
+        });
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
+        s.manual = None;
+
+        s.mode = Mode::Air { time: 0.5 };
+        s.grab = Some(Grab {
+            kind: GrabKind::Indy,
+            time: 0.3,
+        });
+        assert_eq!(
+            pick(&s, 0.0, 0.2, &dur),
+            Pick {
+                role: "grab/fs",
+                time: 0.3
+            }
+        );
+        s.grab = None;
+
+        s.mode = Mode::Bailed { time: 0.2 };
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "bail/fall");
+        s.mode = Mode::Bailed { time: 1.0 };
+        let p = pick(&s, 0.0, 0.0, &dur);
+        assert_eq!(p.role, "bail/getup");
+        assert!((p.time - 0.4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn leans_into_turns_only_while_riding() {
+        let park = Park::demo();
+        let mut s = Skater::spawn(&park);
+        let has = |r: &str| dur(r) > 0.0;
+        assert_eq!(lean(&s, "idle", &has), None, "straight: no lean");
+        s.steer = -1.0;
+        let (role, w) = lean(&s, "idle", &has).unwrap();
+        assert_eq!(role, "lean/left");
+        assert!((w - LEAN_WEIGHT).abs() < 1e-6);
+        s.steer = 0.5;
+        assert_eq!(lean(&s, "push", &has).map(|l| l.0), Some("lean/right"));
+        // No crouched lean poses in this pack.
+        assert_eq!(lean(&s, "crouch", &has), None);
+        assert_eq!(lean(&s, "land/clean", &has), None);
+        s.mode = Mode::Air { time: 0.1 };
+        assert_eq!(lean(&s, "idle", &has), None);
     }
 }
