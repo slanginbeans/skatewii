@@ -57,8 +57,26 @@ typedef struct {
 #define FG_FLAG_CONNECTED (1u << 0)
 #define FG_FLAG_EXIT      (1u << 1)
 
+// What the platform measured over the last frame, and memory. 32 bytes (wii/game/src/ffi.rs FgFrameStats).
+typedef struct {
+    uint32_t gpu_wait_us;   // in fg_end_frame, waiting for the GPU to finish drawing (GX_DrawDone)
+    uint32_t vsync_wait_us; // then waiting for the TV's next refresh (idle time)
+    uint32_t missed_vsyncs; // refreshes that went by without a new frame since the last call (dropped frames)
+    uint32_t arena_used;    // bytes of the per-frame vertex arena used last frame
+    uint32_t mem1_free;     // bytes free in the MEM1 / MEM2 arenas
+    uint32_t mem2_free;
+    uint32_t heap_used;     // bytes the C heap (Rust's allocator) has handed out
+    uint32_t _pad;
+} FgFrameStats;
+
 // ---- Called from C main ----
 void fg_platform_init(void);
+// Opens the session log in <app folder>/logs (argv0: where the loader started us, may be NULL) and writes
+// the platform's own lines (video mode, storage). Call after fg_platform_init.
+void fg_log_start(const char *argv0);
+// Once a frame: writes buffered log lines out every couple of seconds.
+void fg_log_tick(void);
+void fg_log_stop(void);
 // Seconds per frame: 1/50 on PAL50, else 1/60.
 float fg_frame_dt(void);
 void fg_read_pad(FgPadRaw *out);
@@ -81,7 +99,11 @@ uint32_t fg_time_us(void);
 // freed, flushed for the GPU. NULL if there is no such file or no SD/USB storage.
 void *fg_load_file(const char *path, uint32_t *size);
 void fg_end_frame(void);
-// Shows the message on screen and waits for HOME / START to return to the loader.
+// One line for the session log (no trailing newline needed). `important`: written to the card at once.
+void fg_log(const char *line, uint32_t len, int32_t important);
+// The last frame's timings and memory (see FgFrameStats).
+void fg_frame_stats(FgFrameStats *out);
+// Logs it, shows it on screen with the log's last lines, and waits for HOME / START to return to the loader.
 void fg_panic(const char *msg, uint32_t len) __attribute__((noreturn));
 
 // ---- Provided by Rust (libfg_game.a) ----

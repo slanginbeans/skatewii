@@ -2,7 +2,9 @@
 //! small software rasteriser (same `Gfx` trait as the Wii) into PNGs.
 //!
 //!     cargo run -p fg_preview -- [out_dir] [--wide] [--skater imported/skater.fgpak] [--every N] [--tour]
-//!         [--rules imported/rules.fgpak] [--regular]
+//!         [--rules imported/rules.fgpak] [--regular] [--log]
+//!
+//! `--log` prints the game's development log (what the Wii build writes to the SD card) as it runs.
 //!
 //! Writes `frame_NNNN.png` for a few interesting moments plus the event log to stdout. It is a
 //! stand-in for looking at the game until Dolphin runs are scripted; colours and framing match the Wii
@@ -362,6 +364,15 @@ impl Gfx for Fixed<'_> {
     fn end_frame(&mut self) {}
 }
 
+/// Microseconds since the preview started (the game's section timer).
+fn host_us() -> u32 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros() as u32
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let wide = args.iter().any(|a| a == "--wide");
@@ -534,6 +545,8 @@ fn main() {
     }
     // --tour: the whole move set (carves, manual, grab, bail) after the kicker run.
     let tour = args.iter().any(|a| a == "--tour");
+    let print_log = args.iter().any(|a| a == "--log");
+    game.timer = Some(host_us);
     let mut kicker = KickerRun::new();
     let mut trick_tour = TrickTour::new();
     let mut done_at: Option<u32> = None;
@@ -583,6 +596,13 @@ fn main() {
             }
         }
         game.update(&pad, dt);
+        if print_log {
+            for line in game.log.drain(..) {
+                println!("  log  {line}");
+            }
+        } else {
+            game.log.clear();
+        }
         for e in &game.events {
             println!("{:>5.2}s  {e:?}", frame as f32 * dt);
             if matches!(e, Event::Landed { .. }) && !took_land {

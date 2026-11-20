@@ -145,6 +145,9 @@ pub struct Landing {
     pub kind: LandKind,
     /// Seconds since touching down.
     pub time: f32,
+    /// How far the board was off the travel direction (rad), and how fast it hit the ground (m/s, down).
+    pub crooked: f32,
+    pub impact: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -365,6 +368,21 @@ pub struct Skater {
     /// When each push button last went down (seconds ago), for the hippie jump chord.
     since_a: f32,
     since_b: f32,
+    /// Why the last bail happened (for the log).
+    pub bail_reason: Option<&'static str>,
+    /// The numbers behind the last landing check (for the log).
+    pub last_landing: Option<LandingCheck>,
+}
+
+/// What a landing was judged on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LandingCheck {
+    /// Board off the travel direction (rad), and the most it could have been at that speed.
+    pub crooked: f32,
+    pub limit: f32,
+    /// Speed into the ground (m/s) and along it.
+    pub impact: f32,
+    pub speed: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -491,6 +509,8 @@ impl Skater {
             hippy: None,
             since_a: f32::INFINITY,
             since_b: f32::INFINITY,
+            bail_reason: None,
+            last_landing: None,
         }
     }
 
@@ -1349,7 +1369,8 @@ impl Skater {
         self.spin = spin;
     }
 
-    fn bail(&mut self, events: &mut Vec<Event>) {
+    fn bail(&mut self, reason: &'static str, events: &mut Vec<Event>) {
+        self.bail_reason = Some(reason);
         self.mode = Mode::Bailed { time: 0.0 };
         self.trick = None;
         self.grab = None;
@@ -1414,13 +1435,27 @@ impl Skater {
         self.normal = normal;
         let speed = h.length();
         // Still holding a grab when the wheels touch down also takes you out.
-        if !trick_done
-            || self.grab.is_some()
-            || crooked > t.land_angle.eval(speed)
-            || (crooked > SIDEWAYS_BAIL && speed > SIDEWAYS_SPEED)
-            || impact > t.land_max_impact
-        {
-            self.bail(events);
+        let reason = if !trick_done {
+            Some("landed before the trick finished")
+        } else if self.grab.is_some() {
+            Some("still holding the grab")
+        } else if crooked > t.land_angle.eval(speed) {
+            Some("landed too crooked for the speed")
+        } else if crooked > SIDEWAYS_BAIL && speed > SIDEWAYS_SPEED {
+            Some("landed sideways")
+        } else if impact > t.land_max_impact {
+            Some("hit the ground too hard")
+        } else {
+            None
+        };
+        self.last_landing = Some(LandingCheck {
+            crooked,
+            impact,
+            speed,
+            limit: t.land_angle.eval(speed),
+        });
+        if let Some(r) = reason {
+            self.bail(r, events);
             return;
         }
         let side = sinf(crooked);
@@ -1433,7 +1468,12 @@ impl Skater {
         } else {
             LandKind::Clean
         };
-        self.landing = Some(Landing { kind, time: 0.0 });
+        self.landing = Some(Landing {
+            kind,
+            time: 0.0,
+            crooked,
+            impact,
+        });
         self.heading = if backwards {
             wrap_angle(travel + PI)
         } else {

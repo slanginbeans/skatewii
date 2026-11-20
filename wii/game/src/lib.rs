@@ -13,7 +13,7 @@ mod rt;
 
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use core::ffi::CStr;
 use core::ptr;
 
@@ -112,14 +112,49 @@ const RULES_PACKS: &[&CStr] = &[
     c"usb:/apps/flatground/data/rules.fgpak",
 ];
 
-/// The first of `paths` that exists, read whole. Loaded once and kept for the rest of the game: the GPU
-/// reads textures straight out of it.
-fn load_first(paths: &[&CStr]) -> Option<&'static [u8]> {
-    paths.iter().find_map(|p| {
-        let mut size = 0u32;
-        let data = unsafe { ffi::fg_load_file(p.as_ptr(), &mut size) };
-        (!data.is_null()).then(|| unsafe { core::slice::from_raw_parts(data, size as usize) })
-    })
+/// A whole file, or `None`. Loaded once and kept for the rest of the game: the GPU reads textures straight
+/// out of packs.
+fn load(path: &CStr) -> Option<&'static [u8]> {
+    let mut size = 0u32;
+    let data = unsafe { ffi::fg_load_file(path.as_ptr(), &mut size) };
+    (!data.is_null()).then(|| unsafe { core::slice::from_raw_parts(data, size as usize) })
+}
+
+/// The first of `paths` that exists, read whole. Logs which one (with its size and the build stamp next to
+/// it, which says which converter version and disc image made it) or that none was found.
+fn load_first(what: &str, paths: &[&CStr]) -> Option<&'static [u8]> {
+    for p in paths {
+        if let Some(data) = load(p) {
+            let path = p.to_str().unwrap_or("?");
+            let stamp = path
+                .strip_suffix(".fgpak")
+                .and_then(|base| alloc::ffi::CString::new(format!("{base}.stamp")).ok())
+                .and_then(|s| load(&s))
+                .map(|b| {
+                    String::from_utf8_lossy(b)
+                        .replace('\n', " ")
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_else(|| "no stamp".into());
+            log(
+                false,
+                &format!("{what}: {path}, {} KB ({stamp})", data.len() / 1024),
+            );
+            return Some(data);
+        }
+    }
+    log(false, &format!("{what}: no pack found"));
+    None
+}
+
+/// One line for the session log on the SD card. `important`: written out at once.
+fn log(important: bool, line: &str) {
+    unsafe { ffi::fg_log(line.as_ptr(), line.len() as u32, important as i32) }
+}
+
+fn clock_us() -> u32 {
+    unsafe { ffi::fg_time_us() }
 }
 
 /// The one game instance. Only touched from the main thread, through the two entry points below.
@@ -128,31 +163,102 @@ static mut GAME: *mut Game = ptr::null_mut();
 /// Builds the game (park mesh, models). Called once after the platform is up.
 #[unsafe(no_mangle)]
 pub extern "C" fn fg_rust_init() {
+    log(
+        true,
+        &format!(
+            "flatground {} (build {})",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("FG_BUILD_ID").unwrap_or("dev")
+        ),
+    );
     let mut game = Box::new(Game::new());
+    game.timer = Some(clock_us);
     // Rules first: the skater and park are set up with its tuning.
-    let rules: String = match load_first(RULES_PACKS) {
+    let rules: String = match load_first("rules", RULES_PACKS) {
         Some(pack) => match game.load_rules(pack) {
-            Ok(_) => "DISC".into(),
-            Err(_) => "UNREADABLE".into(),
+            Ok((values, shapes)) => {
+                log(
+                    false,
+                    &format!("rules: {values} tuning values, {shapes} flick shapes from the disc"),
+                );
+                "DISC".into()
+            }
+            Err(e) => {
+                log(
+                    true,
+                    &format!("rules: unreadable ({e:?}), built-in values used"),
+                );
+                "UNREADABLE".into()
+            }
         },
         None => "BUILT-IN".into(),
     };
+    let t = &game.tuning;
+    log(
+        false,
+        &format!(
+            "tuning: push max {:.1} m/s, jump {:.2}-{:.2} m, gravity {:.1}, flick misses {}, camera {:.1}-{:.1} m",
+            t.push_max_speed,
+            t.jump_low,
+            t.jump_high,
+            t.gravity,
+            t.flick_misses,
+            t.cam_slow.distance,
+            t.cam_fast.distance
+        ),
+    );
     // Without a pack (or with one that doesn't parse) the placeholder stays; say which.
-    let skater: String = match load_first(SKATER_PACKS) {
+    let skater: String = match load_first("skater", SKATER_PACKS) {
         Some(pack) => match game.load_skater(pack) {
-            Ok(()) => "IMPORTED".into(),
-            Err(e) => format!("UNREADABLE: {}", error_text(e)),
+            Ok(()) => {
+                if let Some(r) = game.rider() {
+                    let c = &r.character;
+                    let verts: usize = c.parts.iter().map(|p| p.out.capacity()).sum();
+                    log(
+                        false,
+                        &format!(
+                            "skater: {} parts, {verts} skinned vertices, {} bones",
+                            c.parts.len(),
+                            c.bones()
+                        ),
+                    );
+                }
+                "IMPORTED".into()
+            }
+            Err(e) => {
+                log(true, &format!("skater: unreadable: {}", error_text(e)));
+                format!("UNREADABLE: {}", error_text(e))
+            }
         },
         None => "PLACEHOLDER".into(),
     };
-    let park: String = match load_first(PARK_PACKS) {
+    let park: String = match load_first("park", PARK_PACKS) {
         Some(pack) => match game.load_park(pack) {
-            Ok(()) => "IMPORTED".into(),
-            Err(_) => "UNREADABLE".into(),
+            Ok(()) => {
+                if let Some(p) = game.imported_park() {
+                    log(
+                        false,
+                        &format!(
+                            "park: {} collision triangles, {} rails, {} meshes, {} vertices in all",
+                            p.mesh.tris.len(),
+                            p.mesh.rails.len(),
+                            p.models.len() + p.chunks.len(),
+                            p.vertex_count()
+                        ),
+                    );
+                }
+                "IMPORTED".into()
+            }
+            Err(e) => {
+                log(true, &format!("park: unreadable ({e:?})"));
+                "UNREADABLE".into()
+            }
         },
         None => "DEMO".into(),
     };
-    game.notice = Some(format!("SKATER: {skater}  PARK: {park}  RULES: {rules}"));
+    let notice = format!("SKATER: {skater}  PARK: {park}  RULES: {rules}");
+    log(true, &format!("ready: {notice}, stance {:?}", game.stance));
+    game.notice = Some(notice);
     game.frame_cost = Some(FrameCost::default());
     unsafe { GAME = Box::into_raw(game) };
 }
@@ -175,12 +281,68 @@ fn error_text(e: character::Error) -> String {
 pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
     let game = unsafe { &mut *GAME };
     let pad = unsafe { &*pad };
-    let start = unsafe { ffi::fg_time_us() };
+    let start = clock_us();
     game.update(pad, dt);
     game.render(&mut WiiGfx);
-    // CPU time of this frame (the GPU works on in parallel), shown from the next frame on.
-    let spent = unsafe { ffi::fg_time_us() }.wrapping_sub(start);
+    // The frame's time includes waiting for the GPU and for the TV's refresh (in fg_end_frame): take
+    // those out to get the CPU's own work.
+    let spent = clock_us().wrapping_sub(start);
+    let mut st = ffi::FgFrameStats::default();
+    unsafe { ffi::fg_frame_stats(&mut st) };
+    let cpu = spent.saturating_sub(st.gpu_wait_us + st.vsync_wait_us);
     if let Some(c) = &mut game.frame_cost {
-        c.add(spent);
+        c.add(cpu, st.gpu_wait_us, st.vsync_wait_us, st.missed_vsyncs);
+    }
+    if st.missed_vsyncs > 0 {
+        let t = game.times;
+        log(
+            false,
+            &format!(
+                "slow frame: {} refresh(es) missed; this frame cpu {:.1} ms (physics {:.1}, skin {:.1}, draw {:.1}), gpu {:.1} ms",
+                st.missed_vsyncs,
+                cpu as f32 / 1000.0,
+                t.physics_us as f32 / 1000.0,
+                t.skin_us as f32 / 1000.0,
+                t.render_us as f32 / 1000.0,
+                st.gpu_wait_us as f32 / 1000.0
+            ),
+        );
+    }
+    // Once a second: where the frame time went, and memory.
+    unsafe {
+        FRAMES += 1;
+        if FRAMES.is_multiple_of(FrameCost::WINDOW)
+            && let Some(c) = &game.frame_cost
+        {
+            let t = game.times;
+            log(
+                false,
+                &format!(
+                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
+                    c.avg_us / 1000.0,
+                    c.peak_us as f32 / 1000.0,
+                    t.physics_us as f32 / 1000.0,
+                    t.skin_us as f32 / 1000.0,
+                    t.render_us as f32 / 1000.0,
+                    c.gpu_avg_us / 1000.0,
+                    c.idle_avg_us / 1000.0,
+                    c.dropped,
+                    t.park_draws,
+                    t.park_verts,
+                    st.arena_used / 1024,
+                    st.heap_used / 1024,
+                    st.mem1_free / 1024,
+                    st.mem2_free / 1024
+                ),
+            );
+        }
+    }
+    // What the game noticed this frame (flicks, landings, bails, status lines).
+    for line in game.log.drain(..) {
+        let important = line.starts_with("BAIL") || line.starts_with("error");
+        log(important, &line);
     }
 }
+
+/// Frames since start, for the once-a-second line.
+static mut FRAMES: u32 = 0;

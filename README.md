@@ -61,6 +61,10 @@ tools/check_symbols.sh  guards what the Wii staticlib may import
 ```
 How the Rust/Wii build works and why: [docs/wii-build.md](docs/wii-build.md).
 
+Every session writes a log to the SD card (`apps/flatground/logs/`): frame timing, memory, every flick, landing
+and bail with its numbers, and the stick ranges seen. `tools\get_logs.ps1` fetches them from the card. See
+[docs/logging.md](docs/logging.md).
+
 The game ships with original placeholder art only. If you own Skate 3 for Xbox 360, `fg_import` can convert
 assets from your own disc image for your own use: see [docs/importing.md](docs/importing.md). No game data
 is ever included in this repository.
