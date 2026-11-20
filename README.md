@@ -3,30 +3,50 @@
 An original skateboarding game for the Nintendo Wii, written in Rust. Physics-driven board, flick-stick
 tricks on the C-stick, played on a GameCube controller. Runs from the Homebrew Channel.
 
-Status: **skeleton**. One placeholder park (kicker, funbox, ledge, manual pad, bank), pushing, carving,
-ollies, nollies, kickflips, heelflips, shove-its, air spins, fakie landings and bails. Tested on the PC
-and on an emulated Wii CPU. **Not yet run on a Wii or in Dolphin.** Plan: [ROADMAP.md](ROADMAP.md).
+Status: **skeleton**. One placeholder park (kicker, funbox, ledge, manual pad, bank) and Skate 3-style
+riding: goofy or regular, fakie and switch, held pushes and mongo pushes, foot and tail brakes,
+powerslides and reverts, kick turns, 30 flick tricks (every flip, shove-it and varial, and their nollie
+versions), held double and triple kickflips, air spins that reward a wind-up, grabs, manuals, hippie jumps,
+50-50s and boardslides. With your own Skate 3 disc the build also takes Skate 3's own riding numbers and
+flick shapes from it. Tested on the PC and on an emulated Wii CPU. **Not yet run on a Wii or in Dolphin.**
+Plan: [ROADMAP.md](ROADMAP.md).
 
 ## Controls (GameCube pad, port 1)
+Laid out like Skate 3 on an Xbox 360 pad, by where each button sits (Xbox A, X, B, Y are the GameCube's A, B,
+X, Y). The default stance is goofy, as in Skate 3.
+
 | Input | Action |
 |---|---|
-| A | Push |
-| B | Brake |
-| Control stick | Steer; spin in the air |
-| C-stick: pull back, then flick up | Ollie |
-| ... flick up-left / up-right | Kickflip / heelflip |
-| ... roll around the left / right edge up | Pop shove-it / FS shove-it |
-| C-stick: push forward, then flick down | Nollie |
-| Control stick down / up while rolling | Manual / nose manual (keep the balance marker centred) |
-| R / L / both triggers in the air | Indy / melon / mute grab (let go before landing) |
+| A (hold for a stronger push; keep holding to keep pushing) | Push |
+| B | Mongo push |
+| A + B, then let go | Hippie jump (hold longer to jump higher) |
+| X | Foot brake |
+| Control stick | Steer (pushed far to the side and a little back: hard turn); spin in the air (a quick wind-up just before the pop spins faster) |
+| Control stick fully back and to one side | Powerslide; just after landing, a revert |
+| Control stick hard to the side, nearly stopped | Kick turn |
+| C-stick: pull back, then flick forward | Ollie (a quicker flick pops higher) |
+| ... flick forward and to one side | Kickflip / heelflip (hold the flick at the end: double, triple) |
+| ... roll round the back edge to the front | Pop shove-it / FS shove-it (further round: 360 shove-its) |
+| ... roll a quarter round, then flick across | Varial kickflip / heelflip, hardflip, inward heelflip |
+| ... roll three quarters round, then flick across | 360 flip, laser flip, 360 hardflip, 360 inward heelflip |
+| C-stick: push forward, then flick back | Nollie, and the nollie version of each trick |
+| C-stick held lightly back / forward while rolling | Manual / nose manual (keep the balance marker centred); fully over drags the tail or nose to brake |
+| L / R in the air | Left-hand / right-hand grab (indy, melon; both: mute) |
 | Come down onto a rail (board along it / across it) | 50-50 / boardslide; flick to pop off |
+| Rolling tail first (fakie), push | The rider turns round and pushes switch |
 | HOME (Wii Remote) or START + Z | Quit to the Homebrew Channel |
+
+The flick directions are for a goofy rider; regular and switch mirror them (a goofy kickflip flick is a
+heelflip for a regular rider), as in Skate 3.
 
 ## Layout
 ```
 game_core/       the game: no_std + alloc, unit-tested on the host and under qemu (PowerPC 750CL)
-  flick.rs         flick-stick trick recogniser
-  skater.rs        board physics, landing rules, trick scoring
+  flick.rs         the flick stick: gestures, crouch, manual hold
+  gesture.rs       Skate 3-style stick-shape recogniser, the 30 flick tricks and their stance mirroring
+  tuning.rs        every riding number (built in, or Skate 3's from the player's disc)
+  skater.rs        board physics, stance, pushing, braking, landing rules, trick scoring
+  camera.rs        chase camera after Skate 3's low riding camera
   park.rs          height-field park made of blocks and ramps (placeholder geometry in code)
   game.rs          update + render loop; draws only through gfx::Gfx
   character.rs     imported skinned character: pack parsing, clip sampling, CPU skinning
