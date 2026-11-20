@@ -29,7 +29,8 @@ content second.
 - [x] Manuals and nose manuals (C-stick held lightly, with a balance meter), grabs on the triggers
 - [x] Reverts
 - [x] Air spin with Skate 3's wind-up; hippie jumps; held double/triple kickflips
-- [ ] Ramps and quarter pipes you can go vertical on (needs a real surface model, not only a height field)
+- [x] Ramps and quarter pipes you can go vertical on: the board follows any surface under its trucks (ray
+  probes against the park's triangles), airs out over coping, wallrides, pumping, bails from impacts
 - [ ] Scripted Dolphin runs from `game_core::autoplay`, with screenshots in CI-like checks
 - [ ] Late flips, finger flips, dark catches, board-sideways flicks (shapes are already converted)
 
@@ -61,7 +62,8 @@ content second.
 
 ## Phase 4: Game
 - [x] Grinds: 50-50 and boardslide on rails (imported parks and the demo ledge)
-- [ ] More grinds and slides (5-0, nosegrind, crooked, lipslide...) and balance
+- [x] Grinds and slides chosen by how the board meets the rail (11 kinds, frontside/backside)
+- [ ] Grind balance; blunts, darkslides; a light physics fall for bails (Skate 3's ragdoll)
 - [ ] Skater animation (skinned, original)
 - [ ] Session goals, combo system, replay
 - [ ] Sound (ASND): rolling, pop, landing

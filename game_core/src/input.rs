@@ -59,8 +59,10 @@ pub struct Pad {
     pub pressed: u32,
 }
 
-const MAIN_RANGE: f32 = 72.0;
-const C_RANGE: f32 = 60.0;
+/// Raw stick values at full deflection, measured on a GameCube pad (session logs: the main stick reached
+/// +-103, the C-stick +-97). Skate 3's conditioning then counts 95% of this as fully over.
+pub const MAIN_RANGE: f32 = 100.0;
+pub const C_RANGE: f32 = 92.0;
 /// Skate 3's stick conditioning: a radial dead zone, then full deflection a little before the rim.
 const DEAD_ZONE: f32 = 0.25;
 const FULL: f32 = 0.95;

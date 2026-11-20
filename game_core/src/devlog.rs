@@ -193,6 +193,15 @@ impl DevLog {
             ));
             self.fakie = s.fakie;
         }
+        // While in a manual, how it balances (a few times a second): why manuals tip over.
+        if let Some(m) = &s.manual
+            && self.frames.is_multiple_of(15)
+        {
+            out.push(format!(
+                "manual: balance {:+.2}, C-stick y {:+.2} (light hold {:.2}..{:.2}), brake {:.2}",
+                m.balance, flick.stick[1], 0.25, 0.9, m.brake
+            ));
+        }
         let manual = s.manual.is_some();
         if manual != self.manual {
             out.push(match &s.manual {
@@ -264,6 +273,17 @@ impl DevLog {
             self.trig[1],
             self.flicks,
         );
+        // A pad that reaches further than the game assumes (the outer part reads as fully over).
+        let main = r[0].hi.max(-r[0].lo).max(r[1].hi).max(-r[1].lo) as f32;
+        let c = r[2].hi.max(-r[2].lo).max(r[3].hi).max(-r[3].lo) as f32;
+        let mut line = line;
+        if main > crate::input::MAIN_RANGE * 1.08 || c > crate::input::C_RANGE * 1.08 {
+            line.push_str(&format!(
+                " | NOTE: this pad reaches main {main:.0} / C {c:.0}, beyond the {:.0} / {:.0} the game assumes",
+                crate::input::MAIN_RANGE,
+                crate::input::C_RANGE
+            ));
+        }
         self.ranges = [Range::EMPTY; 4];
         self.trig = [0; 2];
         self.frames = 0;

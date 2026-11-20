@@ -63,6 +63,61 @@ pub trait Terrain {
     fn rails(&self) -> &[Rail] {
         &[]
     }
+    /// The first surface a ray from `from` along the unit `dir` meets within `max`: how far, where, and
+    /// the surface normal (facing back along the ray). A height field is marched: its ground faces up and
+    /// a rise between two steps is a wall facing the ray.
+    fn raycast(&self, from: Vec3, dir: Vec3, max: f32) -> Option<Hit> {
+        let top = |p: Vec3| self.ground(p.x, p.z, p.y + 0.5);
+        let below = |p: Vec3| p.y < top(p).height - 1e-4;
+        if below(from) {
+            return None;
+        }
+        let step = 0.04;
+        let n = (libm::ceilf(max / step) as usize).clamp(1, 400);
+        let mut prev = from;
+        for i in 1..=n {
+            let t = (i as f32 * step).min(max);
+            let p = from + dir * t;
+            if below(p) {
+                // Narrow down the crossing.
+                let (mut lo, mut hi) = (t - step.min(t), t);
+                for _ in 0..10 {
+                    let mid = (lo + hi) * 0.5;
+                    if below(from + dir * mid) {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                let at = from + dir * hi;
+                // Came in through the top, or through the side of something higher?
+                let was = top(prev).height;
+                let s = top(at);
+                let normal = if was + 0.02 < s.height && prev.y < s.height - 0.02 {
+                    let h = v3(-dir.x, 0.0, -dir.z);
+                    h.normalize_or(Vec3::UP)
+                } else {
+                    s.normal
+                };
+                return Some(Hit {
+                    t: hi,
+                    point: at,
+                    normal,
+                });
+            }
+            prev = p;
+        }
+        None
+    }
+}
+
+/// Where a ray met a surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    pub t: f32,
+    pub point: Vec3,
+    /// Unit surface normal, facing back along the ray.
+    pub normal: Vec3,
 }
 
 impl Terrain for Park {

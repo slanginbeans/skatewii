@@ -416,7 +416,14 @@ void fg_log_start(const char *argv0) {
 }
 
 void fg_log_tick(void) {
+    // Writing to the card happens here every couple of seconds: say when it takes long enough to cost a
+    // frame (the next line shows up with the next write).
+    u32 t0 = fg_time_us();
     log_tick();
+    u32 spent = fg_time_us() - t0;
+    if (spent > 3000) {
+        log_printf("log write to the card took %u.%u ms", spent / 1000, (spent / 100) % 10);
+    }
 }
 
 void fg_log_stop(void) {

@@ -146,14 +146,12 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
             let Some(g) = &s.grind else {
                 return idle;
             };
-            let role = match g.kind {
-                GrindKind::FiftyFifty => "grind/5050",
-                GrindKind::Boardslide => "grind/bslide",
-            };
-            if has(role) {
-                Pick { role, time: g.time }
-            } else {
-                idle
+            // This grind on this side, else the other side, else a 50-50.
+            let [want, other] = grind_roles(g.kind, g.frontside);
+            let fallback = grind_roles(GrindKind::FiftyFifty, g.frontside)[0];
+            match [want, other, fallback].into_iter().find(|r| has(r)) {
+                Some(role) => Pick { role, time: g.time },
+                None => idle,
             }
         }
         Mode::Air { time } => {
@@ -338,6 +336,24 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
             }
         }
     }
+}
+
+/// The clip roles for a grind: this side first, then the other side.
+pub fn grind_roles(kind: GrindKind, frontside: bool) -> [&'static str; 2] {
+    let [fs, bs] = match kind {
+        GrindKind::FiftyFifty => ["grind/5050_fs", "grind/5050_bs"],
+        GrindKind::FiveO => ["grind/50_fs", "grind/50_bs"],
+        GrindKind::Nosegrind => ["grind/ngrind_fs", "grind/ngrind_bs"],
+        GrindKind::Crooked => ["grind/crooks_fs", "grind/crooks_bs"],
+        GrindKind::Willy => ["grind/willy_fs", "grind/willy_bs"],
+        GrindKind::Feeble => ["grind/feeble_fs", "grind/feeble_bs"],
+        GrindKind::Smith => ["grind/smith_fs", "grind/smith_bs"],
+        GrindKind::Boardslide => ["grind/bslide_fs", "grind/bslide_bs"],
+        GrindKind::Lipslide => ["grind/lipslide_fs", "grind/lipslide_bs"],
+        GrindKind::Noseslide => ["grind/nslide_fs", "grind/nslide_bs"],
+        GrindKind::Tailslide => ["grind/tslide_fs", "grind/tslide_bs"],
+    };
+    if frontside { [fs, bs] } else { [bs, fs] }
 }
 
 const PUSH: [&str; 3] = ["push/into", "push/cyc1", "push/cyc2"];

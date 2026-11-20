@@ -364,10 +364,12 @@ impl Game {
         } else {
             s.board_yaw_offset()
         };
-        Xform::new(
-            Mat3::yaw_on_surface(s.heading + s.spin + extra, s.normal),
-            s.pos,
-        )
+        // The board's own frame (its nose and the surface, or its up in the air), turned about its up by
+        // a powerslide or revert.
+        let frame = s.board_frame();
+        let up = frame.cols[1];
+        let nose = crate::skater::rotate(frame.cols[2], up, extra);
+        Xform::new(Mat3::from_cols(up.cross(nose), up, nose), s.pos)
     }
 
     /// Where the imported character is drawn: board space, tipped over on a bail.

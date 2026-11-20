@@ -137,9 +137,30 @@ pub const CLIPS: &[(&str, &str)] = &[
     // Bails: the fall, then getting up.
     ("bail/fall", "w_brace_lean090twist000_n_0_n"),
     ("bail/getup", "w_recovery_onfront_n_0_n"),
-    // Grinds, held on a rail: board along it, board across it.
-    ("grind/5050", "g_5050_fs_low_0_cyc"),
-    ("grind/bslide", "g_bslide_fs_low_0_cyc"),
+    // Grinds and slides, held on a rail, frontside and backside (Skate 3 picks them from how the board
+    // meets the rail).
+    ("grind/5050_fs", "g_5050_fs_low_0_cyc"),
+    ("grind/5050_bs", "g_5050_bf_low_0_cyc"),
+    ("grind/50_fs", "g_50_bf_low_0_cyc"),
+    ("grind/50_bs", "g_50_bs_low_0_cyc"),
+    ("grind/ngrind_fs", "g_ngrind_bf_low_0_cyc"),
+    ("grind/ngrind_bs", "g_ngrind_bs_low_0_cyc"),
+    ("grind/crooks_fs", "g_crooks_fs_low_0_cyc"),
+    ("grind/crooks_bs", "g_crooks_bs_low_0_cyc"),
+    ("grind/willy_fs", "g_willy_bf_low_0_cyc"),
+    ("grind/willy_bs", "g_willy_bs_low_0_cyc"),
+    ("grind/feeble_fs", "g_feeble_fs_low_0_cyc"),
+    ("grind/feeble_bs", "g_feeble_bs_low_0_cyc"),
+    ("grind/smith_fs", "g_smith_fs_low_0_cyc"),
+    ("grind/smith_bs", "g_smith_bs_low_0_cyc"),
+    ("grind/bslide_fs", "g_bslide_fs_low_0_cyc"),
+    ("grind/bslide_bs", "g_bslide_bs_low_0_cyc"),
+    ("grind/lipslide_fs", "g_lipslide_fs_low_0_cyc"),
+    ("grind/lipslide_bs", "g_lipslide_bs_low_0_cyc"),
+    ("grind/nslide_fs", "g_nslide_fs_low_0_cyc"),
+    ("grind/nslide_bs", "g_nslide_bs_low_0_cyc"),
+    ("grind/tslide_fs", "g_tslide_fs_low_0_cyc"),
+    ("grind/tslide_bs", "g_tslide_bs_low_0_cyc"),
 ];
 
 struct Options {
