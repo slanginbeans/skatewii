@@ -10,7 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
+#include <time.h>
 
+#include "fg_log.h"
 #include "fg_platform.h"
 
 #define FIFO_SIZE (256 * 1024)
@@ -30,12 +32,29 @@ static u32 arena_used;
 enum { MODE_DIRECT, MODE_INDEXED, MODE_TEXTURED };
 static int mode = MODE_DIRECT;
 static int alpha_test_on;
+// Last frame's waits, measured in fg_end_frame, and the arena use behind it.
+static u32 gpu_wait_us, vsync_wait_us, last_arena_used, last_retrace, missed;
+// Refreshes so far, counted by the video interrupt.
+static volatile u32 retraces;
+static void on_retrace(u32 count) {
+    retraces = count;
+}
+// Storage: 0 untried, 1 mounted, -1 none.
+static int fat_state;
+
+static int mount(void) {
+    if (fat_state == 0) {
+        fat_state = fatInitDefault() ? 1 : -1;
+    }
+    return fat_state > 0;
+}
 
 void fg_platform_init(void) {
     VIDEO_Init();
     PAD_Init();
     WPAD_Init();
 
+    VIDEO_SetPostRetraceCallback(on_retrace);
     rmode = VIDEO_GetPreferredMode(NULL);
     if (CONF_GetAspectRatio() == CONF_ASPECT_16_9) {
         aspect = 16.0f / 9.0f;
@@ -278,11 +297,7 @@ uint32_t fg_time_us(void) {
 }
 
 void *fg_load_file(const char *path, uint32_t *size) {
-    static int fat_state; // 0 untried, 1 mounted, -1 no storage
-    if (fat_state == 0) {
-        fat_state = fatInitDefault() ? 1 : -1;
-    }
-    if (fat_state < 0) {
+    if (!mount()) {
         return NULL;
     }
     FILE *f = fopen(path, "rb");
@@ -327,25 +342,107 @@ void fg_draw_2d(const FgVertex *verts, uint32_t count) {
 }
 
 void fg_end_frame(void) {
+    u32 t0 = fg_time_us();
     GX_DrawDone();
+    u32 t1 = fg_time_us();
     cur_fb ^= 1;
     GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
     GX_SetColorUpdate(GX_TRUE);
     GX_CopyDisp(xfb[cur_fb], GX_TRUE);
     VIDEO_SetNextFramebuffer(xfb[cur_fb]);
     VIDEO_Flush();
+    // A frame that ran past a refresh shows up as more than one retrace since the last one.
+    u32 r = retraces;
+    if (last_retrace && r - last_retrace > 1) {
+        missed += r - last_retrace - 1;
+    }
     VIDEO_WaitVSync();
+    last_retrace = retraces;
+    gpu_wait_us = t1 - t0;
+    vsync_wait_us = fg_time_us() - t1;
+    last_arena_used = arena_used;
+}
+
+void fg_frame_stats(FgFrameStats *out) {
+    struct mallinfo mi = mallinfo();
+    out->gpu_wait_us = gpu_wait_us;
+    out->vsync_wait_us = vsync_wait_us;
+    out->missed_vsyncs = missed;
+    missed = 0;
+    out->arena_used = last_arena_used;
+    out->mem1_free = (u32)SYS_GetArena1Hi() - (u32)SYS_GetArena1Lo();
+    out->mem2_free = (u32)SYS_GetArena2Hi() - (u32)SYS_GetArena2Lo();
+    out->heap_used = (u32)mi.uordblks;
+    out->_pad = 0;
+}
+
+static uint32_t boot_ms(void) {
+    return (uint32_t)(ticks_to_millisecs(gettime()));
+}
+
+void fg_log_start(const char *argv0) {
+    char dir[128] = "sd:/apps/flatground";
+    log_set_clock(boot_ms);
+    // The loader passes where boot.dol was started from ("sd:/apps/flatground/boot.dol"): log next to it.
+    if (argv0 && strchr(argv0, ':')) {
+        const char *slash = strrchr(argv0, '/');
+        if (slash && slash > argv0 && (size_t)(slash - argv0) < sizeof(dir)) {
+            memcpy(dir, argv0, (size_t)(slash - argv0));
+            dir[slash - argv0] = 0;
+        }
+    }
+    int stored = mount() && log_open(dir, time(NULL));
+    if (!stored && mount() && strncmp(dir, "usb:", 4) != 0) {
+        stored = log_open("usb:/apps/flatground", time(NULL));
+    }
+    log_important("flatground session: started from %s, log %s", argv0 ? argv0 : "(no path)",
+                  stored ? log_path() : "not stored (no writable SD/USB)");
+    const char *tv = "?";
+    switch (rmode->viTVMode >> 2) {
+    case VI_NTSC: tv = "NTSC"; break;
+    case VI_PAL: tv = "PAL50"; break;
+    case VI_EURGB60: tv = "PAL60"; break;
+    case VI_MPAL: tv = "MPAL"; break;
+    }
+    log_printf("video: %s %s, %ux%u framebuffer, %ux%u EFB, %s, aa %d, %.0f Hz", tv,
+               (rmode->viTVMode & VI_NON_INTERLACE) ? "progressive" : "interlaced", rmode->fbWidth,
+               rmode->xfbHeight, rmode->fbWidth, rmode->efbHeight, aspect > 1.5f ? "16:9" : "4:3", rmode->aa,
+               1.0f / fg_frame_dt());
+    log_printf("memory: MEM1 %u KB free, MEM2 %u KB free", ((u32)SYS_GetArena1Hi() - (u32)SYS_GetArena1Lo()) / 1024,
+               ((u32)SYS_GetArena2Hi() - (u32)SYS_GetArena2Lo()) / 1024);
+}
+
+void fg_log_tick(void) {
+    log_tick();
+}
+
+void fg_log_stop(void) {
+    log_important("session over (quit to the loader)");
+    log_close();
+}
+
+void fg_log(const char *line, uint32_t len, int32_t important) {
+    log_line(line, len, important);
 }
 
 void fg_panic(const char *msg, uint32_t len) {
+    log_important("CRASH: %.*s", (int)len, msg);
+    char path[224];
+    snprintf(path, sizeof(path), "%s", log_path()[0] ? log_path() : "(not stored)");
+    log_close();
     GX_AbortFrame();
     void *fb = xfb[cur_fb];
     VIDEO_ClearFrameBuffer(rmode, fb, COLOR_BLACK);
     console_init(fb, 20, 20, rmode->fbWidth, rmode->xfbHeight, rmode->fbWidth * VI_DISPLAY_PIX_SZ);
     VIDEO_SetNextFramebuffer(fb);
     VIDEO_Flush();
-    printf("\n\n  flatground crashed:\n\n  %.*s\n\n  Press HOME or START to return to the loader.\n",
-           (int)len, msg);
+    printf("\n\n  flatground crashed:\n\n  %.*s\n\n  Last log lines:\n", (int)len, msg);
+    const char *tail[LOG_TAIL_LINES];
+    int n = log_tail(tail, 10);
+    for (int i = 0; i < n; i++) {
+        printf("  %.74s\n", tail[i]);
+    }
+    printf("\n  Log: %s\n  Press HOME or START to return to the loader.\n", path);
     for (;;) {
         VIDEO_WaitVSync();
         PAD_ScanPads();

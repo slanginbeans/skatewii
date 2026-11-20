@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use crate::camera::ChaseCam;
 use crate::character::{self, Character};
 use crate::collision;
+use crate::devlog::DevLog;
 use crate::flick::{FlickInput, FlickOut};
 use crate::gesture;
 use crate::gfx::{Gfx, MeshBuilder, SCREEN_W, Vertex, rgb};
@@ -27,35 +28,67 @@ const IMPORTED_TO_BOARD: Mat3 = Mat3::IDENTITY;
 const POPUP_TIME: f32 = 1.8;
 const HINT_TIME: f32 = 12.0;
 
-/// CPU time per frame (update + render), measured by the platform: a running average and the worst frame
-/// of the last second.
+/// Frame timing measured by the platform, over windows of a second: the CPU's own work (update + render, not
+/// counting waits), the time spent waiting for the GPU to finish, the time idle until the next refresh, and
+/// frames that missed their refresh.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameCost {
+    /// Running average and the worst frame of the last full window (microseconds).
     pub avg_us: f32,
-    /// Worst frame of the last full window.
     pub peak_us: u32,
+    pub gpu_avg_us: f32,
+    pub idle_avg_us: f32,
+    /// Frames that missed their refresh in the last full window.
+    pub dropped: u32,
     window_peak: u32,
+    window_dropped: u32,
     frames: u32,
+    started: bool,
 }
 
 impl FrameCost {
-    /// Frames per peak window (one second at 60 Hz).
-    const WINDOW: u32 = 60;
+    /// Frames per window (one second at 60 Hz).
+    pub const WINDOW: u32 = 60;
 
-    pub fn add(&mut self, us: u32) {
-        self.avg_us = if self.frames == 0 && self.peak_us == 0 {
-            us as f32
-        } else {
-            self.avg_us + (us as f32 - self.avg_us) * 0.05
+    /// One frame: CPU work, GPU wait, idle wait (microseconds), and refreshes missed since the last frame.
+    pub fn add(&mut self, cpu_us: u32, gpu_us: u32, idle_us: u32, missed: u32) {
+        let first = !self.started;
+        self.started = true;
+        let ease = |avg: f32, v: u32| {
+            if first {
+                v as f32
+            } else {
+                avg + (v as f32 - avg) * 0.05
+            }
         };
-        self.window_peak = self.window_peak.max(us);
+        self.avg_us = ease(self.avg_us, cpu_us);
+        self.gpu_avg_us = ease(self.gpu_avg_us, gpu_us);
+        self.idle_avg_us = ease(self.idle_avg_us, idle_us);
+        self.window_peak = self.window_peak.max(cpu_us);
+        self.window_dropped += missed;
         self.frames += 1;
         if self.frames == Self::WINDOW {
             self.peak_us = self.window_peak;
+            self.dropped = self.window_dropped;
             self.window_peak = 0;
+            self.window_dropped = 0;
             self.frames = 0;
         }
     }
+}
+
+/// Where the CPU went in the last frame (microseconds), when the platform gives the game a clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SectionTimes {
+    /// Input, physics, camera.
+    pub physics_us: u32,
+    /// Posing and skinning the imported skater.
+    pub skin_us: u32,
+    /// Building and submitting the frame's draws (not waiting for the GPU).
+    pub render_us: u32,
+    /// Park meshes and vertices drawn last frame.
+    pub park_draws: u32,
+    pub park_verts: u32,
 }
 
 struct Popup {
@@ -92,7 +125,21 @@ pub struct Game {
     pub frame_cost: Option<FrameCost>,
     /// A status line shown under the controls hint (for example whether the imported skater loaded).
     pub notice: Option<String>,
+    /// Development log lines from the last updates; the platform takes them (`log.drain(..)`) and writes
+    /// them out. Capped while nobody takes them.
+    pub log: Vec<String>,
+    devlog: DevLog,
+    status_timer: f32,
+    /// A microsecond clock from the platform, for [`Game::times`] (none: no timing).
+    pub timer: Option<fn() -> u32>,
+    pub times: SectionTimes,
+    render_times: core::cell::Cell<(u32, u32, u32)>,
 }
+
+/// Lines kept while nobody takes them.
+const LOG_CAP: usize = 512;
+/// Seconds between status lines.
+const STATUS_EVERY: f32 = 1.0;
 
 /// The imported park if there is one, else the demo park (a free function so callers can borrow other
 /// fields of the game at the same time).
@@ -133,6 +180,12 @@ impl Game {
             notice: None,
             rider: None,
             imported_park: None,
+            log: Vec::new(),
+            devlog: DevLog::new(),
+            status_timer: 0.0,
+            timer: None,
+            times: SectionTimes::default(),
+            render_times: core::cell::Cell::new((0, 0, 0)),
         }
     }
 
@@ -207,12 +260,15 @@ impl Game {
             flick.flick = None;
         }
         self.flick_out = flick;
+        let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
+        let t0 = now(self.timer);
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
         self.skater.step(ground, &pad, &flick, dt, &mut self.events);
         if self.events.contains(&Event::Respawned) {
             self.flick.reset();
         }
         self.cam.update(&self.skater, ground, dt);
+        let t1 = now(self.timer);
         if self.rider.is_some() {
             let rot = self.imported_xform().rot;
             let s = &self.skater;
@@ -220,6 +276,32 @@ impl Game {
             let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, s.tuning.gravity);
             if let Some(r) = &mut self.rider {
                 r.update(&self.skater, self.clock, land_in, dt, rot);
+            }
+        }
+        let t2 = now(self.timer);
+        let (render_us, park_draws, park_verts) = self.render_times.get();
+        self.times = SectionTimes {
+            physics_us: t1.wrapping_sub(t0),
+            skin_us: t2.wrapping_sub(t1),
+            render_us,
+            park_draws,
+            park_verts,
+        };
+        // Development log: what happened this frame, and a status line now and then.
+        if self.log.len() < LOG_CAP {
+            let cam = self.cam.distance();
+            self.devlog.observe(
+                &self.skater,
+                raw,
+                &self.flick_out,
+                &self.events,
+                cam,
+                &mut self.log,
+            );
+            self.status_timer += dt;
+            if self.status_timer >= STATUS_EVERY {
+                self.status_timer = 0.0;
+                self.log.push(self.devlog.status(&self.skater, cam));
             }
         }
 
@@ -254,13 +336,21 @@ impl Game {
     }
 
     pub fn render(&self, gfx: &mut dyn Gfx) {
+        let now = || self.timer.map_or(0, |f| f());
+        let t0 = now();
         gfx.begin_frame(&self.cam.camera(), SKY);
-        match &self.imported_park {
+        let (draws, verts) = match &self.imported_park {
             Some(p) => p.draw(gfx, self.cam.camera().eye),
-            None => gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34()),
-        }
+            None => {
+                gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34());
+                (1, self.park_mesh.len() as u32)
+            }
+        };
         self.draw_skater(gfx);
         self.draw_hud(gfx);
+        // Before end_frame: that waits for the GPU and the TV, which the platform measures itself.
+        self.render_times
+            .set((now().wrapping_sub(t0), draws, verts));
         gfx.end_frame();
     }
 
@@ -378,14 +468,16 @@ impl Game {
             }
         }
         if let Some(c) = &self.frame_cost {
-            // Budget: 16.7 ms a frame at 60 Hz.
+            // The CPU's own work against the 16.7 ms frame at 60 Hz; GPU: waiting for it to finish drawing.
             let ms = |us: f32| us / 1000.0;
             let line = format!(
-                "CPU {:.1} MS  PEAK {:.1}",
+                "CPU {:.1} PEAK {:.1}  GPU {:.1}  DROP {}",
                 ms(c.avg_us),
-                ms(c.peak_us as f32)
+                ms(c.peak_us as f32),
+                ms(c.gpu_avg_us),
+                c.dropped
             );
-            let over = c.avg_us > 14_000.0 || c.peak_us > 16_600;
+            let over = c.avg_us + c.gpu_avg_us > 14_000.0 || c.dropped > 0;
             let colour = if over {
                 rgb(255, 120, 100)
             } else {
@@ -446,17 +538,69 @@ mod tests {
     #[test]
     fn frame_cost_averages_and_keeps_last_seconds_peak() {
         let mut c = FrameCost::default();
-        c.add(4000);
+        c.add(4000, 2000, 10000, 0);
         assert_eq!(c.avg_us, 4000.0, "first sample starts the average");
+        assert_eq!(c.gpu_avg_us, 2000.0);
         for _ in 1..59 {
-            c.add(4000);
+            c.add(4000, 2000, 10000, 0);
         }
-        c.add(9000); // frame 60 closes the window
+        c.add(9000, 2000, 5000, 2); // frame 60 closes the window
         assert_eq!(c.peak_us, 9000);
+        assert_eq!(c.dropped, 2);
         assert!(c.avg_us > 4000.0 && c.avg_us < 4500.0, "{}", c.avg_us);
         for _ in 0..60 {
-            c.add(4000);
+            c.add(4000, 2000, 10000, 0);
         }
         assert_eq!(c.peak_us, 4000, "the spike has left the window");
+        assert_eq!(c.dropped, 0);
+    }
+
+    #[test]
+    fn the_game_logs_what_happens_and_times_itself() {
+        fn fake_clock() -> u32 {
+            use core::sync::atomic::{AtomicU32, Ordering};
+            static T: AtomicU32 = AtomicU32::new(0);
+            T.fetch_add(100, Ordering::Relaxed)
+        }
+        let mut g = Game::new();
+        g.timer = Some(fake_clock);
+        let mut run = crate::autoplay::KickerRun::new();
+        let mut gfx = Null;
+        for _ in 0..300 {
+            let pad = run.next(&g);
+            g.update(&pad, 1.0 / 60.0);
+            g.render(&mut gfx);
+        }
+        assert!(g.log.iter().any(|l| l.starts_with("pop: ")), "{:?}", g.log);
+        assert!(
+            g.log.iter().any(|l| l.starts_with("landed: ")),
+            "{:?}",
+            g.log
+        );
+        assert!(g.log.iter().filter(|l| l.starts_with("status: ")).count() >= 4);
+        assert!(g.times.physics_us > 0 && g.times.render_us > 0);
+        assert_eq!(g.times.park_draws, 1);
+        // Nobody takes the lines: they stop at the cap instead of growing forever.
+        for _ in 0..(60 * 600) {
+            g.update(&PadRaw::default(), 1.0 / 60.0);
+        }
+        assert!(g.log.len() <= LOG_CAP + 8);
+    }
+
+    /// Draws nothing.
+    struct Null;
+    impl Gfx for Null {
+        fn begin_frame(&mut self, _cam: &crate::gfx::Camera, _clear: u32) {}
+        fn draw_tris(&mut self, _v: &[Vertex], _m: &crate::math::Mat34) {}
+        fn draw_indexed(
+            &mut self,
+            _v: &[crate::gfx::TexVertex],
+            _i: &[u16],
+            _t: Option<&crate::gfx::Texture>,
+            _m: &crate::math::Mat34,
+        ) {
+        }
+        fn draw_2d(&mut self, _v: &[Vertex]) {}
+        fn end_frame(&mut self) {}
     }
 }

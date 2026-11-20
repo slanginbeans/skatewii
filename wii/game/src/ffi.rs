@@ -23,6 +23,22 @@ const _: () = {
     assert!(core::mem::offset_of!(FgTexture, format) == 8);
 };
 
+/// `FgFrameStats`: what the platform measured over the last frame, and memory.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FgFrameStats {
+    pub gpu_wait_us: u32,
+    pub vsync_wait_us: u32,
+    pub missed_vsyncs: u32,
+    pub arena_used: u32,
+    pub mem1_free: u32,
+    pub mem2_free: u32,
+    pub heap_used: u32,
+    pub _pad: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<FgFrameStats>() == 32);
+
 unsafe extern "C" {
     pub fn fg_begin_frame(
         eye: *const f32,
@@ -46,4 +62,6 @@ unsafe extern "C" {
     pub fn fg_time_us() -> u32;
     pub fn fg_load_file(path: *const c_char, size: *mut u32) -> *mut u8;
     pub fn fg_panic(msg: *const u8, len: u32) -> !;
+    pub fn fg_log(line: *const u8, len: u32, important: i32);
+    pub fn fg_frame_stats(out: *mut FgFrameStats);
 }

@@ -706,6 +706,8 @@ mod tests {
         s.landing = Some(Landing {
             kind: LandKind::Sketchy { frontside: true },
             time: 0.4,
+            crooked: 0.3,
+            impact: 2.0,
         });
         assert_eq!(
             pick(&s, 0.0, 0.0, &dur),
@@ -717,6 +719,8 @@ mod tests {
         s.landing = Some(Landing {
             kind: LandKind::Clean,
             time: 0.7,
+            crooked: 0.0,
+            impact: 2.0,
         });
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
         s.landing = None;

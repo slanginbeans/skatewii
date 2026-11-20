@@ -26,20 +26,20 @@ RUSTLIB     := ../target/$(RUST_TARGET)/release/libfg_game.a
 BUILD_ID    ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo dev)
 
 BUILD := build
-OBJS  := $(BUILD)/main.o $(BUILD)/fg_platform.o
+OBJS  := $(BUILD)/main.o $(BUILD)/fg_platform.o $(BUILD)/fg_log.o
 
 .PHONY: all package assets run clean rustlib
 all: $(BUILD)/flatground.dol
 
 # Cargo tracks its own dependencies; always ask it.
 rustlib:
-	cargo build --release -p fg_game --target $(RUST_TARGET)
+	FG_BUILD_ID=$(BUILD_ID) cargo build --release -p fg_game --target $(RUST_TARGET)
 $(RUSTLIB): rustlib
 
 $(BUILD):
 	mkdir -p $@
 
-$(BUILD)/%.o: platform/%.c platform/fg_platform.h | $(BUILD)
+$(BUILD)/%.o: platform/%.c platform/fg_platform.h platform/fg_log.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/flatground.elf: $(OBJS) $(RUSTLIB)

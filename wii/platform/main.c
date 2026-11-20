@@ -4,8 +4,9 @@
 
 #include "fg_platform.h"
 
-int main(void) {
+int main(int argc, char **argv) {
     fg_platform_init();
+    fg_log_start(argc > 0 ? argv[0] : NULL);
     fg_rust_init();
     const float dt = fg_frame_dt();
     for (;;) {
@@ -15,7 +16,9 @@ int main(void) {
             break;
         }
         fg_rust_frame(&pad, dt);
+        fg_log_tick();
     }
+    fg_log_stop();
     // Returning from main goes back to the Homebrew Channel / loader.
     return 0;
 }

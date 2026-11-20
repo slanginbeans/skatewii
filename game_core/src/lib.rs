@@ -15,6 +15,7 @@ pub mod autoplay;
 pub mod camera;
 pub mod character;
 pub mod collision;
+pub mod devlog;
 pub mod flick;
 pub mod game;
 pub mod gesture;

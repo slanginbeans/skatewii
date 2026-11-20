@@ -224,22 +224,29 @@ impl ImportedPark {
         chunks
     }
 
-    /// Draws what is within [`DRAW_DISTANCE`] of `eye`: the park's models, else its collision.
-    pub fn draw(&self, gfx: &mut dyn Gfx, eye: Vec3) {
+    /// Draws what is within [`DRAW_DISTANCE`] of `eye`: the park's models, else its collision. Returns how
+    /// many meshes and vertices it drew.
+    pub fn draw(&self, gfx: &mut dyn Gfx, eye: Vec3) -> (u32, u32) {
         let m = Xform::IDENTITY.to_mat34();
+        let (mut draws, mut verts) = (0, 0);
         for p in &self.models {
             let (dx, dz) = (p.center.x - eye.x, p.center.z - eye.z);
             let reach = DRAW_DISTANCE + p.radius;
             if dx * dx + dz * dz <= reach * reach {
                 gfx.draw_indexed(&p.verts, &p.indices, p.texture.as_ref(), &m);
+                draws += 1;
+                verts += p.verts.len() as u32;
             }
         }
         for c in &self.chunks {
             let (dx, dz) = (c.center.x - eye.x, c.center.z - eye.z);
             if dx * dx + dz * dz <= DRAW_DISTANCE * DRAW_DISTANCE {
                 gfx.draw_tris(&c.verts, &m);
+                draws += 1;
+                verts += c.verts.len() as u32;
             }
         }
+        (draws, verts)
     }
 
     pub fn vertex_count(&self) -> usize {
