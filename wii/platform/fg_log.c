@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "fg_log.h"
 
@@ -124,6 +125,9 @@ void log_flush(void) {
     if (s_file && s_len) {
         fwrite(s_buf, 1, (size_t)s_len, s_file);
         fflush(s_file);
+        // Commit to the card: the SD driver keeps the file's size in a cache until the file is closed or
+        // synced, and a crash, power-off or emulator stop never closes it.
+        fsync(fileno(s_file));
         s_len = 0;
     } else if (!s_file && s_len > BUF_SIZE / 2) {
         s_len = 0; // no card: the tail still has the latest lines

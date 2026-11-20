@@ -6,8 +6,8 @@ Every run of the game on a Wii (or in Dolphin) writes a log to the SD card (or U
 apps/flatground/logs/session_YYYYMMDD_HHMMSS.txt
 ```
 
-The newest 10 sessions are kept. Lines are buffered in memory and written out every 2 seconds, so writing never
-stalls a frame. Errors, bails and crashes are written at once, and a crash also shows the last log lines on the
+The newest 10 sessions are kept. Lines are buffered in memory and written out (and synced to the card, so a crash,
+power-off or emulator stop keeps them) every 2 seconds. Errors, bails and crashes are written at once, and a crash also shows the last log lines on the
 crash screen.
 
 ## Reading them
@@ -15,6 +15,10 @@ crash screen.
   `powershell -ExecutionPolicy Bypass -File tools\get_logs.ps1`. It copies every session log it finds on any
   drive (and from Dolphin's virtual SD card, `dist\apps\flatground\logs`) into `out\logs\` and prints the newest
   one's last lines.
+- **From Dolphin:** `build.bat dolphin` runs the game with `dist\` as its SD card. Dolphin copies the card back
+  into `dist\` when emulation stops, so the logs appear in `distppslatground\logs` after you close it (the
+  game's Dolphin profile stops without asking). If Dolphin isn't found, put `dolphin=<path to Dolphin.exe>` in
+  `fg_local.txt` at the repo root (git-ignored).
 - **On the PC without a Wii:** `cargo run --release -p fg_preview -- out/preview --tour --log` prints the same game
   lines as the preview plays.
 

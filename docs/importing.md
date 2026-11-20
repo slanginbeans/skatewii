@@ -22,7 +22,8 @@ Copy `dist/apps/flatground` to the SD card's `apps` folder and the game finds it
 inside the repo folder, so put the image there (`*.iso` is git-ignored) or point `FG_ISO` at a path inside it.
 
 `build.bat dolphin` then starts the game in Dolphin (the regular build from dolphin-emu.org) with its own
-profile in `out/dolphin` and `dist/` as the virtual SD card, so it loads the same files a Wii would.
+profile in `out/dolphin` and `dist/` as the virtual SD card, so it loads the same files a Wii would. Dolphin is
+looked for in the usual places, then `FG_DOLPHIN`, then `dolphin=<path>` in `fg_local.txt`.
 
 The game shows on start-up whether the imported skater, park and rules loaded (`RULES: DISC` or
 `BUILT-IN`), and its CPU time per frame (average and the

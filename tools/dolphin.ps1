@@ -8,6 +8,13 @@ $ErrorActionPreference = 'Stop'
 
 function Find-Dolphin {
     if ($env:FG_DOLPHIN -and (Test-Path $env:FG_DOLPHIN)) { return $env:FG_DOLPHIN }
+    # The repo's local settings (git-ignored): dolphin=<path to Dolphin.exe>
+    $local = Join-Path $Repo 'fg_local.txt'
+    if (Test-Path $local) {
+        foreach ($line in Get-Content -LiteralPath $local) {
+            if ($line -match '^\s*dolphin\s*=\s*(.+?)\s*$' -and (Test-Path $Matches[1])) { return $Matches[1] }
+        }
+    }
     $candidates = @(
         "$env:ProgramFiles\Dolphin\Dolphin.exe",
         "$env:ProgramFiles\Dolphin-x64\Dolphin.exe",
@@ -73,6 +80,9 @@ Set-IniValue $ini 'General' 'WiiSDCardSyncFolder' ($sdFolder + '\')
 Set-IniValue $ini 'General' 'WiiSDCardPath' (Join-Path $user 'Wii\sd.raw')
 # GameCube pad in port 1 (the game's controls); 6 = standard controller.
 Set-IniValue $ini 'Core' 'SIDevice0' '6'
+# Stop without a confirmation box: Dolphin writes the virtual SD card back to dist\ (the game's logs) when
+# emulation stops, so closing the window cleanly is what brings the logs out.
+Set-IniValue $ini 'Interface' 'ConfirmStop' 'False'
 # Show the frame rate on screen.
 Set-IniValue (Join-Path $user 'Config\GFX.ini') 'Settings' 'ShowFPS' 'True'
 
