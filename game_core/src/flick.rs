@@ -1,278 +1,149 @@
-//! Flick-stick trick input: the right stick (C-stick) is your feet.
+//! The flick stick (the C-stick, Skate 3's right stick): gestures for flick tricks, plus the crouch you
+//! wind up with before popping and the light hold that balances a manual.
 //!
-//! Pull the stick back to load up (crouch), then flick it forward fast to pop:
-//! - back, then straight forward ...................... Ollie
-//! - back, then forward-left .......................... Kickflip
-//! - back, then forward-right ......................... Heelflip
-//! - back, then roll around the left edge to forward .. Pop shove-it
-//! - back, then roll around the right edge to forward . Frontside shove-it
-//! - forward, then flick straight back ................ Nollie
-//!
-//! A flick only counts if it lands within [`FLICK_WINDOW`] seconds of leaving the loaded position;
-//! a slow move is ignored. Sampled once per frame; works at 50 or 60 Hz.
+//! Each frame [`FlickInput::update`] turns the stick into gesture space (y towards the player, small
+//! components zeroed as in Skate 3) and runs the [`Recognizer`]. What the gesture *does* (which trick,
+//! mirrored for the stance, fitted to a manual) is up to the skater.
 
-use crate::math::{PI, atan2f, sqrtf, wrap_angle};
+use crate::gesture::{self, Flick, Recognizer, Shape};
+use crate::math::sqrtf;
 
-/// Seconds allowed from leaving the loaded position to reaching the flick target.
-pub const FLICK_WINDOW: f32 = 0.25;
-/// Stick deflection that counts as "pushed into a direction".
-const PUSHED: f32 = 0.6;
-/// Below this the stick is "through the centre".
-const CENTRE: f32 = 0.45;
-/// Half-width of the back/forward load sectors.
-const SECTOR: f32 = 40.0 * PI / 180.0;
-/// Rotation around the rim (degrees) that turns a flick into a shove-it.
-const SHOVE_SWEEP: f32 = 100.0 * PI / 180.0;
-/// Largest per-frame angle change still treated as rolling around the rim.
-const MAX_RIM_STEP: f32 = 100.0 * PI / 180.0;
-/// Sideways deflection at the end of a forward flick that turns it into a flip.
-const FLIP_SIDE: f32 = 0.35;
+/// Components smaller than this are zeroed before matching.
+const COMPONENT_DEAD: f32 = 0.1;
+/// Stick deflection (towards the player, or away for a nollie) that starts the crouch...
+const CROUCH_FROM: f32 = 0.35;
+/// ...and where it is a full crouch.
+const CROUCH_FULL: f32 = 0.9;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Flick {
-    Ollie,
-    Nollie,
-    Kickflip,
-    Heelflip,
-    PopShoveIt,
-    FsShoveIt,
+/// What the flick stick did this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlickOut {
+    /// A completed flick gesture, as recognised (before stance mirroring).
+    pub flick: Option<Flick>,
+    /// 0..1: how fast it was (a faster flick pops higher).
+    pub strength: f32,
+    /// The stick is still on the end of the last kickflip or heelflip gesture (more flips).
+    pub holding_flip: bool,
+    /// 0..1: how far the rider is crouched, from the stick held back or forward.
+    pub crouch: f32,
+    /// The stick in gesture space (x right, y towards the player).
+    pub stick: [f32; 2],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Load {
-    /// Stick held back (towards the player).
-    Back,
-    /// Stick held forward.
-    Forward,
+#[derive(Clone, Debug)]
+pub struct FlickInput {
+    rec: Recognizer,
+    /// The last recognised flick was a kickflip or heelflip (it can be held for more flips).
+    hold_candidate: bool,
+    /// Shapes come from the player's disc.
+    pub from_disc: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum State {
-    Idle,
-    Loaded {
-        load: Load,
-        angle: f32,
-    },
-    Flicking {
-        load: Load,
-        t: f32,
-        swept: f32,
-        last: Option<f32>,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FlickReader {
-    state: State,
-}
-
-impl Default for FlickReader {
+impl Default for FlickInput {
     fn default() -> Self {
         Self::new()
     }
 }
 
-fn sector_of(angle: f32) -> Option<Load> {
-    if wrap_angle(angle + PI / 2.0).abs() <= SECTOR {
-        Some(Load::Back)
-    } else if wrap_angle(angle - PI / 2.0).abs() <= SECTOR {
-        Some(Load::Forward)
-    } else {
-        None
-    }
-}
-
-impl FlickReader {
-    pub const fn new() -> Self {
-        FlickReader { state: State::Idle }
+impl FlickInput {
+    /// With flatground's built-in shapes.
+    pub fn new() -> FlickInput {
+        FlickInput {
+            rec: Recognizer::new(gesture::built_in()),
+            hold_candidate: false,
+            from_disc: false,
+        }
     }
 
-    /// True while the stick is held back: the skater crouches, ready to pop.
-    pub fn is_loaded(&self) -> bool {
-        matches!(self.state, State::Loaded { .. })
+    /// With shapes from a rules pack (Skate 3's own).
+    pub fn with_shapes(shapes: alloc::vec::Vec<Shape>) -> FlickInput {
+        FlickInput {
+            rec: Recognizer::new(shapes),
+            hold_candidate: false,
+            from_disc: true,
+        }
     }
 
-    /// Feeds one frame of stick input; returns a trick when a flick completes.
-    pub fn update(&mut self, stick: [f32; 2], dt: f32) -> Option<Flick> {
-        let [x, y] = stick;
-        let mag = sqrtf(x * x + y * y);
-        let angle = atan2f(y, x);
-        // A fast flick can move several sectors in one frame, so a transition re-runs the new state
-        // on the same sample (at most twice).
-        for _ in 0..3 {
-            match self.state {
-                State::Idle => {
-                    if mag >= PUSHED
-                        && let Some(load) = sector_of(angle)
-                    {
-                        self.state = State::Loaded { load, angle };
-                    }
-                    return None;
-                }
-                State::Loaded { load, .. } => {
-                    if mag >= PUSHED && sector_of(angle) == Some(load) {
-                        self.state = State::Loaded { load, angle };
-                        return None;
-                    }
-                    let State::Loaded { angle: last, .. } = self.state else {
-                        unreachable!()
-                    };
-                    self.state = State::Flicking {
-                        load,
-                        t: 0.0,
-                        swept: 0.0,
-                        last: Some(last),
-                    };
-                    // Fall through: this sample may already complete the flick.
-                }
-                State::Flicking {
-                    load,
-                    t,
-                    mut swept,
-                    mut last,
-                } => {
-                    if mag >= CENTRE {
-                        if let Some(prev) = last {
-                            let step = wrap_angle(angle - prev);
-                            // A jump this big in one frame went across the middle, not around the rim.
-                            if step.abs() <= MAX_RIM_STEP {
-                                swept += step;
-                            }
-                        }
-                        last = Some(angle);
-                    } else {
-                        // Went through the centre: a straight flick, not a rim roll.
-                        last = None;
-                    }
-                    let t = t + dt;
-                    if let Some(trick) = Self::classify(load, x, y, mag, swept) {
-                        self.state = State::Idle;
-                        return Some(trick);
-                    }
-                    if mag >= PUSHED && sector_of(angle) == Some(load) {
-                        // Wiggled back to where it started: still loaded.
-                        self.state = State::Loaded { load, angle };
-                    } else if t > FLICK_WINDOW {
-                        self.state = State::Idle;
-                    } else {
-                        self.state = State::Flicking {
-                            load,
-                            t,
-                            swept,
-                            last,
-                        };
-                    }
-                    return None;
-                }
+    pub fn recognizer(&self) -> &Recognizer {
+        &self.rec
+    }
+
+    /// Feeds one frame of the C-stick (`stick`: +y away from the player, as [`crate::input::Pad`]).
+    pub fn update(&mut self, stick: [f32; 2], max_misses: u8) -> FlickOut {
+        let g = [stick[0], -stick[1]].map(|v| if v.abs() < COMPONENT_DEAD { 0.0 } else { v });
+        let holding = self.hold_candidate && self.rec.held(g).is_some();
+        if !holding {
+            self.hold_candidate = false;
+        }
+        let mut out = FlickOut {
+            holding_flip: holding,
+            stick: g,
+            ..FlickOut::default()
+        };
+        if let Some(r) = self.rec.sample(g, max_misses) {
+            let name = &self.rec.shapes()[r.shape].name;
+            if let Some(f) = Flick::from_gesture(name) {
+                self.hold_candidate = matches!(
+                    name.as_str(),
+                    "Kickflip" | "Heelflip" | "N_Kickflip" | "N_Heelflip"
+                );
+                out.flick = Some(f);
+                out.strength = r.strength;
             }
         }
-        None
+        // Crouch: the stick held mostly straight back (or forward, for a nollie).
+        let mag = sqrtf(g[0] * g[0] + g[1] * g[1]);
+        if g[1].abs() > g[0].abs() {
+            out.crouch = ((mag - CROUCH_FROM) / (CROUCH_FULL - CROUCH_FROM)).clamp(0.0, 1.0);
+        }
+        out
     }
 
-    fn classify(load: Load, x: f32, y: f32, mag: f32, swept: f32) -> Option<Flick> {
-        if mag < PUSHED {
-            return None;
-        }
-        match load {
-            Load::Back if y >= PUSHED * 0.8 => Some(if swept >= SHOVE_SWEEP {
-                // Counter-clockwise from back: back -> right -> forward.
-                Flick::FsShoveIt
-            } else if swept <= -SHOVE_SWEEP {
-                Flick::PopShoveIt
-            } else if x <= -FLIP_SIDE {
-                Flick::Kickflip
-            } else if x >= FLIP_SIDE {
-                Flick::Heelflip
-            } else {
-                Flick::Ollie
-            }),
-            Load::Forward if y <= -PUSHED * 0.8 => Some(Flick::Nollie),
-            _ => None,
-        }
+    /// Forgets a gesture in progress (after a bail or respawn).
+    pub fn reset(&mut self) {
+        self.rec.reset();
+        self.hold_candidate = false;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::{cosf, sinf};
-    use alloc::vec::Vec;
+    use crate::gesture::Trick;
 
-    const DT: f32 = 1.0 / 60.0;
-
-    fn at(deg: f32, mag: f32) -> [f32; 2] {
-        let a = deg * PI / 180.0;
-        [cosf(a) * mag, sinf(a) * mag]
-    }
-
-    fn run(samples: &[[f32; 2]]) -> Vec<Flick> {
-        let mut r = FlickReader::new();
-        samples.iter().filter_map(|s| r.update(*s, DT)).collect()
-    }
-
-    fn hold(s: [f32; 2], frames: usize) -> Vec<[f32; 2]> {
-        (0..frames).map(|_| s).collect()
+    /// Stick at `deg` clockwise from forward (+y up, as the pad reports it).
+    fn at(deg: f32) -> [f32; 2] {
+        let a = deg * crate::math::PI / 180.0;
+        [crate::math::sinf(a), crate::math::cosf(a)]
     }
 
     #[test]
-    fn straight_flicks() {
-        for (end, want) in [
-            (90.0, Flick::Ollie),
-            (125.0, Flick::Kickflip),
-            (55.0, Flick::Heelflip),
-        ] {
-            let mut s = hold(at(-90.0, 1.0), 10);
-            s.push([0.0, 0.0]);
-            s.push(at(end, 1.0));
-            assert_eq!(run(&s), [want], "flick to {end} deg");
+    fn pull_back_then_flick_forward_is_an_ollie_and_crouches_first() {
+        let mut f = FlickInput::new();
+        let mut crouched = false;
+        let mut got = None;
+        for s in [at(180.0); 8].into_iter().chain([[0.0, 0.0], at(0.0)]) {
+            let o = f.update(s, 8);
+            crouched |= o.crouch > 0.9;
+            got = got.or(o.flick);
         }
+        assert!(crouched);
+        assert_eq!(got, Some(Flick::OLLIE));
     }
 
     #[test]
-    fn one_frame_flick_still_counts() {
-        let mut s = hold(at(-90.0, 1.0), 5);
-        s.push(at(90.0, 1.0));
-        assert_eq!(run(&s), [Flick::Ollie]);
-    }
-
-    #[test]
-    fn rim_rolls_are_shove_its() {
-        let mut ccw = hold(at(-90.0, 1.0), 5);
-        ccw.extend([-45.0, 0.0, 45.0, 90.0].map(|d| at(d, 1.0)));
-        assert_eq!(run(&ccw), [Flick::FsShoveIt]);
-
-        let mut cw = hold(at(-90.0, 1.0), 5);
-        cw.extend([-135.0, 180.0, 135.0, 90.0].map(|d| at(d, 1.0)));
-        assert_eq!(run(&cw), [Flick::PopShoveIt]);
-    }
-
-    #[test]
-    fn nollie_from_forward() {
-        let mut s = hold(at(90.0, 1.0), 6);
-        s.push([0.0, 0.0]);
-        s.push(at(-90.0, 1.0));
-        assert_eq!(run(&s), [Flick::Nollie]);
-    }
-
-    #[test]
-    fn slow_move_is_not_a_flick() {
-        let mut s = hold(at(-90.0, 1.0), 6);
-        s.extend(hold([0.0, 0.0], 30)); // half a second in the centre
-        s.push(at(90.0, 1.0));
-        assert!(run(&s).is_empty());
-    }
-
-    #[test]
-    fn forward_without_loading_does_nothing() {
-        assert!(run(&hold(at(90.0, 1.0), 10)).is_empty());
-    }
-
-    #[test]
-    fn loaded_while_held_back() {
-        let mut r = FlickReader::new();
-        r.update(at(-90.0, 1.0), DT);
-        assert!(r.is_loaded());
-        r.update([0.0, 0.0], DT);
-        assert!(!r.is_loaded());
+    fn a_held_kickflip_reports_holding() {
+        let mut f = FlickInput::new();
+        let mut got = None;
+        let mut held = false;
+        for (i, s) in [at(180.0); 6].into_iter().chain([at(50.0); 6]).enumerate() {
+            let o = f.update(s, 8);
+            got = got.or(o.flick);
+            held |= i > 7 && o.holding_flip;
+        }
+        assert_eq!(got.map(|f| f.trick), Some(Trick::Kickflip));
+        assert!(held);
+        // Letting go ends it.
+        assert!(!f.update([0.0, 0.0], 8).holding_flip);
     }
 }

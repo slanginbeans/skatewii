@@ -111,6 +111,10 @@ pub struct Character {
     clips: Vec<(&'static str, Clip<'static>)>,
     pub parts: Vec<Part>,
     world: Vec<Rows>,
+    /// Each bone's bind matrix (from whichever part binds it), for mirrored skinning.
+    binds: Vec<Option<Rows>>,
+    /// The axis (0 = x, 2 = z) the bind pose is symmetric across: left and right bones differ along it.
+    rest_axis: usize,
 }
 
 impl Character {
@@ -186,16 +190,48 @@ impl Character {
         if parts.is_empty() {
             return Err(Error::NoParts);
         }
+        let mut binds: Vec<Option<Rows>> = alloc::vec![None; bones];
+        for p in &parts {
+            for (b, m) in &p.palette {
+                binds[*b as usize].get_or_insert(*m);
+            }
+        }
+        // The pair of mirrored bones furthest apart in the bind pose shows the symmetry axis.
+        let mut rest_axis = 0;
+        let mut widest = 0.0;
+        for b in 0..bones {
+            let m = skeleton.mirror(b);
+            if m < 0 || m as usize == b || m as usize >= bones {
+                continue;
+            }
+            if let (Some(a), Some(c)) = (binds[b], binds[m as usize]) {
+                let (pa, pc) = (rest_position(&a), rest_position(&c));
+                for axis in [0, 2] {
+                    let d = (pa[axis] - pc[axis]).abs();
+                    if d > widest {
+                        widest = d;
+                        rest_axis = axis;
+                    }
+                }
+            }
+        }
         Ok(Character {
             skeleton,
             clips,
             parts,
             world: alloc::vec![IDENTITY; bones],
+            binds,
+            rest_axis,
         })
     }
 
     pub fn bones(&self) -> usize {
         self.skeleton.bones()
+    }
+
+    /// The index of the bone called `name` (case-insensitive).
+    pub fn bone(&self, name: &str) -> Option<usize> {
+        (0..self.bones()).find(|&b| self.skeleton.name(b).eq_ignore_ascii_case(name))
     }
 
     pub fn has_clip(&self, role: &str) -> bool {
@@ -270,17 +306,31 @@ impl Character {
     }
 
     /// Skins every part with the current pose and lights it from `light` (unit vector towards the light,
-    /// in the character's own space).
-    pub fn skin(&mut self, light: Vec3) {
+    /// in the character's own space). `mirror` draws the mirror image across the board's long axis
+    /// (x = 0, swapping the toe and heel sides): each bone drives its left/right partner's vertices,
+    /// reflected, which turns the clips' goofy rider into a regular one still facing down the board.
+    pub fn skin(&mut self, light: Vec3, mirror: bool) {
         let world = &self.world;
+        let skeleton = &self.skeleton;
+        let binds = &self.binds;
+        let rest_axis = self.rest_axis;
         let mut palette: Vec<Rows> = Vec::new();
         for part in &mut self.parts {
             palette.clear();
-            palette.extend(
-                part.palette
-                    .iter()
-                    .map(|(bone, bind)| mul(bind, &world[*bone as usize])),
-            );
+            palette.extend(part.palette.iter().map(|(bone, bind)| {
+                if !mirror {
+                    return mul(bind, &world[*bone as usize]);
+                }
+                let b = *bone as usize;
+                let m = skeleton.mirror(b);
+                let m = if m >= 0 && (m as usize) < world.len() {
+                    m as usize
+                } else {
+                    b
+                };
+                let bind_m = binds[m].unwrap_or(*bind);
+                mirrored(&mul(&bind_m, &world[m]), rest_axis, 0)
+            }));
             part.out.clear();
             for v in &part.verts {
                 let (mut p, mut n) = ([0.0f32; 3], [0.0f32; 3]);
@@ -309,6 +359,30 @@ impl Character {
             }
         }
     }
+}
+
+/// A bone's position in the bind pose, from its bind (inverse rest) matrix.
+fn rest_position(bind: &Rows) -> [f32; 3] {
+    // bind = [R; t] maps rest space to bone space, so the bone sits at -t R^T.
+    let t = bind[3];
+    core::array::from_fn(|c| -(t[0] * bind[c][0] + t[1] * bind[c][1] + t[2] * bind[c][2]))
+}
+
+/// `S_in * m * S_out` for row vectors: reflect the input across `axis_in`, apply `m`, reflect the
+/// output across `axis_out`.
+fn mirrored(m: &Rows, axis_in: usize, axis_out: usize) -> Rows {
+    let mut o = *m;
+    for (r, row) in o.iter_mut().enumerate() {
+        for (c, v) in row.iter_mut().enumerate() {
+            if r == axis_in {
+                *v = -*v;
+            }
+            if c == axis_out {
+                *v = -*v;
+            }
+        }
+    }
+    o
 }
 
 #[cfg(test)]
@@ -463,12 +537,31 @@ mod tests {
         assert_eq!(local[0], Local::IDENTITY, "trajectory root is pinned");
         assert!((local[1].t[1] - 0.5).abs() < 1e-4);
         c.pose(&local);
-        c.skin(Vec3::UP);
+        c.skin(Vec3::UP, false);
         let out = &c.parts[0].out;
         assert!(close(out[1].pos, [1.0, 0.5, 0.0]), "{:?}", out[1].pos);
         assert_eq!(out[0].uv, [0.0, 1.0]);
         // Normal +Y faces the light: full brightness.
         assert_eq!(out[0].rgba, 0xffff_ffff);
         assert_eq!(c.parts[0].indices, [0, 1, 2]);
+        // Mirrored: the vertex comes from across the rest pose's symmetry plane (x here: the skeleton
+        // has no left/right pairs) and is reflected across the board's long axis (x): a bone that only
+        // moves up lands where it was.
+        c.skin(Vec3::UP, true);
+        let p = c.parts[0].out[1].pos;
+        assert!(close(p, [1.0, 0.5, 0.0]), "{p:?}");
+        assert_eq!(c.parts[0].out[0].rgba, 0xffff_ffff);
+        // Turned about y, the mirror image turns the other way.
+        let s = core::f32::consts::FRAC_1_SQRT_2;
+        local[1].q = [0.0, s, 0.0, s];
+        c.pose(&local);
+        c.skin(Vec3::UP, false);
+        let plain = c.parts[0].out[1].pos;
+        c.skin(Vec3::UP, true);
+        let mirror = c.parts[0].out[1].pos;
+        assert!(
+            close(plain, [mirror[0], mirror[1], -mirror[2]]),
+            "{plain:?} {mirror:?}"
+        );
     }
 }

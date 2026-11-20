@@ -2,6 +2,7 @@
 //! small software rasteriser (same `Gfx` trait as the Wii) into PNGs.
 //!
 //!     cargo run -p fg_preview -- [out_dir] [--wide] [--skater imported/skater.fgpak] [--every N] [--tour]
+//!         [--rules imported/rules.fgpak] [--regular]
 //!
 //! Writes `frame_NNNN.png` for a few interesting moments plus the event log to stdout. It is a
 //! stand-in for looking at the game until Dolphin runs are scripted; colours and framing match the Wii
@@ -376,7 +377,11 @@ fn main() {
         .enumerate()
         .find(|(i, a)| {
             !a.starts_with("--")
-                && (*i == 0 || !matches!(args[i - 1].as_str(), "--skater" | "--every"))
+                && (*i == 0
+                    || !matches!(
+                        args[i - 1].as_str(),
+                        "--skater" | "--every" | "--park" | "--rules"
+                    ))
         })
         .map(|(_, a)| PathBuf::from(a))
         .unwrap_or_else(|| PathBuf::from("out/preview"));
@@ -389,11 +394,72 @@ fn main() {
         Raster::new(640, 480)
     };
     let mut game = Game::new();
+    // --rules: Skate 3's tuning and flick shapes (fg_import rules); --regular: left foot forward.
+    if let Some(path) = value("--rules") {
+        let bytes = fs::read(path).expect("read rules pack");
+        let (values, shapes) = game.load_rules(&bytes).expect("rules pack");
+        println!("using rules {path}: {values} tuning values, {shapes} flick shapes");
+    }
+    if args.iter().any(|a| a == "--regular") {
+        game.set_stance(game_core::skater::Stance::Regular);
+    }
     if let Some(path) = skater {
         // Leaked like the Wii does: the pack stays loaded for the whole game.
         let bytes: &'static [u8] = Vec::leak(fs::read(path).expect("read skater pack"));
         game.load_skater(bytes).expect("skater pack");
         println!("using imported skater {path}");
+    }
+    // --poses: still shots of each stance (goofy, fakie, switch, regular) to check facing and mirroring.
+    if args.iter().any(|a| a == "--poses") {
+        use game_core::skater::Stance;
+        let base = game;
+        for (name, stance, switch, speed) in [
+            ("goofy", Stance::Goofy, false, 3.0f32),
+            ("fakie", Stance::Goofy, false, -3.0),
+            ("switch", Stance::Goofy, true, 3.0),
+            ("regular", Stance::Regular, false, 3.0),
+        ] {
+            let mut g = Game::new();
+            if let Some(path) = value("--rules") {
+                g.load_rules(&fs::read(path).expect("rules"))
+                    .expect("rules pack");
+            }
+            if let Some(path) = skater {
+                let bytes: &'static [u8] = Vec::leak(fs::read(path).expect("read skater pack"));
+                g.load_skater(bytes).expect("skater pack");
+            }
+            g.set_stance(stance);
+            g.skater.switch = switch;
+            g.skater.speed = speed;
+            g.skater.pos.z = -10.0;
+            for _ in 0..60 {
+                g.skater.speed = speed;
+                g.update(
+                    &PadRaw {
+                        flags: game_core::input::flag::CONNECTED,
+                        ..Default::default()
+                    },
+                    1.0 / 60.0,
+                );
+            }
+            g.render(&mut raster);
+            raster.save(&out.join(format!("pose_{name}.png")));
+            let side = yaw_dir(g.skater.heading + std::f32::consts::FRAC_PI_2);
+            g.render(&mut CloseUp {
+                inner: &mut raster,
+                target: g.skater.pos,
+                side,
+            });
+            raster.save(&out.join(format!("pose_{name}_side.png")));
+            let fakie = g.rider().map_or(0.0, |r| r.fakie_weight());
+            println!(
+                "{name}: fakie {} mirrored {} fakie look {fakie:.2}",
+                g.skater.fakie,
+                g.skater.mirrored()
+            );
+        }
+        drop(base);
+        return;
     }
     // --park: ride an imported park (fg_import park) instead of the demo park.
     let park = value("--park");

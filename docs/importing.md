@@ -24,7 +24,8 @@ inside the repo folder, so put the image there (`*.iso` is git-ignored) or point
 `build.bat dolphin` then starts the game in Dolphin (the regular build from dolphin-emu.org) with its own
 profile in `out/dolphin` and `dist/` as the virtual SD card, so it loads the same files a Wii would.
 
-The game shows on start-up whether the imported skater loaded, and its CPU time per frame (average and the
+The game shows on start-up whether the imported skater, park and rules loaded (`RULES: DISC` or
+`BUILT-IN`), and its CPU time per frame (average and the
 worst frame of the last second; the budget at 60 Hz is 16.7 ms) in the top left corner.
 
 ## By hand
@@ -70,7 +71,7 @@ cargo run --release -p fg_import -- skater path/to/skate3.iso --lod 2
 ```
 Builds the default skater from the disc's fallback recipe (`data/cacrecipes/SavedRecipeFallbackMale.bin`).
 That is 10 parts: arms, feet, hair, eyes/teeth, shirt, pants, head, deck, trucks and wheels. Writes
-`imported/skater.fgpak` (about 1.1 MiB at `--lod 2`):
+`imported/skater.fgpak` (about 2 MiB at `--lod 2`):
 
 | Entry | Kind |
 |---|---|
@@ -96,17 +97,28 @@ deck is at its start and end):
 | Role | Default clip | When |
 |---|---|---|
 | `idle` | `r_idle_ride_n_0_cyc` | rolling, and the fallback for anything missing |
-| `crouch` | `r_antic_crouch_ollie_n_0_into` | flick stick held back (frame follows the crouch amount) |
-| `push` | `r_pushlsp_lstr_mongo_left_cyc2` | after A, while the clip lasts |
+| `crouch`, `crouch_nollie` | `r_antic_crouch_ollie_n_0_into`, `r_antic_crouch_nollie_n_0_into` | flick stick held back / forward (frame follows the crouch amount) |
+| `push/into`, `push/cyc1`, `push/cyc2` | `r_pushlsp_hstr_n_0_*` | A: the first push of a run, then alternating cycles |
+| `mongo/into`, `mongo/cyc1`, `mongo/cyc2` | `r_pushlsp_hstr_mongo_0_*` | B, or A when riding switch (as Skate 3 does) |
+| `brake/into`, `brake/cyc`, `brake/out` | `r_brake_n_n_0_*` | X held: the foot goes down, drags, comes back up |
+| `tailbrake`, `nosebrake` | `m_brake_n_0_cyc`, `m_nosebrake_n_0_cyc` | C-stick pushed past the manual zone |
+| `slide/fs`, `slide/bs` | `r_turn_180slide_fs_n_0_n`, `..._bs_...` | powerslides (held at the sideways point) and reverts (whole) |
+| `kickturn/fs`, `kickturn/bs` | `r_kickturn_stat_fs`, `..._bs` | stick hard to the side when nearly stopped |
+| `fakie` | `fakie_head_channel_cyc` | rolling tail first: its neck and head (and part of the upper back) replace the riding clip's, so the rider looks where the board is going |
+| `hippy/antic`, `hippy/into`, `hippy/air` | `t_hippyjump_low_n_0_*` | A + B held, then the jump |
 | `lean/left`, `lean/right` | `r_idle_hcom_n100`, `r_idle_hcom_p100` | single poses blended over the riding clips by how hard you steer (`lean/crouch_*`: `r_idle_lcom_*`, while crouched) |
-| `land/clean`, `land/heavy`, `land/sketchy` | `l_hcom_limp`, `l_hcom_himp`, `l_sketch_fs_hcom_limp` | after touching down: a normal landing, a big drop, a crooked catch |
-| `manual`, `nosemanual` | `m_idle_n_0_cyc`, `m_noseidle_n_0_cyc` | main stick held down / up while rolling |
-| `grab/fs`, `grab/bs`, `grab/mute` | `gr_grab_n_fs_0_cyc`, `gr_grab_n_bs_0_cyc`, `gr_mutegrab_n_0_cyc` | R, L, or both triggers held in the air |
+| `land/clean`, `land/heavy`, `land/sketchy_fs`, `land/sketchy_bs` | `l_hcom_limp`, `l_hcom_himp`, `l_sketch_fs_hcom_limp`, `l_sketch_bs_hcom_limp` | after touching down: a normal landing, a big drop, a crooked catch turned frontside / backside |
+| `manual`, `nosemanual` | `m_idle_n_0_cyc`, `m_noseidle_n_0_cyc` | C-stick held lightly back / forward while rolling |
+| `grab/fs`, `grab/bs`, `grab/mute` | `gr_grab_n_fs_0_cyc`, `gr_grab_n_bs_0_cyc`, `gr_mutegrab_n_0_cyc` | rear hand, front hand, or both (L and R are the left and right hand; which is which depends on the stance) |
 | `bail/fall`, `bail/getup` | `w_brace_lean090twist000_n_0_n`, `w_recovery_onfront_n_0_n` | after a bail, one after the other |
 | `grind/5050`, `grind/bslide` | `g_5050_fs_low_0_cyc`, `g_bslide_fs_low_0_cyc` | on a rail, board along it / across it |
 | `<trick>/pop`, `/air`, `/flip`, `/out` | e.g. `kickflip_in_low_g`, `kickflip_in_low_a`, `t_low_kick_cyc1`, `t_low_kick_out4` | in the air, back to back |
 
-Tricks are `ollie`, `nollie`, `kickflip`, `heelflip`, `popshuvit` and `fsshuvit`. `--anim role=clip`
+Tricks are `ollie`, `nollie`, `kickflip`, `heelflip`, `popshuvit`, `fspopshuvit`, `360popshuvit`,
+`fs360popshuvit`, `varialkickflip`, `varialheelflip`, `hardflip`, `inwardheelflip`, `360flip`, `laserflip`,
+`360hardflip`, `360inwardheelflip`, and each with an `n_` prefix for its nollie version (the plain nollie is
+`nollie`). Most have a `pop` and an `air` clip (`<name>_low_g`, `<name>_low_a`); kickflips and heelflips also
+`flip` (played once per flip of a held double or triple) and `out`. `--anim role=clip`
 replaces a default, and `--anim role=` drops one. The pop plays at its own speed; the stages after it are
 sped up or slowed (0.6× to 2.5×) to end as the board lands, predicted from the jump. Many trick clips on the
 disc expect the game to move the board itself (the `uflip`/`dcatch` catch clips end with the deck upside
@@ -114,6 +126,9 @@ down), so the defaults are chains whose deck ends grip up. Clips cross-fade over
 
 The game pins the trajectory root bone to the origin: clips carry forward travel in it, and the game moves the
 skater itself. The character is drawn in board space with Skate's axes as they are (Y up, travel along +Z).
+The clips are authored for a goofy rider (right foot towards the nose). A regular rider, or a goofy one riding
+switch, is drawn as their mirror image across the board's long axis: each bone drives its left/right
+partner's vertices (the skeleton's mirror pairs), reflected.
 
 How the skinning fits together, all checked against the previews:
 - Mesh bones are matched to the animation skeleton by name. Finger, twist and face bones follow their nearest
@@ -164,6 +179,25 @@ flip finished and no grab held, locks on: a 50-50 with the board within 30° of 
 30° of across it. On the rail gravity and a little friction act along it; the end of the rail, running out of
 speed or a flick takes you off, and that scores the grind.
 
+### Riding rules
+```bash
+cargo run --release -p fg_import -- rules path/to/skate3.iso
+```
+Writes `imported/rules.fgpak` (about 16 KB) with what makes the skating feel like Skate 3:
+
+- `rules/tuning`: the riding numbers flatground's skating reads (`game_core::tuning::PATHS`), taken from
+  the game's tuning database (`data/big/db.big`: `data/db/skaterschema` and `skatercollections`, EA's
+  AttribSys vault format, read by `attrib.rs`). Push strength and top push speed, rolling resistance, foot
+  and tail brakes, steering against stick and speed, jump heights, the air spin curves, the landing limits,
+  the flick recogniser's tolerance and the low camera's shots ("normal" difficulty, the game's default).
+  Values are found by hashing their names, as the game does; inherited values are followed up the parent
+  chain.
+- `rules/gestures/<file>`: the flick-stick shapes from `data/joystick/*.pat` in `miscload.big`
+  (`skater.pat` drives the ground flick tricks; the rest are kept for later: board sideways, late flips,
+  finger flips, the left stick).
+
+Without it the game uses its own built-in values and shapes, which only approximate Skate 3's.
+
 ### Water and menu tables (from the executable)
 Two tables exist only inside the game's code: the ocean PCA water animation and the front-end menu tables.
 **fg_import never decrypts executables and contains no console keys.** It reads them from an image you
@@ -192,6 +226,8 @@ Only plain disc files. `default.xex` is never decrypted or read.
 | Xenos textures | `texture.rs` | Untiles Xbox 360 tiling, including the packed mip tail when the fetch constant sets `packed_mips`. Decodes DXT1/3/5, ATI2, A8R8G8B8, B5G6R5 and A8. |
 | GX encoding | `gx.rs` | DXT1 → CMPR transcode without loss (8×8 tiles, big-endian colours, flipped index order). Other formats are re-encoded to CMPR, RGB5A3 or RGBA8. |
 | Pack | `pack.rs` / `game_core::pack` | `.fgpak` v1, layout documented in `game_core/src/pack.rs` |
+| Tuning database | `attrib.rs` | AttribSys vault pairs (`.vlt` + `.bin`): pointer fix-ups, exports, class field definitions, collections with parent inheritance; 64-bit lookup8 name hashes |
+| Flick shapes | `rules.rs` | `.pat` text: `global_tolerance_dist`, `pattern`, `tolerance_dist`, `coord` |
 
 Format knowledge comes from the public research in
 [SK8-ENGINE/skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine) (GPL-3.0), which
@@ -216,5 +252,8 @@ plenty for an offline converter.
   the city districts' streaming cells.
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
 - Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
-- Game side: `skater.fgpak` and `park.fgpak` are loaded. Texture packs, animation packs and the executable
+- Riding: Skate 3 turns, pumps and wipes out through rigid-body truck and ragdoll physics; flatground keeps
+  a simpler board model and uses Skate 3's numbers where they carry over (see `game_core::tuning`). The
+  board-sideways, late-flip and finger-flip shapes are converted but not used yet, nor dark catches.
+- Game side: `skater.fgpak`, `park.fgpak` and `rules.fgpak` are loaded. Texture packs, animation packs and the executable
   tables are parsed and validated, but nothing uses them yet.

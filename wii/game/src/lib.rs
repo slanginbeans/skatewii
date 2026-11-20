@@ -106,6 +106,12 @@ const PARK_PACKS: &[&CStr] = &[
     c"usb:/apps/flatground/data/park.fgpak",
 ];
 
+/// Skate 3's riding tuning and flick shapes, converted from the player's disc (`fg_import rules`).
+const RULES_PACKS: &[&CStr] = &[
+    c"sd:/apps/flatground/data/rules.fgpak",
+    c"usb:/apps/flatground/data/rules.fgpak",
+];
+
 /// The first of `paths` that exists, read whole. Loaded once and kept for the rest of the game: the GPU
 /// reads textures straight out of it.
 fn load_first(paths: &[&CStr]) -> Option<&'static [u8]> {
@@ -123,6 +129,14 @@ static mut GAME: *mut Game = ptr::null_mut();
 #[unsafe(no_mangle)]
 pub extern "C" fn fg_rust_init() {
     let mut game = Box::new(Game::new());
+    // Rules first: the skater and park are set up with its tuning.
+    let rules: String = match load_first(RULES_PACKS) {
+        Some(pack) => match game.load_rules(pack) {
+            Ok(_) => "DISC".into(),
+            Err(_) => "UNREADABLE".into(),
+        },
+        None => "BUILT-IN".into(),
+    };
     // Without a pack (or with one that doesn't parse) the placeholder stays; say which.
     let skater: String = match load_first(SKATER_PACKS) {
         Some(pack) => match game.load_skater(pack) {
@@ -138,7 +152,7 @@ pub extern "C" fn fg_rust_init() {
         },
         None => "DEMO".into(),
     };
-    game.notice = Some(format!("SKATER: {skater}   PARK: {park}"));
+    game.notice = Some(format!("SKATER: {skater}  PARK: {park}  RULES: {rules}"));
     game.frame_cost = Some(FrameCost::default());
     unsafe { GAME = Box::into_raw(game) };
 }

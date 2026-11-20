@@ -6,6 +6,7 @@
 
 mod anim;
 mod assets;
+mod attrib;
 mod big;
 mod cac;
 mod gx;
@@ -15,6 +16,7 @@ mod park;
 mod parkmodel;
 mod raster;
 mod refpack;
+mod rules;
 mod rw4;
 mod skater;
 mod skin;
@@ -50,6 +52,7 @@ const USAGE: &str = "usage:
                         DownTownSkatePark, SkateSchool or MaloofMoneyCup
       --max <n>         largest texture edge for the models (default 128; 0: no models)
       --out <dir>       output directory (default: imported)
+  fg_import rules    <disc.iso> [--out <dir>]     Skate 3's riding tuning and flick shapes as rules.fgpak
   fg_import skater   <disc.iso> [options]         the default skater as skinned meshes + textures
       --lod <0|2>       model detail (default 0)
       --png             front/side previews; --clip <name> [--frame <n>] also renders that clip
@@ -180,13 +183,14 @@ fn run(args: &[String]) -> Res<()> {
         "anims" => anims(&mut disc, &rest[1..])?,
         "skater" => skater::run(&mut disc, &rest[1..])?,
         "park" => park::run(&mut disc, &rest[1..])?,
+        "rules" => rules::run(&mut disc, &rest[1..])?,
         _ => return Err(USAGE.into()),
     }
     Ok(())
 }
 
 /// Reads a disc file, or `archive.big::entry` from inside a BIG on the disc.
-fn read_asset<R: Read + Seek>(disc: &mut Disc<R>, spec: &str) -> Res<Vec<u8>> {
+pub fn read_asset<R: Read + Seek>(disc: &mut Disc<R>, spec: &str) -> Res<Vec<u8>> {
     match spec.split_once("::") {
         Some((archive, inner)) => {
             let entry = disc.find(archive)?;

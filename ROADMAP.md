@@ -15,15 +15,23 @@ content second.
 - [ ] Panic screen checked on hardware (force one from a debug button)
 
 ## Phase 1: Feel
+- [x] Skate 3's flick recognition (stick shapes, tolerance, misses, flick speed sets the pop) with its own
+  shapes from the player's disc; flatground's own shapes without it
 - [ ] Tune flick thresholds on a real C-stick (its range and gate differ from the main stick)
 - [x] Pushing animation, carve lean (imported skater)
+- [x] Skate 3 riding: goofy/regular, fakie (detected from motion) and switch (pushing out of fakie turns the
+  rider round), held and mongo pushes, foot/tail/nose brakes, powerslides, kick turns, deck-tilt steering,
+  rolling resistance, all from Skate 3's tuning when the player's disc supplies it
+- [x] Controls laid out like Skate 3's Xbox 360 pad by button position
 - [ ] Speed wobble
 - [x] Sketchy and heavy landings besides clean/bail
 - [ ] Slope matching on landing
-- [x] Manuals and nose manuals (main stick, with a balance meter), grabs on the triggers
-- [ ] Reverts
+- [x] Manuals and nose manuals (C-stick held lightly, with a balance meter), grabs on the triggers
+- [x] Reverts
+- [x] Air spin with Skate 3's wind-up; hippie jumps; held double/triple kickflips
 - [ ] Ramps and quarter pipes you can go vertical on (needs a real surface model, not only a height field)
 - [ ] Scripted Dolphin runs from `game_core::autoplay`, with screenshots in CI-like checks
+- [ ] Late flips, finger flips, dark catches, board-sideways flicks (shapes are already converted)
 
 ## Phase 2: Renderer
 - [ ] Display lists for static geometry (built once, `GX_CallDispList`)
@@ -41,6 +49,7 @@ content second.
 - [x] `fg_import park`: district streams (ATOC/SFIL) and ClusteredMesh collision, spawn point
 - [x] `fg_import park`: grind rails from the spline sections
 - [x] `fg_import park`: the park's textured models (Pres stream, material -> texture binding)
+- [x] `fg_import rules`: Skate 3's riding tuning (AttribSys database) and flick shapes (`.pat`)
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)

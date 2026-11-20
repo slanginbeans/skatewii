@@ -4,7 +4,13 @@
 use std::path::Path;
 
 /// `game_core` modules that define pack formats. Add new ones here (world, collision, ...).
-const FORMATS: &[&str] = &["pack.rs", "anim.rs", "skinned.rs"];
+const FORMATS: &[&str] = &[
+    "pack.rs",
+    "anim.rs",
+    "skinned.rs",
+    "tuning.rs",
+    "gesture.rs",
+];
 
 fn walk(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
