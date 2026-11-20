@@ -3,7 +3,8 @@
 # Run by `build.bat dolphin` after a build. Uses its own Dolphin profile (out\dolphin) and leaves the
 # player's normal Dolphin settings alone.
 #   FG_DOLPHIN=C:\path\to\Dolphin.exe   if Dolphin isn't found by itself
-param([string]$Repo = (Split-Path -Parent $PSScriptRoot))
+#   -PassThru   return Dolphin's process (tools\dolphin_test.ps1 uses it to close Dolphin again)
+param([string]$Repo = (Split-Path -Parent $PSScriptRoot), [switch]$PassThru)
 $ErrorActionPreference = 'Stop'
 
 function Find-Dolphin {
@@ -89,4 +90,5 @@ Set-IniValue (Join-Path $user 'Config\GFX.ini') 'Settings' 'ShowFPS' 'True'
 Write-Host "[dolphin] $dolphin"
 Write-Host "[dolphin] Profile: $user (controller mapping: Controllers in Dolphin's menu)"
 Write-Host "[dolphin] SD card: $sdFolder"
-Start-Process -FilePath $dolphin -ArgumentList @('-u', "`"$user`"", '-b', '-e', "`"$dol`"")
+$process = Start-Process -FilePath $dolphin -ArgumentList @('-u', "`"$user`"", '-b', '-e', "`"$dol`"") -PassThru
+if ($PassThru) { $process }

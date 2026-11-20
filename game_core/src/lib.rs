@@ -24,6 +24,7 @@ pub mod hud;
 pub mod input;
 pub mod math;
 pub mod model;
+pub mod motion;
 pub mod pack;
 pub mod park;
 pub mod rails;

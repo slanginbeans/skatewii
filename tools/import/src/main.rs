@@ -11,6 +11,7 @@ mod big;
 mod cac;
 mod gx;
 mod mesh;
+mod motion;
 mod pack;
 mod park;
 mod parkmodel;
@@ -20,6 +21,7 @@ mod rules;
 mod rw4;
 mod skater;
 mod skin;
+mod stategraph;
 mod texture;
 mod world;
 mod xdvdfs;
@@ -58,13 +60,20 @@ const USAGE: &str = "usage:
       --png             front/side previews; --clip <name> [--frame <n>] also renders that clip
       --anim <role>=<clip>  pick the clip the game plays for a role (docs/importing.md); <role>= drops it
       --max <n>, --out <dir>  as for textures
+  fg_import motion   <disc.iso> [options]         the on-board motion library as motion.fgpak: clip timing,
+                                                  attribute tracks and events, animation trees, and the
+                                                  poses of the clips the on-board motion graph plays
+      --budget <MiB>    pose memory budget (default 20); graph areas that don't fit are left out
+      --list            also list every attribute name
+      --out <dir>       output directory (default: imported)
   fg_import anims    <disc.iso> [options]         convert skeletons and animation clips (VBR banks)
       --from <asset>    a .abin, or a .big to take every .abin from (repeatable;
                         default: data/big/miscload.big::data/anim/OnBoard.abin)
       --clips <text>    only clips whose name contains <text> (repeatable, case-insensitive)
       --additive        keep clips relative to the bind pose (default: compose RIG_TPOSE in)
       --out <dir>       output directory (default: imported)
-  fg_import info     <file.fgpak> [entry]       list a pack, or show one entry in detail
+  fg_import info     <file.fgpak> [entry] [name]  list a pack, or show one entry in detail (motion/db: a
+                                                  clip's or tree's data by name)
   fg_import xex-tables <image> [--base <hex>] [--out <dir>]
                         water (ocean PCA) and front-end menu tables from an executable image YOU have
                         already decrypted: an unencrypted XEX2, or the mapped PE image (MZ) loaded at
@@ -182,6 +191,7 @@ fn run(args: &[String]) -> Res<()> {
         "textures" => textures(&mut disc, &rest[1..])?,
         "anims" => anims(&mut disc, &rest[1..])?,
         "skater" => skater::run(&mut disc, &rest[1..])?,
+        "motion" => motion::run(&mut disc, &rest[1..])?,
         "park" => park::run(&mut disc, &rest[1..])?,
         "rules" => rules::run(&mut disc, &rest[1..])?,
         _ => return Err(USAGE.into()),
@@ -661,6 +671,50 @@ fn info(args: &[String]) -> Res<()> {
                 }
             }
         }
+        7 => {
+            let db = game_core::motion::MotionDb::parse(e.data).map_err(|e| format!("{e:?}"))?;
+            println!(
+                "{} clips, {} trees, {} attribute records, {} names",
+                db.clips().len(),
+                db.trees().len(),
+                db.attribute_count(),
+                db.names()
+            );
+            // Optional third argument: one clip or tree in detail.
+            if let Some(n) = args.get(2) {
+                match db.find(n).ok_or("no such clip or tree")? {
+                    game_core::motion::Node::Clip(i) => {
+                        let c = db.clip(i);
+                        println!(
+                            "clip {}: {} frames @ {} fps, base speed {}, {:.3} s, loop {}, pose {}",
+                            db.name(c.name),
+                            c.frames,
+                            c.fps,
+                            c.base_speed,
+                            c.length(),
+                            c.looping(),
+                            c.has_pose
+                        );
+                        for a in db.attributes(i) {
+                            println!(
+                                "  {:<30} kind {} {:>7.3}..{:<7.3} {:?}",
+                                db.name(a.name),
+                                a.kind,
+                                a.begin,
+                                a.end,
+                                db.words(a)
+                                    .iter()
+                                    .take(8)
+                                    .map(|w| f32::from_bits(*w))
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                    }
+                    game_core::motion::Node::Tree(i) => print_tree(&db, i),
+                    game_core::motion::Node::Missing(_) => {}
+                }
+            }
+        }
         _ => println!(
             "{} bytes, kind {}, {}x{}, GX format {:#x}",
             e.data.len(),
@@ -671,4 +725,56 @@ fn info(args: &[String]) -> Res<()> {
         ),
     }
     Ok(())
+}
+
+/// One animation tree of a motion database, with names.
+fn print_tree(db: &game_core::motion::MotionDb, i: u16) {
+    use game_core::motion::{Node, TreeDef};
+    let node = |n: &Node| match *n {
+        Node::Clip(c) => db.name(db.clip(c).name).to_string(),
+        Node::Tree(t) => format!("{} (tree)", db.name(db.tree(t).name)),
+        Node::Missing(n) => format!("{} (missing)", db.name(n)),
+    };
+    match &db.tree(i).def {
+        TreeDef::PhaseBlend {
+            parameter,
+            children,
+        } => {
+            println!("phase blend by {}:", db.name(*parameter));
+            children.iter().for_each(|c| println!("  {}", node(c)));
+        }
+        TreeDef::BlendSpace {
+            parameters,
+            children,
+            simplexes,
+        } => {
+            let p: Vec<&str> = parameters.iter().map(|p| db.name(*p)).collect();
+            println!("blend space over {p:?}, {} simplexes:", simplexes.len());
+            children.iter().for_each(|c| println!("  {}", node(c)));
+        }
+        TreeDef::Selector {
+            parameter,
+            default,
+            options,
+        } => {
+            println!(
+                "selector by {} (default {}):",
+                db.name(*parameter),
+                node(default)
+            );
+            for (v, c) in options {
+                println!("  {} -> {}", db.name(*v), node(c));
+            }
+        }
+        TreeDef::SelectionSpace {
+            parameters,
+            candidates,
+        } => {
+            let p: Vec<&str> = parameters.iter().map(|p| db.name(p.name)).collect();
+            println!("selection space over {p:?}:");
+            for (c, v) in candidates {
+                println!("  {} at {v:?}", node(c));
+            }
+        }
+    }
 }

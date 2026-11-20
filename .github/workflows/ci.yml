@@ -80,7 +80,10 @@ jobs:
           findstr /c:"TARGET=clean UPDATE=0" args3.txt || exit /b 1
           call build.bat dolphin showargs > args4.txt
           findstr /c:"TARGET=package UPDATE=1 PAUSE=0 DOLPHIN=1" args4.txt || exit /b 1
-          type args1.txt args2.txt args3.txt args4.txt
+          call build.bat fast noupdate showargs > args5.txt
+          findstr /c:"TARGET=package UPDATE=0 PAUSE=0 DOLPHIN=0 FAST=1" args5.txt || exit /b 1
+          findstr /c:"FAST=0" args1.txt || exit /b 1
+          type args1.txt args2.txt args3.txt args4.txt args5.txt
       - name: Without devkitPro or Docker it fails with instructions
         shell: cmd
         env:

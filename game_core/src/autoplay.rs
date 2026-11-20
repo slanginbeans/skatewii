@@ -10,6 +10,8 @@ use crate::skater::Mode;
 #[derive(Default)]
 pub struct KickerRun {
     flicked: bool,
+    /// Frames pushed so far (an imported park has no kicker at the spawn: flick on flat ground instead).
+    pushed: u32,
 }
 
 /// Raw C-stick values: pulled back, and flicked forward and right (a goofy rider's kickflip).
@@ -39,10 +41,16 @@ impl KickerRun {
             pad.buttons |= btn::A;
         }
         if !self.flicked && s.mode == Mode::Rolling {
-            if s.pos.z > -2.8 {
+            self.pushed += 1;
+            let (load, flick) = if game.imported_park().is_some() {
+                (self.pushed > 150, self.pushed > 160)
+            } else {
+                (s.pos.z > -5.0, s.pos.z > -2.8)
+            };
+            if flick {
                 (pad.cstick_x, pad.cstick_y) = UP_RIGHT;
                 self.flicked = true;
-            } else if s.pos.z > -5.0 {
+            } else if load {
                 (pad.cstick_x, pad.cstick_y) = BACK;
             }
         }
@@ -103,6 +111,11 @@ impl TrickTour {
             p.t = 0;
         };
         self.t += 1;
+        // Somewhere the script doesn't fit (an imported park): give up on a phase after 20 s.
+        if self.t > 20 * 60 && self.phase != Tour::Done {
+            next(self, Tour::Done);
+            return pad;
+        }
         // Keep the speed down so everything fits in the park (X: foot brake), and steer back towards the
         // middle when near a wall.
         let busy_stick = matches!(
@@ -288,5 +301,71 @@ impl TrickTour {
     /// True once the whole tour has been played (after the bail).
     pub fn done(&self) -> bool {
         self.phase == Tour::Done
+    }
+}
+
+/// Hands-off play for scripted runs on the Wii and in Dolphin (`autoplay.txt` in the app folder, see
+/// docs/logging.md): the [`TrickTour`] over and over, after the rider is back on the board each time.
+#[derive(Default)]
+pub struct Autoplay {
+    tour: TrickTour,
+    /// Tours finished so far.
+    pub rounds: u32,
+    /// Frames to wait (rolling, no input) before the next tour starts.
+    rest: u32,
+}
+
+impl Autoplay {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The next pad state. Returns the line to log when a tour finishes.
+    pub fn next(&mut self, game: &Game) -> (PadRaw, Option<alloc::string::String>) {
+        let idle = PadRaw {
+            flags: flag::CONNECTED,
+            ..Default::default()
+        };
+        if self.rest > 0 {
+            self.rest -= 1;
+            // Wait until the rider is up again before starting over.
+            if self.rest == 0 && !matches!(game.skater.mode, Mode::Rolling) {
+                self.rest = 30;
+            }
+            return (idle, None);
+        }
+        let pad = self.tour.next(game);
+        if self.tour.done() {
+            self.rounds += 1;
+            self.tour = TrickTour::new();
+            self.rest = 180;
+            return (
+                idle,
+                Some(alloc::format!("autoplay: tour {} done", self.rounds)),
+            );
+        }
+        (pad, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autoplay_repeats_the_tour() {
+        let mut game = Game::new();
+        let mut auto = Autoplay::new();
+        let mut lines = 0;
+        for _ in 0..(60 * 120) {
+            let (pad, line) = auto.next(&game);
+            lines += line.is_some() as u32;
+            game.update(&pad, 1.0 / 60.0);
+            if auto.rounds >= 2 {
+                break;
+            }
+        }
+        assert!(auto.rounds >= 2, "rounds {}", auto.rounds);
+        assert_eq!(lines, auto.rounds);
     }
 }

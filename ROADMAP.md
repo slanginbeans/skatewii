@@ -31,7 +31,8 @@ content second.
 - [x] Air spin with Skate 3's wind-up; hippie jumps; held double/triple kickflips
 - [x] Ramps and quarter pipes you can go vertical on: the board follows any surface under its trucks (ray
   probes against the park's triangles), airs out over coping, wallrides, pumping, bails from impacts
-- [ ] Scripted Dolphin runs from `game_core::autoplay`, with screenshots in CI-like checks
+- [x] Scripted Dolphin runs from `game_core::autoplay` (`autoplay.txt`, `tools/dolphin_test.ps1`)
+- [ ] Screenshots from scripted runs in CI-like checks
 - [ ] Late flips, finger flips, dark catches, board-sideways flicks (shapes are already converted)
 
 ## Phase 2: Renderer
@@ -51,6 +52,11 @@ content second.
 - [x] `fg_import park`: grind rails from the spline sections
 - [x] `fg_import park`: the park's textured models (Pres stream, material -> texture binding)
 - [x] `fg_import rules`: Skate 3's riding tuning (AttribSys database) and flick shapes (`.pat`)
+- [x] `fg_import motion`: every clip's attribute tracks and events, every animation tree, and the poses of
+  every clip the on-board motion graph plays (`motion.fgpak`, loaded at start-up); tree playback in
+  `game_core::motion::tree` (SK8's semantics)
+- [ ] Play the motion graph's trees instead of the hand-picked clip roles (`rider.rs`), clip-authored timing
+  (jump frame, push and brake contact, wind-up strength) driving the skating
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)

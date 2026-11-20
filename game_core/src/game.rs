@@ -106,6 +106,9 @@ pub struct Game {
     models: Models,
     /// The player's imported skater, drawn instead of the box placeholder when loaded.
     rider: Option<Rider>,
+    /// Skate 3's motion library (`fg_import motion`): clip timing, attribute tracks, animation trees and
+    /// poses. Loaded but not played yet.
+    pub motion: Option<crate::motion::Library<'static>>,
     pub skater: Skater,
     flick: FlickInput,
     /// This frame's flick-stick reading (for the preview and tests).
@@ -179,6 +182,7 @@ impl Game {
             frame_cost: None,
             notice: None,
             rider: None,
+            motion: None,
             imported_park: None,
             log: Vec::new(),
             devlog: DevLog::new(),
@@ -194,6 +198,14 @@ impl Game {
     pub fn load_skater(&mut self, pack: &'static [u8]) -> Result<(), character::Error> {
         self.rider = Some(Rider::new(Character::parse(pack)?));
         Ok(())
+    }
+
+    /// Loads a motion library pack (`fg_import motion`). The bytes stay borrowed for the rest of the game.
+    pub fn load_motion(
+        &mut self,
+        pack: &'static [u8],
+    ) -> Result<&crate::motion::Library<'static>, crate::motion::LibraryError> {
+        Ok(self.motion.insert(crate::motion::Library::parse(pack)?))
     }
 
     pub fn rider(&self) -> Option<&Rider> {
@@ -490,7 +502,9 @@ impl Game {
         if let Some(n) = &self.notice
             && self.clock < HINT_TIME
         {
-            hud::text_centered(&mut m, SCREEN_W / 2.0, 366.0, 3.0, n, rgb(255, 230, 90));
+            // As big as fits across the screen.
+            let px = ((SCREEN_W - 32.0) / (4.0 * n.chars().count().max(1) as f32)).min(3.0);
+            hud::text_centered(&mut m, SCREEN_W / 2.0, 366.0, px, n, rgb(255, 230, 90));
         }
         if !self.connected {
             hud::text_centered(

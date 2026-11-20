@@ -93,6 +93,7 @@ drive; `build.bat` offers to install Rust for you), or Docker Desktop.
 | `build.bat clean` | delete the build output |
 | `build.bat nopause` | don't wait for a key at the end |
 | `build.bat dolphin` | build, then start the game in Dolphin (`dist` as its SD card) |
+| `build.bat fast` | quicker build for testing (no link-time optimisation) |
 
 Switches combine. Optional settings: `set FG_SD=E:` also copies the app to `E:\apps\flatground`;
 `FG_DEVKITPRO` points at devkitPro if it's somewhere unusual; `FG_ASSUME_YES=1` installs Rust without asking;
@@ -127,3 +128,5 @@ the `flatground-sd-card` artifact from the run's page.
 
 To try it in Dolphin: `build.bat dolphin` (Windows), or open `dist/apps/flatground/boot.dol` with Dolphin's
 SD card set to sync from the `dist` folder (Config, Wii, SD Card). Map a GameCube controller to port 1.
+A scripted test run (build, play hands-off for a minute, close Dolphin, print the session log):
+`powershell -ExecutionPolicy Bypass -File tools\dolphin_test.ps1` (docs/logging.md).
