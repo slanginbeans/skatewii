@@ -1,8 +1,8 @@
 // fg_log: the session log. One text file per play session in <app folder>/logs/session_YYYYMMDD_HHMMSS.txt,
 // the newest LOG_KEEP kept.
 //
-// Lines are buffered in memory and written out every LOG_FLUSH_MS (or at once for important ones), so writing to
-// the SD card never stalls a frame. The last lines are also kept for the crash screen. Plain C + stdio, so it
+// Lines are buffered in memory and written out every LOG_FLUSH_MS (or at once for important ones). On the Wii a
+// background thread does the writing (log_set_writer), so the game never waits for the SD card. The last lines are also kept for the crash screen. Plain C + stdio, so it
 // builds and is tested on the PC too (wii/platform/tests/log_test.c).
 //
 // Based on the session log of the author's earlier Wii project.
@@ -21,6 +21,10 @@
 int log_open(const char *dir, time_t now);
 // Milliseconds since boot, for the timestamps.
 void log_set_clock(uint32_t (*ms)(void));
+// Hands the writing to a background thread: lock/unlock guard the buffer (held only to copy lines), kick wakes
+// the writer early (important lines, a filling buffer). The writer calls log_flush() every LOG_FLUSH_MS;
+// log_tick() then does nothing, and a full buffer drops lines (counted in the file) rather than wait.
+void log_set_writer(void (*lock_fn)(void), void (*unlock_fn)(void), void (*kick_fn)(void));
 // One line (a trailing newline is dropped). `important`: written out at once (errors, crashes).
 void log_line(const char *text, uint32_t len, int important);
 void log_printf(const char *fmt, ...)

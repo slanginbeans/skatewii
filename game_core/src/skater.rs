@@ -92,10 +92,12 @@ const REVERT_TIME: f32 = 0.3;
 const REVERT_POINTS: u32 = 100;
 /// Manuals: C-stick deflection that holds one (beyond is the tail or nose brake), how long it must be
 /// held before the manual starts (so a quick flick doesn't start one), the balance sweet spot.
-const MANUAL_MIN: f32 = 0.25;
+const MANUAL_MIN: f32 = 0.1;
 const MANUAL_BRAKE: f32 = 0.9;
 const MANUAL_ENGAGE: f32 = 0.12;
-const MANUAL_SWEET: f32 = 0.55;
+const MANUAL_SWEET: f32 = 0.35;
+/// The C-stick deflection a manual balances at (for the log).
+pub const MANUAL_BALANCED_AT: f32 = MANUAL_MIN + MANUAL_SWEET * (MANUAL_BRAKE - MANUAL_MIN);
 const MANUAL_MIN_TIME: f32 = 0.5;
 const MANUAL_POINTS_PER_S: f32 = 120.0;
 /// Analog trigger past this holds a grab (Skate 3: any pressure).

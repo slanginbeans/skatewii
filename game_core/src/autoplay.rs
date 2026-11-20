@@ -151,8 +151,8 @@ impl TrickTour {
             Tour::Manual => {
                 // Hold the C-stick lightly back and keep the balance marker centred.
                 let b = s.manual.map_or(0.0, |m| m.balance);
-                let push = (0.55 - 1.2 * b).clamp(0.05, 0.95);
-                let gesture_y = 0.25 + push * 0.65;
+                let push = (0.35 - 1.2 * b).clamp(0.02, 0.98);
+                let gesture_y = 0.1 + push * 0.8;
                 // Undo the stick conditioning: 0.25 dead zone, full at 0.95 of the C-stick's range.
                 pad.cstick_y = -((gesture_y * 0.7 + 0.25) * crate::input::C_RANGE) as i8;
                 if s.speed < 3.0 && s.manual.is_none() {
