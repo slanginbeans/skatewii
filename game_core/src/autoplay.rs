@@ -3,18 +3,25 @@
 
 use crate::game::Game;
 use crate::input::{PadRaw, btn, flag};
+use crate::math::{PI, atan2f, cosf, sinf, wrap_angle};
 use crate::skater::Mode;
 
 /// Push up to speed down the spawn lane, load the flick stick on the kicker and kickflip off the lip.
 #[derive(Default)]
 pub struct KickerRun {
-    frame: u32,
     flicked: bool,
 }
 
-/// Raw stick values for the C-stick.
+/// Raw C-stick values: pulled back, and flicked forward and right (a goofy rider's kickflip).
 const BACK: (i8, i8) = (0, -80);
-const UP_LEFT: (i8, i8) = (-50, 62);
+const UP_RIGHT: (i8, i8) = (50, 62);
+const UP: (i8, i8) = (0, 80);
+
+/// The C-stick at `deg` degrees clockwise from straight forward, fully over.
+fn rim(deg: f32) -> (i8, i8) {
+    let a = deg * PI / 180.0;
+    ((sinf(a) * 80.0) as i8, (cosf(a) * 80.0) as i8)
+}
 
 impl KickerRun {
     pub fn new() -> Self {
@@ -27,30 +34,27 @@ impl KickerRun {
             flags: flag::CONNECTED,
             ..Default::default()
         };
-        // Tap A every half second until near top push speed.
-        if s.mode == Mode::Rolling
-            && s.speed < 6.5
-            && self.frame.is_multiple_of(30)
-            && !self.flicked
-        {
+        // Hold A (keep pushing) until near top push speed.
+        if s.mode == Mode::Rolling && s.speed < 6.0 && !self.flicked {
             pad.buttons |= btn::A;
         }
         if !self.flicked && s.mode == Mode::Rolling {
             if s.pos.z > -2.8 {
-                (pad.cstick_x, pad.cstick_y) = UP_LEFT;
+                (pad.cstick_x, pad.cstick_y) = UP_RIGHT;
                 self.flicked = true;
             } else if s.pos.z > -5.0 {
                 (pad.cstick_x, pad.cstick_y) = BACK;
             }
         }
-        self.frame += 1;
         pad
     }
 }
 
 /// The kicker run, then the rest of the move set: carve both ways (the rider leans), a U-turn, a
-/// balanced manual, an ollie with an indy grab, and finally an over-spun ollie that bails. For the
-/// preview and an end-to-end test.
+/// balanced manual, an ollie with an indy grab, a 360 flip, a 180 to fakie, pushing out of fakie (the
+/// rider turns round to switch), a powerslide, a hippie jump, and finally a grab held into the landing
+/// (a bail).
+/// For the preview and an end-to-end test.
 #[derive(Default)]
 pub struct TrickTour {
     kicker: KickerRun,
@@ -69,12 +73,18 @@ enum Tour {
     Manual,
     GrabOllie,
     GrabAir,
+    TreFlip,
+    TreAir,
+    HalfCab,
+    HalfCabAir,
+    FakiePush,
+    Powerslide,
+    Hippie,
+    HippieAir,
     BailOllie,
     BailAir,
     Done,
 }
-
-const UP: (i8, i8) = (0, 80);
 
 impl TrickTour {
     pub fn new() -> Self {
@@ -93,9 +103,19 @@ impl TrickTour {
             p.t = 0;
         };
         self.t += 1;
-        // Keep the speed down so everything fits in the park.
-        if rolling && s.speed > 4.0 && self.phase != Tour::Kicker {
-            pad.buttons |= btn::B;
+        // Keep the speed down so everything fits in the park (X: foot brake), and steer back towards the
+        // middle when near a wall.
+        let busy_stick = matches!(
+            self.phase,
+            Tour::Kicker | Tour::Carve | Tour::HalfCabAir | Tour::Powerslide | Tour::BailAir
+        );
+        if rolling && s.speed > 4.5 && !matches!(self.phase, Tour::Kicker | Tour::Powerslide) {
+            pad.buttons |= btn::X;
+        }
+        if rolling && !busy_stick && (s.pos.x.abs() > 6.0 || s.pos.z.abs() > 9.0) {
+            let want = atan2f(-s.pos.x, -s.pos.z);
+            let err = wrap_angle(want - s.travel_yaw());
+            pad.stick_x = (-err * 90.0).clamp(-72.0, 72.0) as i8;
         }
         match self.phase {
             Tour::Kicker => {
@@ -109,27 +129,44 @@ impl TrickTour {
                 }
             }
             Tour::Carve => {
-                // A little right, then a long left: a U-turn back down the park beside the kicker.
-                pad.stick_x = if self.t < 25 { -60 } else { 72 };
-                if self.t > 25 + 90 {
+                // A quick lean right, straight on past the funbox, then a U-turn to the left back down
+                // the park between the kicker and the funbox.
+                if s.speed > 3.5 {
+                    pad.buttons |= btn::X;
+                }
+                let turned = wrap_angle(s.travel_yaw() - PI).abs() < 0.25;
+                pad.stick_x = if self.t < 12 {
+                    60
+                } else if s.pos.z < 9.0 && self.t < 200 {
+                    -10
+                } else if !turned && self.t < 300 {
+                    -72
+                } else {
+                    0
+                };
+                if turned && self.t > 40 {
                     next(self, Tour::Manual);
                 }
             }
             Tour::Manual => {
-                // Pull the stick down and keep the balance marker centred.
+                // Hold the C-stick lightly back and keep the balance marker centred.
                 let b = s.manual.map_or(0.0, |m| m.balance);
-                let push = (0.75 - 1.2 * b).clamp(0.35, 1.0);
-                pad.stick_y = -(push * 72.0) as i8;
-                if s.speed < 3.0 {
+                let push = (0.55 - 1.2 * b).clamp(0.05, 0.95);
+                let gesture_y = 0.25 + push * 0.65;
+                // Undo the stick conditioning: 0.25 dead zone, full at 0.95 of 60.
+                pad.cstick_y = -((gesture_y * 0.7 + 0.25) * 60.0) as i8;
+                if s.speed < 3.0 && s.manual.is_none() {
                     pad.buttons |= btn::A;
                 }
-                if self.t > 100 {
+                if self.t > 110 {
                     next(self, Tour::GrabOllie);
                 }
             }
             Tour::GrabOllie => {
                 // Load, then flick straight up.
-                (pad.cstick_x, pad.cstick_y) = if self.t < 10 { BACK } else { UP };
+                if self.t > 8 {
+                    (pad.cstick_x, pad.cstick_y) = if self.t < 18 { BACK } else { UP };
+                }
                 if !rolling {
                     next(self, Tour::GrabAir);
                 }
@@ -140,10 +177,93 @@ impl TrickTour {
                     pad.trig_r = 255;
                 }
                 if rolling {
+                    next(self, Tour::TreFlip);
+                }
+            }
+            Tour::TreFlip => {
+                if s.speed < 3.5 && self.t < 40 {
+                    pad.buttons |= btn::A;
+                }
+                // Roll the stick round the back from the left, then flick across to forward-right.
+                let k = self.t.saturating_sub(50);
+                if k > 0 {
+                    (pad.cstick_x, pad.cstick_y) = match k {
+                        1..=4 => rim(260.0),
+                        5 => rim(215.0),
+                        6 => rim(165.0),
+                        7 => (39, -19),
+                        _ => rim(65.0),
+                    };
+                }
+                if !rolling {
+                    next(self, Tour::TreAir);
+                }
+            }
+            Tour::TreAir => {
+                if rolling {
+                    next(self, Tour::HalfCab);
+                }
+            }
+            Tour::HalfCab => {
+                if s.speed < 3.5 && self.t < 40 {
+                    pad.buttons |= btn::A;
+                }
+                if self.t > 50 {
+                    (pad.cstick_x, pad.cstick_y) = if self.t < 60 { BACK } else { UP };
+                }
+                if !rolling {
+                    next(self, Tour::HalfCabAir);
+                }
+            }
+            Tour::HalfCabAir => {
+                // Spin left to about half a turn, then let the stick go.
+                if s.spin < PI - 0.35 {
+                    pad.stick_x = -72;
+                }
+                if rolling {
+                    next(self, Tour::FakiePush);
+                }
+            }
+            Tour::FakiePush => {
+                // Rolling tail first: a push turns the rider round to switch.
+                if self.t == 20 || (self.t > 40 && s.speed < 3.5) {
+                    pad.buttons |= btn::A;
+                }
+                if self.t > 100 {
+                    next(self, Tour::Powerslide);
+                }
+            }
+            Tour::Powerslide => {
+                if self.t < 60 && s.speed < 5.5 {
+                    pad.buttons |= btn::A;
+                } else if self.t >= 60 && self.t < 100 {
+                    // Main stick fully back and to the right.
+                    (pad.stick_x, pad.stick_y) = (40, -66);
+                }
+                if self.t > 120 {
+                    next(self, Tour::Hippie);
+                }
+            }
+            Tour::Hippie => {
+                if self.t < 40 && s.speed < 3.0 {
+                    pad.buttons |= btn::A;
+                }
+                if (50..70).contains(&self.t) {
+                    pad.buttons |= btn::A | btn::B;
+                }
+                if !rolling {
+                    next(self, Tour::HippieAir);
+                }
+            }
+            Tour::HippieAir => {
+                if rolling {
                     next(self, Tour::BailOllie);
                 }
             }
             Tour::BailOllie => {
+                if s.speed < 3.0 && self.t < 30 {
+                    pad.buttons |= btn::A;
+                }
                 if self.t > 50 {
                     (pad.cstick_x, pad.cstick_y) = if self.t < 60 { BACK } else { UP };
                 }
@@ -152,8 +272,10 @@ impl TrickTour {
                 }
             }
             Tour::BailAir => {
-                // Spin about 90 degrees and hold it: lands sideways.
-                pad.stick_x = 26;
+                // Grab and never let go: still holding the board when the wheels touch down.
+                if self.t > 4 {
+                    pad.trig_l = 255;
+                }
                 if matches!(s.mode, Mode::Bailed { .. }) {
                     next(self, Tour::Done);
                 }

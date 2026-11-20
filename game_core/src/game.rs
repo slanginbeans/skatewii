@@ -7,15 +7,18 @@ use alloc::vec::Vec;
 use crate::camera::ChaseCam;
 use crate::character::{self, Character};
 use crate::collision;
-use crate::flick::FlickReader;
+use crate::flick::{FlickInput, FlickOut};
+use crate::gesture;
 use crate::gfx::{Gfx, MeshBuilder, SCREEN_W, Vertex, rgb};
 use crate::hud;
 use crate::input::{Pad, PadRaw, flag};
 use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
 use crate::model::Models;
+use crate::pack::Pack;
 use crate::park::{Park, Terrain};
 use crate::rider::{self, Rider};
-use crate::skater::{Event, GRAVITY, Mode, STEP, Skater};
+use crate::skater::{Event, Mode, STEP, Skater, Stance};
+use crate::tuning::Tuning;
 use crate::world::ImportedPark;
 
 const SKY: u32 = rgb(150, 196, 232);
@@ -71,7 +74,12 @@ pub struct Game {
     /// The player's imported skater, drawn instead of the box placeholder when loaded.
     rider: Option<Rider>,
     pub skater: Skater,
-    flick: FlickReader,
+    flick: FlickInput,
+    /// This frame's flick-stick reading (for the preview and tests).
+    pub flick_out: FlickOut,
+    /// Riding numbers: built in, or Skate 3's from a rules pack.
+    pub tuning: Tuning,
+    pub stance: Stance,
     cam: ChaseCam,
     pub score: u32,
     popup: Option<Popup>,
@@ -111,7 +119,10 @@ impl Game {
             cam: ChaseCam::new(&skater),
             park,
             skater,
-            flick: FlickReader::new(),
+            flick: FlickInput::new(),
+            flick_out: FlickOut::default(),
+            tuning: Tuning::BUILT_IN,
+            stance: Stance::Goofy,
             score: 0,
             popup: None,
             prev_held: 0,
@@ -139,10 +150,37 @@ impl Game {
     /// Rides an imported park (`fg_import park`) instead of the demo park, starting at its spawn.
     pub fn load_park(&mut self, pack: &'static [u8]) -> Result<(), collision::Error> {
         let p = ImportedPark::parse(pack)?;
-        self.skater = Skater::spawn(&p.mesh);
+        self.skater = Skater::spawn_with(&p.mesh, self.tuning, self.stance);
         self.cam = ChaseCam::new(&self.skater);
         self.imported_park = Some(p);
         Ok(())
+    }
+
+    /// Uses a rules pack (`fg_import rules`): Skate 3's tuning values and flick shapes from the player's
+    /// disc. Returns how many tuning values and flick shapes it supplied.
+    pub fn load_rules(&mut self, pack: &[u8]) -> Result<(usize, usize), crate::pack::Error> {
+        let pack = Pack::parse(pack)?;
+        let mut values = 0;
+        if let Some(e) = pack.find("rules/tuning") {
+            values = self.tuning.apply(e.data);
+        }
+        let mut shapes = 0;
+        if let Some(e) = pack.find("rules/gestures/skater")
+            && let Some(s) = gesture::parse(e.data)
+            && !s.is_empty()
+        {
+            shapes = s.len();
+            self.flick = FlickInput::with_shapes(s);
+        }
+        self.skater.tuning = self.tuning;
+        self.cam = ChaseCam::new(&self.skater);
+        Ok((values, shapes))
+    }
+
+    /// Sets the rider's natural stance (Skate 3's default is goofy).
+    pub fn set_stance(&mut self, stance: Stance) {
+        self.stance = stance;
+        self.skater.stance = stance;
     }
 
     pub fn imported_park(&self) -> Option<&ImportedPark> {
@@ -162,20 +200,24 @@ impl Game {
         self.clock += dt;
         self.events.clear();
 
-        let flick = self.flick.update(pad.flick, dt);
+        let mut flick = self.flick.update(pad.flick, self.tuning.flick_misses);
         let rolling = self.skater.mode == Mode::Rolling;
         let grinding = self.skater.mode == Mode::Grind;
-        let flick = if rolling || grinding { flick } else { None };
-        let loaded = rolling && self.flick.is_loaded();
+        if !(rolling || grinding) {
+            flick.flick = None;
+        }
+        self.flick_out = flick;
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
-        self.skater
-            .step(ground, &pad, flick, loaded, dt, &mut self.events);
+        self.skater.step(ground, &pad, &flick, dt, &mut self.events);
+        if self.events.contains(&Event::Respawned) {
+            self.flick.reset();
+        }
         self.cam.update(&self.skater, ground, dt);
         if self.rider.is_some() {
             let rot = self.imported_xform().rot;
             let s = &self.skater;
             let ground = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
-            let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, GRAVITY);
+            let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, s.tuning.gravity);
             if let Some(r) = &mut self.rider {
                 r.update(&self.skater, self.clock, land_in, dt, rot);
             }
@@ -222,12 +264,18 @@ impl Game {
         gfx.end_frame();
     }
 
-    /// The skater's board-space frame in the world (heading, spin, stance, slope).
+    /// The skater's board-space frame in the world (heading, spin, slope; powerslides and reverts turn
+    /// the board unless the rider's clip does it).
     fn skater_base(&self) -> Xform {
         let s = &self.skater;
-        let stance = if s.fakie { PI } else { 0.0 };
+        let clip_turns = self.rider.as_ref().is_some_and(|r| r.turns_board());
+        let extra = if clip_turns {
+            0.0
+        } else {
+            s.board_yaw_offset()
+        };
         Xform::new(
-            Mat3::yaw_on_surface(s.heading + s.spin + stance, s.normal),
+            Mat3::yaw_on_surface(s.heading + s.spin + extra, s.normal),
             s.pos,
         )
     }
@@ -263,9 +311,10 @@ impl Game {
         let (mut lift, mut board_rot) = (0.0, Mat3::IDENTITY);
         if let Some(t) = &s.trick {
             let p = t.progress();
+            let (flip, shove) = t.flick.trick.motion();
             lift = 0.28 * sinf(PI * p);
-            board_rot = Mat3::rot_y(t.def.shove_halves * PI * p)
-                .mul(&Mat3::rot_z(t.def.flip_turns * TAU * p));
+            board_rot =
+                Mat3::rot_y(shove * PI * p).mul(&Mat3::rot_z(flip * t.flips as f32 * TAU * p));
         }
         let pivot = 0.09;
         let board = base
@@ -359,38 +408,24 @@ impl Game {
                 rgb(255, 120, 100),
             );
         } else if self.clock < HINT_TIME {
-            hud::text_centered(
-                &mut m,
-                SCREEN_W / 2.0,
-                392.0,
-                3.0,
-                "A PUSH   B BRAKE   STICK STEER AND SPIN",
-                white,
-            );
-            hud::text_centered(
-                &mut m,
-                SCREEN_W / 2.0,
-                410.0,
-                3.0,
-                "C-STICK: PULL BACK THEN FLICK UP TO OLLIE",
-                white,
-            );
-            hud::text_centered(
-                &mut m,
-                SCREEN_W / 2.0,
-                428.0,
-                3.0,
-                "FLICK UP-LEFT KICKFLIP / UP-RIGHT HEELFLIP",
-                white,
-            );
-            hud::text_centered(
-                &mut m,
-                SCREEN_W / 2.0,
-                446.0,
-                3.0,
-                "STICK DOWN/UP MANUAL   L/R IN THE AIR GRAB",
-                white,
-            );
+            for (i, line) in [
+                "A PUSH  B MONGO  A+B HIPPIE JUMP  X BRAKE",
+                "STICK STEER - FULL BACK + SIDE: POWERSLIDE",
+                "C-STICK: PULL BACK, FLICK UP TO OLLIE",
+                "FLICK OR ROLL FOR FLIPS - HOLD LIGHT: MANUAL",
+            ]
+            .iter()
+            .enumerate()
+            {
+                hud::text_centered(
+                    &mut m,
+                    SCREEN_W / 2.0,
+                    392.0 + 18.0 * i as f32,
+                    3.0,
+                    line,
+                    white,
+                );
+            }
         }
         if let Some(man) = &self.skater.manual {
             // Balance meter: keep the marker in the middle.

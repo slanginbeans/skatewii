@@ -61,7 +61,9 @@ pub struct Pad {
 
 const MAIN_RANGE: f32 = 72.0;
 const C_RANGE: f32 = 60.0;
-const DEAD_ZONE: f32 = 0.15;
+/// Skate 3's stick conditioning: a radial dead zone, then full deflection a little before the rim.
+const DEAD_ZONE: f32 = 0.25;
+const FULL: f32 = 0.95;
 
 fn stick(x: i8, y: i8, range: f32) -> [f32; 2] {
     let (x, y) = (x as f32 / range, y as f32 / range);
@@ -70,7 +72,7 @@ fn stick(x: i8, y: i8, range: f32) -> [f32; 2] {
         return [0.0, 0.0];
     }
     // Rescale so the output starts at 0 just outside the dead zone and saturates at 1.
-    let scaled = ((mag - DEAD_ZONE) / (1.0 - DEAD_ZONE)).min(1.0);
+    let scaled = ((mag - DEAD_ZONE) / (FULL - DEAD_ZONE)).min(1.0);
     [x / mag * scaled, y / mag * scaled]
 }
 
@@ -108,8 +110,8 @@ mod tests {
     #[test]
     fn dead_zone_and_saturation() {
         let r = PadRaw {
-            stick_x: 5,
-            stick_y: -5,
+            stick_x: 12,
+            stick_y: -12,
             cstick_x: 100,
             ..Default::default()
         };

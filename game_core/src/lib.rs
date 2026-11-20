@@ -17,6 +17,7 @@ pub mod character;
 pub mod collision;
 pub mod flick;
 pub mod game;
+pub mod gesture;
 pub mod gfx;
 pub mod hud;
 pub mod input;
@@ -28,6 +29,7 @@ pub mod rails;
 pub mod rider;
 pub mod skater;
 pub mod skinned;
+pub mod tuning;
 pub mod world;
 
 pub use game::Game;

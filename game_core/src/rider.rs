@@ -1,16 +1,19 @@
 //! Drives an imported [`Character`] from the skater's state: picks a clip for what the skater is doing,
-//! crossfades between clips, poses and skins it once per step.
+//! crossfades between clips, lays the fakie layers on top, poses and skins it once per step (mirrored for
+//! a regular or switch rider: the clips are authored goofy).
 //!
-//! Clip roles are the `skater/clip/<role>` entries `fg_import skater` writes: `idle`, `crouch`, `push`,
-//! `land/*`, `manual`, `nosemanual`, `grab/*`, `bail/fall` + `bail/getup`, `lean/*` (single poses blended
-//! over the riding clips by steering),
-//! and `<trick>/pop` + `<trick>/air` for each flick trick. A missing clip falls back to `idle`.
+//! Clip roles are the `skater/clip/<role>` entries `fg_import skater` writes (see its `CLIPS` table):
+//! riding (`idle`, `crouch`, `crouch_nollie`, `push/*`, `mongo/*`, `brake/*`, `tailbrake`, `nosebrake`,
+//! `slide/fs|bs`, `kickturn/fs|bs`, `lean/*`), `land/*`, `manual`, `nosemanual`, `grab/*`, `bail/*`,
+//! `grind/*`, `hippy/*`, `fakie` (a pose the head and upper back are taken from when riding tail
+//! first), and per flick trick
+//! `<trick>/pop`, `/air`, `/flip`, `/out`. A missing clip falls back to something close (`idle` last).
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::character::{Character, Local};
-use crate::flick::Flick;
+use crate::gesture::{Flick, Trick};
 use crate::gfx::SUN;
 use crate::math::{Mat3, sqrtf, v3};
 use crate::skater::{GrabKind, GrindKind, LandKind, Mode, Skater};
@@ -24,6 +27,16 @@ const MIN_SPEED: f32 = 0.6;
 const MAX_SPEED: f32 = 2.5;
 /// How far full steering blends towards the lean pose.
 const LEAN_WEIGHT: f32 = 0.85;
+/// The fakie look fades in and out over this (Skate 3: 0.3 s).
+const FAKIE_FADE: f32 = 0.3;
+/// Bones the fakie pose takes over fully (the head looks round)...
+const FAKIE_HEAD: [&str; 3] = ["NECK", "NECK1", "HEAD"];
+/// ...and by the torso amount (the upper back turns with it).
+const FAKIE_TORSO_BONES: [&str; 2] = ["SPINE2", "SPINE3"];
+/// How much of the upper back to turn: in a manual, in a powerslide, otherwise.
+const FAKIE_TORSO_MANUAL: f32 = 1.0;
+const FAKIE_TORSO_SLIDE: f32 = 0.0;
+const FAKIE_TORSO: f32 = 0.5;
 
 /// Which clip to show and how far into it (seconds).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -32,41 +45,69 @@ pub struct Pick {
     pub time: f32,
 }
 
+macro_rules! stages {
+    ($k:literal) => {
+        [
+            concat!($k, "/pop"),
+            concat!($k, "/air"),
+            concat!($k, "/flip"),
+            concat!($k, "/out"),
+        ]
+    };
+}
+
 /// The clip roles of a trick, played back to back: pop, air, flip, catch (any may be missing).
 pub fn trick_roles(f: Flick) -> [&'static str; 4] {
-    match f {
-        Flick::Ollie => ["ollie/pop", "ollie/air", "ollie/flip", "ollie/out"],
-        Flick::Nollie => ["nollie/pop", "nollie/air", "nollie/flip", "nollie/out"],
-        Flick::Kickflip => [
-            "kickflip/pop",
-            "kickflip/air",
-            "kickflip/flip",
-            "kickflip/out",
-        ],
-        Flick::Heelflip => [
-            "heelflip/pop",
-            "heelflip/air",
-            "heelflip/flip",
-            "heelflip/out",
-        ],
-        Flick::PopShoveIt => [
-            "popshuvit/pop",
-            "popshuvit/air",
-            "popshuvit/flip",
-            "popshuvit/out",
-        ],
-        Flick::FsShoveIt => [
-            "fsshuvit/pop",
-            "fsshuvit/air",
-            "fsshuvit/flip",
-            "fsshuvit/out",
-        ],
+    use Trick::*;
+    match (f.trick, f.nollie) {
+        (Ollie, false) => stages!("ollie"),
+        (Ollie, true) => stages!("nollie"),
+        (Kickflip, false) => stages!("kickflip"),
+        (Kickflip, true) => stages!("n_kickflip"),
+        (Heelflip, false) => stages!("heelflip"),
+        (Heelflip, true) => stages!("n_heelflip"),
+        (PopShuvit, false) => stages!("popshuvit"),
+        (PopShuvit, true) => stages!("n_popshuvit"),
+        (FsPopShuvit, false) => stages!("fspopshuvit"),
+        (FsPopShuvit, true) => stages!("n_fspopshuvit"),
+        (Bs360Shuvit, false) => stages!("360popshuvit"),
+        (Bs360Shuvit, true) => stages!("n_360popshuvit"),
+        (Fs360Shuvit, false) => stages!("fs360popshuvit"),
+        (Fs360Shuvit, true) => stages!("n_fs360popshuvit"),
+        (VarialKickflip, false) => stages!("varialkickflip"),
+        (VarialKickflip, true) => stages!("n_varialkickflip"),
+        (VarialHeelflip, false) => stages!("varialheelflip"),
+        (VarialHeelflip, true) => stages!("n_varialheelflip"),
+        (Hardflip, false) => stages!("hardflip"),
+        (Hardflip, true) => stages!("n_hardflip"),
+        (InwardHeelflip, false) => stages!("inwardheelflip"),
+        (InwardHeelflip, true) => stages!("n_inwardheelflip"),
+        (TreFlip, false) => stages!("360flip"),
+        (TreFlip, true) => stages!("n_360flip"),
+        (Laserflip, false) => stages!("laserflip"),
+        (Laserflip, true) => stages!("n_laserflip"),
+        (Hardflip360, false) => stages!("360hardflip"),
+        (Hardflip360, true) => stages!("n_360hardflip"),
+        (InwardHeelflip360, false) => stages!("360inwardheelflip"),
+        (InwardHeelflip360, true) => stages!("n_360inwardheelflip"),
     }
 }
 
 /// Seconds until a body at `height` above the ground, moving up at `vel_y`, lands under `gravity`.
 pub fn time_to_land(height: f32, vel_y: f32, gravity: f32) -> f32 {
     (vel_y + sqrtf((vel_y * vel_y + 2.0 * gravity * height.max(0.0)).max(0.0))) / gravity
+}
+
+/// "fs" or "bs" for a turn of the board `dir` (+1 left), as seen in the clips' own goofy frame.
+fn side_role(s: &Skater, dir: f32, fs: &'static str, bs: &'static str) -> &'static str {
+    let mut g = dir;
+    if s.mirrored() {
+        g = -g;
+    }
+    if s.speed < 0.0 {
+        g = -g;
+    }
+    if g > 0.0 { bs } else { fs }
 }
 
 /// Picks the clip for the skater's current state. `duration` gives a clip's length in seconds, 0 when
@@ -122,18 +163,47 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                     return Pick { role, time: g.time };
                 }
             }
+            if s.hippie_air() {
+                let into = duration("hippy/into");
+                if time < into {
+                    return Pick {
+                        role: "hippy/into",
+                        time,
+                    };
+                }
+                if has("hippy/air") {
+                    return Pick {
+                        role: "hippy/air",
+                        time: time - into,
+                    };
+                }
+            }
             let Some(t) = &s.trick else {
                 return idle;
             };
             let mut stages = trick_roles(t.flick);
             if !stages.iter().any(|r| has(r)) {
-                stages = trick_roles(Flick::Ollie);
+                stages = trick_roles(if t.flick.nollie {
+                    Flick::NOLLIE
+                } else {
+                    Flick::OLLIE
+                });
             }
-            let [pop, rest @ ..] = stages;
+            if !stages.iter().any(|r| has(r)) {
+                stages = trick_roles(Flick::OLLIE);
+            }
+            let [pop, air, flip, out] = stages;
             let pop_d = duration(pop);
             if time < pop_d {
                 return Pick { role: pop, time };
             }
+            // A held kickflip plays its flip stage once per flip.
+            let flips = t.flips.max(1) as usize;
+            let rest: Vec<&'static str> = core::iter::once(air)
+                .chain(core::iter::repeat_n(flip, flips))
+                .chain(core::iter::once(out))
+                .filter(|r| has(r))
+                .collect();
             // Fit the rest of the trick into the flight, within sensible speeds.
             let rest_d: f32 = rest.iter().map(|r| duration(r)).sum();
             let window = time + land_in - pop_d;
@@ -152,7 +222,7 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
             } else {
                 None
             };
-            for role in rest.iter().copied().filter(|r| has(r)) {
+            for role in rest {
                 let d = duration(role);
                 last = Some(Pick { role, time: t });
                 if t < d {
@@ -163,31 +233,115 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
             last.unwrap_or(idle)
         }
         Mode::Rolling => {
+            if let Some(r) = &s.revert {
+                let role = side_role(s, r.side, "slide/fs", "slide/bs");
+                if has(role) {
+                    // The whole 180 slide over the revert.
+                    return Pick {
+                        role,
+                        time: duration(role) * (r.time / 0.3).min(1.0),
+                    };
+                }
+            }
+            if let Some(sl) = &s.slide {
+                let role = side_role(s, sl.side, "slide/fs", "slide/bs");
+                if has(role) {
+                    // Held at the sideways point of the 180 slide.
+                    return Pick {
+                        role,
+                        time: duration(role) * 0.4 * sl.amount,
+                    };
+                }
+            }
             if let Some(m) = &s.manual {
+                let brake = if m.nose { "nosebrake" } else { "tailbrake" };
+                if m.brake > 0.5 && has(brake) {
+                    return Pick {
+                        role: brake,
+                        time: m.time,
+                    };
+                }
                 let role = if m.nose { "nosemanual" } else { "manual" };
                 if has(role) {
                     return Pick { role, time: m.time };
                 }
             }
+            if let Some(t) = s.hippy
+                && has("hippy/antic")
+            {
+                return Pick {
+                    role: "hippy/antic",
+                    time: t,
+                };
+            }
+            if let Some((dir, t)) = s.kickturn {
+                let role = side_role(s, dir, "kickturn/fs", "kickturn/bs");
+                if has(role) {
+                    return Pick { role, time: t };
+                }
+            }
+            if let Some(b) = &s.brake {
+                let p = match b.released {
+                    Some(r) => Pick {
+                        role: "brake/out",
+                        time: r,
+                    },
+                    None if b.time < duration("brake/into") => Pick {
+                        role: "brake/into",
+                        time: b.time,
+                    },
+                    None => Pick {
+                        role: "brake/cyc",
+                        time: b.time - duration("brake/into"),
+                    },
+                };
+                if has(p.role) {
+                    return p;
+                }
+            }
+            if let Some(p) = &s.push {
+                let set = if p.mongo { MONGO } else { PUSH };
+                let set = if has(set[0]) || has(set[1]) {
+                    set
+                } else {
+                    PUSH
+                };
+                let role = if p.count == 0 && has(set[0]) {
+                    set[0]
+                } else if p.count % 2 == 1 || !has(set[2]) {
+                    set[1]
+                } else {
+                    set[2]
+                };
+                if p.turning <= 0.0 && has(role) {
+                    return Pick {
+                        role,
+                        time: p.time(),
+                    };
+                }
+            }
             let landing = s.landing.map(|l| (land_role(l.kind), l.time));
-            if s.crouch > CROUCH_MIN && has("crouch") {
+            let crouch = if s.crouch_nollie() && has("crouch_nollie") {
+                "crouch_nollie"
+            } else {
+                "crouch"
+            };
+            if s.crouch > CROUCH_MIN && has(crouch) {
                 Pick {
-                    role: "crouch",
-                    time: s.crouch.min(1.0) * duration("crouch"),
+                    role: crouch,
+                    time: s.crouch.min(1.0) * duration(crouch),
                 }
             } else if let Some((role, time)) = landing.filter(|(r, t)| *t < duration(r)) {
                 Pick { role, time }
-            } else if s.since_push < duration("push") {
-                Pick {
-                    role: "push",
-                    time: s.since_push,
-                }
             } else {
                 idle
             }
         }
     }
 }
+
+const PUSH: [&str; 3] = ["push/into", "push/cyc1", "push/cyc2"];
+const MONGO: [&str; 3] = ["mongo/into", "mongo/cyc1", "mongo/cyc2"];
 
 pub fn grab_role(k: GrabKind) -> &'static str {
     match k {
@@ -201,7 +355,8 @@ pub fn land_role(k: LandKind) -> &'static str {
     match k {
         LandKind::Clean => "land/clean",
         LandKind::Heavy => "land/heavy",
-        LandKind::Sketchy => "land/sketchy",
+        LandKind::Sketchy { frontside: true } => "land/sketchy_fs",
+        LandKind::Sketchy { frontside: false } => "land/sketchy_bs",
     }
 }
 
@@ -209,13 +364,19 @@ pub fn land_role(k: LandKind) -> &'static str {
 /// `None` when the skater is doing anything but rolling along (manuals, tricks, bails, landings) or
 /// the pack has no lean poses.
 pub fn lean(s: &Skater, base: &str, has: &dyn Fn(&str) -> bool) -> Option<(&'static str, f32)> {
-    if s.mode != Mode::Rolling || s.manual.is_some() || !matches!(base, "idle" | "push" | "crouch")
-    {
+    let riding = base == "idle"
+        || base == "crouch"
+        || base == "crouch_nollie"
+        || base.starts_with("push/")
+        || base.starts_with("mongo/");
+    if s.mode != Mode::Rolling || s.manual.is_some() || !riding {
         return None;
     }
-    let crouched = base == "crouch";
-    // Stick right (positive) turns the board right.
-    let role = match (s.steer >= 0.0, crouched) {
+    let crouched = base.starts_with("crouch");
+    // Stick right (positive) turns right. The poses are in the clips' frame: a mirrored rider, or one
+    // rolling tail first, leans the other way for the same turn.
+    let right = (s.steer >= 0.0) != (s.mirrored() != (s.speed < 0.0));
+    let role = match (right, crouched) {
         (true, false) => "lean/right",
         (false, false) => "lean/left",
         (true, true) => "lean/crouch_right",
@@ -232,6 +393,12 @@ pub struct Rider {
     prev: Option<Pick>,
     fade: f32,
     lean: Option<(&'static str, f32)>,
+    /// 0..1 how much of the fakie look is on.
+    fakie: f32,
+    torso: f32,
+    head_bones: Vec<usize>,
+    torso_bones: Vec<usize>,
+    mirror: bool,
     a: Vec<Local>,
     b: Vec<Local>,
 }
@@ -239,6 +406,10 @@ pub struct Rider {
 impl Rider {
     pub fn new(character: Character) -> Rider {
         let n = character.bones();
+        let find = |names: &[&str]| -> Vec<usize> {
+            names.iter().filter_map(|b| character.bone(b)).collect()
+        };
+        let (head_bones, torso_bones) = (find(&FAKIE_HEAD), find(&FAKIE_TORSO_BONES));
         let mut r = Rider {
             character,
             cur: Pick {
@@ -248,6 +419,11 @@ impl Rider {
             prev: None,
             fade: FADE,
             lean: None,
+            fakie: 0.0,
+            torso: FAKIE_TORSO,
+            head_bones,
+            torso_bones,
+            mirror: false,
             a: vec![Local::IDENTITY; n],
             b: vec![Local::IDENTITY; n],
         };
@@ -264,22 +440,51 @@ impl Rider {
         self.lean
     }
 
+    /// How much of the fakie look is laid over the clip (0..1).
+    pub fn fakie_weight(&self) -> f32 {
+        self.fakie
+    }
+
+    /// The current clip turns the board itself (powerslides and reverts), so the drawn board should not be
+    /// turned again.
+    pub fn turns_board(&self) -> bool {
+        self.cur.role.starts_with("slide/")
+    }
+
     /// One step: choose the clip, blend, pose and skin. `rot` is the character's world rotation (for
     /// lighting).
     pub fn update(&mut self, s: &Skater, clock: f32, land_in: f32, dt: f32, rot: Mat3) {
         let ch = &self.character;
         let mut next = pick(s, clock, land_in, &|r| ch.duration(r));
-        if next.role == "push" && self.cur.role == "push" {
-            // Another push while the last one plays: keep the cycle going instead of restarting it.
-            next.time = (self.cur.time + dt) % ch.duration("push");
+        if next.role == self.cur.role && next.role.ends_with("/cyc") {
+            // A looping clip keeps going instead of restarting.
+            next.time = self.cur.time + dt;
         }
         self.lean = lean(s, next.role, &|r| ch.has_clip(r));
         if next.role != self.cur.role {
             self.prev = Some(self.cur);
             self.fade = 0.0;
         }
+        // A stance change flips the mirror at once: blend from the old pose to hide the jump.
+        let mirror = s.mirrored();
+        if mirror != self.mirror {
+            self.prev = Some(self.cur);
+            self.fade = 0.0;
+            self.mirror = mirror;
+        }
         self.cur = next;
         self.fade = (self.fade + dt).min(FADE);
+        let fakie_on = s.speed < 0.0 && matches!(s.mode, Mode::Rolling | Mode::Grind);
+        let step = dt / FAKIE_FADE;
+        self.fakie = (self.fakie + if fakie_on { step } else { -step }).clamp(0.0, 1.0);
+        let torso = if s.manual.is_some() {
+            FAKIE_TORSO_MANUAL
+        } else if s.slide.is_some() {
+            FAKIE_TORSO_SLIDE
+        } else {
+            FAKIE_TORSO
+        };
+        self.torso += (torso - self.torso).clamp(-0.01 * dt * 60.0, 0.01 * dt * 60.0);
         self.pose_and_skin(rot);
     }
 
@@ -304,10 +509,19 @@ impl Rider {
                 *a = a.blend(b, w);
             }
         }
+        // Riding tail first: the head (and some of the upper back) turns to look where the board is going.
+        if self.fakie > 0.0 && ch.sample("fakie", self.cur.time, &mut self.b) {
+            for &i in &self.head_bones {
+                self.a[i] = self.a[i].blend(&self.b[i], self.fakie);
+            }
+            for &i in &self.torso_bones {
+                self.a[i] = self.a[i].blend(&self.b[i], self.fakie * self.torso);
+            }
+        }
         ch.pose(&self.a);
         // The sun in the character's own space: R^T * sun.
         let c = &rot.cols;
-        ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)));
+        ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), self.mirror);
     }
 }
 
@@ -315,24 +529,51 @@ impl Rider {
 mod tests {
     use super::*;
     use crate::park::Park;
-    use crate::skater::{ActiveTrick, trick_def};
+    use crate::skater::{ActiveTrick, FootBrake, Grab, Landing, Manual, Powerslide, Push, Stance};
+    use crate::tuning::Tuning;
 
     fn dur(r: &str) -> f32 {
         match r {
             "idle" => 2.0,
             "crouch" => 0.5,
-            "push" => 0.7,
+            "push/into" => 0.4,
+            "push/cyc1" => 0.6,
+            "push/cyc2" => 0.6,
+            "mongo/cyc1" => 0.6,
+            "brake/into" => 0.2,
+            "brake/cyc" => 1.0,
+            "brake/out" => 0.3,
+            "tailbrake" => 1.0,
+            "slide/fs" => 1.0,
+            "slide/bs" => 1.0,
             "ollie/pop" => 0.2,
             "ollie/air" => 0.5,
             "kickflip/pop" => 0.2,
             "kickflip/air" => 0.2,
+            "kickflip/flip" => 0.2,
             "kickflip/out" => 0.3,
+            "land/clean" => 0.6,
+            "land/sketchy_fs" => 1.0,
+            "manual" => 3.0,
+            "grab/fs" => 1.0,
+            "bail/fall" => 0.6,
+            "bail/getup" => 1.5,
+            "lean/left" | "lean/right" => 3.0,
             _ => 0.0,
         }
     }
 
+    fn trick(t: Trick, flips: u8) -> Option<ActiveTrick> {
+        Some(ActiveTrick {
+            flick: Flick::of(t),
+            t: 0.1,
+            duration: 0.4,
+            flips,
+        })
+    }
+
     #[test]
-    fn picks_clips_from_the_skater_state() {
+    fn picks_riding_clips() {
         let park = Park::demo();
         let mut s = Skater::spawn(&park);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "idle");
@@ -345,161 +586,147 @@ mod tests {
             }
         );
         s.crouch = 0.0;
-        s.since_push = 0.3;
-        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push");
-        s.since_push = 0.8;
-        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "idle");
-
-        s.mode = Mode::Air { time: 0.1 };
-        s.trick = Some(ActiveTrick {
-            flick: Flick::Kickflip,
-            def: trick_def(Flick::Kickflip),
-            t: 0.1,
-        });
-        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/pop");
-        s.mode = Mode::Air { time: 0.3 };
-        let p = pick(&s, 3.0, f32::INFINITY, &dur);
-        assert_eq!(p.role, "kickflip/air");
-        assert!((p.time - 0.1).abs() < 1e-6);
-        s.mode = Mode::Air { time: 0.5 };
-        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/out");
-        // Past the end: the catch holds.
-        s.mode = Mode::Air { time: 2.0 };
-        let p = pick(&s, 3.0, f32::INFINITY, &dur);
-        assert_eq!(p.role, "kickflip/out");
-        assert!((p.time - 1.6).abs() < 1e-5);
-        // No heelflip clips in this pack: the ollie stands in.
-        s.trick = Some(ActiveTrick {
-            flick: Flick::Heelflip,
-            def: trick_def(Flick::Heelflip),
+        let mut push = Push {
             t: 0.3,
-        });
-        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "ollie/air");
-        s.mode = Mode::Bailed { time: 0.2 };
-        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "idle");
-    }
-}
-
-#[cfg(test)]
-mod fit_tests {
-    use super::*;
-    use crate::park::Park;
-    use crate::skater::{ActiveTrick, trick_def};
-
-    #[test]
-    fn landing_time_is_ballistic() {
-        // Popped at 4 m/s from the ground under g = 10: up and down again in 0.8 s.
-        assert!((time_to_land(0.0, 4.0, 10.0) - 0.8).abs() < 1e-5);
-        // Falling from 5 m at rest: 1 s.
-        assert!((time_to_land(5.0, 0.0, 10.0) - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn trick_is_fitted_into_the_flight() {
-        let dur = |r: &str| match r {
-            "kickflip/pop" => 0.2,
-            "kickflip/air" => 0.4,
-            "kickflip/out" => 0.4,
-            _ => 0.0,
+            held: 0.2,
+            mongo: false,
+            base: 0.0,
+            count: 0,
+            button: 0,
+            turning: 0.0,
+            delay: 0.0,
         };
-        let mut s = Skater::spawn(&Park::demo());
-        s.trick = Some(ActiveTrick {
-            flick: Flick::Kickflip,
-            def: trick_def(Flick::Kickflip),
-            t: 0.0,
-        });
-        // 0.6 s of flight: air + out (0.8 s) play at 2x in the 0.4 s after the 0.2 s pop.
-        s.mode = Mode::Air { time: 0.3 };
-        let p = pick(&s, 0.0, 0.3, &dur);
-        assert_eq!(p.role, "kickflip/air");
-        assert!((p.time - 0.2).abs() < 1e-5, "{p:?}");
-        s.mode = Mode::Air { time: 0.5 };
-        let p = pick(&s, 0.0, 0.1, &dur);
-        assert_eq!(p.role, "kickflip/out");
-        assert!((p.time - 0.2).abs() < 1e-5, "{p:?}");
-        // A very long flight never slows the trick below MIN_SPEED.
-        s.mode = Mode::Air { time: 1.2 };
-        let p = pick(&s, 0.0, 9.0, &dur);
-        assert_eq!(p.role, "kickflip/out");
-        assert!((p.time - 0.2).abs() < 1e-4, "{p:?}");
-    }
-}
+        s.push = Some(push);
+        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push/into");
+        push.count = 1;
+        s.push = Some(push);
+        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push/cyc1");
+        push.count = 2;
+        s.push = Some(push);
+        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push/cyc2");
+        // Mongo: this pack only has its first cycle.
+        push.mongo = true;
+        push.count = 1;
+        s.push = Some(push);
+        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "mongo/cyc1");
+        s.push = None;
 
-#[cfg(test)]
-mod role_tests {
-    use super::*;
-    use crate::park::Park;
-    use crate::skater::{Grab, Landing, Manual};
-
-    fn dur(r: &str) -> f32 {
-        match r {
-            "idle" => 2.0,
-            "push" => 0.7,
-            "land/clean" => 0.6,
-            "land/sketchy" => 1.0,
-            "manual" => 3.0,
-            "grab/fs" => 1.0,
-            "bail/fall" => 0.6,
-            "bail/getup" => 1.5,
-            "lean/left" | "lean/right" => 3.0,
-            _ => 0.0,
-        }
-    }
-
-    #[test]
-    fn landings_manuals_grabs_and_bails() {
-        let park = Park::demo();
-        let mut s = Skater::spawn(&park);
-        s.landing = Some(Landing {
-            kind: LandKind::Sketchy,
-            time: 0.4,
-        });
-        assert_eq!(
-            pick(&s, 0.0, 0.0, &dur),
-            Pick {
-                role: "land/sketchy",
-                time: 0.4
-            }
-        );
-        // Past the clip's end: back to riding. A missing clip (heavy) is skipped too.
-        s.landing = Some(Landing {
-            kind: LandKind::Clean,
-            time: 0.7,
-        });
-        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
-        s.landing = Some(Landing {
-            kind: LandKind::Heavy,
+        s.brake = Some(FootBrake {
             time: 0.1,
+            released: None,
         });
-        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "brake/into");
+        s.brake = Some(FootBrake {
+            time: 0.5,
+            released: None,
+        });
+        let p = pick(&s, 0.0, 0.0, &dur);
+        assert_eq!(p.role, "brake/cyc");
+        assert!((p.time - 0.3).abs() < 1e-5);
+        s.brake = Some(FootBrake {
+            time: 0.5,
+            released: Some(0.1),
+        });
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "brake/out");
+        s.brake = None;
+
+        s.slide = Some(Powerslide {
+            side: 1.0,
+            amount: 1.0,
+            time: 0.4,
+            releasing: false,
+        });
+        // Goofy, board turned left: backside.
+        let p = pick(&s, 0.0, 0.0, &dur);
+        assert_eq!(p.role, "slide/bs");
+        assert!((p.time - 0.4).abs() < 1e-5);
+        // Regular: the mirrored clip, so the other one.
+        s.stance = Stance::Regular;
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "slide/fs");
+        s.slide = None;
 
         s.manual = Some(Manual {
             nose: false,
             balance: 0.0,
             time: 1.2,
+            brake: 0.8,
         });
-        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "manual");
-        // No nose manual clip in this pack: plain riding.
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "tailbrake");
         s.manual = Some(Manual {
             nose: true,
             balance: 0.0,
             time: 1.2,
+            brake: 0.0,
+        });
+        // No nose manual clip in this pack: plain riding.
+        assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
+    }
+
+    #[test]
+    fn picks_trick_stages_fitted_into_the_flight() {
+        let park = Park::demo();
+        let mut s = Skater::spawn(&park);
+        s.mode = Mode::Air { time: 0.1 };
+        s.trick = trick(Trick::Kickflip, 1);
+        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/pop");
+        s.mode = Mode::Air { time: 0.3 };
+        let p = pick(&s, 3.0, f32::INFINITY, &dur);
+        assert_eq!(p.role, "kickflip/air");
+        assert!((p.time - 0.1).abs() < 1e-6);
+        // Past the end: the catch holds.
+        s.mode = Mode::Air { time: 2.0 };
+        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/out");
+        // A double kickflip plays the flip stage twice: still flipping where a single would catch.
+        s.mode = Mode::Air { time: 0.65 };
+        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/out");
+        s.trick = trick(Trick::Kickflip, 2);
+        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/flip");
+        // No hardflip clips in this pack: the ollie stands in.
+        s.mode = Mode::Air { time: 0.3 };
+        s.trick = trick(Trick::Hardflip, 1);
+        assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "ollie/air");
+        // Fitted: 0.6 s of flight for 0.7 s of kickflip after the pop plays a little fast.
+        s.trick = trick(Trick::Kickflip, 1);
+        s.mode = Mode::Air { time: 0.3 };
+        let p = pick(&s, 0.0, 0.3, &dur);
+        assert_eq!(p.role, "kickflip/air");
+        assert!((p.time - 0.1 * 0.7 / 0.4).abs() < 1e-4, "{p:?}");
+    }
+
+    #[test]
+    fn landing_time_is_ballistic() {
+        assert!((time_to_land(0.0, 4.0, 10.0) - 0.8).abs() < 1e-5);
+        assert!((time_to_land(5.0, 0.0, 10.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn landings_grabs_and_bails() {
+        let park = Park::demo();
+        let mut s = Skater::spawn(&park);
+        s.landing = Some(Landing {
+            kind: LandKind::Sketchy { frontside: true },
+            time: 0.4,
+        });
+        assert_eq!(
+            pick(&s, 0.0, 0.0, &dur),
+            Pick {
+                role: "land/sketchy_fs",
+                time: 0.4
+            }
+        );
+        s.landing = Some(Landing {
+            kind: LandKind::Clean,
+            time: 0.7,
         });
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
-        s.manual = None;
+        s.landing = None;
 
         s.mode = Mode::Air { time: 0.5 };
         s.grab = Some(Grab {
             kind: GrabKind::Indy,
             time: 0.3,
         });
-        assert_eq!(
-            pick(&s, 0.0, 0.2, &dur),
-            Pick {
-                role: "grab/fs",
-                time: 0.3
-            }
-        );
+        assert_eq!(pick(&s, 0.0, 0.2, &dur).role, "grab/fs");
         s.grab = None;
 
         s.mode = Mode::Bailed { time: 0.2 };
@@ -511,9 +738,9 @@ mod role_tests {
     }
 
     #[test]
-    fn leans_into_turns_only_while_riding() {
+    fn leans_into_turns_and_mirrors_the_lean() {
         let park = Park::demo();
-        let mut s = Skater::spawn(&park);
+        let mut s = Skater::spawn_with(&park, Tuning::BUILT_IN, Stance::Goofy);
         let has = |r: &str| dur(r) > 0.0;
         assert_eq!(lean(&s, "idle", &has), None, "straight: no lean");
         s.steer = -1.0;
@@ -521,11 +748,27 @@ mod role_tests {
         assert_eq!(role, "lean/left");
         assert!((w - LEAN_WEIGHT).abs() < 1e-6);
         s.steer = 0.5;
-        assert_eq!(lean(&s, "push", &has).map(|l| l.0), Some("lean/right"));
-        // No crouched lean poses in this pack.
-        assert_eq!(lean(&s, "crouch", &has), None);
+        assert_eq!(lean(&s, "push/cyc1", &has).map(|l| l.0), Some("lean/right"));
+        // Mirrored (switch) or tail first: the other pose for the same turn.
+        s.switch = true;
+        assert_eq!(lean(&s, "idle", &has).map(|l| l.0), Some("lean/left"));
+        s.speed = -2.0;
+        assert_eq!(lean(&s, "idle", &has).map(|l| l.0), Some("lean/right"));
         assert_eq!(lean(&s, "land/clean", &has), None);
         s.mode = Mode::Air { time: 0.1 };
         assert_eq!(lean(&s, "idle", &has), None);
+    }
+
+    #[test]
+    fn every_trick_has_its_own_roles() {
+        let mut seen = Vec::new();
+        for t in crate::gesture::TRICKS {
+            for nollie in [false, true] {
+                let r = trick_roles(Flick { trick: t, nollie });
+                assert!(!seen.contains(&r[0]), "{t:?} {nollie}");
+                seen.push(r[0]);
+            }
+        }
+        assert_eq!(trick_roles(Flick::NOLLIE)[0], "nollie/pop");
     }
 }
