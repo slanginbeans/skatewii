@@ -102,10 +102,10 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     )?;
     let mut values = Vec::new();
     let mut missing = Vec::new();
-    for path in game_core::tuning::PATHS {
+    for path in game_core::tuning::all_paths() {
         match db.values(path) {
-            Some(v) => values.push((*path, v)),
-            None => missing.push(*path),
+            Some(v) => values.push((path, v)),
+            None => missing.push(path),
         }
     }
     for m in &missing {
@@ -143,7 +143,7 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         path.display(),
         bytes.len(),
         values.len(),
-        game_core::tuning::PATHS.len(),
+        game_core::tuning::all_paths().count(),
         shape_count,
         SHAPES.len()
     );

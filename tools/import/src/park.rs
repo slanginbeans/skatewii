@@ -177,6 +177,40 @@ pub fn spawn(tris: &[Triangle]) -> Option<[f32; 4]> {
     Some([c[0], c[1], c[2], yaw])
 }
 
+/// Classifies every rail segment against the park's collision as Skate 3 does (probes beside the rail:
+/// thin, fat, ledge, curb or blocked, and the high side; `game_core::rails::classify`), and prints how
+/// many of each.
+pub fn classify_rails(
+    collision: &[u8],
+    rails: &[RailPoints],
+) -> Res<Vec<game_core::rails::RailData>> {
+    use game_core::math::v3;
+    use game_core::rails::RailClass;
+    let mesh = game_core::collision::TriMesh::parse(collision, (v3(0.0, 0.0, 0.0), 0.0))
+        .map_err(|e| format!("collision: {e:?}"))?;
+    let mut counts = [0usize; 5];
+    let out: Vec<_> = rails
+        .iter()
+        .map(|r| {
+            let pts: Vec<_> = r.iter().map(|p| v3(p[0], p[1], p[2])).collect();
+            let classes = game_core::rails::classify(&pts, &mesh);
+            for c in &classes {
+                counts[c.class.to_u8() as usize] += 1;
+            }
+            (r.clone(), classes)
+        })
+        .collect();
+    println!(
+        "rail segments: {} thin, {} fat, {} ledge, {} curb, {} blocked",
+        counts[RailClass::Thin.to_u8() as usize],
+        counts[RailClass::Fat.to_u8() as usize],
+        counts[RailClass::Ledge.to_u8() as usize],
+        counts[RailClass::Curb.to_u8() as usize],
+        counts[RailClass::Blocked.to_u8() as usize],
+    );
+    Ok(out)
+}
+
 pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let o = options(args)?;
     let (tris, rails) = simulation(disc, &o.park)?;
@@ -196,11 +230,13 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         .iter()
         .map(|t| (t.v, t.surface, t.flags as u16))
         .collect();
+    let collision = game_core::collision::encode(&encoded);
+    let classified = classify_rails(&collision, &rails)?;
     let mut items = vec![
         pack::Item {
             name: "park/collision".into(),
             kind: Kind::Collision,
-            data: game_core::collision::encode(&encoded),
+            data: collision,
             width: 0,
             height: 0,
             gx_format: 0,
@@ -216,7 +252,7 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         pack::Item {
             name: "park/rails".into(),
             kind: Kind::Data,
-            data: game_core::rails::encode(&rails),
+            data: game_core::rails::encode(&classified),
             width: 0,
             height: 0,
             gx_format: 0,

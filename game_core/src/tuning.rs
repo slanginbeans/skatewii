@@ -10,6 +10,9 @@
 
 use alloc::vec::Vec;
 
+pub mod grind;
+pub use grind::GrindTuning;
+
 /// Most points a curve can hold (Skate 3's largest point graphs have 16).
 pub const CURVE_POINTS: usize = 16;
 
@@ -423,6 +426,9 @@ pub struct Tuning {
     // The rider's riding animation (what the state graphs' riding behaviours feed the blend trees).
     pub anim: AnimTuning,
 
+    // Grinds (`tuning::grind`).
+    pub grind: GrindTuning,
+
     // Camera (riding slow, riding fast, grinding): distance (m), elevation (deg), heading (deg, 180 =
     // straight behind), framing pitch (deg), look-at height above the board (m).
     pub cam_slow: CamShot,
@@ -717,8 +723,13 @@ impl Default for Tuning {
     }
 }
 
-/// Where each value lives in Skate 3's tuning database (`class/key/field`). `fg_import rules` exports
-/// exactly these paths.
+/// Every path the tuning reads: [`PATHS`] and the grinds' ([`grind::PATHS`]). `fg_import rules` exports
+/// exactly these.
+pub fn all_paths() -> impl Iterator<Item = &'static str> {
+    PATHS.iter().chain(grind::PATHS.iter()).copied()
+}
+
+/// Where each value lives in Skate 3's tuning database (`class/key/field`).
 pub const PATHS: &[&str] = &[
     "physics_speed_conservation/default/Gravity",
     "physics_speed_conservation/default/MaxGravityAcceleration",
@@ -1206,6 +1217,7 @@ impl Tuning {
         spin_max_acc: 0.02,
         flick_misses: 8,
         anim: AnimTuning::BUILT_IN,
+        grind: GrindTuning::BUILT_IN,
         cam_slow: CamShot {
             distance: 2.0,
             elevation: 8.0,
@@ -1564,7 +1576,7 @@ impl Tuning {
                 }
                 _ => false,
             },
-            _ => self.anim.set(name, f, c(), v),
+            _ => self.grind.set(name, f, c()) || self.anim.set(name, f, c(), v),
         }
     }
 
@@ -1695,7 +1707,7 @@ mod tests {
 
     #[test]
     fn every_path_is_one_the_tuning_reads() {
-        for p in PATHS {
+        for p in all_paths() {
             let mut t = Tuning::BUILT_IN;
             // A two-point curve (or a four-value vector) also counts as a scalar (its first value).
             assert!(t.set(p, &[0.0, 1.0, 1.0, 1.0]) || t.set(p, &[1.0]), "{p}");

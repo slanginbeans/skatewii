@@ -151,7 +151,7 @@ pub struct Park {
     pub wall_height: f32,
     pub spawn: Vec3,
     pub spawn_yaw: f32,
-    /// Grind rails (the ledge's top).
+    /// Grind rails (the ledge's edge).
     pub rails: Vec<Rail>,
 }
 
@@ -332,7 +332,7 @@ impl Park {
                 h1: 0.0,
                 rgba: WOOD
             },
-            // Long ledge with a painted top (grinds come later).
+            // Long ledge with a painted top (its edge facing the park is a grind rail).
             Shape::Block {
                 min: v3(-10.0, 0.0, -6.0),
                 max: v3(-9.4, 0.4, 6.0),
@@ -354,18 +354,18 @@ impl Park {
                 rgba: STEEL
             },
         ];
-        Park {
+        let mut park = Park {
             shapes: s,
             half_size: 20.0,
             wall_height: 1.2,
             spawn: v3(0.0, 0.0, -14.0),
             spawn_yaw: 0.0,
-            // Along the middle of the long ledge's top.
-            rails: alloc::vec![Rail::new(alloc::vec![
-                v3(-9.7, 0.4, -6.0),
-                v3(-9.7, 0.4, 6.0)
-            ])],
-        }
+            rails: Vec::new(),
+        };
+        // Along the long ledge's edge facing the park (a ledge: its top is the high side).
+        let rail = Rail::new(alloc::vec![v3(-9.4, 0.4, -6.0), v3(-9.4, 0.4, 6.0)]);
+        park.rails = alloc::vec![rail.classified(&park)];
+        park
     }
 
     /// The surface under (x, z): the highest shape, the ground, or a wall outside the park.
