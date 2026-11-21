@@ -15,8 +15,8 @@ use alloc::vec::Vec;
 use crate::character::{Character, Local};
 use crate::gesture::{Flick, Trick};
 use crate::gfx::SUN;
-use crate::math::{Mat3, sqrtf, v3};
-use crate::skater::{GrabKind, GrindKind, LandKind, Mode, Skater};
+use crate::math::{Mat3, PI, sqrtf, v3};
+use crate::skater::{GrabKind, GrindKind, LandKind, Landing, Mode, Skater};
 
 /// Crossfade time between clips (s).
 const FADE: f32 = 0.12;
@@ -148,8 +148,8 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                 return idle;
             };
             // This grind on this side, else the other side, else a 50-50.
-            let [want, other] = grind_roles(g.kind, g.frontside);
-            let fallback = grind_roles(GrindKind::FiftyFifty, g.frontside)[0];
+            let [want, other] = grind_roles(g.kind(), g.frontside());
+            let fallback = grind_roles(GrindKind::FiftyFifty, g.frontside())[0];
             match [want, other, fallback].into_iter().find(|r| has(r)) {
                 Some(role) => Pick { role, time: g.time },
                 None => idle,
@@ -238,7 +238,7 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                     // The whole 180 slide over the revert.
                     return Pick {
                         role,
-                        time: duration(role) * (r.time / 0.3).min(1.0),
+                        time: duration(role) * (r.turned / PI).min(1.0),
                     };
                 }
             }
@@ -319,7 +319,7 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                     return Pick { role, time };
                 }
             }
-            let landing = s.landing.map(|l| (land_role(l.kind), l.time));
+            let landing = s.landing.map(|l| (land_role(&l), l.time));
             let crouch = if s.crouch_nollie() && has("crouch_nollie") {
                 "crouch_nollie"
             } else {
@@ -343,16 +343,17 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
 pub fn grind_roles(kind: GrindKind, frontside: bool) -> [&'static str; 2] {
     let [fs, bs] = match kind {
         GrindKind::FiftyFifty => ["grind/5050_fs", "grind/5050_bs"],
-        GrindKind::FiveO => ["grind/50_fs", "grind/50_bs"],
+        // The built-in roles have no salad, overcrook, overwilly, blunts or darkslide: the nearest.
+        GrindKind::FiveO | GrindKind::Salad => ["grind/50_fs", "grind/50_bs"],
         GrindKind::Nosegrind => ["grind/ngrind_fs", "grind/ngrind_bs"],
-        GrindKind::Crooked => ["grind/crooks_fs", "grind/crooks_bs"],
-        GrindKind::Willy => ["grind/willy_fs", "grind/willy_bs"],
+        GrindKind::Crooked | GrindKind::Overcrook => ["grind/crooks_fs", "grind/crooks_bs"],
+        GrindKind::Willy | GrindKind::Overwilly => ["grind/willy_fs", "grind/willy_bs"],
         GrindKind::Feeble => ["grind/feeble_fs", "grind/feeble_bs"],
         GrindKind::Smith => ["grind/smith_fs", "grind/smith_bs"],
-        GrindKind::Boardslide => ["grind/bslide_fs", "grind/bslide_bs"],
+        GrindKind::Boardslide | GrindKind::Darkslide => ["grind/bslide_fs", "grind/bslide_bs"],
         GrindKind::Lipslide => ["grind/lipslide_fs", "grind/lipslide_bs"],
-        GrindKind::Noseslide => ["grind/nslide_fs", "grind/nslide_bs"],
-        GrindKind::Tailslide => ["grind/tslide_fs", "grind/tslide_bs"],
+        GrindKind::Noseslide | GrindKind::Noseblunt => ["grind/nslide_fs", "grind/nslide_bs"],
+        GrindKind::Tailslide | GrindKind::Bluntslide => ["grind/tslide_fs", "grind/tslide_bs"],
     };
     if frontside { [fs, bs] } else { [bs, fs] }
 }
@@ -364,14 +365,18 @@ pub fn grab_role(k: GrabKind) -> &'static str {
     match k {
         GrabKind::Indy => "grab/fs",
         GrabKind::Melon => "grab/bs",
-        GrabKind::Mute => "grab/mute",
+        // The two-handed grab clip (the clip set's role keeps its old name).
+        GrabKind::Double => "grab/mute",
     }
 }
 
-pub fn land_role(k: LandKind) -> &'static str {
-    match k {
-        LandKind::Clean => "land/clean",
-        LandKind::Heavy => "land/heavy",
+/// A hard landing's clip for the built-in rider (cosmetic only: Skate 3 has no heavy landing type).
+const HEAVY_LOOK: f32 = 7.0;
+
+pub fn land_role(l: &Landing) -> &'static str {
+    match l.kind {
+        LandKind::Clean | LandKind::Spin if l.impact > HEAVY_LOOK => "land/heavy",
+        LandKind::Clean | LandKind::Spin => "land/clean",
         LandKind::Sketchy { frontside: true } => "land/sketchy_fs",
         LandKind::Sketchy { frontside: false } => "land/sketchy_bs",
     }
@@ -517,6 +522,19 @@ impl Rider {
     /// summing to 1), each sampled and mirrored for the stance its tree started in before blending, so a
     /// stance change crossfades instead of popping. False (nothing drawn new) when the clips can't be
     /// posed on this skeleton.
+    /// The feet against the board from the last pose: along its nose and up (m), left then right (SK8
+    /// PushFootFrame `out_distance`; the imported character's space is the board's).
+    pub fn feet(&self) -> Option<[[f32; 2]; 2]> {
+        let c = &self.character;
+        let w = c.world();
+        let b = w.get(c.bone("SKATEBOARD_ROOT")?)?[3];
+        let foot = |name: &str| -> Option<[f32; 2]> {
+            let t = w.get(c.bone(name)?)?[3];
+            Some([t[2] - b[2], t[1] - b[1]])
+        };
+        Some([foot("LEFTFOOT")?, foot("RIGHTFOOT")?])
+    }
+
     pub fn update_graph(
         &mut self,
         lib: &crate::motion::Library,
@@ -832,6 +850,7 @@ mod tests {
             time: 0.4,
             crooked: 0.3,
             impact: 2.0,
+            quality: Default::default(),
         });
         assert_eq!(
             pick(&s, 0.0, 0.0, &dur),
@@ -845,6 +864,7 @@ mod tests {
             time: 0.7,
             crooked: 0.0,
             impact: 2.0,
+            quality: Default::default(),
         });
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
         s.landing = None;
@@ -853,6 +873,9 @@ mod tests {
         s.grab = Some(Grab {
             kind: GrabKind::Indy,
             time: 0.3,
+            name: "INDY",
+            base: "INDY",
+            tweak: 0.0,
         });
         assert_eq!(pick(&s, 0.0, 0.2, &dur).role, "grab/fs");
         s.grab = None;

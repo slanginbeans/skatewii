@@ -4,21 +4,21 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::camera::ChaseCam;
+use crate::camera::{CamData, CameraMan};
 use crate::character::{self, Character};
 use crate::collision;
 use crate::devlog::DevLog;
 use crate::flick::{FlickInput, FlickOut};
 use crate::gesture;
-use crate::gfx::{Gfx, MeshBuilder, SCREEN_W, Vertex, rgb};
+use crate::gfx::{Gfx, MeshBuilder, SCREEN_H, SCREEN_W, Vertex, rgb};
 use crate::hud;
 use crate::input::{Pad, PadRaw, flag};
 use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
 use crate::model::Models;
 use crate::pack::Pack;
 use crate::park::{Park, Terrain};
-use crate::rider::{self, Rider};
-use crate::skater::{ClipTiming, Event, Mode, STEP, Skater, Stance};
+use crate::rider::Rider;
+use crate::skater::{ClipTiming, Event, Mode, Skater, Stance};
 use crate::tuning::Tuning;
 use crate::world::ImportedPark;
 
@@ -119,6 +119,14 @@ pub struct SectionTimes {
     pub park_verts: u32,
     /// Skate 3's state graphs (input intents, both graphs, animation advance), part of `physics_us`.
     pub graph_us: u32,
+    /// The skater's step on the last tick spent in the air (the landing prediction, spin, flight), part
+    /// of `physics_us`, and the most one took since the platform last cleared `air_peak_us`.
+    pub air_us: u32,
+    pub air_peak_us: u32,
+    /// The camera's tick (shot choice, rig, collision, predictors), part of `physics_us`, and the most
+    /// one took since the platform last cleared `cam_peak_us`.
+    pub cam_us: u32,
+    pub cam_peak_us: u32,
 }
 
 struct Popup {
@@ -153,7 +161,7 @@ pub struct Game {
     /// Riding numbers: built in, or Skate 3's from a rules pack.
     pub tuning: Tuning,
     pub stance: Stance,
-    cam: ChaseCam,
+    cam: CameraMan,
     pub score: u32,
     popup: Option<Popup>,
     prev_held: u32,
@@ -210,7 +218,7 @@ impl Game {
         Game {
             park_mesh: park.build_mesh(),
             models: Models::build(),
-            cam: ChaseCam::new(&skater),
+            cam: CameraMan::new(&skater, &park, CamData::default(), Tuning::BUILT_IN.cam),
             park,
             skater,
             flick: FlickInput::new(),
@@ -287,7 +295,7 @@ impl Game {
         let clips = self.skater.clips;
         self.skater = Skater::spawn_with(&p.mesh, self.tuning, self.stance);
         self.skater.clips = clips;
-        self.cam = ChaseCam::new(&self.skater);
+        self.cam.request_reset();
         self.imported_park = Some(p);
         Ok(())
     }
@@ -325,7 +333,28 @@ impl Game {
             g.set_tuning(&self.tuning);
         }
         self.skater.tuning = self.tuning;
-        self.cam = ChaseCam::new(&self.skater);
+        // The disc's camera shots and graph (`fg_import rules`), else the built-in ones.
+        let mut data = CamData::default();
+        if let Some(e) = pack.find(crate::camera::shot::ENTRY) {
+            match crate::camera::shot::ShotSet::parse(e.data) {
+                Ok(set) => data.shots = set,
+                Err(e) => self.log.push(format!("camera: shots unreadable ({e:?})")),
+            }
+        }
+        if data.shots.imported
+            && let Some(e) = pack.find(crate::camera::select::ENTRY)
+        {
+            match crate::camera::select::CamGraph::load(e.data) {
+                Ok(g) => {
+                    for n in &g.unsupported {
+                        self.log.push(format!("camera graph: unsupported {n}"));
+                    }
+                    data.graph = Some(g);
+                }
+                Err(e) => self.log.push(format!("camera: graph unreadable ({e:?})")),
+            }
+        }
+        self.cam.set_data(data, self.tuning.cam);
         Ok((values, shapes))
     }
 
@@ -357,6 +386,50 @@ impl Game {
     }
 
     /// What the skater rides on: the imported park if there is one, else the demo park.
+    /// Puts the rider back at the park's spawn, a fresh start (scripted runs between tours).
+    pub fn restart_at_spawn(&mut self) {
+        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        self.skater.reset_to_spawn(ground);
+        self.flick.reset();
+        self.cam.request_reset();
+    }
+
+    /// Puts the rider on the board at `pos` (on the ground there), heading `heading` (yaw), rolling at
+    /// `speed`: for scripted runs (`autoplay`).
+    /// Puts the rider where a scripted run asks: on the ground ([`Game::place_rider`]), or in the air
+    /// moving along its heading and up at its lift.
+    pub fn place(&mut self, p: &crate::autoplay::Placement) {
+        if p.lift <= 0.0 {
+            self.place_rider(p.pos, p.heading, p.speed);
+            return;
+        }
+        self.place_rider(p.pos, p.heading, 0.0);
+        let s = &mut self.skater;
+        s.pos = p.pos;
+        s.vel = crate::math::yaw_dir(p.heading) * p.speed + crate::math::Vec3::UP * p.lift;
+        s.mode = Mode::Air { time: 0.0 };
+    }
+
+    pub fn place_rider(&mut self, pos: crate::math::Vec3, heading: f32, speed: f32) {
+        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        self.skater.put_at(ground, pos, heading, speed);
+        self.flick.reset();
+        self.cam.request_reset();
+    }
+
+    /// The screen's width over its height (the platform's TV setting): the camera's field of view
+    /// follows it.
+    pub fn set_aspect(&mut self, aspect: f32) {
+        if aspect.is_finite() && aspect > 0.5 {
+            self.cam.aspect = aspect;
+        }
+    }
+
+    /// The camera (shots, rig, what chose the shot).
+    pub fn camera(&self) -> &CameraMan {
+        &self.cam
+    }
+
     pub fn terrain(&self) -> &dyn Terrain {
         terrain(&self.imported_park, &self.park)
     }
@@ -381,8 +454,7 @@ impl Game {
             let rot = self.imported_xform().rot;
             let s = &self.skater;
             let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
-            let ground = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
-            let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, s.tuning.gravity);
+            let land_in = s.time_to_land(ground);
             let mut posed = false;
             if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
             {
@@ -450,17 +522,22 @@ impl Game {
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
         if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
             let s = &self.skater;
-            let land_in = matches!(s.mode, Mode::Air { .. }).then(|| {
-                let h = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
-                rider::time_to_land(s.pos.y - h, s.vel.y, s.tuning.gravity)
-            });
-            let world = g.world(s, land_in, g.input.idle());
+            // The known landing's time (the trajectory selector), else straight down.
+            let land_in = matches!(s.mode, Mode::Air { .. }).then(|| s.time_to_land(ground));
+            let mut world = g.world(s, land_in, g.input.idle());
+            if let Some(f) = self.rider.as_ref().and_then(|r| r.feet()) {
+                world.feet = f;
+            }
+            if matches!(s.mode, Mode::Bailed { .. }) {
+                world.wipe_stick = Some(pad.stick);
+            }
             let gates = crate::graph::input::Gates {
                 late_flips_blocked: s.trick.is_some_and(|t| t.progress() < 1.0),
                 finger_flips_blocked: s.grab.is_none(),
                 reverts_blocked: false,
                 grinding: s.mode == Mode::Grind,
-                ..Default::default()
+                grabbing: pad.trig_l > 0.0 || pad.trig_r > 0.0,
+                pushing: pad.held & (crate::input::btn::A | crate::input::btn::B) != 0,
             };
             g.tick(&lib.db, &pad, world, gates, dt, self.timer);
             self.skater.graph = Some(g.control(&lib.db, &self.tuning));
@@ -472,17 +549,35 @@ impl Game {
                 for n in g.new_unsupported() {
                     self.log.push(format!("graph: unsupported {n}"));
                 }
+                for (tree, param) in g.new_unset(&lib.db) {
+                    self.log
+                        .push(format!("graph: {tree} plays with unset parameter {param}"));
+                }
             }
         }
         let mut events = Vec::new();
+        let air = self.skater.is_airborne();
+        let t_step = now(self.timer);
         self.skater.step(ground, &pad, &flick, dt, &mut events);
+        if air {
+            let us = now(self.timer).wrapping_sub(t_step);
+            self.times.air_us = us;
+            self.times.air_peak_us = self.times.air_peak_us.max(us);
+        }
         if events.contains(&Event::Respawned) {
             self.flick.reset();
+            self.cam.request_reset();
         }
+        let t_cam = now(self.timer);
         self.cam.update(&self.skater, ground, dt);
+        let us = now(self.timer).wrapping_sub(t_cam);
+        self.times.cam_us = us;
+        self.times.cam_peak_us = self.times.cam_peak_us.max(us);
         self.times.physics_us = now(self.timer).wrapping_sub(t0);
         // Development log: what happened this tick, and a status line now and then.
+        let cam_lines = self.cam.take_log();
         if self.log.len() < LOG_CAP {
+            self.log.extend(cam_lines);
             let cam = self.cam.distance();
             self.devlog.observe(
                 &self.skater,
@@ -526,6 +621,8 @@ impl Game {
                 crate::gfx::Camera {
                     eye: p.cam.eye.lerp(cur.eye, self.alpha),
                     target: p.cam.target.lerp(cur.target, self.alpha),
+                    up: p.cam.up.lerp(cur.up, self.alpha).normalize_or(cur.up),
+                    fov_y_deg: p.cam.fov_y_deg + (cur.fov_y_deg - p.cam.fov_y_deg) * self.alpha,
                     ..cur
                 }
             }
@@ -578,6 +675,13 @@ impl Game {
         let frame = s.board_frame();
         let up = frame.cols[1];
         let nose = crate::skater::rotate(frame.cols[2], up, extra);
+        // A body flip turns board and rider about the centre of mass.
+        if let Some(f) = &s.body_flip {
+            let pivot = s.pos + up * crate::skater::flip::PIVOT;
+            let (up, nose) = (f.apply(up), f.apply(nose));
+            let pos = pivot + f.apply(s.pos - pivot);
+            return Xform::new(Mat3::from_cols(up.cross(nose), up, nose), pos);
+        }
         Xform::new(Mat3::from_cols(up.cross(nose), up, nose), s.pos)
     }
 
@@ -650,6 +754,11 @@ impl Game {
     fn draw_hud(&self, gfx: &mut dyn Gfx) {
         let mut m = MeshBuilder::new();
         let white = rgb(255, 255, 255);
+        // The fade to black before an automatic reset after a bail.
+        let dark = self.skater.recovery.darkness(&self.tuning);
+        if dark > 0.0 {
+            m.rect_2d(0.0, 0.0, SCREEN_W, SCREEN_H, (dark * 255.0) as u32 & 0xff);
+        }
         hud::text(
             &mut m,
             24.0,
@@ -869,6 +978,52 @@ mod tests {
             pushes += g.skater.push.is_some() as u32;
         }
         assert!(pushes >= 1);
+    }
+
+    /// Keeps the 2D vertices drawn.
+    #[derive(Default)]
+    struct Overlay(Vec<Vertex>);
+    impl Gfx for Overlay {
+        fn begin_frame(&mut self, _cam: &crate::gfx::Camera, _clear: u32) {}
+        fn draw_tris(&mut self, _v: &[Vertex], _m: &crate::math::Mat34) {}
+        fn draw_indexed(
+            &mut self,
+            _v: &[crate::gfx::TexVertex],
+            _i: &[u16],
+            _t: Option<&crate::gfx::Texture>,
+            _m: &crate::math::Mat34,
+        ) {
+        }
+        fn draw_2d(&mut self, v: &[Vertex]) {
+            self.0.extend_from_slice(v);
+        }
+        fn end_frame(&mut self) {}
+    }
+
+    #[test]
+    fn a_reset_fades_the_screen_and_the_camera_draws_between_ticks() {
+        let mut g = Game::new();
+        g.update(&held(0), 1.0 / 60.0);
+        let black = |g: &Game| {
+            let mut o = Overlay::default();
+            g.render(&mut o);
+            o.0.iter()
+                .filter(|v| v.rgba >> 8 == 0 && v.pos[0] == 0.0 && v.pos[1] == 0.0)
+                .map(|v| v.rgba & 0xff)
+                .max()
+        };
+        assert_eq!(black(&g), None);
+        g.skater.recovery.fade = Some(g.tuning.reset_fade * 0.5);
+        let a = black(&g).expect("a fade quad");
+        assert!((100..=155).contains(&a), "{a}");
+        // PAL50: the camera is drawn between the last two ticks.
+        let mut g = Game::new();
+        for _ in 0..30 {
+            g.update(&held(crate::input::btn::A), 1.0 / 50.0);
+        }
+        let (prev, cur) = (g.prev_view.unwrap().cam.eye, g.cam.camera().eye);
+        let k = g.blend();
+        assert!((g.drawn_camera().eye - prev.lerp(cur, k)).length() < 1e-4);
     }
 
     /// Draws nothing.

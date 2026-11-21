@@ -3,7 +3,8 @@
 
 use crate::game::Game;
 use crate::input::{PadRaw, btn, flag};
-use crate::math::{PI, cosf, sinf, wrap_angle};
+use crate::math::{PI, Vec3, atan2f, cosf, sinf, v3, wrap_angle};
+use crate::rails::RailClass;
 use crate::skater::Mode;
 
 /// Push up to speed down the spawn lane, load the flick stick on the kicker and kickflip off the lip.
@@ -18,6 +19,10 @@ pub struct KickerRun {
 const BACK: (i8, i8) = (0, -92);
 const UP_RIGHT: (i8, i8) = (50, 62);
 const UP: (i8, i8) = (0, 92);
+/// The C-stick pushed most of the way to the side and held: a grab's tweak.
+const TWEAK: (i8, i8) = (80, 20);
+/// The C-stick held down during a grab: its variant.
+const GRAB_DOWN: (i8, i8) = (0, -85);
 
 /// The C-stick at `deg` degrees clockwise from straight forward, fully over.
 fn rim(deg: f32) -> (i8, i8) {
@@ -63,12 +68,113 @@ impl KickerRun {
     }
 }
 
+/// A camera check: push up to riding speed, carve a quarter turn at full lock, ride straight on for
+/// `straight` ticks, wind up and ollie, ride on. The preview's `--carve-ollie` and the camera's
+/// regression test run it; [`CarveOllie::phase`] says where it is.
+pub struct CarveOllie {
+    /// Ticks so far, and ticks of straight riding between the carve and the wind-up.
+    pub t: u32,
+    pub straight: u32,
+    /// When the carve started and ended, the wind-up started, the flick went (0: not yet).
+    pub carve_at: u32,
+    pub carved_at: u32,
+    pub wind_at: u32,
+    pub flick_at: u32,
+    start_yaw: Option<f32>,
+}
+
+impl CarveOllie {
+    pub fn new(straight: u32) -> Self {
+        CarveOllie {
+            t: 0,
+            straight,
+            carve_at: 0,
+            carved_at: 0,
+            wind_at: 0,
+            flick_at: 0,
+            start_yaw: None,
+        }
+    }
+
+    /// `push`, `carve`, `straight`, `wind`, `flick` or `ride`.
+    pub fn phase(&self) -> &'static str {
+        if self.carve_at == 0 {
+            "push"
+        } else if self.carved_at == 0 {
+            "carve"
+        } else if self.wind_at == 0 {
+            "straight"
+        } else if self.flick_at == 0 {
+            "wind"
+        } else if self.t < self.flick_at + 8 {
+            "flick"
+        } else {
+            "ride"
+        }
+    }
+
+    /// Where to put the rider first on the demo park (the caller does: `Game::place_rider`): the clear
+    /// lane by the bank, heading +z, so the carve goes off to -x across open ground.
+    pub const START: (Vec3, f32) = (v3(12.0, 0.0, -19.0), 0.0);
+
+    pub fn next(&mut self, game: &Game) -> PadRaw {
+        let s = &game.skater;
+        let mut pad = PadRaw {
+            flags: flag::CONNECTED,
+            ..Default::default()
+        };
+        self.t += 1;
+        let rolling = s.mode == Mode::Rolling;
+        match self.phase() {
+            "push" => {
+                if rolling && s.speed < 4.5 && self.t % 30 < 10 {
+                    pad.buttons |= btn::A;
+                }
+                if self.t > 100 && s.push.is_none() {
+                    self.carve_at = self.t;
+                    self.start_yaw = Some(s.travel_yaw());
+                }
+            }
+            "carve" => {
+                pad.stick_x = 100;
+                let turned = self
+                    .start_yaw
+                    .is_some_and(|y| wrap_angle(s.travel_yaw() - y).abs() > PI / 2.0);
+                if turned || self.t > self.carve_at + 120 {
+                    self.carved_at = self.t;
+                }
+            }
+            "straight" => {
+                if self.t >= self.carved_at + self.straight {
+                    self.wind_at = self.t;
+                }
+            }
+            "wind" => {
+                (pad.cstick_x, pad.cstick_y) = BACK;
+                let ready = match game.graph.as_ref().map(|g| g.runner.motion_state()) {
+                    Some(st) => st.contains("AnticCyc") || self.t > self.wind_at + 60,
+                    None => self.t >= self.wind_at + 10,
+                };
+                if ready {
+                    self.flick_at = self.t;
+                }
+            }
+            "flick" => (pad.cstick_x, pad.cstick_y) = UP,
+            _ => {}
+        }
+        pad
+    }
+}
+
 /// The kicker run, then the rest of the move set: carve both ways (the rider leans), a U-turn, a
 /// manual held for 3 s, a kick turn, an ollie with an indy grab, a revert, a 360 flip, a 180 to fakie,
 /// riding fakie until the rider turns round to switch (with Skate 3's state graphs on their own after
 /// 0.6 s, else by pushing), a held double kickflip (state graphs; else a kickflip), an ollie with a late
 /// kickflip (state graphs only),
-/// a powerslide, a hippie jump, and finally a grab held into the landing (a bail).
+/// a powerslide, a hippie jump, grinds (an ollie onto a ledge into a 50-50, tipped into a 5-0 with the
+/// C-stick; rolling off a quarter pipe's deck into a coping grind; an ollie along a ledge's line with a
+/// quarter turn into a slide), and finally a grab held into the landing (a bail). For the grinds the
+/// tour asks to be put beside a ledge or on a deck ([`TrickTour::take_place`]).
 /// For the preview and an end-to-end test.
 #[derive(Default)]
 pub struct TrickTour {
@@ -89,6 +195,34 @@ pub struct TrickTour {
     pub seen: Seen,
     /// The heading (yaw) it steers for: clear, flat ground ahead.
     steer_to: Option<f32>,
+    /// The grab's scored name when it was first held.
+    grab_name: Option<&'static str>,
+    /// Where the tour wants the rider put (the caller does it: `Game::place_rider`).
+    place: Option<Placement>,
+    /// The rail the grind phase uses.
+    rail: Option<RailPick>,
+}
+
+/// Where to put the rider: position, heading (yaw), speed along it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub pos: Vec3,
+    pub heading: f32,
+    pub speed: f32,
+    /// Upward speed (m/s): above 0 the rider is put in the air at `pos`, moving along `heading` at
+    /// `speed` and up at this ([`Game::place`]).
+    pub lift: f32,
+}
+
+/// A straight, level run of a rail the tour grinds: its rail, where it starts along it, its direction
+/// and high side, the point it starts at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RailPick {
+    rail: usize,
+    s: f32,
+    dir: Vec3,
+    high: Vec3,
+    start: Vec3,
 }
 
 /// Moves the tour saw the game do.
@@ -103,7 +237,24 @@ pub struct Seen {
     /// Most flips of a held kickflip.
     pub flips: u8,
     pub late_flip: bool,
+    /// The C-stick picked a grab's variant (its scored name changed while the grab was held).
+    pub grab_variant: bool,
+    /// Grinds: onto a ledge, tipped into a 5-0 by the C-stick, on coping, a slide (board or tip).
+    pub ledge: bool,
+    pub five_o: bool,
+    pub coping: bool,
+    pub slide: bool,
+    /// A d-pad gesture played (the state graphs' CharacterGesture).
+    pub gesture: bool,
+    /// A thin rail ground to its end (not leaned off).
+    pub handrail: bool,
+    /// A back flip turned (whole turns, rounded) and landed on the wheels.
+    pub backflip: bool,
 }
+
+/// How far short of half a turn the 180's let-go spin may carry it (rad): the landing assist does the
+/// rest.
+const RELEASE_HALF_CAB: f32 = 0.25;
 
 /// How long the tour holds its manual (ticks): over 3 s.
 pub const MANUAL_TICKS: u32 = 190;
@@ -130,6 +281,21 @@ enum Tour {
     Powerslide,
     Hippie,
     HippieAir,
+    LedgeFind,
+    LedgeRide,
+    LedgeAir,
+    LedgeGrind,
+    CopingFind,
+    CopingRide,
+    SlideFind,
+    SlideRide,
+    SlideAir,
+    Gesture,
+    RailFind,
+    RailGrind,
+    FlipFind,
+    FlipRide,
+    FlipAir,
     BailOllie,
     BailAir,
     Done,
@@ -151,6 +317,14 @@ impl Tour {
             Tour::LateOllie | Tour::LateAir => "ollie, late kickflip",
             Tour::Powerslide => "powerslide",
             Tour::Hippie | Tour::HippieAir => "hippie jump",
+            Tour::LedgeFind | Tour::LedgeRide | Tour::LedgeAir | Tour::LedgeGrind => {
+                "ollie onto a ledge, 50-50 into a 5-0"
+            }
+            Tour::CopingFind | Tour::CopingRide => "coping grind off a quarter pipe's deck",
+            Tour::SlideFind | Tour::SlideRide | Tour::SlideAir => "ollie into a slide",
+            Tour::Gesture => "d-pad gesture",
+            Tour::RailFind | Tour::RailGrind => "handrail grind to its end",
+            Tour::FlipFind | Tour::FlipRide | Tour::FlipAir => "back flip off the kicker",
             Tour::BailOllie | Tour::BailAir => "grab held into the landing (bail)",
             Tour::Done => "done",
         }
@@ -199,6 +373,165 @@ fn clear_heading(game: &Game, yaw: f32, dist: f32) -> Option<f32> {
         }
     }
     None
+}
+
+/// How far beside a ledge the tour rides to ollie onto it, and how far in from a deck's edge it rolls
+/// off onto coping (m).
+const LEDGE_SIDE: f32 = 0.35;
+const DECK_IN: f32 = 0.4;
+
+/// What the tour wants of a rail: a ledge to ride beside and ollie onto, coping to roll onto from its
+/// deck, or a ledge to ollie onto from its line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Want {
+    Ledge,
+    Coping,
+    Slide,
+}
+
+/// The longest straight, level run (at least `len` metres) of a ledge-class rail whose sides are what
+/// the tour needs, skipping rail `avoid`: for a ledge, flat ground 0.25 to 0.8 m down on the low side
+/// along the run and `approach` metres before it (to ride beside it and pop); for coping, a steep
+/// transition more than a metre down on the low side and a flat deck level with the rail on the high
+/// side; for a slide, a ledge with flat ground on the rail's line before its start.
+fn find_rail(game: &Game, want: Want, len: f32, avoid: Option<usize>) -> Option<RailPick> {
+    let park = game.terrain();
+    let (side, approach) = match want {
+        Want::Ledge => (LEDGE_SIDE, 5.0),
+        Want::Coping => (DECK_IN, 0.0),
+        Want::Slide => (0.05, 2.5),
+    };
+    let flat_at = |p: Vec3, height: f32| {
+        let g = park.ground(p.x, p.z, height + 0.1);
+        g.normal.y > 0.95 && (g.height - height).abs() < 0.05
+    };
+    let mut best: Option<(f32, RailPick)> = None;
+    for (ri, r) in park.rails().iter().enumerate() {
+        if Some(ri) == avoid {
+            continue;
+        }
+        let n = r.points.len();
+        let mut s0 = 0.0;
+        let mut dir0: Option<Vec3> = None;
+        for i in 0..n.saturating_sub(1) {
+            let (a, b) = (r.points[i], r.points[i + 1]);
+            let d = (b - a).normalize_or(Vec3::ZERO);
+            let class = r.classes.get(i).map_or(RailClass::Thin, |c| c.class);
+            let ok = class == RailClass::Ledge
+                && d.y.abs() < 0.05
+                && dir0.is_none_or(|d0| d0.dot(d) > 0.996);
+            if !ok {
+                s0 = r.segment_start(i + 1);
+                dir0 = None;
+                continue;
+            }
+            let d0 = *dir0.get_or_insert(d);
+            let end = r.segment_start(i + 1);
+            // Only a run's longest stretch counts: judge it where it ends.
+            let last = i + 2 >= n
+                || r.classes
+                    .get(i + 1)
+                    .is_none_or(|c| c.class != RailClass::Ledge)
+                || {
+                    let e = (r.points[i + 2] - b).normalize_or(Vec3::ZERO);
+                    e.y.abs() >= 0.05 || d0.dot(e) <= 0.996
+                };
+            let run = end - s0;
+            if !last || run < len || best.is_some_and(|b| b.0 >= run) {
+                continue;
+            }
+            let (start, _) = r.at(s0);
+            let (_, high) = r.class_at(s0 + 0.5);
+            let low = -high;
+            let low_height = park.ground(
+                start.x + low.x * side,
+                start.z + low.z * side,
+                start.y - 0.1,
+            );
+            let drop = start.y - low_height.height;
+            let mut good = match want {
+                Want::Coping => drop > 1.0,
+                _ => (0.25..=0.8).contains(&drop),
+            };
+            let mut k = -approach;
+            while k <= run && good {
+                let p = start + d0 * k;
+                good = match want {
+                    Want::Coping => {
+                        let deck = p + high * DECK_IN;
+                        let wall = park.ground(p.x + low.x * 0.3, p.z + low.z * 0.3, p.y - 0.05);
+                        flat_at(deck, p.y) && wall.normal.y < 0.85 && p.y - wall.height > 0.05
+                    }
+                    Want::Ledge => {
+                        flat_at(p + low * side, low_height.height)
+                            && flat_at(p + low * (side + 0.8), low_height.height)
+                    }
+                    Want::Slide if k < 0.0 => {
+                        flat_at(p + low * side, low_height.height)
+                            && flat_at(p + high * 0.3, low_height.height)
+                            && flat_at(p + low * 0.5, low_height.height)
+                    }
+                    Want::Slide => flat_at(p + low * 0.5, low_height.height),
+                };
+                k += 1.0;
+            }
+            if good {
+                best = Some((
+                    run,
+                    RailPick {
+                        rail: ri,
+                        s: s0,
+                        dir: d0,
+                        high,
+                        start,
+                    },
+                ));
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// The longest run (at least `len` metres, gently sloped) of a thin rail, started from its higher end:
+/// (rail, start point, direction along it, length).
+fn find_thin_rail(game: &Game, len: f32) -> Option<(usize, Vec3, Vec3, f32)> {
+    let mut best: Option<(usize, Vec3, Vec3, f32)> = None;
+    for (ri, r) in game.terrain().rails().iter().enumerate() {
+        let n = r.points.len();
+        let mut i = 0;
+        while i + 1 < n {
+            let thin = |k: usize| r.classes.get(k).is_none_or(|c| c.class == RailClass::Thin);
+            if !thin(i) {
+                i += 1;
+                continue;
+            }
+            let d0 = (r.points[i + 1] - r.points[i]).normalize_or(Vec3::ZERO);
+            let mut j = i + 1;
+            while j + 1 < n && thin(j) && {
+                let e = (r.points[j + 1] - r.points[j]).normalize_or(Vec3::ZERO);
+                e.dot(d0) > 0.99
+            } {
+                j += 1;
+            }
+            let (a, b) = (r.points[i], r.points[j]);
+            let length = (b - a).length();
+            let dir = (b - a).normalize_or(Vec3::ZERO);
+            if length >= len && dir.y.abs() < 0.35 && best.is_none_or(|x| x.3 < length) {
+                best = Some(if a.y >= b.y {
+                    (ri, a, dir, length)
+                } else {
+                    (ri, b, -dir, length)
+                });
+            }
+            i = j;
+        }
+    }
+    best
+}
+
+/// The yaw of a direction.
+fn yaw_of(d: Vec3) -> f32 {
+    atan2f(d.x, d.z)
 }
 
 /// Where a flick of gesture `name` ends on the C-stick (raw), from the loaded gesture file `skater`
@@ -271,20 +604,34 @@ impl TrickTour {
     /// (long enough for shorter shapes that also start there, such as the body flips, to be dropped),
     /// then one point a tick. The raw stick for this tick, `None` once played (or without the shape).
     fn replay(&self, game: &Game, set: &str, name: &str, from: u32) -> Option<(i8, i8)> {
-        const HOLD_FIRST: usize = 12;
+        self.replay_held(game, set, name, from, 12)
+    }
+
+    /// [`TrickTour::replay`] with the first point held `hold` ticks.
+    fn replay_held(
+        &self,
+        game: &Game,
+        set: &str,
+        name: &str,
+        from: u32,
+        hold: usize,
+    ) -> Option<(i8, i8)> {
         let shape = game.gesture_shape(set, name)?;
-        let k = (self.t.checked_sub(from)? as usize).saturating_sub(HOLD_FIRST);
+        let k = (self.t.checked_sub(from)? as usize).saturating_sub(hold);
         let p = shape.points.get(k)?;
         // Gesture space has y towards the player: the stick's y is the other way.
         Some(raw_stick([p[0], -p[1]], crate::input::MAIN_RANGE))
     }
 
     /// Heading where the tour steers (clear ground ahead), give or take a little: time to pop.
+    /// (Not mid-turn either: a wind-up started at full lock flies with the camera wherever the turn left
+    /// it, as Skate 3's small-air shot keeps the shot it took over.)
     fn lined_up(&self, s: &crate::skater::Skater) -> bool {
         self.wind > 0
-            || self
-                .steer_to
-                .is_none_or(|h| wrap_angle(h - s.travel_yaw()).abs() < 0.12)
+            || (s.steer.abs() < 0.3
+                && self
+                    .steer_to
+                    .is_none_or(|h| wrap_angle(h - s.travel_yaw()).abs() < 0.12))
     }
 
     /// In the air: on to `air` if it was the flick's pop; launched off a lip before the flick, the
@@ -306,6 +653,23 @@ impl TrickTour {
     /// The phase it is in, by name (for the log).
     pub fn phase_name(&self) -> &'static str {
         self.phase.name()
+    }
+
+    /// Where the tour wants the rider put now, once (the caller puts the rider there:
+    /// `Game::place_rider`).
+    pub fn take_place(&mut self) -> Option<Placement> {
+        self.place.take()
+    }
+
+    /// The main stick that keeps the rider riding along `pick`'s rail at `side` metres off it (+ on the
+    /// low side), heading along it.
+    fn hold_line(s: &crate::skater::Skater, pick: &RailPick, side: f32) -> i8 {
+        let low = -pick.high;
+        let off = (s.pos - pick.start).dot(low) - side;
+        let want =
+            yaw_of(pick.dir) + (off * 0.6).clamp(-0.15, 0.15) * low.cross(pick.dir).y.signum();
+        let err = wrap_angle(want - s.travel_yaw());
+        (-err * 150.0).clamp(-45.0, 45.0) as i8
     }
 
     pub fn next(&mut self, game: &Game) -> PadRaw {
@@ -342,13 +706,27 @@ impl TrickTour {
                 | Tour::HalfCabAir
                 | Tour::Powerslide
                 | Tour::BailAir
+                | Tour::LedgeRide
+                | Tour::LedgeAir
+                | Tour::LedgeGrind
+                | Tour::CopingRide
+                | Tour::SlideRide
+                | Tour::SlideAir
+                | Tour::RailGrind
+                | Tour::FlipRide
+                | Tour::FlipAir
         );
         // (Not in the manual, the kick turn or riding fakie: a foot brake would take the rider out.)
         if rolling
             && s.speed > 4.5
             && !matches!(
                 self.phase,
-                Tour::Kicker | Tour::Powerslide | Tour::KickTurn | Tour::FakieRide | Tour::Revert
+                Tour::Kicker
+                    | Tour::Powerslide
+                    | Tour::KickTurn
+                    | Tour::FakieRide
+                    | Tour::Revert
+                    | Tour::FlipRide
             )
             && !(self.phase == Tour::Manual && self.t >= 40)
         {
@@ -462,9 +840,22 @@ impl TrickTour {
                 }
             }
             Tour::GrabAir => {
-                // Grab from just after the pop until falling, then let go to land.
-                if self.t > 4 && s.vel.y > -2.0 {
+                // Grab from just after the pop until falling, then let go to land; a moment into the
+                // grab the C-stick goes down to pick the grab's variant (and back before letting go).
+                let grabbing = self.t > 4 && s.vel.y > -2.0;
+                if grabbing {
                     pad.trig_r = 255;
+                }
+                if let Some(g) = &s.grab {
+                    match self.grab_name {
+                        None => self.grab_name = Some(g.name),
+                        Some(n) if n != g.name => self.seen.grab_variant = true,
+                        _ => {}
+                    }
+                    // (Back to the middle by the top: still tweaking it on landing would wipe out.)
+                    if grabbing && g.time > 0.08 && s.vel.y > 0.5 {
+                        (pad.cstick_x, pad.cstick_y) = GRAB_DOWN;
+                    }
                 }
                 if rolling {
                     next(self, Tour::Revert, sw);
@@ -538,8 +929,11 @@ impl TrickTour {
                 }
             }
             Tour::HalfCabAir => {
-                // Spin left to about half a turn, then let the stick go.
-                if s.spin.abs() < PI - 1.0 {
+                // Spin left, letting the stick go once the let-go spin will carry it about half round
+                // (it slows by the opposite-direction limit a tick); the landing assist finishes it.
+                let slow = (s.tuning.spin_reverse_change * 60.0).max(1.0);
+                let carry = s.spin_rate * s.spin_rate / (2.0 * slow);
+                if s.spin.abs() + carry < PI - RELEASE_HALF_CAB {
                     pad.stick_x = -100;
                 }
                 if rolling {
@@ -648,6 +1042,295 @@ impl TrickTour {
             }
             Tour::HippieAir => {
                 if rolling {
+                    next(self, Tour::LedgeFind, sw);
+                }
+            }
+            Tour::LedgeFind => {
+                self.rail = find_rail(game, Want::Ledge, 8.0, None);
+                match self.rail {
+                    Some(r) => {
+                        // Beside the ledge's line, a little before it starts.
+                        let low = -r.high;
+                        let at = r.start - r.dir * 3.0 + low * LEDGE_SIDE;
+                        let p = r.start;
+                        let g = game.terrain().ground(at.x, at.z, p.y - 0.1);
+                        self.place = Some(Placement {
+                            pos: v3(at.x, g.height, at.z),
+                            heading: yaw_of(r.dir),
+                            speed: 4.0,
+                            lift: 0.0,
+                        });
+                        next(self, Tour::LedgeRide, sw);
+                    }
+                    None => next(self, Tour::CopingFind, sw),
+                }
+            }
+            Tour::LedgeRide => {
+                let Some(r) = self.rail else {
+                    next(self, Tour::CopingFind, sw);
+                    return pad;
+                };
+                pad.stick_x = Self::hold_line(s, &r, LEDGE_SIDE);
+                // Load and pop once riding along it (the state graphs' wind-up takes a while longer):
+                // the landing prediction steers onto the ledge.
+                let along = (s.pos - r.start).dot(r.dir);
+                let from = if game.graph.is_some() { -2.0 } else { 0.5 };
+                if along > from || self.wind > 0 {
+                    (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, 10, &[UP]);
+                }
+                if !rolling {
+                    self.popped(Tour::LedgeAir, sw);
+                }
+                if self.t > 240 {
+                    next(self, Tour::CopingFind, sw);
+                }
+            }
+            Tour::LedgeAir => {
+                if s.mode == Mode::Grind {
+                    self.seen.ledge = true;
+                    next(self, Tour::LedgeGrind, sw);
+                } else if rolling || self.t > 120 {
+                    next(self, Tour::CopingFind, sw);
+                }
+            }
+            Tour::LedgeGrind => {
+                // A moment of 50-50, then the C-stick back tips it onto the back truck: a 5-0.
+                if (15..60).contains(&self.t) {
+                    pad.cstick_y = -80;
+                }
+                if let Some(g) = &s.grind
+                    && g.family == crate::skater::Family::FiveO
+                    && !g.front
+                {
+                    self.seen.five_o = true;
+                }
+                if s.mode != Mode::Grind && self.held == 0 {
+                    self.held = self.t;
+                }
+                if (self.held > 0 && rolling && self.t > self.held + 30) || self.t > 600 {
+                    next(self, Tour::CopingFind, sw);
+                }
+            }
+            Tour::CopingFind => {
+                let pick = find_rail(game, Want::Coping, 6.0, None);
+                match pick {
+                    Some(r) => {
+                        self.rail = Some(r);
+                        let (p, _) = game.terrain().rails()[r.rail].at(r.s + 0.5);
+                        let at = p + r.high * DECK_IN;
+                        let g = game.terrain().ground(at.x, at.z, p.y + 0.1);
+                        // Along the coping, a little towards the edge.
+                        let toward =
+                            wrap_angle(yaw_of(r.dir) + 0.1 * r.dir.cross(-r.high).y.signum());
+                        self.place = Some(Placement {
+                            pos: v3(at.x, g.height, at.z),
+                            heading: toward,
+                            speed: 3.5,
+                            lift: 0.0,
+                        });
+                        next(self, Tour::CopingRide, sw);
+                    }
+                    None => next(self, Tour::SlideFind, sw),
+                }
+            }
+            Tour::CopingRide => {
+                if s.mode == Mode::Grind {
+                    self.seen.coping = true;
+                }
+                if s.mode != Mode::Grind && self.seen.coping && self.held == 0 {
+                    self.held = self.t;
+                }
+                if (self.held > 0 && rolling && self.t > self.held + 30) || self.t > 360 {
+                    next(self, Tour::SlideFind, sw);
+                }
+            }
+            Tour::SlideFind => {
+                let avoid = self.rail.map(|r| r.rail);
+                let pick = find_rail(game, Want::Slide, 4.0, avoid)
+                    .or_else(|| find_rail(game, Want::Slide, 4.0, None));
+                match pick {
+                    Some(r) => {
+                        self.rail = Some(r);
+                        // On the ledge's line, a little back from its start, on the low ground.
+                        let low = -r.high;
+                        let at = r.start - r.dir * 2.2 + low * 0.05;
+                        let g = game.terrain().ground(at.x, at.z, r.start.y - 0.1);
+                        self.place = Some(Placement {
+                            pos: v3(at.x, g.height, at.z),
+                            heading: yaw_of(r.dir),
+                            speed: 4.0,
+                            lift: 0.0,
+                        });
+                        next(self, Tour::SlideRide, sw);
+                    }
+                    None => next(self, Tour::Gesture, sw),
+                }
+            }
+            Tour::SlideRide => {
+                // Pop just before the ledge's end.
+                if self.t > 6 {
+                    (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, 4, &[UP]);
+                }
+                if !rolling {
+                    self.popped(Tour::SlideAir, sw);
+                }
+                if self.t > 240 {
+                    next(self, Tour::Gesture, sw);
+                }
+            }
+            Tour::SlideAir => {
+                // A quarter turn in the air (the main stick for a moment): across the ledge's edge.
+                let turn = if game.graph.is_some() { 9 } else { 15 };
+                if self.t < turn && s.mode != Mode::Grind {
+                    pad.stick_x = 100;
+                }
+                if let Some(g) = &s.grind
+                    && g.family != crate::skater::Family::FiftyFifty
+                    && g.family != crate::skater::Family::FiveO
+                {
+                    self.seen.slide = true;
+                }
+                if s.mode == Mode::Rolling && self.t > 2 && self.held == 0 {
+                    self.held = self.t;
+                }
+                if (self.held > 0 && self.t > self.held + 30) || self.t > 600 {
+                    next(self, Tour::Gesture, sw);
+                }
+            }
+            Tour::Gesture => {
+                // The d-pad up for a moment while rolling: the state graphs play the gesture.
+                if s.speed.abs() < 2.0 && self.t < 40 {
+                    pad.buttons |= btn::A;
+                }
+                if (30..90).contains(&self.t) {
+                    pad.buttons |= btn::DPAD_UP;
+                }
+                if game
+                    .graph
+                    .as_ref()
+                    .is_some_and(|g| g.runner.s.gesture.is_some())
+                {
+                    self.seen.gesture = true;
+                }
+                if self.t > 180 {
+                    next(self, Tour::RailFind, sw);
+                }
+            }
+            Tour::RailFind => match find_thin_rail(game, 3.0) {
+                Some((ri, start, dir, _)) => {
+                    // Dropped onto the rail's high end, moving along it.
+                    self.rail = Some(RailPick {
+                        rail: ri,
+                        s: 0.0,
+                        dir,
+                        high: Vec3::UP,
+                        start,
+                    });
+                    let at = start - dir * 0.6 + Vec3::UP * 0.45;
+                    self.place = Some(Placement {
+                        pos: at,
+                        heading: yaw_of(dir),
+                        speed: 4.0,
+                        lift: 0.5,
+                    });
+                    next(self, Tour::RailGrind, sw);
+                }
+                None => next(self, Tour::FlipFind, sw),
+            },
+            Tour::RailGrind => {
+                if s.mode == Mode::Grind {
+                    self.held = self.t;
+                }
+                // Off the rail: it went to the end (the log says why: `grind: off (off the end)`).
+                if self.held > 0 && s.mode != Mode::Grind {
+                    if let Some(r) = self.rail {
+                        let rail = &game.terrain().rails()[r.rail];
+                        let end = rail.points.iter().any(|p| (*p - s.pos).length() < 1.0);
+                        self.seen.handrail |= end;
+                    }
+                    if rolling || self.t > self.held + 60 {
+                        next(self, Tour::FlipFind, sw);
+                    }
+                }
+                if self.t > 360 {
+                    next(self, Tour::FlipFind, sw);
+                }
+            }
+            Tour::FlipFind => {
+                // The demo park's kicker run-in; an imported park has no kicker the tour knows of, so
+                // the rider is launched from its spawn instead.
+                self.place = Some(match game.imported_park() {
+                    None => Placement {
+                        pos: v3(0.0, 0.0, -16.0),
+                        heading: 0.0,
+                        speed: 2.0,
+                        lift: 0.0,
+                    },
+                    Some(_) => {
+                        // Where the rider is, towards clear, flat ground.
+                        let p = s.pos;
+                        let yaw =
+                            clear_heading(game, s.travel_yaw(), 8.0).unwrap_or(s.travel_yaw());
+                        Placement {
+                            pos: p + Vec3::UP * 0.3,
+                            heading: yaw,
+                            speed: 3.0,
+                            lift: 6.5,
+                        }
+                    }
+                });
+                next(self, Tour::FlipRide, sw);
+            }
+            Tour::FlipRide => {
+                // Push up to speed, load the C-stick and ollie off the kicker's lip.
+                if rolling && s.speed < 6.5 {
+                    pad.buttons |= btn::A;
+                }
+                // Wound up well before the lip (the state graphs' wind-up takes a moment), flicked at
+                // it.
+                let wound = Self::graph_state(game).is_none_or(|st| st.contains("Antic"));
+                if s.pos.z > -8.0 && rolling {
+                    (pad.cstick_x, pad.cstick_y) = BACK;
+                }
+                if s.pos.z > -4.3 && rolling && wound {
+                    (pad.cstick_x, pad.cstick_y) = UP;
+                }
+                if !rolling {
+                    next(self, Tour::FlipAir, sw);
+                }
+                if self.t > 600 {
+                    next(self, Tour::BailOllie, sw);
+                }
+            }
+            Tour::FlipAir => {
+                // Grab, the left stick's back flip shape, and hold the grab until nearly round (the
+                // flip slows to a stop once let go).
+                let turned = s.body_flip.map_or(0.0, |f| f.angle.abs());
+                let release = s
+                    .body_flip
+                    .is_some_and(|f| f.angle.abs() > crate::math::TAU - 1.1);
+                if !release && self.held == 0 {
+                    pad.trig_r = 255;
+                }
+                if release {
+                    self.held = self.t;
+                }
+                // Straight after take-off: the flip gesture counts only early in the air.
+                if let Some((x, y)) = self.replay_held(game, "skaterls", "BackFlip", 1, 2) {
+                    (pad.stick_x, pad.stick_y) = (x, y);
+                }
+                if turned > 0.0 {
+                    self.wind = self.wind.max((turned * 10.0) as u32);
+                }
+                if !matches!(s.mode, Mode::Air { .. }) {
+                    if rolling && self.wind as f32 / 10.0 > crate::math::PI {
+                        self.seen.backflip = true;
+                    }
+                    if !matches!(s.mode, Mode::Air { .. }) && self.t > 2 {
+                        next(self, Tour::BailOllie, sw);
+                    }
+                }
+                if self.t > 300 {
                     next(self, Tour::BailOllie, sw);
                 }
             }
@@ -663,9 +1346,13 @@ impl TrickTour {
                 }
             }
             Tour::BailAir => {
-                // Grab and never let go: still holding the board when the wheels touch down.
+                // Grab, tweak it with the C-stick and never let go: still tweaking the grab when the
+                // wheels touch down wipes out.
                 if self.t > 4 {
                     pad.trig_l = 255;
+                }
+                if self.t > 8 {
+                    (pad.cstick_x, pad.cstick_y) = TWEAK;
                 }
                 if matches!(s.mode, Mode::Bailed { .. }) {
                     next(self, Tour::Done, sw);
@@ -693,11 +1380,30 @@ pub struct Autoplay {
     rest: u32,
     /// The phase last logged.
     shown: &'static str,
+    /// A tour just ended and the rider is back on the board: start the next one from the park's spawn
+    /// (the tour is laid out from there), see [`Autoplay::take_restart`].
+    restart: bool,
 }
 
 impl Autoplay {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// True once when the next tour should start from the park's spawn (the caller puts the rider there:
+    /// `Game::restart_at_spawn`).
+    pub fn take_restart(&mut self) -> bool {
+        core::mem::take(&mut self.restart)
+    }
+
+    /// Where the tour wants the rider put (the caller does it: `Game::place_rider`).
+    pub fn take_place(&mut self) -> Option<Placement> {
+        self.tour.take_place()
+    }
+
+    /// The tour phase it is in (for the log).
+    pub fn phase(&self) -> &'static str {
+        self.tour.phase_name()
     }
 
     /// The next pad state. Returns the line to log when a tour phase starts or the tour finishes.
@@ -709,8 +1415,12 @@ impl Autoplay {
         if self.rest > 0 {
             self.rest -= 1;
             // Wait until the rider is up again before starting over.
-            if self.rest == 0 && !matches!(game.skater.mode, Mode::Rolling) {
-                self.rest = 30;
+            if self.rest == 0 {
+                if matches!(game.skater.mode, Mode::Rolling) {
+                    self.restart = true;
+                } else {
+                    self.rest = 30;
+                }
             }
             return (idle, None);
         }
@@ -725,14 +1435,23 @@ impl Autoplay {
                 idle,
                 Some(alloc::format!(
                     "autoplay: tour {} done (manual {:.1} s, kick turn {}, revert {}, auto switch {}, \
-                     {} flips held, late flip {})",
+                     {} flips held, late flip {}, grab variant {}, ledge grind {}, 5-0 {}, coping {}, \
+                     slide {}, gesture {}, handrail {}, back flip {})",
                     self.rounds,
                     seen.manual as f32 / 60.0,
                     seen.kick_turn,
                     seen.revert,
                     seen.auto_switch,
                     seen.flips,
-                    seen.late_flip
+                    seen.late_flip,
+                    seen.grab_variant,
+                    seen.ledge,
+                    seen.five_o,
+                    seen.coping,
+                    seen.slide,
+                    seen.gesture,
+                    seen.handrail,
+                    seen.backflip
                 )),
             );
         }
@@ -757,6 +1476,12 @@ mod tests {
         for _ in 0..(60 * 120) {
             let (pad, line) = auto.next(&game);
             lines += line.is_some_and(|l| l.contains(" done")) as u32;
+            if auto.take_restart() {
+                game.restart_at_spawn();
+            }
+            if let Some(p) = auto.take_place() {
+                game.place(&p);
+            }
             game.update(&pad, 1.0 / 60.0);
             if auto.rounds >= 2 {
                 break;

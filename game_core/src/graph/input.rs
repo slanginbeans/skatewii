@@ -67,6 +67,10 @@ names! {
     board_adjust_angle = "BoardAdjustAngle", board_adjust_mag = "BoardAdjustMag",
     tweak_x = "TweakX", tweak_y = "TweakY", trick = "Trick", gesture_speed = "GestureSpeed",
     hold_pattern = "HoldPattern", no_input = "NoInput",
+    gesture_left_start = "GestureLeftStart", gesture_right_start = "GestureRightStart",
+    gesture_up_start = "GestureUpStart", gesture_down_start = "GestureDownStart",
+    gesture_left_held = "GestureLeftHeld", gesture_right_held = "GestureRightHeld",
+    gesture_up_held = "GestureUpHeld", gesture_down_held = "GestureDownHeld",
 }
 
 /// Gates from the game (SK8's actor flags): what the rider may do right now.
@@ -191,6 +195,24 @@ impl Intentions {
         }
         if held & btn::X != 0 {
             put(id.brake, 1.0);
+        }
+        // The d-pad: character gestures (Skate 3's on the Xbox pad's d-pad, the same place).
+        for (b, start, hold) in [
+            (btn::DPAD_LEFT, id.gesture_left_start, id.gesture_left_held),
+            (
+                btn::DPAD_RIGHT,
+                id.gesture_right_start,
+                id.gesture_right_held,
+            ),
+            (btn::DPAD_UP, id.gesture_up_start, id.gesture_up_held),
+            (btn::DPAD_DOWN, id.gesture_down_start, id.gesture_down_held),
+        ] {
+            if new & b != 0 {
+                put(start, 1.0);
+            }
+            if held & b != 0 {
+                put(hold, 1.0);
+            }
         }
         if new_right || new_left {
             put(id.new_push, 1.0);

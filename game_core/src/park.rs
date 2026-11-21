@@ -103,6 +103,7 @@ pub trait Terrain {
                     t: hi,
                     point: at,
                     normal,
+                    surface: 0,
                 });
             }
             prev = p;
@@ -118,7 +119,18 @@ pub struct Hit {
     pub point: Vec3,
     /// Unit surface normal, facing back along the ray.
     pub normal: Vec3,
+    /// The collision surface id (0: none); its category is bits 7..11 ([`surface_category`]).
+    pub surface: u16,
 }
+
+/// Skate 3's surface category of a collision surface id (bits 7..11, SK8 `packed_surface >> 7 & 31`):
+/// 8 is stairs, 6 unrideable, 7 and 8 surfaces the board doesn't align to.
+pub fn surface_category(surface: u16) -> u32 {
+    (u32::from(surface) >> 7) & 31
+}
+
+/// The stairs category.
+pub const STAIRS: u32 = 8;
 
 impl Terrain for Park {
     fn ground(&self, x: f32, z: f32, _max: f32) -> Surface {
@@ -139,7 +151,7 @@ pub struct Park {
     pub wall_height: f32,
     pub spawn: Vec3,
     pub spawn_yaw: f32,
-    /// Grind rails (the ledge's top).
+    /// Grind rails (the ledge's edge).
     pub rails: Vec<Rail>,
 }
 
@@ -320,7 +332,7 @@ impl Park {
                 h1: 0.0,
                 rgba: WOOD
             },
-            // Long ledge with a painted top (grinds come later).
+            // Long ledge with a painted top (its edge facing the park is a grind rail).
             Shape::Block {
                 min: v3(-10.0, 0.0, -6.0),
                 max: v3(-9.4, 0.4, 6.0),
@@ -332,6 +344,12 @@ impl Park {
                 max: v3(-2.5, 0.18, 9.5),
                 rgba: CONCRETE
             },
+            // A flat bar (a thin rail on posts), by the funbox.
+            Shape::Block {
+                min: v3(3.97, 0.0, 10.0),
+                max: v3(4.03, 0.35, 16.0),
+                rgba: STEEL
+            },
             // Bank against the east wall.
             Shape::Ramp {
                 min: v3(14.0, 0.0, -10.0),
@@ -342,18 +360,20 @@ impl Park {
                 rgba: STEEL
             },
         ];
-        Park {
+        let mut park = Park {
             shapes: s,
             half_size: 20.0,
             wall_height: 1.2,
             spawn: v3(0.0, 0.0, -14.0),
             spawn_yaw: 0.0,
-            // Along the middle of the long ledge's top.
-            rails: alloc::vec![Rail::new(alloc::vec![
-                v3(-9.7, 0.4, -6.0),
-                v3(-9.7, 0.4, 6.0)
-            ])],
-        }
+            rails: Vec::new(),
+        };
+        // Along the long ledge's edge facing the park (a ledge: its top is the high side).
+        let rail = Rail::new(alloc::vec![v3(-9.4, 0.4, -6.0), v3(-9.4, 0.4, 6.0)]);
+        // Along the flat bar's top (a thin rail).
+        let bar = Rail::new(alloc::vec![v3(4.0, 0.35, 10.0), v3(4.0, 0.35, 16.0)]);
+        park.rails = alloc::vec![rail.classified(&park), bar.classified(&park)];
+        park
     }
 
     /// The surface under (x, z): the highest shape, the ground, or a wall outside the park.

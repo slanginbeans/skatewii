@@ -154,20 +154,24 @@ void fg_read_pad(FgPadRaw *out) {
     }
 }
 
+float fg_aspect(void) {
+    return aspect;
+}
+
 static GXColor unpack(uint32_t rgba) {
     GXColor c = {(u8)(rgba >> 24), (u8)(rgba >> 16), (u8)(rgba >> 8), (u8)rgba};
     return c;
 }
 
-void fg_begin_frame(const float eye[3], const float target[3], float fov_y_deg, float near_z, float far_z,
-                    uint32_t clear_rgba) {
+void fg_begin_frame(const float eye[3], const float target[3], const float up_dir[3], float fov_y_deg, float near_z,
+                    float far_z, uint32_t clear_rgba) {
     // The copy-clear colour applies when this frame is copied out in fg_end_frame.
     GX_SetCopyClear(unpack(clear_rgba), GX_MAX_Z24);
     GX_SetViewport(0, 0, rmode->fbWidth, rmode->efbHeight, 0, 1);
 
     guVector cam = {eye[0], eye[1], eye[2]};
     guVector look = {target[0], target[1], target[2]};
-    guVector up = {0.0f, 1.0f, 0.0f};
+    guVector up = {up_dir[0], up_dir[1], up_dir[2]};
     guLookAt(view, &cam, &up, &look);
     guPerspective(proj, fov_y_deg, aspect, near_z, far_z);
     GX_LoadProjectionMtx(proj, GX_PERSPECTIVE);

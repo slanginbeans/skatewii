@@ -80,6 +80,21 @@ pub fn parse_pat(text: &str) -> Res<Vec<Shape>> {
     Ok(out)
 }
 
+/// The disc's tuning database (AttribSys `skaterschema` and `skatercollections`).
+pub fn database<R: Read + Seek>(disc: &mut Disc<R>) -> Res<Database> {
+    let file = |disc: &mut Disc<R>, name: &str| read_asset(disc, &format!("{DB}{name}"));
+    Database::parse(
+        (
+            file(disc, "skaterschema.vlt")?,
+            file(disc, "skaterschema.bin")?,
+        ),
+        (
+            file(disc, "skatercollections.vlt")?,
+            file(disc, "skatercollections.bin")?,
+        ),
+    )
+}
+
 pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let mut out = PathBuf::from("imported");
     let mut it = args.iter();
@@ -89,23 +104,13 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
             _ => return Err(format!("unknown option {a}\n{USAGE}").into()),
         }
     }
-    let file = |disc: &mut Disc<R>, name: &str| read_asset(disc, &format!("{DB}{name}"));
-    let db = Database::parse(
-        (
-            file(disc, "skaterschema.vlt")?,
-            file(disc, "skaterschema.bin")?,
-        ),
-        (
-            file(disc, "skatercollections.vlt")?,
-            file(disc, "skatercollections.bin")?,
-        ),
-    )?;
+    let db = database(disc)?;
     let mut values = Vec::new();
     let mut missing = Vec::new();
-    for path in game_core::tuning::PATHS {
+    for path in game_core::tuning::all_paths() {
         match db.values(path) {
-            Some(v) => values.push((*path, v)),
-            None => missing.push(*path),
+            Some(v) => values.push((path, v)),
+            None => missing.push(path),
         }
     }
     for m in &missing {
@@ -119,6 +124,42 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         height: 0,
         gx_format: 0,
     }];
+    // The camera: Skate 3's camera graph and every shot it can choose.
+    let compiled = crate::camera::graph(&read_asset(disc, crate::camera::GRAPH)?)?;
+    let roots = crate::camera::shots_named(&compiled)?;
+    let field = |key: u64, name: &str| {
+        db.raw_key(crate::camera::CLASS, key, name)
+            .map(<[u8]>::to_vec)
+    };
+    let shots = crate::camera::shots(&roots, &field)?;
+    let missing_shots: Vec<&String> = roots.iter().filter(|n| shots.find(n).is_none()).collect();
+    println!(
+        "camera: graph {} KiB, {} shots ({} named by the graph{})",
+        compiled.len() / 1024,
+        shots.defs.len(),
+        roots.len(),
+        if missing_shots.is_empty() {
+            String::new()
+        } else {
+            format!(", not in the database: {missing_shots:?}")
+        }
+    );
+    items.push(pack::Item {
+        name: game_core::camera::select::ENTRY.into(),
+        kind: Kind::StateGraph,
+        data: compiled,
+        width: 0,
+        height: 0,
+        gx_format: 0,
+    });
+    items.push(pack::Item {
+        name: game_core::camera::shot::ENTRY.into(),
+        kind: Kind::Data,
+        data: shots.encode(),
+        width: 0,
+        height: 0,
+        gx_format: 0,
+    });
     let mut shape_count = 0;
     for name in SHAPES {
         let text = read_asset(disc, &format!("{JOYSTICK}{name}.pat"))?;
@@ -143,7 +184,7 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         path.display(),
         bytes.len(),
         values.len(),
-        game_core::tuning::PATHS.len(),
+        game_core::tuning::all_paths().count(),
         shape_count,
         SHAPES.len()
     );

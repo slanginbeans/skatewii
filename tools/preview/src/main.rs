@@ -215,7 +215,7 @@ impl Gfx for Raster {
         self.depth.fill(f32::INFINITY);
         self.eye = cam.eye;
         self.fwd = (cam.target - cam.eye).normalize_or(v3(0.0, 0.0, 1.0));
-        self.right = self.fwd.cross(Vec3::UP).normalize_or(v3(1.0, 0.0, 0.0));
+        self.right = self.fwd.cross(cam.up).normalize_or(v3(1.0, 0.0, 0.0));
         self.up = self.right.cross(self.fwd);
         self.focal = (self.h as f32 / 2.0) / (cam.fov_y_deg.to_radians() / 2.0).tan();
         self.near = cam.near;
@@ -316,6 +316,7 @@ impl Gfx for CloseUp<'_> {
         let cam = Camera {
             eye: target + self.side * 3.2 + v3(0.0, 0.4, 0.0),
             target,
+            up: Vec3::UP,
             fov_y_deg: 45.0,
             near: 0.1,
             far: 60.0,
@@ -405,6 +406,7 @@ fn main() {
         Raster::new(640, 480)
     };
     let mut game = Game::new();
+    game.set_aspect(if wide { 854.0 / 480.0 } else { 4.0 / 3.0 });
     // --rules: Skate 3's tuning and flick shapes (fg_import rules); --regular: left foot forward.
     if let Some(path) = value("--rules") {
         let bytes = fs::read(path).expect("read rules pack");
@@ -433,15 +435,19 @@ fn main() {
             }
         );
     }
-    // --poses: still shots of each stance (goofy, fakie, switch, regular) to check facing and mirroring.
+    // --poses: still shots of each stance (goofy, fakie, switch, regular) to check facing and mirroring,
+    // and of a held carve each way (the rider leans into the turn), each also close up from the side
+    // and from behind.
     if args.iter().any(|a| a == "--poses") {
         use game_core::skater::Stance;
         let base = game;
-        for (name, stance, switch, speed) in [
-            ("goofy", Stance::Goofy, false, 3.0f32),
-            ("fakie", Stance::Goofy, false, -3.0),
-            ("switch", Stance::Goofy, true, 3.0),
-            ("regular", Stance::Regular, false, 3.0),
+        for (name, stance, switch, speed, stick_x) in [
+            ("goofy", Stance::Goofy, false, 3.0f32, 0i8),
+            ("fakie", Stance::Goofy, false, -3.0, 0),
+            ("switch", Stance::Goofy, true, 3.0, 0),
+            ("regular", Stance::Regular, false, 3.0, 0),
+            ("carve_left", Stance::Goofy, false, 5.0, -70),
+            ("carve_right", Stance::Goofy, false, 5.0, 70),
         ] {
             let mut g = Game::new();
             if let Some(path) = value("--rules") {
@@ -460,11 +466,12 @@ fn main() {
             g.skater.switch = switch;
             g.skater.speed = speed;
             g.skater.pos.z = -10.0;
-            for _ in 0..60 {
+            for _ in 0..90 {
                 g.skater.speed = speed;
                 g.update(
                     &PadRaw {
                         flags: game_core::input::flag::CONNECTED,
+                        stick_x,
                         ..Default::default()
                     },
                     1.0 / 60.0,
@@ -479,11 +486,44 @@ fn main() {
                 side,
             });
             raster.save(&out.join(format!("pose_{name}_side.png")));
+            g.render(&mut CloseUp {
+                inner: &mut raster,
+                target: g.skater.pos,
+                side: yaw_dir(g.skater.heading + std::f32::consts::PI),
+            });
+            raster.save(&out.join(format!("pose_{name}_back.png")));
             let fakie = g.rider().map_or(0.0, |r| r.fakie_weight());
+            // The riding trees' parameters, as the graph's behaviours set them.
+            let params = match (&g.graph, g.motion.as_ref().map(|m| &m.db)) {
+                (Some(d), Some(db)) => d
+                    .runner
+                    .s
+                    .player
+                    .params
+                    .iter()
+                    .filter(|p| {
+                        matches!(
+                            db.name(p.name).to_ascii_uppercase().as_str(),
+                            "ANGLE"
+                                | "DIR"
+                                | "QUICKNESS"
+                                | "HOLDING"
+                                | "SPEEDTUCK"
+                                | "TILT_X"
+                                | "DISTTOCOG"
+                        )
+                    })
+                    .map(|p| format!("{} {:.2}", db.name(p.name), p.value))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                _ => String::new(),
+            };
             println!(
-                "{name}: fakie {} mirrored {} fakie look {fakie:.2}",
+                "{name}: fakie {} mirrored {} fakie look {fakie:.2}, yaw rate {:.2} | {}",
                 g.skater.fakie,
-                g.skater.mirrored()
+                g.skater.mirrored(),
+                g.skater.yaw_rate,
+                params
             );
         }
         drop(base);
@@ -509,6 +549,7 @@ fn main() {
         let cam = Camera {
             eye: v3(mid.x, max.y + span * 0.9, mid.z - span * 0.45),
             target: v3(mid.x, min.y, mid.z),
+            up: Vec3::UP,
             fov_y_deg: 60.0,
             near: 1.0,
             far: span * 4.0,
@@ -532,6 +573,11 @@ fn main() {
         let path = out.join("park_overview.png");
         raster.save(&path);
         println!("        wrote {}", path.display());
+    }
+    // --rails: how the park's rails were classified, and what the probes beside each segment meet.
+    if args.iter().any(|a| a == "--rails") {
+        rails_report(&game);
+        return;
     }
     // --grind-test: drop the skater onto the park's longest fairly level rail, moving along it.
     if args.iter().any(|a| a == "--grind-test") {
@@ -562,6 +608,17 @@ fn main() {
     }
     // --tour: the whole move set (carves, manual, grab, bail) after the kicker run.
     let tour = args.iter().any(|a| a == "--tour");
+    // --carve-ollie <ticks>: the camera check (a carve, <ticks> straight, an ollie), the camera's angle
+    // off behind the skater each tick.
+    let mut carve_ollie = args
+        .iter()
+        .position(|a| a == "--carve-ollie")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|n| n.parse::<u32>().ok())
+        .map(game_core::autoplay::CarveOllie::new);
+    // --autoplay: the hands-off tour the Wii runs (grinds and the bail included), in any park.
+    let autoplay = args.iter().any(|a| a == "--autoplay");
+    let mut auto = game_core::autoplay::Autoplay::new();
     let print_log = args.iter().any(|a| a == "--log");
     game.timer = Some(host_us);
     let mut kicker = KickerRun::new();
@@ -573,17 +630,59 @@ fn main() {
     let mut took_air = false;
     let mut took_land = false;
     let grind_test = args.iter().any(|a| a == "--grind-test");
-    let frames = if grind_test {
+    if carve_ollie.is_some() {
+        let (p, h) = game_core::autoplay::CarveOllie::START;
+        game.place_rider(p, h, 0.0);
+    }
+    let frames = if carve_ollie.is_some() {
+        60 * 10
+    } else if grind_test {
         60 * 6
+    } else if autoplay {
+        60 * 150
     } else if park.is_some() {
         60 * 30
     } else if tour {
-        60 * 20
+        60 * 32
     } else {
         60 * 7
     };
     for frame in 0..frames {
-        let pad = if park.is_some() {
+        let pad = if let Some(co) = &mut carve_ollie {
+            let pad = co.next(&game);
+            let s = &game.skater;
+            let to = (s.pos - game.camera().camera().eye).horizontal();
+            let off = (to.x.atan2(to.z) - s.travel_yaw()).to_degrees();
+            let off = (off + 540.0).rem_euclid(360.0) - 180.0;
+            println!(
+                "carve {frame} {} {:?} pos {:.1} {:.1} yaw {:.0} speed {:.2} off {:.1} shot {}",
+                co.phase(),
+                s.mode,
+                s.pos.x,
+                s.pos.z,
+                s.travel_yaw().to_degrees(),
+                s.speed,
+                off,
+                game.camera().shot_name
+            );
+            pad
+        } else if autoplay {
+            let (pad, line) = auto.next(&game);
+            if let Some(l) = line {
+                println!("{:>5.2}s  {l}", frame as f32 * dt);
+            }
+            if auto.take_restart() {
+                game.restart_at_spawn();
+            }
+            if let Some(p) = auto.take_place() {
+                game.place(&p);
+            }
+            // Let the bail play out after the tour.
+            if auto.rounds >= 1 && frame > *done_at.get_or_insert(frame) + 240 {
+                break;
+            }
+            pad
+        } else if park.is_some() {
             // Push up to a cruise and weave gently: enough to see the park and its collision.
             let s = &game.skater;
             PadRaw {
@@ -613,6 +712,43 @@ fn main() {
             }
         }
         game.update(&pad, dt);
+        if std::env::var_os("FG_CAMDBG").is_some() {
+            let c = game.camera();
+            let r = &c.rig;
+            println!(
+                "cam {frame} {} an {} rv {:.2} prep {} st {:.2} ct {:.2} cur {:.0} prev {:.0} k {:.2}/{:.2} sp {:.2} gi {:.1} mv {:.0} trav {:.0} mir {:.2} arm {:.0} d {:.2}/{:.2} avail {:.2} hit {} el {:.1}+{:.1}+{:.1} tgt {:.1} hd {:.1}->{:.1} w {:.2} anchor {:.2} ref {:.2} eye {:?}",
+                c.shot_name,
+                c.state.selected_anchor,
+                c.rig.velocity.length(),
+                c.conditions.preparing,
+                game.skater.steer,
+                c.conditions.centred_time,
+                c.shots.current_shot().arm_heading.to_degrees(),
+                c.shots.previous.arm_heading.to_degrees(),
+                c.shots.elapsed,
+                c.shots.duration(),
+                c.conditions.speed,
+                c.conditions.grind_incline,
+                c.compass.movement.to_degrees(),
+                game.skater.travel_yaw().to_degrees(),
+                c.state.heading_mirror.pos,
+                c.shown().arm_heading.to_degrees(),
+                r.positioner.distance.pos,
+                r.distance,
+                r.positioner.available,
+                r.positioner.hit,
+                r.elevation.pos().to_degrees(),
+                r.elevation_offset.to_degrees(),
+                r.additional_elevation.to_degrees(),
+                r.elevation_target.to_degrees(),
+                r.heading.pos().to_degrees(),
+                r.heading_target.to_degrees(),
+                r.heading_weight,
+                r.anchor.y,
+                r.reference_height,
+                c.camera().eye
+            );
+        }
         if print_log {
             for line in game.log.drain(..) {
                 println!("  log  {line}");
@@ -644,11 +780,16 @@ fn main() {
                 .rider()
                 .map(|r| format!(", clip {} @ {:.2}s", r.current().role, r.current().time))
                 .unwrap_or_default();
-            if label != "every" || park.is_some() {
+            if label != "every" || park.is_some() || tour || autoplay {
                 game.render(&mut raster);
                 let path = out.join(format!("frame_{frame:04}.png"));
                 raster.save(&path);
-                println!("        wrote {} ({label}{clip})", path.display());
+                println!(
+                    "        wrote {} ({label}{clip}, {:?}, camera {})",
+                    path.display(),
+                    game.skater.mode,
+                    game.camera().shot_name
+                );
             }
             if game.rider().is_some() {
                 let side = yaw_dir(game.skater.heading + std::f32::consts::FRAC_PI_2);
@@ -664,4 +805,58 @@ fn main() {
         }
     }
     println!("score: {}", game.score);
+}
+
+/// The rails' classes, with each segment's probes (the importer's classification, `rails::classify`),
+/// the drop under its middle and the segment's length, for checking the classes against the park.
+fn rails_report(game: &Game) {
+    use game_core::rails::{RailClass, side_of, upright};
+    let t = game.terrain();
+    // The far probes reach out by the deck-centre-to-truck distance (the rules pack's, else ours).
+    let far = game.skater.tuning.grind.deck_to_truck;
+    let mut counts = std::collections::BTreeMap::new();
+    for (i, r) in t.rails().iter().enumerate() {
+        for (k, w) in r.points.windows(2).enumerate() {
+            let (a, b) = (w[0], w[1]);
+            let class = r.classes.get(k).map_or(RailClass::Thin, |c| c.class);
+            let dir = (b - a).normalize_or(v3(0.0, 0.0, 1.0));
+            let up = upright(dir);
+            let c = a.lerp(b, 0.5);
+            let side = up.cross(dir).normalize_or(side_of(dir));
+            let probe = |top: Vec3, bottom: Vec3| {
+                let d = bottom - top;
+                let len = d.length().max(1e-6);
+                t.raycast(top, d * (1.0 / len), len)
+                    .map(|h| (h.t / len, h.normal))
+            };
+            let line = |at: Vec3, half: Vec3| probe(at + half, at - half);
+            let fmt = |h: Option<(f32, Vec3)>| match h {
+                Some((f, n)) => format!("{f:.2}/n{:.2},{:.2},{:.2}", n.x, n.y, n.z),
+                None => "-".into(),
+            };
+            let h0 = line(c + side * 0.09, up * 0.04);
+            let h1 = line(c - side * 0.09, up * 0.04);
+            let h2 = line(c + side * far, up * (far * 1.06));
+            let h3 = line(c - side * far, up * (far * 1.06));
+            let h4 = line(c, up * 0.04);
+            let drop = t
+                .raycast(c - Vec3::UP * 0.3, -Vec3::UP, 10.0)
+                .map_or(10.0, |h| h.t + 0.3);
+            let kind = if drop > 0.5 { "high" } else { "low" };
+            *counts.entry((format!("{class:?}"), kind)).or_insert(0usize) += 1;
+            println!(
+                "rail {i} seg {k} {class:?} len {:.2} drop {drop:.2} slope {:.2} h0 {} h1 {} h2 {} h3 {} h4 {}",
+                (b - a).length(),
+                dir.y,
+                fmt(h0),
+                fmt(h1),
+                fmt(h2),
+                fmt(h3),
+                fmt(h4)
+            );
+        }
+    }
+    for ((c, k), n) in counts {
+        println!("summary {c} {k} {n}");
+    }
 }

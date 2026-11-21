@@ -50,7 +50,7 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
   gesture.rs       Skate 3-style stick-shape recogniser, the 30 flick tricks and their stance mirroring
   tuning.rs        every riding number (built in, or Skate 3's from the player's disc)
   skater.rs        board physics, stance, pushing, braking, landing rules, trick scoring
-  camera.rs        chase camera after Skate 3's low riding camera
+  camera/          Skate 3's camera: shots and blends, the camera graph's choice, rig, collision, framing
   park.rs          height-field park made of blocks and ramps (placeholder geometry in code)
   game.rs          update + render loop; draws only through gfx::Gfx
   character.rs     imported skinned character: pack parsing, clip sampling, CPU skinning

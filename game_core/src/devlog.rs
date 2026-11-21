@@ -150,7 +150,15 @@ impl DevLog {
                     });
                     out.push(format!("BAIL: {why}{numbers}"));
                 }
-                Event::Respawned => out.push(String::from("respawned")),
+                Event::Respawned => out.push(format!(
+                    "respawned at ({:.1}, {:.1}, {:.1}) heading {:.0} deg{} ({} checkpoints left)",
+                    s.pos.x,
+                    s.pos.y,
+                    s.pos.z,
+                    deg(s.heading),
+                    if s.switch { ", switch" } else { "" },
+                    s.checkpoints.len()
+                )),
                 Event::RanOut => out.push(format!(
                     "RUNOUT: {} (stepped off, back on where it stops)",
                     s.bail_reason.unwrap_or("?")
@@ -222,10 +230,24 @@ impl DevLog {
         if grinding != self.grinding {
             if let Some(g) = &s.grind {
                 out.push(format!(
-                    "grind: {} on rail {} at {:.1} m/s",
-                    g.kind.name(),
+                    "grind: {} ({}, {:?}, {:?}) on rail {} ({}) at {:.1} m/s",
+                    g.display(),
+                    g.graph_name(),
+                    g.family,
+                    g.entry,
                     g.rail,
+                    g.class.name(),
                     g.speed
+                ));
+            }
+            if !grinding {
+                out.push(format!(
+                    "grind: off ({})",
+                    s.grind_exit.unwrap_or(if s.is_airborne() {
+                        "in the air"
+                    } else {
+                        "wiped out"
+                    })
                 ));
             }
             self.grinding = grinding;

@@ -178,8 +178,9 @@ runs the two state graphs every tick ([graph-runner.md](graph-runner.md)).
 ```bash
 cargo run --release -p fg_import -- park path/to/skate3.iso --park BlackBoxPark
 ```
-Writes `imported/park.fgpak` (about 500 KB): `park/collision` (every collision triangle, format in
-`game_core/src/collision.rs`), `park/spawn` and `park/rails` (grind rails, `game_core/src/rails.rs`). The build converts `BlackBoxPark` unless `FG_PARK` names
+Writes `imported/park.fgpak` (about 1 MB with the models): `park/collision` (every collision triangle,
+format in `game_core/src/collision.rs`), `park/spawn` and `park/rails` (grind rails with each segment's
+class and high side, `game_core/src/rails.rs`; version 2, older packs still load as thin rails). The build converts `BlackBoxPark` unless `FG_PARK` names
 another. Parks small enough for the Wii: `StartPark` (the opening warehouse: an empty floor), `MegaPark`,
 `BlackBoxPark`, `IndustrialSkatePark`, `DownTownSkatePark`, `SkateSchool` and `MaloofMoneyCup`. The city
 districts are hundreds of MB each.
@@ -206,29 +207,44 @@ is drawn instead (flat shaded, coloured by surface).
 
 Grind rails are the game's spline sections (type `0x00EB0004`) in the same `Sim` assets: chains of cubic
 segments `D + C t + B t² + A t³`, sampled at 4 points per segment (SK8's `retail_grind_splines.py`).
-BlackBoxPark has 120 rails (about 1.35 km); MegaPark has none. Coming down within 0.4 m of a rail, with any
-flip finished and no grab held, locks on: a 50-50 with the board within 30° of the rail, a boardslide within
-30° of across it. On the rail gravity and a little friction act along it; the end of the rail, running out of
-speed or a flick takes you off, and that scores the grind.
+BlackBoxPark has 120 rails (about 1.35 km); MegaPark has none. Each segment is classified as Skate 3 does
+(SK8 `grind_surface/classify.rs`): probes 0.09 m to each side of its middle (0.04 m up and down), out by the
+disc's `DeckCenterToTruck` (1.06 times that up and down) and just over it find a thin rail (nothing beside it), a fat rail, a ledge (a top
+carrying on to one side: that side is high), a curb (a ledge whose low side is 0.20 to 0.24 m down) or a
+blocked one (something on both sides or over it: never grindable). BlackBoxPark's 2,180 segments: 110 thin,
+8 fat, 1,642 ledge (stair edges among them), 226 curb, 194 blocked (`fg_import park` prints the counts).
+How grinds lock on, ride and end is in [graph-runner.md](graph-runner.md) ("Grinds").
 
 ### Riding rules
 ```bash
 cargo run --release -p fg_import -- rules path/to/skate3.iso
 ```
-Writes `imported/rules.fgpak` (about 16 KB) with what makes the skating feel like Skate 3:
+Writes `imported/rules.fgpak` (about 80 KB) with what makes the skating feel like Skate 3:
 
 - `rules/tuning`: the riding numbers flatground's skating reads (`game_core::tuning::PATHS`), taken from
   the game's tuning database (`data/big/db.big`: `data/db/skaterschema` and `skatercollections`, EA's
   AttribSys vault format, read by `attrib.rs`). Push strength and top push speed, rolling resistance, foot
   and tail brakes, steering against stick and speed, jump heights, the air spin curves, the landing limits,
-  the flick recogniser's tolerance and the low camera's shots ("normal" difficulty, the game's default).
+  the flick recogniser's tolerance, the camera's trackers, collision, avoidance, drop predictor and push lag
+  (`game_core::tuning::camera::PATHS`: `camera_tracker`, `camera/dynamics`, `camera/rotation`,
+  `camera/subject_tracker`, `camera_compass`, `camera_positioner`, `camera_droppredictor`,
+  `camera_lag_profile`) and the grinds' numbers (`game_core::tuning::grind::PATHS`: `physics_grinds`, `physics_grinds_air`, grind
+  targeting, grind wipeouts, the board's dimensions, the grind trees' twist and height).
   Values are found by hashing their names, as the game does; inherited values are followed up the parent
   chain.
+- `rules/camera/graph`: Skate 3's camera graph (`data/script/camera/Default_cameragraph.stategraph` in
+  `miscload.big`, the low and high cameras), compiled for the game's graph runner like the motion graphs
+  (`game_core::graph`, one graph named `Camera`).
+- `rules/camera/shots`: every shot that graph chooses and the children of its blend shots (156 on the
+  US/EU disc): the `camera_shots` collections of the tuning database, found by the hash of their names
+  and, for a blend's children, by the name hashes in its `BlendShot` references
+  (`game_core::camera::shot` has the layout). Shots the graph names but the database lacks are listed.
 - `rules/gestures/<file>`: the flick-stick shapes from `data/joystick/*.pat` in `miscload.big`
   (`skater.pat` drives the ground flick tricks; the rest are kept for later: board sideways, late flips,
   finger flips, the left stick).
 
-Without it the game uses its own built-in values and shapes, which only approximate Skate 3's.
+Without it the game uses its own built-in values and shapes, which only approximate Skate 3's, and its own
+camera shots and shot choice (`game_core::camera::builtin`, `select::built_in`).
 
 ### Water and menu tables (from the executable)
 Two tables exist only inside the game's code: the ocean PCA water animation and the front-end menu tables.

@@ -11,9 +11,10 @@ use super::{Error, Pack, Str};
 use crate::gesture::Flick;
 use crate::gesture::Shape;
 use crate::input::Pad;
+use crate::math::Vec3;
 use crate::motion::MotionDb;
 use crate::motion::NameId;
-use crate::skater::{AirTrick, GraphControl, GrindKind, Mode, Skater, Stance};
+use crate::skater::{AirTrick, Family, GRAPH_NAMES, GraphControl, Mode, Skater, Stance};
 use crate::tuning::Tuning;
 
 /// Motion-library names the driver reads from the playing clips.
@@ -42,24 +43,10 @@ pub struct Driver {
     jumping: bool,
     /// The motion state's path last tick (for edges).
     last_path: String,
-    /// The graph's grind names (`FS_50_50` ...) by [`GrindKind`] and side (backside, frontside).
-    grinds: [[Str; 2]; 11],
+    /// The graph's string for each grind name the physics publishes (`skater::GRAPH_NAMES`: Skate 3's
+    /// `IsGrinding` grindName values, `BF_` variants included).
+    grinds: Vec<Str>,
 }
-
-/// The graph's name for each of the physics' grinds (Skate 3's `IsGrinding` grindName values).
-const GRIND_NAMES: [(GrindKind, &str); 11] = [
-    (GrindKind::FiftyFifty, "50_50"),
-    (GrindKind::FiveO, "5_O"),
-    (GrindKind::Nosegrind, "NOSEGRIND"),
-    (GrindKind::Crooked, "CROOK"),
-    (GrindKind::Willy, "WILLY"),
-    (GrindKind::Feeble, "FEEBLE"),
-    (GrindKind::Smith, "SMITH"),
-    (GrindKind::Boardslide, "BOARD"),
-    (GrindKind::Lipslide, "LIP"),
-    (GrindKind::Noseslide, "NOSESLIDE"),
-    (GrindKind::Tailslide, "TAILSLIDE"),
-];
 
 impl Driver {
     /// `entry`: the `motion/graph` pack entry. `sets`: gesture files by name (`skater`, `skaterls`, ...).
@@ -74,12 +61,10 @@ impl Driver {
         let typed = ops.and_then(|o| super::opcode::decode(o, entry.len()));
         let memory = pack.graphs.iter().map(|g| g.memory()).sum();
         let input = Intentions::new(&pack, sets);
-        let grinds = GRIND_NAMES.map(|(_, n)| {
-            ["BS_", "FS_"].map(|side| {
-                pack.find(&alloc::format!("{side}{n}"))
-                    .unwrap_or(super::NONE)
-            })
-        });
+        let grinds = GRAPH_NAMES
+            .iter()
+            .map(|n| pack.find(n).unwrap_or(super::NONE))
+            .collect();
         let runner = Runner::with_ops(pack, Some(db), typed).ok_or(Error::Bad)?;
         Ok(Driver {
             runner,
@@ -141,14 +126,78 @@ impl Driver {
             wants_runout: matches!(s.mode, Mode::Runout { .. }),
             wants_wipeout: matches!(s.mode, Mode::Bailed { .. }),
             grind: s.grind.as_ref().map_or(super::NONE, |g| {
-                let k = GRIND_NAMES.iter().position(|n| n.0 == g.kind).unwrap_or(0);
-                self.grinds[k][usize::from(g.frontside)]
+                let name = g.graph_name();
+                GRAPH_NAMES
+                    .iter()
+                    .position(|n| *n == name)
+                    .map_or(super::NONE, |k| self.grinds[k])
             }),
+            // A blunt (Skate 3's backslash family) and a darkslide's way out (SK8 grind/contact.rs:
+            // on a ledge, 2 when the board's nose points to the high side, else 1; elsewhere by which
+            // side of the rail the board is on).
+            blunting: s
+                .grind
+                .as_ref()
+                .is_some_and(|g| g.family == Family::Backslash),
+            // SK8 grind_control/facing.rs: the deck's velocity against its nose, seen from above,
+            // flipped riding switch and for the mirrored rider.
+            grind_backwards: s.grind.is_some()
+                && (s.vel.cross(s.fwd).y > 0.0) != (s.switch != s.mirrored()),
+            grind_out: s.grind.as_ref().map_or(0, |g| darkslide_out(s, g)),
             slide: s
                 .slide
                 .as_ref()
                 .map_or(0, |p| if p.side > 0.0 { 2 } else { 1 }),
             slide_ending: s.slide.as_ref().is_some_and(|p| p.releasing),
+            // Only the trucks or the deck (a grind), not the wheels: SK8 TrucksOrDeckInContact reads the
+            // truck and deck contacts. Counting the wheels (or nothing) wiped grabs out in the air.
+            trucks_or_deck: s.mode == Mode::Grind,
+            // Skate 3's processed turn (and its lean) are positive turning left, the way the board
+            // yaws (`s.steer` is positive to the right): so the rider leans into the turn.
+            turn: -s.steer,
+            // The lean into the turn: the angle that balances the turn's centripetal pull (signed
+            // like the turn, rolling either way).
+            lean: libm::atanf(s.yaw_rate * s.speed / s.tuning.gravity.max(0.1)),
+            ground_speed: s.ground_velocity().length(),
+            lateral_up: up.cross(s.fwd).y,
+            body_spin: s.spin_rate,
+            vel_y: s.vel.y,
+            vel_up: s.vel.dot(up),
+            pump_potential: s.pump.effect.abs().min(1.0),
+            // The landing classifier's signed magnitude (SK8 SetLandingData's spin).
+            landing_spin: s.landing.map_or(0.0, |l| l.quality.magnitude),
+            // Skate 3's landing classifier (0 straight, 1 sketchy, 2 spin, 3 slightly off).
+            landing_type: s.landing.map_or(0, |l| l.quality.kind),
+            body_flipping: s.body_flip.is_some(),
+            pump_acc: s.pump.dv,
+            slide_dir: {
+                let v = s.vel.normalize_or(Vec3::ZERO);
+                if v == Vec3::ZERO { 1.0 } else { v.dot(s.fwd) }
+            },
+            ground_acc: {
+                // SK8 ground_acceleration.rs: the deck's up taken out, then the ground's, in the
+                // board's frame.
+                let a = s.accel - s.normal * s.accel.dot(s.normal);
+                let a = a - s.contact_n * a.dot(s.contact_n);
+                let side = s.contact_n.cross(s.fwd).normalize_or(Vec3::ZERO);
+                [a.dot(side), a.dot(s.fwd)]
+            },
+            hips: match s.mode {
+                // flatground's bail tips the body over sideways (as drawn) and keeps its heading
+                // against the travel.
+                Mode::Bailed { time } | Mode::Runout { time } => {
+                    let lean = -(time * 5.0).min(1.0) * crate::math::PI * 0.48;
+                    let v = s.vel.horizontal();
+                    let twist = if v.length() > 0.3 {
+                        let f = s.fwd.horizontal();
+                        libm::atan2f(f.cross(v).y, f.dot(v))
+                    } else {
+                        0.0
+                    };
+                    [lean, twist]
+                }
+                _ => [0.0; 2],
+            },
             ..World::default()
         }
     }
@@ -210,7 +259,9 @@ impl Driver {
             c.revert = Some(path.contains("/Revert/Fs"));
         }
         // The takeoff clip's jump: pop on its first tick, as the trick the graph scores.
-        let jump = has(self.clips.jump) && r.s.world.phys == phys::GROUND;
+        // (On the ground or a rail: a takeoff clip still carrying its jump onto a rail is not a new pop.)
+        let attr = has(self.clips.jump);
+        let jump = attr && matches!(r.s.world.phys, phys::GROUND | phys::GRIND);
         if jump && !self.jumping {
             let name = r.str(r.s.trick);
             let name = name.strip_prefix("U_").unwrap_or(name);
@@ -228,7 +279,7 @@ impl Driver {
             let over = r.packet(r.names.jump_override).unwrap_or(0.0);
             c.pop = Some((flick, jump_strength(height, over, t)));
         }
-        self.jumping = jump;
+        self.jumping = attr;
         // In the air: the trick the clips animate, whether the board is caught yet, a dark catch.
         // The danger zone's end (seconds into the clip; untimed: the whole clip): landing within the
         // last moment of it (`DANGER_GRACE`) still counts as caught.
@@ -245,6 +296,33 @@ impl Driver {
                 end - r.s.player.time() > DANGER_GRACE
             });
         c.dark = r.s.dark;
+        // The wind-up states' `IsAnticipating` (Skate 3's anticipating flag, which its camera reads as
+        // `IsPreparingToJump`).
+        c.anticipating = r.flag(super::ops::Flag::Anticipating);
+        // A body flip the motion graph hands the physics (`AttachIntent FrontFlip` / `BackFlip`) and
+        // the grab it reads with it.
+        c.body_flip = if r.packet_named("FrontFlip").is_some_and(|v| v != 0.0) {
+            Some(true)
+        } else if r.packet_named("BackFlip").is_some_and(|v| v != 0.0) {
+            Some(false)
+        } else {
+            None
+        };
+        c.grabbing = ["Grabbing", "WantsLeftAirGrab", "WantsRightAirGrab"]
+            .iter()
+            .any(|n| r.packet_named(n).is_some());
+        // The graph went to its wipeout state on its own (the physics' own wipeouts take it there too,
+        // once the physics is already off the board).
+        c.wipeout = path.starts_with("WipeOut")
+            && !self.last_path.starts_with("WipeOut")
+            && matches!(r.s.world.phys, phys::GROUND | phys::AIR);
+        if r.s.grab_score != super::NONE {
+            c.grab_name = Some(r.pack.str(r.s.grab_score));
+        }
+        let tx = r.s.filtered.get(r.names.tweak_x).unwrap_or(0.0);
+        let ty = r.s.filtered.get(r.names.tweak_y).unwrap_or(0.0);
+        c.tweak = libm::sqrtf(tx * tx + ty * ty);
+        c.body_spin = r.packet(r.names.phys_body_spin).unwrap_or(0.0);
         if r.s.world.phys == phys::AIR && air_trick_state(&path) {
             let name = r.str(r.s.trick);
             let (flick, flips) = air_flick(name);
@@ -280,6 +358,20 @@ impl Driver {
         }
         self.shown = now.clone();
         Some(now)
+    }
+
+    /// Trees played with a parameter no behaviour has set (tree, parameter), each parameter once, since
+    /// the last call.
+    pub fn new_unset(&mut self, db: &MotionDb) -> Vec<(&'static str, String)> {
+        let r = &mut self.runner;
+        let out =
+            r.s.player
+                .unset
+                .iter()
+                .map(|&(t, n)| (r.pack.str(t), String::from(db.name(n))))
+                .collect();
+        r.s.player.unset.clear();
+        out
     }
 
     /// Unsupported operations reached for the first time since the last call.
@@ -369,4 +461,18 @@ pub fn jump_strength(height: f32, override_height: f32, t: &Tuning) -> f32 {
         height
     };
     h.max(override_height).clamp(0.0, 1.0)
+}
+
+/// A darkslide's way out for the graph's `GrindTrickOutTypeAllowed` (SK8 grind/contact.rs): 0 for every
+/// other grind; on a ledge 2 when the board's nose points to the high side, else 1; on a rail 1 when the
+/// board's middle is to its nose side of the rail, else 2.
+fn darkslide_out(s: &Skater, g: &crate::skater::Grind) -> u8 {
+    if g.family != Family::Darkslide {
+        return 0;
+    }
+    if g.class.is_ledge() {
+        return if g.high.dot(s.fwd) > 0.0 { 2 } else { 1 };
+    }
+    let across = (s.pos - g.point).horizontal();
+    if across.dot(s.fwd) > 0.0 { 1 } else { 2 }
 }

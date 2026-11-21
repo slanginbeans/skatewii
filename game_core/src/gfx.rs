@@ -41,6 +41,8 @@ pub struct Texture<'a> {
 pub struct Camera {
     pub eye: Vec3,
     pub target: Vec3,
+    /// The screen's up (world up unless the camera rolls).
+    pub up: Vec3,
     /// Vertical field of view in degrees.
     pub fov_y_deg: f32,
     pub near: f32,

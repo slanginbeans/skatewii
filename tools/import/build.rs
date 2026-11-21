@@ -10,6 +10,12 @@ const FORMATS: &[&str] = &[
     "skinned.rs",
     "tuning.rs",
     "gesture.rs",
+    "tuning/grind.rs",
+    "tuning/camera.rs",
+    "tuning/moves.rs",
+    "rails.rs",
+    "graph/ops.rs",
+    "graph/opcode.rs",
 ];
 
 fn walk(dir: &Path, files: &mut Vec<std::path::PathBuf>) {

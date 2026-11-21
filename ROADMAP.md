@@ -24,11 +24,21 @@ content second.
   rolling resistance, all from Skate 3's tuning when the player's disc supplies it
 - [x] Controls laid out like Skate 3's Xbox 360 pad by button position
 - [ ] Speed wobble
-- [x] Sketchy and heavy landings besides clean/bail
-- [ ] Slope matching on landing
+- [x] Landings classified as Skate 3 does (straight, sketchy with a magnitude, spin landings that keep
+  pivoting; nothing judged under 2 m/s); the graphs pick their landing clips by it
+- [x] Slope matching on landing: the board's up arrives at the landing surface 3 ticks before touchdown
+  (Skate 3's known air), within its per-tick limit
 - [x] Manuals and nose manuals (C-stick held lightly, with a balance meter), grabs on the triggers
 - [x] Reverts
-- [x] Air spin with Skate 3's wind-up; hippie jumps; held double/triple kickflips
+- [x] Air spin with Skate 3's body spin controller: signed wind-up, a let-go spin carries on, spins about
+  the body's up; hippie jumps; held kickflips up to four flips
+- [x] Air and landings (phase 5, SK8 air): Skate 3's trajectory selector (7 candidate flights in a cone,
+  scored, followed with the start error blended away; long drops resolve over a few ticks), the landing
+  assist's automatic spin (lands fakie when that end is nearer), landing speed kept (gaining on
+  transitions, no snap to travel: the wheels straighten it), bails only on Skate 3's rules (landing angle
+  against speed, into-ground, stairs and rail speeds, landing before the board is caught), wipeouts the
+  graph makes (a grab tweaked into the landing), the reset after a bail on the spot or a recent checkpoint
+  (A/B to skip once settled), a yaw-servo revert
 - [x] Ramps and quarter pipes you can go vertical on: the board follows any surface under its trucks (ray
   probes against the park's triangles), airs out over coping, wallrides, pumping, bails from impacts
 - [x] Fixed 60 Hz simulation (Skate 3's tick) on every TV: PAL50 runs one or two ticks a frame and draws
@@ -39,7 +49,8 @@ content second.
   timing from the imported clips, SK8 powerslides, vert pops re-aimed up, SK8 wallrides (needs a floor),
   pumping by curvature; every curve from the disc through the rules pack
 - [ ] Calibrate the flatground-own scales (brake, powerslide grip, side grip) against SK8 runs
-- [ ] Grinds from riding (into coping, onto curbs and ledges): the lock-on hook is ready (`try_grind`)
+- [x] Grinds from riding (into coping, off a ledge's top, up a bank into a ledge, dropping in), SK8's
+  admission and coping hold
 - [x] Scripted Dolphin runs from `game_core::autoplay` (`autoplay.txt`, `tools/dolphin_test.ps1`)
 - [ ] Screenshots from scripted runs in CI-like checks
 - [x] Late flips, finger flips, under flips, dark catches: recognised and selected by the state graphs (Z is
@@ -77,10 +88,26 @@ content second.
   (late/finger/under flips, dark catches, multi-flips up to 4, landings from the clips' danger zone);
   operations typed at import (graph load 217 ms -> 13 ms on the Wii); simultaneous gestures in SK8's
   hash-bucket order; the trick tour does all of it in Dolphin
-- [ ] Graph runner, next: CalcLandingQuality and landing types from the landing behaviours, the push speed
-  from the posed clips' trajectory, SK8's manual PID (PhysicsWantsManualExit), character gestures (d-pad)
-  and shoves, grind trick-outs by grind type (needs the grind physics of phase 6), camera shots from the
-  graph (phase 7)
+- [x] Graph runner, riding animation: SK8's SetTurning on the physics' animation turn conditioner (carve
+  lean, direction, quickness, holding, speed tuck), body tilt (`TILT_X`), Crouching and the centre-of-mass
+  height (`DISTTOCOG`, trigger crouch, auto pump), landing data, manual angle, all with disc tuning through
+  the rules pack; the rider stands upright riding straight and leans into carves (it sat in the full carve
+  lean, its blend parameters never set); trees played with unset parameters are logged and placed at the
+  neutral point; the no-op operations audited (docs/graph-runner.md); a GameCube trigger dead zone;
+  `TrucksOrDeckInContact` from the physics (grabs no longer wiped out the graph while the physics landed)
+- [x] Graph runner, air: `ScoringGrabs` (grab variants by C-stick), `TweakProject` (grab tweaks),
+  `BodySpin` channels, `ControlAirLegExtension` (`EXTEND`), `SetDeckPitchAndYaw`, the physics spin from the
+  graph's `PhysBodySpin`, landing types and `TimeToLand` from the physics' landing prediction
+- [x] Graph runner, phase 8: the pump layers (`Pumping`), push-out distance (`PushOut`, from the posed
+  feet), powerslide spin and deceleration, the wipeout's lean, twist and stick gesture (`Wipeout`,
+  `MatchTwistAndLean`), bumps (`IsBumped`, `SetBumpCoefficients`, from the board's acceleration along the
+  ground), the d-pad's character gestures (`CharacterGesture`, its clips converted by the importer),
+  body flips (`BodyFlippingSignal`, `IsBodyFlipping`); no tree in the trick tour plays with an unset
+  parameter
+- [ ] Graph runner, next: the air leg's centre-of-mass height, the push speed from the posed clips'
+  trajectory, `PhysicsWantsManualExit` (the manual balances on SK8's PID servo, but held manuals never
+  tip out), shoves (nobody to shove), a board posed apart
+  from the body (`SetDeckPitchAndYaw`), the wipeout's body from a ragdoll, the player's own gesture picks
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
@@ -92,8 +119,30 @@ content second.
 
 ## Phase 4: Game
 - [x] Grinds: 50-50 and boardslide on rails (imported parks and the demo ledge)
-- [x] Grinds and slides chosen by how the board meets the rail (11 kinds, frontside/backside)
-- [ ] Grind balance; blunts, darkslides; a light physics fall for bails (Skate 3's ragdoll)
+- [x] Grinds as Skate 3 does them (phase 6, docs/graph-runner.md "Grinds"): the board's contact boxes pick
+  the family (50-50, 5-0, tip slide, blunt, boardslide, darkslide), rail classes and high sides from the
+  park, grind targeting in the landing prediction and the grind air assist, stick pitch and yaw on the
+  rail, friction by family and class, lean-off, entry and in-grind wipeouts, pop-outs with energy, every
+  grind name the state graphs know (BF_ variants included), the grind trees' twist and height
+- [ ] Grind balance as a rigid board (Skate 3's pins and forces; flatground holds the board on the rail),
+  the in-grind deck closing-speed wipeout, grind grabs, a light physics fall for bails (Skate 3's ragdoll)
+- [x] Camera as Skate 3's (phase 7, docs/graph-runner.md "The camera"): the disc's camera graph run on
+  the graph runner choosing the disc's shots (blend trees by speed, slope, steering, air time, grind
+  speed and incline), sine-eased shot transitions, the movement compass, heading/elevation/pan/tilt
+  trackers, stance mirrors (fakie included, frozen in the air), push and pump lag, small airs not chased,
+  three-line collision with the elevation raise, breadcrumb avoidance, the drop predictor, framing yaw
+  and dutch roll, the lens's field of view for the TV's aspect; flatground's own shots and choice without
+  the disc; the reset fade drawn
+- [ ] Camera, next: free look, camera shake, slow motion on long airs, the high camera, off-board shots
+  beyond run-outs and hippie jumps
+- [x] Body flips and their upside-down bails (phase 8, docs/graph-runner.md "The air"): front and back
+  flips from the left stick with a grab, Skate 3's start, speed and grab rules, landing off the flip or
+  falling upside down without the grab bails
+- [x] Camera after a carve (phase 8): the wind-up from the graph's anticipating flag, SK8's turning
+  steering, no one-tick stop at the pop; checked against SK8's frozen-arm shot transitions (a regression
+  test: behind within 90 ticks of a hard carve, never past 45 degrees at riding speed)
+- [x] Grind rail classes checked against SK8's probes on BlackBoxPark (handrails thin, ledges ledge), the
+  far probes' reach from the disc's truck distance
 - [ ] Skater animation (skinned, original)
 - [ ] Session goals, combo system, replay
 - [ ] Sound (ASND): rolling, pop, landing

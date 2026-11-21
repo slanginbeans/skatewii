@@ -7,14 +7,15 @@
 use alloc::vec::Vec;
 
 use super::ops::{
-    Beh, Cmp, Cond, FilterDef, Flag, Group, Hook, Num, Op, ParamDef, PlayDef, PushOp, TransitionDef,
+    Beh, Cmp, Cond, FilterDef, Flag, GrabScore, Group, Hook, Num, Op, ParamDef, PlayDef, PushOp,
+    TransitionDef,
 };
 use crate::motion::Node;
 
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 5;
 
 struct W(Vec<u8>);
 
@@ -261,7 +262,7 @@ fn read_op(r: &mut R) -> Option<Op> {
 }
 
 /// Conditions without fields, by tag.
-const PLAIN_CONDS: [Cond; 27] = [
+const PLAIN_CONDS: [Cond; 28] = [
     Cond::Mirrored,
     Cond::RidingFakie,
     Cond::RidingGoofy,
@@ -289,6 +290,7 @@ const PLAIN_CONDS: [Cond; 27] = [
     Cond::DoneWipingOut,
     Cond::Fixed(false),
     Cond::Fixed(true),
+    Cond::Bumped,
 ];
 
 fn cond(w: &mut W, c: &Cond) {
@@ -429,7 +431,7 @@ fn cond(w: &mut W, c: &Cond) {
 
 fn read_cond(r: &mut R) -> Option<Cond> {
     let tag = r.u8()?;
-    if (100..127).contains(&tag) {
+    if (100..100 + PLAIN_CONDS.len() as u8).contains(&tag) {
         return Some(PLAIN_CONDS[(tag - 100) as usize]);
     }
     Some(match tag {
@@ -479,7 +481,7 @@ fn read_cond(r: &mut R) -> Option<Cond> {
 }
 
 /// Behaviours without fields, by tag.
-const PLAIN_BEHS: [Beh; 13] = [
+const PLAIN_BEHS: [Beh; 19] = [
     Beh::JumpInto,
     Beh::ClearTrickAttr,
     Beh::SetDark,
@@ -488,11 +490,17 @@ const PLAIN_BEHS: [Beh; 13] = [
     Beh::UpdateRidingFakie,
     Beh::ResetTimeSinceKickturn,
     Beh::UpdateTimeSinceKickturn,
-    Beh::ScoringGrabs,
-    Beh::SetTurning,
     Beh::BodyFlippingSignal,
+    Beh::BodySpin,
     Beh::FakieHead,
     Beh::Nothing,
+    Beh::ApplyingBodyTilt,
+    Beh::SetLandingData,
+    Beh::StoreLandingData,
+    Beh::SetManualAngle,
+    Beh::Pumping,
+    Beh::WipeoutGestures,
+    Beh::CharacterGesture,
 ];
 
 fn beh(w: &mut W, b: &Beh) {
@@ -687,6 +695,105 @@ fn beh(w: &mut W, b: &Beh) {
             w.u8(21);
             w.u16(*s);
         }
+        Beh::SetTurning { names } => {
+            w.u8(22);
+            for n in names {
+                w.o16(*n);
+            }
+        }
+        Beh::SettingBodyTilt(n) => {
+            w.u8(23);
+            w.o16(*n);
+        }
+        Beh::Crouching(n) => {
+            w.u8(24);
+            w.o16(*n);
+        }
+        Beh::SetDistComToBoard {
+            attr,
+            manually,
+            adjust,
+        } => {
+            w.u8(25);
+            w.o16(*attr);
+            w.b(*manually);
+            w.b(*adjust);
+        }
+        Beh::ScoringGrabs(g) => {
+            w.u8(26);
+            w.u16(g.base);
+            for d in g.dirs {
+                w.u16(d);
+            }
+            w.u16(g.x);
+            w.u16(g.y);
+            w.b(g.invert_y);
+            w.b(g.polar);
+        }
+        Beh::TweakProject { x, y } => {
+            w.u8(27);
+            w.o16(*x);
+            w.o16(*y);
+        }
+        Beh::AirLegExtension(n) => {
+            w.u8(28);
+            w.o16(*n);
+        }
+        Beh::DeckPitchAndYaw { yaw, pitch } => {
+            w.u8(29);
+            w.o16(*yaw);
+            w.o16(*pitch);
+        }
+        Beh::GrindFade {
+            height,
+            twist,
+            intent,
+        } => {
+            w.u8(30);
+            w.o16(*height);
+            w.o16(*twist);
+            w.u16(*intent);
+        }
+        Beh::GrindCrouch(n) => {
+            w.u8(31);
+            w.o16(*n);
+        }
+        Beh::GrindAttributes => w.u8(32),
+        Beh::SlideSpin(n) => {
+            w.u8(33);
+            w.o16(*n);
+        }
+        Beh::SlideDecel(n) => {
+            w.u8(34);
+            w.o16(*n);
+        }
+        Beh::BumpCoefs { x, y } => {
+            w.u8(35);
+            w.o16(*x);
+            w.o16(*y);
+        }
+        Beh::TwistLean {
+            always,
+            twist,
+            lean,
+        } => {
+            w.u8(36);
+            w.b(*always);
+            w.o16(*twist);
+            w.o16(*lean);
+        }
+        Beh::Wipeout {
+            lean,
+            twist,
+            gesture_x,
+            gesture_y,
+        } => {
+            w.u8(37);
+            w.o16(*lean);
+            w.o16(*twist);
+            w.o16(*gesture_x);
+            w.o16(*gesture_y);
+        }
         // Every field-less behaviour was written above.
         _ => w.u8(255),
     }
@@ -694,7 +801,7 @@ fn beh(w: &mut W, b: &Beh) {
 
 fn read_beh(r: &mut R) -> Option<Beh> {
     let tag = r.u8()?;
-    if (100..113).contains(&tag) {
+    if (100..100 + PLAIN_BEHS.len() as u8).contains(&tag) {
         return Some(PLAIN_BEHS[(tag - 100) as usize].clone());
     }
     Some(match tag {
@@ -807,6 +914,57 @@ fn read_beh(r: &mut R) -> Option<Beh> {
             angle: r.u16()?,
         },
         21 => Beh::Unsupported(r.u16()?),
+        22 => Beh::SetTurning {
+            names: [r.o16()?, r.o16()?, r.o16()?, r.o16()?, r.o16()?],
+        },
+        23 => Beh::SettingBodyTilt(r.o16()?),
+        24 => Beh::Crouching(r.o16()?),
+        25 => Beh::SetDistComToBoard {
+            attr: r.o16()?,
+            manually: r.b()?,
+            adjust: r.b()?,
+        },
+        26 => Beh::ScoringGrabs(GrabScore {
+            base: r.u16()?,
+            dirs: [r.u16()?, r.u16()?, r.u16()?, r.u16()?],
+            x: r.u16()?,
+            y: r.u16()?,
+            invert_y: r.b()?,
+            polar: r.b()?,
+        }),
+        27 => Beh::TweakProject {
+            x: r.o16()?,
+            y: r.o16()?,
+        },
+        28 => Beh::AirLegExtension(r.o16()?),
+        29 => Beh::DeckPitchAndYaw {
+            yaw: r.o16()?,
+            pitch: r.o16()?,
+        },
+        30 => Beh::GrindFade {
+            height: r.o16()?,
+            twist: r.o16()?,
+            intent: r.u16()?,
+        },
+        31 => Beh::GrindCrouch(r.o16()?),
+        32 => Beh::GrindAttributes,
+        33 => Beh::SlideSpin(r.o16()?),
+        34 => Beh::SlideDecel(r.o16()?),
+        35 => Beh::BumpCoefs {
+            x: r.o16()?,
+            y: r.o16()?,
+        },
+        36 => Beh::TwistLean {
+            always: r.b()?,
+            twist: r.o16()?,
+            lean: r.o16()?,
+        },
+        37 => Beh::Wipeout {
+            lean: r.o16()?,
+            twist: r.o16()?,
+            gesture_x: r.o16()?,
+            gesture_y: r.o16()?,
+        },
         _ => return None,
     })
 }

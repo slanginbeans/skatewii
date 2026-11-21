@@ -44,8 +44,8 @@ At the start:
   events/windows); the main tuning values in use; whether autoplay is on; the line shown on the start screen.
 
 While playing:
-- `frame:` once a second: the CPU's own work per frame (average and worst, split into physics, skinning and
-  drawing), the time waiting for the GPU to finish, the idle time until the TV's next refresh, frames that missed
+- `frame:` once a second: the CPU's own work per frame (average and worst, split into physics (with the state
+  graphs, the air step and the camera's tick in it), skinning and drawing), the time waiting for the GPU to finish, the idle time until the TV's next refresh, frames that missed
   their refresh, park meshes and vertices drawn, the vertex arena, heap and free memory. The budget at 60 Hz is
   16.7 ms for CPU + GPU wait; idle is what is left.
 - `slow frame:` whenever a frame missed its refresh, with that frame's breakdown.
@@ -56,6 +56,9 @@ While playing:
   for the stance and the manual's nose/tail rules).
 - `pop:`, `landed:` (with how crooked and how hard), `BAIL:` (with the reason and the numbers it was judged on),
   `stance:`, `manual:`, `grind:`, `powerslide`, `hippie jump`, `respawned`.
+- `camera:` the camera's shot when it changes (at most every quarter second) and the camera graph's state
+  that chose it (`camera: low_ollie (CameraLow/OnBoard/Air/LowOllie)`, or `built-in` without the disc's
+  graph); `camera graph: unsupported <name>` once for graph names flatground doesn't run.
 
 The on-screen readout (top left) shows the same frame numbers: `CPU avg PEAK worst  GPU wait  DROP missed`.
 

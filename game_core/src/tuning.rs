@@ -10,6 +10,12 @@
 
 use alloc::vec::Vec;
 
+pub mod camera;
+pub mod grind;
+pub mod moves;
+pub use camera::CamTuning;
+pub use grind::GrindTuning;
+
 /// Most points a curve can hold (Skate 3's largest point graphs have 16).
 pub const CURVE_POINTS: usize = 16;
 
@@ -296,51 +302,389 @@ pub struct Tuning {
     pub spin_windup: Curve,
     /// Spin speed without any wind-up, as a share of the full speed.
     pub spin_no_windup: f32,
+    /// Most the spin speed may change per tick while the landing assist turns the body (rad/s, against
+    /// time in the air).
+    pub spin_auto_change: Curve,
+    /// Without a known landing: the stick's spin (`max_spin_speed` deg/s per unit) scaled by this against
+    /// twice the time in the air.
+    pub spin_input_filter: Curve,
+    pub max_spin_speed: f32,
+    /// The landing assist's spin: never faster than `max_auto_spin` (rad/s), halved under
+    /// `min_auto_spin`; turned the other way round (land fakie or switch) past `heading_adjust_vs_up`
+    /// degrees from the landing direction (against the body's up y); only with a landing direction
+    /// faster than `min_heading_vel` (m/s).
+    pub max_auto_spin: f32,
+    pub min_auto_spin: f32,
+    pub heading_adjust_vs_up: Curve,
+    pub min_heading_vel: f32,
+
+    // Attitude in the air.
+    /// Most the board's up may turn per tick (rad) towards the landing surface, against the centre of
+    /// mass's distance to the deck (m).
+    pub air_up_max_delta: Curve,
+    /// Without a known landing: the share of the angle to the surface below turned per tick, and the
+    /// angle (rad) past which the board doesn't turn to it at all.
+    pub phys_air_align: f32,
+    pub phys_air_dont_align: f32,
+
+    // Landing prediction and flight assist (the trajectory selector).
+    /// The candidate cone around the launch velocity: sideways and along-travel angles (degrees, the
+    /// latter scaled by `traj_cone_z_vs_speed` against speed / 20 m/s), the second pass's angles, and
+    /// the cone's speed range (m/s).
+    pub traj_cone_x: f32,
+    pub traj_cone_z: f32,
+    pub traj_cone_z_vs_speed: Curve,
+    pub traj_cone_x2: f32,
+    pub traj_cone_z2: f32,
+    pub traj_speed_min: f32,
+    pub traj_speed_max: f32,
+    /// How far ahead a flight is followed: seconds and metres of drop.
+    pub traj_max_time: f32,
+    pub traj_max_drop: f32,
+    /// Scores: a bonus against flight time, the landing force and direction terms (scaled by
+    /// `traj_force_scalar` against the speed into the surface), the middle candidate's bonus, the
+    /// transition term on vert, unrideable and don't-align surfaces.
+    pub traj_time_bonus: Curve,
+    pub traj_force_scalar: Curve,
+    pub traj_score_force: f32,
+    pub traj_score_direction: f32,
+    pub traj_score_middle: f32,
+    pub traj_score_transition: f32,
+    pub traj_score_unrideable: f32,
+    pub traj_score_dont_align: f32,
+    /// A landing sooner than this (s) isn't a known landing; within `traj_min_after_apex` of the apex
+    /// a vert landing is penalised; a second, narrower pass runs when the landing surface is more than
+    /// `traj_second_pass_delta` rad off the ground left.
+    pub traj_min_valid_time: f32,
+    pub traj_min_after_apex: f32,
+    pub traj_second_pass_delta: f32,
+    /// Most a candidate is nudged (m/s), and how long (s) the start error takes to blend away.
+    pub traj_max_adjust: f32,
+    pub traj_error_blend: f32,
+    /// Wallride candidates: probe distance off the wall, least height over the floor, score per metre,
+    /// the slope from launch to wall that still counts, and the upward nudge against height.
+    pub traj_wall_test_dist: f32,
+    pub traj_wall_min_height: f32,
+    pub traj_wall_score: f32,
+    pub traj_wall_land_angle: f32,
+    pub traj_wall_boost: Curve,
 
     // Landing.
     /// Largest board-to-travel angle (rad) that still lands, against speed.
     pub land_angle: Curve,
-    /// Hitting the ground faster than this (m/s, downwards) is a bail.
+    /// Hitting the ground faster than this (m/s, downwards) is a bail; onto stairs, onto a rail.
     pub land_max_impact: f32,
+    pub land_max_stairs: f32,
+    pub land_max_grind: f32,
+    /// Landing while the clips say the board isn't caught: a bail past this speed into the ground
+    /// (m/s), once the air is older than `danger_ignore_ticks` ticks.
+    pub danger_max_impact: f32,
+    pub danger_ignore_ticks: f32,
+    /// The tangential speed kept on landing, against the surface's normal y (transitions gain).
+    pub landing_speed_vs_ny: Curve,
+    /// Landing quality magnitudes: against the side speed and the spin speed (both remapped to 0..1).
+    pub land_sketchy_side: Curve,
+    pub land_sketchy_twist: Curve,
+
+    // After a bail.
+    /// Automatic reset: after `reset_min_time` s with the body settled (under `settled_speed` m/s, after
+    /// `settled_min_time` s) for `reset_settled` s, or after `reset_max_time` s; the screen fades for
+    /// `reset_fade` s first.
+    pub reset_min_time: f32,
+    pub reset_settled: f32,
+    pub reset_max_time: f32,
+    pub reset_fade: f32,
+    pub settled_speed: f32,
+    pub settled_min_time: f32,
+    /// Checkpoints: the ground under one no further than `respawn_drop` m down and facing up at least
+    /// `respawn_normal_y`, with `respawn_height` m clear over a `respawn_radius` m capsule.
+    pub respawn_height: f32,
+    pub respawn_radius: f32,
+    pub respawn_drop: f32,
+    pub respawn_normal_y: f32,
+
+    // Reverts (a servo on the board's yaw).
+    /// Target yaw rate (rad/s) against the angle left (rad), the gain per tick, the angle (degrees,
+    /// against the surface normal's y) that counts as done, and the longest a revert lasts (s).
+    pub revert_speed: Curve,
+    pub revert_gain: f32,
+    pub revert_tolerance: Curve,
+    pub revert_duration: f32,
+
+    // Air animation (the state graphs' air behaviours).
+    /// The arms' reach in the air (`EXTEND`) against seconds coming down.
+    pub air_arm_extend: Curve,
+    /// The body spin channels: influence against the spin intent, its blend in and out per update, and
+    /// its rate and acceleration limits.
+    pub spin_map: Curve,
+    pub spin_blend_in: f32,
+    pub spin_blend_out: f32,
+    pub spin_max_delta: f32,
+    pub spin_max_acc: f32,
 
     // Flick input.
     /// Samples a flick may stray from its shape before it is dropped.
     pub flick_misses: u8,
 
-    // Camera (riding slow, riding fast, grinding): distance (m), elevation (deg), heading (deg, 180 =
-    // straight behind), framing pitch (deg), look-at height above the board (m).
-    pub cam_slow: CamShot,
-    pub cam_fast: CamShot,
-    pub cam_grind: CamShot,
-    /// Riding speed (m/s) at which the camera has fully changed from the slow shot to the fast one.
-    pub cam_fast_speed: f32,
+    // The rider's riding animation (what the state graphs' riding behaviours feed the blend trees).
+    pub anim: AnimTuning,
+
+    // Grinds (`tuning::grind`).
+    pub grind: GrindTuning,
+
+    // The camera's trackers, collision and predictors (`tuning::camera`; the shots are their own entry).
+    pub cam: CamTuning,
+
+    // Body flips, the pump channel, bumps, the powerslide's and the wipeout's pose (`tuning::moves`).
+    pub moves: moves::MoveTuning,
 }
 
+/// What the state graphs' riding behaviours (`graph::riding`, ports of SK8's SetTurning, the physics'
+/// animation turn conditioner, Crouching, SettingBodyTilt and SetManualAngle) need: Skate 3's
+/// `anim_carving`, `physics_animation`, `anim_motion/crouching`, `anim_motion/auto_pump`,
+/// `anim_motion/body_tilt` and `anim_motion/manual` values from the rules pack, or flatground's own.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CamShot {
-    pub distance: f32,
-    pub elevation: f32,
-    pub heading: f32,
-    pub pitch: f32,
-    pub board_offset: f32,
+pub struct AnimTuning {
+    /// Carving lean (SetTurning): the turn vector remapped by magnitude and angle curves (against the
+    /// vector's angle, 0..pi) plus an angle offset, for quick turns and for slow turns, mixed by
+    /// quickness.
+    pub quick_mag: Curve,
+    pub quick_angle: Curve,
+    pub quick_offset: f32,
+    pub slow_mag: Curve,
+    pub slow_angle: Curve,
+    pub slow_offset: f32,
+    /// Speed tuck against speed over `tuck_start` (m/s).
+    pub speed_tuck: Curve,
+    pub tuck_start: f32,
+    /// Lean blend against seconds since the lean's mode (carve, slide left, slide right) changed, and
+    /// the most the lean moves per update.
+    pub lean_in: Curve,
+    pub lean_max_delta: f32,
+    /// The animation turn conditioner: three filters' coefficients (slow lean, lean, direction).
+    pub filter_lean_slow: [f32; 4],
+    pub filter_lean: [f32; 4],
+    pub filter_dir: [f32; 4],
+    /// Turn input scale against speed (as a share of `cond[11]`), the quickness remap, quickness against
+    /// speed (m/s), and the lean smoothing against speed wobble.
+    pub turn_vs_speed: Curve,
+    pub quickness_curve: Curve,
+    pub quickness_vs_speed: Curve,
+    pub wobble_blend: Curve,
+    /// The conditioner's scalars, in [`COND_NAMES`] order.
+    pub cond: [f32; 13],
+    /// Crouching: centre-of-mass heights over the board (m), the highest against ground speed (m/s).
+    pub crouch_min_height: f32,
+    pub crouch_max_height: Curve,
+    pub crouch_max_ratio: f32,
+    pub crouch_max_delta: f32,
+    pub crouch_max_delta_delta: f32,
+    pub crouch_blend_input: f32,
+    /// Absorption: the restoring force against the crouch, the rising speed limit against it (times
+    /// `crouch_pump_speed_y`), and how the board's push reaches the rider.
+    pub crouch_upforce: Curve,
+    pub crouch_pump_speed: Curve,
+    pub crouch_pump_speed_y: f32,
+    pub crouch_from_deck: f32,
+    pub crouch_board_damping: f32,
+    pub crouch_max_force: f32,
+    pub crouch_max_ground_force: f32,
+    pub crouch_absorption: f32,
+    /// Auto pump: the most crouch against ground speed, and the scalars in [`AUTO_PUMP_NAMES`] order.
+    pub auto_pump_max_crouch: Curve,
+    pub auto_pump: [f32; 10],
+    /// Body tilt (`TILT_X`): its scale against body spin speed, and its rate limits per update on the
+    /// ground and in the air.
+    pub tilt_spin_factor: Curve,
+    pub tilt_ground_vel: f32,
+    pub tilt_ground_acc: f32,
+    pub tilt_air_vel: f32,
+    pub tilt_air_acc: f32,
+    /// Manual pose (`MANUAL_ANGLE`): the angle against the C-stick, and its rate limits per update.
+    pub manual_balance: Curve,
+    pub manual_vel: f32,
+    pub manual_acc: f32,
 }
 
-impl CamShot {
-    pub fn lerp(&self, o: &CamShot, k: f32) -> CamShot {
-        let l = |a: f32, b: f32| a + (b - a) * k;
-        // Headings take the short way round (-160 to 180 is 20 degrees, not 340).
-        let mut dh = (o.heading - self.heading) % 360.0;
-        if dh > 180.0 {
-            dh -= 360.0;
-        } else if dh < -180.0 {
-            dh += 360.0;
+/// The turn conditioner's scalars (`physics_animation/default/<name>`), as [`AnimTuning::cond`] holds
+/// them.
+pub const COND_NAMES: [&str; 13] = [
+    "QuicknessMaxDelta",
+    "InputQuicknessMax",
+    "InputQuicknessBlendVal",
+    "HoldingMinVal",
+    "HoldingMaxAcceleration",
+    "HoldingIntegralBlend",
+    "HoldingBlendUp",
+    "HoldingBlendDown",
+    "AnimationTurnWobbleScalar",
+    "AnimationTurnPhysicsWeight",
+    "AnimationTurnMaxLean",
+    "AnimationTurnGraphX",
+    "AnimationTurnDirMax",
+];
+
+/// The auto pump's scalars (`anim_motion/auto_pump/<name>`), as [`AnimTuning::auto_pump`] holds them.
+pub const AUTO_PUMP_NAMES: [&str; 10] = [
+    "auto_pump_sufficient_crouch",
+    "auto_pump_standing_thresh",
+    "auto_pump_rise_speed",
+    "auto_pump_pump_speed",
+    "auto_pump_potential_thresh",
+    "auto_pump_potential_blend",
+    "auto_pump_intent_mag_start",
+    "auto_pump_intent_angle_region",
+    "auto_pump_crouch_time",
+    "auto_pump_crouch_speed",
+];
+
+impl AnimTuning {
+    /// flatground's own values.
+    pub const BUILT_IN: AnimTuning = AnimTuning {
+        quick_mag: Curve::constant(1.0),
+        quick_angle: Curve::new(&[(0.0, 0.0), (3.15, 3.15)]),
+        quick_offset: 0.0,
+        slow_mag: Curve::constant(1.0),
+        slow_angle: Curve::new(&[(0.0, 0.0), (3.15, 3.15)]),
+        slow_offset: 0.0,
+        speed_tuck: Curve::new(&[(0.0, 0.0), (8.0, 1.0)]),
+        tuck_start: 10.0,
+        lean_in: Curve::new(&[(0.0, 0.0), (0.5, 1.0)]),
+        lean_max_delta: 0.5,
+        filter_lean_slow: [0.03, 0.04, 0.0, 0.15],
+        filter_lean: [0.15, 0.2, 0.0, 0.1],
+        filter_dir: [0.02, 0.03, 0.0, 0.08],
+        turn_vs_speed: Curve::new(&[(0.0, 0.0), (0.25, 0.5), (0.6, 0.9), (1.0, 1.0)]),
+        quickness_curve: Curve::new(&[(0.0, 0.0), (0.5, 0.2), (1.0, 1.0)]),
+        quickness_vs_speed: Curve::new(&[(0.0, 1.0), (12.0, 1.0), (24.0, 0.0)]),
+        wobble_blend: Curve::new(&[(0.0, 1.0), (1.0, 0.25)]),
+        cond: [
+            0.005, 0.04, 0.03, 0.03, 0.03, 0.12, 0.03, 0.1, 1.0, 0.5, 0.8, 12.0, 0.1,
+        ],
+        crouch_min_height: 0.5,
+        crouch_max_height: Curve::new(&[(0.0, 0.96), (10.0, 0.96), (30.0, 0.6)]),
+        crouch_max_ratio: 1.0,
+        crouch_max_delta: 0.06,
+        crouch_max_delta_delta: 0.03,
+        crouch_blend_input: 0.1,
+        crouch_upforce: Curve::new(&[(0.0, 0.4), (1.0, 0.0)]),
+        crouch_pump_speed: Curve::new(&[(0.0, 1.0), (1.0, 0.2)]),
+        crouch_pump_speed_y: 0.12,
+        crouch_from_deck: 0.8,
+        crouch_board_damping: 0.75,
+        crouch_max_force: 12.0,
+        crouch_max_ground_force: 12.0,
+        crouch_absorption: 0.06,
+        auto_pump_max_crouch: Curve::new(&[(0.0, 0.2), (8.0, 0.9)]),
+        auto_pump: [0.6, 0.15, 0.03, 0.08, 0.25, 0.1, 0.65, 0.75, 0.7, 0.12],
+        tilt_spin_factor: Curve::new(&[(0.0, 1.0), (3.0, 0.6), (6.0, 0.0)]),
+        tilt_ground_vel: 0.025,
+        tilt_ground_acc: 0.005,
+        tilt_air_vel: 0.04,
+        tilt_air_acc: 0.04,
+        manual_balance: Curve::new(&[(0.0, 0.0), (0.7, 0.0), (1.0, 1.0)]),
+        manual_vel: 0.05,
+        manual_acc: 0.025,
+    };
+
+    fn set(&mut self, name: &str, f: Option<f32>, c: Option<Curve>, v: &[f32]) -> bool {
+        let field = name.rsplit('/').next().unwrap_or("");
+        let four = |v: &[f32]| -> Option<[f32; 4]> {
+            (v.len() == 4 && v.iter().all(|x| x.is_finite())).then(|| [v[0], v[1], v[2], v[3]])
+        };
+        macro_rules! scalar {
+            ($field:expr) => {
+                match f {
+                    Some(f) => {
+                        $field = f;
+                        true
+                    }
+                    None => false,
+                }
+            };
         }
-        CamShot {
-            distance: l(self.distance, o.distance),
-            elevation: l(self.elevation, o.elevation),
-            heading: self.heading + dh * k,
-            pitch: l(self.pitch, o.pitch),
-            board_offset: l(self.board_offset, o.board_offset),
+        macro_rules! curve {
+            ($field:expr) => {
+                match c {
+                    Some(c) => {
+                        $field = c;
+                        true
+                    }
+                    None => false,
+                }
+            };
+        }
+        macro_rules! vec4 {
+            ($field:expr) => {
+                match four(v) {
+                    Some(x) => {
+                        $field = x;
+                        true
+                    }
+                    None => false,
+                }
+            };
+        }
+        if name.starts_with("physics_animation/default/")
+            && let Some(i) = COND_NAMES.iter().position(|n| *n == field)
+        {
+            return scalar!(self.cond[i]);
+        }
+        if name.starts_with("anim_motion/auto_pump/")
+            && let Some(i) = AUTO_PUMP_NAMES.iter().position(|n| *n == field)
+        {
+            return scalar!(self.auto_pump[i]);
+        }
+        match name {
+            "anim_carving/default/quickMagMap" => curve!(self.quick_mag),
+            "anim_carving/default/quickAngleMap" => curve!(self.quick_angle),
+            "anim_carving/default/quickAngleOffset" => scalar!(self.quick_offset),
+            "anim_carving/default/slowMagMap" => curve!(self.slow_mag),
+            "anim_carving/default/slowAngleMap" => curve!(self.slow_angle),
+            "anim_carving/default/slowAngleOffset" => scalar!(self.slow_offset),
+            "anim_carving/default/speed_tuck" => curve!(self.speed_tuck),
+            "anim_carving/default/speed_tuck_start" => scalar!(self.tuck_start),
+            "anim_carving/default/blend_lean_in" => curve!(self.lean_in),
+            "anim_carving/default/clamp_curr_lean" => scalar!(self.lean_max_delta),
+            "physics_animation/default/AnimationTurnLeanFilterSlow" => {
+                vec4!(self.filter_lean_slow)
+            }
+            "physics_animation/default/AnimationTurnLeanFilter" => vec4!(self.filter_lean),
+            "physics_animation/default/AnimationTurnDirFilter" => vec4!(self.filter_dir),
+            "physics_animation/default/AnimationTurnSpeedGraph" => curve!(self.turn_vs_speed),
+            "physics_animation/default/QuicknessVsQuickness" => curve!(self.quickness_curve),
+            "physics_animation/default/ScaleQuicknessAtSpeed" => curve!(self.quickness_vs_speed),
+            "physics_animation/default/SpeedWobbleTurnBlend" => curve!(self.wobble_blend),
+            "anim_motion/crouching/crouching_min_height" => scalar!(self.crouch_min_height),
+            "anim_motion/crouching/crouching_max_height" => curve!(self.crouch_max_height),
+            "anim_motion/crouching/crouch_max_ratio" => scalar!(self.crouch_max_ratio),
+            "anim_motion/crouching/crouch_max_delta" => scalar!(self.crouch_max_delta),
+            "anim_motion/crouching/crouch_max_delta_delta" => {
+                scalar!(self.crouch_max_delta_delta)
+            }
+            "anim_motion/crouching/crouch_blend_input" => scalar!(self.crouch_blend_input),
+            "anim_motion/crouching/absorption_upforce" => curve!(self.crouch_upforce),
+            "anim_motion/crouching/pump_maxspeed" => curve!(self.crouch_pump_speed),
+            "anim_motion/crouching/pump_maxspeed_yaxis" => scalar!(self.crouch_pump_speed_y),
+            "anim_motion/crouching/MaxCrouchFromDeckAngle" => scalar!(self.crouch_from_deck),
+            "anim_motion/crouching/absorption_skateboard_damping" => {
+                scalar!(self.crouch_board_damping)
+            }
+            "anim_motion/crouching/absorption_maxforce" => scalar!(self.crouch_max_force),
+            "anim_motion/crouching/absorption_ground_maxforce" => {
+                scalar!(self.crouch_max_ground_force)
+            }
+            "anim_motion/crouching/absorption_factor" => scalar!(self.crouch_absorption),
+            "anim_motion/auto_pump/auto_pump_max_crouch" => curve!(self.auto_pump_max_crouch),
+            "anim_motion/body_tilt/body_tilt_bodyspin_factor" => curve!(self.tilt_spin_factor),
+            "anim_motion/body_tilt/body_tilt_ground_clamp_vel" => scalar!(self.tilt_ground_vel),
+            "anim_motion/body_tilt/body_tilt_ground_clamp_acc" => scalar!(self.tilt_ground_acc),
+            "anim_motion/body_tilt/body_tilt_air_clamp_vel" => scalar!(self.tilt_air_vel),
+            "anim_motion/body_tilt/body_tilt_air_clamp_acc" => scalar!(self.tilt_air_acc),
+            "anim_motion/manual/manual_balance" => curve!(self.manual_balance),
+            "anim_motion/manual/manual_clamp_vel" => scalar!(self.manual_vel),
+            "anim_motion/manual/manual_clamp_acc" => scalar!(self.manual_acc),
+            _ => false,
         }
     }
 }
@@ -351,8 +695,18 @@ impl Default for Tuning {
     }
 }
 
-/// Where each value lives in Skate 3's tuning database (`class/key/field`). `fg_import rules` exports
-/// exactly these paths.
+/// Every path the tuning reads: [`PATHS`] and the grinds' ([`grind::PATHS`]). `fg_import rules` exports
+/// exactly these.
+pub fn all_paths() -> impl Iterator<Item = &'static str> {
+    PATHS
+        .iter()
+        .chain(grind::PATHS.iter())
+        .chain(camera::PATHS.iter())
+        .chain(moves::PATHS.iter())
+        .copied()
+}
+
+/// Where each value lives in Skate 3's tuning database (`class/key/field`).
 pub const PATHS: &[&str] = &[
     "physics_speed_conservation/default/Gravity",
     "physics_speed_conservation/default/MaxGravityAcceleration",
@@ -475,38 +829,152 @@ pub const PATHS: &[&str] = &[
     "physics_bodyspin/default/MaxDeltaOppositeDirection",
     "physics_bodyspin/default/DerivativeBodySpinVsTime",
     "physics_bodyspin/default/MinDerivativeScalar",
+    "physics_bodyspin/default/MaxDeltaForAutoVsTime",
+    "physics_airstates/default/BodySpinInputFilter",
+    "physics_airstates/default/MaxSpinSpeed",
+    "physics_mode/normal/MaxAutoBodySpinSpeed",
+    "physics_airstates/default/MinAutoBodySpeed",
+    "physics_airstates/default/MaxHeadingAdjustVsUpY",
+    "physics_airstates/default/MinTargetHeadingVel",
+    "physics_reckoning/default/Air_MaxUpVectAngleDelta",
+    "physics_airstates/default/SpeedToAlignToGround_PhysAir",
+    "physics_airstates/default/DontAlignAnglePhysicsAir",
+    "physics_trajectory/default/ConeAngleX",
+    "physics_trajectory/default/ConeAngleZ",
+    "physics_trajectory/default/ConeAngleZVsSpeed",
+    "physics_trajectory/default/ConeAngleXSecondPass",
+    "physics_trajectory/default/ConeAngleZSecondPass",
+    "physics_trajectory/default/SpeedFactorMin",
+    "physics_trajectory/default/SpeedFactorMax",
+    "physics_trajectory/default/TrajectoryMaxTime",
+    "physics_trajectory/default/TrajectoryMaxDrop",
+    "physics_trajectory/default/LandingTimeBonus",
+    "physics_trajectory/default/LandingForceScalarVsDPVelNorm",
+    "physics_trajectory/default/ScoreLandingForce",
+    "physics_trajectory/default/ScoreLandingDirection",
+    "physics_trajectory/default/ScoreMiddleBonus",
+    "physics_trajectory/default/ScoreTransition",
+    "physics_trajectory/default/ScoreSurface_Unrideable",
+    "physics_trajectory/default/ScoreSurface_DontAlign",
+    "physics_trajectory/default/MinTimeForTrajectoryToBeValid",
+    "physics_trajectory/default/MinTimeAfterApexForTransition",
+    "physics_trajectory/default/MinNormalDeltaForSecondPass",
+    "physics_trajectory/default/MaxTrajectoryAdjust",
+    "physics_airstates/default/TrajErrorBlendAwayTime",
+    "physics_trajectory/default/WallRideTestDist",
+    "physics_trajectory/default/WallRideMinHeightFromGround",
+    "physics_trajectory/default/ScoreWallrideHeight",
+    "physics_trajectory/default/WallRideAngleToAllowLanding",
+    "physics_trajectory/default/WallRideBoost",
     // Landing angle limit against speed (the database has no name for this field).
     "physics_wipeout/default/Hash_4F08D9BAE6831524",
     "physics_wipeout/default/Wipeout_AirMaxSpeedIntoGround",
+    "physics_wipeout/default/Wipeout_AirMaxSpeedIntoStairs",
+    "physics_wipeout/default/Wipeout_AirMaxSpeedIntoCollisionNearGrind",
+    "physics_wipeout/default/Wipeout_AirYTrick",
+    "physics_wipeout/default/FramesAtStartOfAirToIgnoreDangerZone",
+    "physics_airstates/default/LandingSpeedScalarVsGroundNormalY",
+    "physics_animation/default/LandingSketchySideSpeed",
+    "physics_animation/default/LandingSketchyTwistSpin",
+    "physics_wipeout/default/TeleportMinTimeForAutoReset",
+    "physics_wipeout/default/TeleportMinTimeAfterSettlingForAutoReset",
+    "physics_wipeout/default/TeleportMaxTime",
+    "physics_wipeout/default/TeleportAutoResetFadeOutTime",
+    "physics_wipeout/default/WipeoutOverSpeed",
+    "physics_wipeout/default/WipeoutOverMinTime",
+    // The checkpoint manager's ground and clearance checks (no names in the database).
+    "Hash_12B64C0E804B0853/default/Hash_C0526C883AF0ECCA",
+    "Hash_12B64C0E804B0853/default/Hash_CEB092E418A5B001",
+    "Hash_12B64C0E804B0853/default/Hash_8ABE098D3806D273",
+    "Hash_12B64C0E804B0853/default/Hash_ADD032CACF6A1C15",
+    // The revert servo: speed against angle left, gain, tolerance against normal y, longest time.
+    "Hash_018E8A2E5028AB3F/default/Hash_DAA990E803A782A1",
+    "Hash_018E8A2E5028AB3F/default/Hash_0E5B939FD4ECDBAA",
+    "Hash_018E8A2E5028AB3F/default/Hash_3387562E9BEA0AF6",
+    "Hash_018E8A2E5028AB3F/default/Hash_035D9805EB9E2EE2",
+    "anim_motion/inair_disttocog/lo_air_arm_extend",
+    "anim_motion/body_spin/spin_map",
+    "anim_motion/body_spin/spin_influence_blendin",
+    "anim_motion/body_spin/spin_influence_blendout",
+    "anim_motion/body_spin/spin_clamp_influence_delta",
+    "anim_motion/body_spin/spin_clamp_influence_deltadelta",
     "recognizer/right_stick/NumTicksPatternNotInRangeBeforeCulling",
-    "camera_shots/chase_flat_slow/PositionDistance",
-    "camera_shots/chase_flat_slow/PositionElevation",
-    "camera_shots/chase_flat_slow/PositionHeading",
-    "camera_shots/chase_flat_slow/FramingPitch",
-    "camera_shots/chase_flat_slow/ReferenceBoardOffset",
-    "camera_shots/chase_flat_fast/PositionDistance",
-    "camera_shots/chase_flat_fast/PositionElevation",
-    "camera_shots/chase_flat_fast/PositionHeading",
-    "camera_shots/chase_flat_fast/FramingPitch",
-    "camera_shots/chase_flat_fast/ReferenceBoardOffset",
-    "camera_shots/grind_flat_slow/PositionDistance",
-    "camera_shots/grind_flat_slow/PositionElevation",
-    "camera_shots/grind_flat_slow/PositionHeading",
-    "camera_shots/grind_flat_slow/FramingPitch",
-    "camera_shots/grind_flat_slow/ReferenceBoardOffset",
+    "anim_carving/default/quickMagMap",
+    "anim_carving/default/quickAngleMap",
+    "anim_carving/default/quickAngleOffset",
+    "anim_carving/default/slowMagMap",
+    "anim_carving/default/slowAngleMap",
+    "anim_carving/default/slowAngleOffset",
+    "anim_carving/default/speed_tuck",
+    "anim_carving/default/speed_tuck_start",
+    "anim_carving/default/blend_lean_in",
+    "anim_carving/default/clamp_curr_lean",
+    "physics_animation/default/AnimationTurnLeanFilterSlow",
+    "physics_animation/default/AnimationTurnLeanFilter",
+    "physics_animation/default/AnimationTurnDirFilter",
+    "physics_animation/default/AnimationTurnSpeedGraph",
+    "physics_animation/default/QuicknessVsQuickness",
+    "physics_animation/default/ScaleQuicknessAtSpeed",
+    "physics_animation/default/SpeedWobbleTurnBlend",
+    "physics_animation/default/QuicknessMaxDelta",
+    "physics_animation/default/InputQuicknessMax",
+    "physics_animation/default/InputQuicknessBlendVal",
+    "physics_animation/default/HoldingMinVal",
+    "physics_animation/default/HoldingMaxAcceleration",
+    "physics_animation/default/HoldingIntegralBlend",
+    "physics_animation/default/HoldingBlendUp",
+    "physics_animation/default/HoldingBlendDown",
+    "physics_animation/default/AnimationTurnWobbleScalar",
+    "physics_animation/default/AnimationTurnPhysicsWeight",
+    "physics_animation/default/AnimationTurnMaxLean",
+    "physics_animation/default/AnimationTurnGraphX",
+    "physics_animation/default/AnimationTurnDirMax",
+    "anim_motion/crouching/crouching_min_height",
+    "anim_motion/crouching/crouching_max_height",
+    "anim_motion/crouching/crouch_max_ratio",
+    "anim_motion/crouching/crouch_max_delta",
+    "anim_motion/crouching/crouch_max_delta_delta",
+    "anim_motion/crouching/crouch_blend_input",
+    "anim_motion/crouching/absorption_upforce",
+    "anim_motion/crouching/pump_maxspeed",
+    "anim_motion/crouching/pump_maxspeed_yaxis",
+    "anim_motion/crouching/MaxCrouchFromDeckAngle",
+    "anim_motion/crouching/absorption_skateboard_damping",
+    "anim_motion/crouching/absorption_maxforce",
+    "anim_motion/crouching/absorption_ground_maxforce",
+    "anim_motion/crouching/absorption_factor",
+    "anim_motion/auto_pump/auto_pump_max_crouch",
+    "anim_motion/auto_pump/auto_pump_sufficient_crouch",
+    "anim_motion/auto_pump/auto_pump_standing_thresh",
+    "anim_motion/auto_pump/auto_pump_rise_speed",
+    "anim_motion/auto_pump/auto_pump_pump_speed",
+    "anim_motion/auto_pump/auto_pump_potential_thresh",
+    "anim_motion/auto_pump/auto_pump_potential_blend",
+    "anim_motion/auto_pump/auto_pump_intent_mag_start",
+    "anim_motion/auto_pump/auto_pump_intent_angle_region",
+    "anim_motion/auto_pump/auto_pump_crouch_time",
+    "anim_motion/auto_pump/auto_pump_crouch_speed",
+    "anim_motion/body_tilt/body_tilt_bodyspin_factor",
+    "anim_motion/body_tilt/body_tilt_ground_clamp_vel",
+    "anim_motion/body_tilt/body_tilt_ground_clamp_acc",
+    "anim_motion/body_tilt/body_tilt_air_clamp_vel",
+    "anim_motion/body_tilt/body_tilt_air_clamp_acc",
+    "anim_motion/manual/manual_balance",
+    "anim_motion/manual/manual_clamp_vel",
+    "anim_motion/manual/manual_clamp_acc",
 ];
 
 impl Tuning {
     /// flatground's own values, used when no rules pack is present.
     pub const BUILT_IN: Tuning = Tuning {
         gravity: 9.8,
-        max_slope_accel: 6.5,
-        push_max_speed: 8.0,
+        max_slope_accel: 5.5,
+        push_max_speed: 7.2,
         push_tick_limit_slow: 0.5,
         push_tick_limit_fast: 0.4,
         push_hold_time: Curve::constant(0.3),
         push_dv: Curve::new(&[(0.0, 1.0), (1.0, 4.0)]),
-        push_out_max: 0.6,
+        push_out_max: 0.5,
         push_out_speed_weight: 0.5,
         push_hold_cap: 3.5,
         push_blend_speed_frames: Curve::constant(6.0),
@@ -518,20 +986,20 @@ impl Tuning {
         no_input_time: 2.5,
         friction_manual: Curve::new(&[(0.0, 0.1), (8.0, 0.45)]),
         foot_brake: 45.0,
-        tail_brake: 32.0,
+        tail_brake: 28.0,
         brake_scale: 0.06,
         braking_scalar: 1.0,
         brake_slow_speed: 0.02,
         friction_max_change: 0.4,
         speed_general_amount: 0.2,
-        steer_follow: 0.75,
-        steer_scalar: 0.6,
+        steer_follow: 0.85,
+        steer_scalar: 0.5,
         steer_vs_input: Curve::new(&[(0.0, 0.0), (0.2, 0.02), (1.0, 0.8)]),
         steer_vs_speed: Curve::new(&[(0.0, 1.0), (0.1, 0.9), (0.5, 0.35), (1.0, 0.3)]),
         steer_speed_range: 45.0,
         hard_turn_boost: 1.0,
         push_steer_drop: 0.02,
-        push_steer_rise: 0.05,
+        push_steer_rise: 0.04,
         push_steer_min: 0.5,
         steer_tilt_blend: 0.25,
         manual_tilt: 0.5,
@@ -539,42 +1007,31 @@ impl Tuning {
         manual_max_tilt: 20.0,
         manual_p: 0.06,
         manual_i: 0.02,
-        manual_d: -0.75,
+        manual_d: -0.6,
         manual_d_limit: 0.05,
         manual_max_error: 0.12,
         manual_noise_freq: 1.2,
         manual_noise_scale: 0.04,
-        manual_noise_vs_speed: Curve::new(&[(0.0, 0.3), (8.0, 1.0)]),
-        jump_clamp_low: 0.5,
-        jump_clamp_high: 0.9,
+        manual_noise_vs_speed: Curve::new(&[(0.0, 0.5), (6.0, 1.0)]),
+        jump_clamp_low: 0.4,
+        jump_clamp_high: 0.8,
         side_friction: 60.0,
         straighten: 0.02,
-        straighten_max_turn: 0.75,
+        straighten_max_turn: 0.65,
         heading_adjust: 0.025,
-        heading_adjust_max_speed: 7.5,
-        heading_vs_slope: Curve::new(&[(0.0, 0.0), (0.06, 0.0), (0.2, 0.8), (0.3, 1.0)]),
-        heading_vs_speed: Curve::new(&[(0.0, 1.0), (0.4, 0.75), (0.7, 0.25), (1.0, 0.0)]),
+        heading_adjust_max_speed: 6.5,
+        heading_vs_slope: Curve::new(&[(0.0, 0.0), (0.1, 0.0), (0.4, 1.0)]),
+        heading_vs_speed: Curve::new(&[(0.0, 1.0), (1.0, 0.0)]),
         turn_torque: 0.06,
-        turn_torque_vs_slope: Curve::new(&[
-            (0.0, 0.0),
-            (0.3, 0.0),
-            (0.45, 0.15),
-            (0.65, 0.6),
-            (0.8, 1.0),
-        ]),
-        turn_torque_vs_speed: Curve::new(&[(0.0, 1.0), (0.5, 0.8), (1.0, 0.1)]),
-        turn_torque_vs_neg_ang_vel: Curve::new(&[
-            (0.0, 1.0),
-            (0.05, 0.3),
-            (0.1, 0.05),
-            (0.5, 0.03),
-        ]),
+        turn_torque_vs_slope: Curve::new(&[(0.0, 0.0), (0.4, 0.0), (1.0, 1.0)]),
+        turn_torque_vs_speed: Curve::new(&[(0.0, 1.0), (1.0, 0.2)]),
+        turn_torque_vs_neg_ang_vel: Curve::new(&[(0.0, 1.0), (0.08, 0.2), (0.2, 0.0)]),
         slide_speed_threshold: 1.2,
         slide_min_entry: 0.25,
         well_into_slide_time: 0.25,
         slide_turn_value: 0.35,
         slide_input_remap: Curve::new(&[(0.0, 0.0), (0.5, 0.12), (0.75, 0.35), (1.0, 1.0)]),
-        slide_remap_vs_speed: Curve::new(&[(0.0, 0.0), (3.0, 0.0), (7.0, 0.8), (9.0, 1.0)]),
+        slide_remap_vs_speed: Curve::new(&[(0.0, 0.0), (4.0, 0.0), (8.0, 1.0)]),
         slide_speed_factor: Curve::new(&[(0.0, 0.0), (1.2, 1.0)]),
         not_sliding_threshold: Curve::new(&[(-1.0, 0.5), (0.0, 0.04), (1.0, 0.04)]),
         not_sliding_time: Curve::constant(0.12),
@@ -584,90 +1041,123 @@ impl Tuning {
         ground_normal_blend: 0.3,
         wall_push_away: 0.8,
         wall_max_vel_delta: 10.0,
-        collision_torque: Curve::new(&[
-            (0.0, 0.0),
-            (0.3, 0.0),
-            (0.5, 0.03),
-            (0.7, 0.05),
-            (0.8, 0.05),
-            (0.85, 0.0),
-        ]),
+        collision_torque: Curve::new(&[(0.0, 0.0), (0.4, 0.0), (0.65, 0.06), (0.9, 0.0)]),
         collision_torque_time: 0.4,
-        collision_torque_fade: 0.92,
-        wipe_ground_closing: 7.5,
+        collision_torque_fade: 0.8,
+        wipe_ground_closing: 8.5,
         wipe_air_closing: 3.5,
         vert_align_max_ny: 0.25,
-        vert_align_min_dir_y: 0.75,
+        vert_align_min_dir_y: 0.65,
         vert_align_max_angle: 0.1,
         vert_align_factor: 1.0,
         natural_air_off_verts: 0.5,
         wallride_antigravity: Curve::new(&[(0.0, 0.12), (0.05, 0.1), (0.12, 0.0)]),
-        wallride_max_dot_floor: 0.45,
+        wallride_max_dot_floor: 0.4,
         wallride_jump_height: 0.5,
         wallride_lookahead: 0.3,
         wallride_max_time: 1.2,
-        wallride_jump_ydown: 0.6,
+        wallride_jump_ydown: 0.5,
         wallride_jump_force: 2.5,
         pump_damping: 0.15,
         pump_min_change: 0.003,
         pump_max_change: 0.008,
-        pump_vs_time: Curve::new(&[(0.0, 1.0), (0.4, 1.0), (0.7, 0.4), (1.0, 0.1)]),
+        pump_vs_time: Curve::new(&[(0.0, 1.0), (0.25, 1.0), (1.0, 0.0)]),
         pump_ang_damping: 0.25,
         pump_vs_vel: Curve::new(&[(0.0, 3.0), (3.0, 1.8), (6.0, 1.0), (10.0, 0.7), (13.0, 0.1)]),
         pump_factor: 15.0,
         pump_max_accel: 8.0,
         pump_unintentional: 0.6,
-        jump_floor: 0.9,
-        jump_low: 1.3,
-        jump_high: 1.7,
+        jump_floor: 0.8,
+        jump_low: 1.15,
+        jump_high: 1.95,
         jump_low_vs_speed: Curve::constant(1.0),
         jump_high_vs_speed: Curve::new(&[(0.0, 1.0), (0.5, 0.8), (1.0, 0.5)]),
         jump_speed_range: 25.0,
-        hippy_low: 1.3,
-        hippy_high: 1.6,
+        hippy_low: 1.15,
+        hippy_high: 1.9,
         hippy_windup: Curve::new(&[(0.0, 0.0), (0.25, 0.2), (0.5, 1.0)]),
-        vertical_response: Curve::new(&[
-            (0.0, 1.0),
-            (0.5, 1.0),
-            (0.7, 0.5),
-            (0.85, 0.15),
-            (1.0, 0.08),
-        ]),
+        vertical_response: Curve::new(&[(0.0, 1.0), (0.6, 1.0), (1.0, 0.2)]),
         jump_min_scalar: 0.15,
-        jump_y_vs_normal_y: Curve::new(&[(0.0, 1.4), (0.1, 1.3), (0.2, 1.05), (0.25, 1.0)]),
+        jump_y_vs_normal_y: Curve::new(&[(0.0, 1.3), (0.3, 1.0)]),
         jump_y_bonus_max: 1.2,
         jump_adjust_x: 0.15,
         jump_adjust_z: 0.15,
         spin_speed: Curve::new(&[(0.0, 3.0), (0.4, 7.5), (1.0, 6.0), (2.0, 3.5)]),
         spin_change: Curve::new(&[(0.0, 1.0), (0.4, 0.5), (1.0, 0.15)]),
-        spin_reverse_change: 0.2,
-        spin_windup: Curve::new(&[(-0.5, 0.0), (-0.3, 1.0), (0.1, 1.0), (0.5, 0.3)]),
+        spin_reverse_change: 0.25,
+        spin_windup: Curve::new(&[(-0.6, 0.0), (-0.35, 1.0), (0.2, 1.0), (0.6, 0.0)]),
         spin_no_windup: 0.45,
-        land_angle: Curve::new(&[(0.0, 1.5), (10.0, 1.4), (28.0, 0.3)]),
-        land_max_impact: 11.0,
+        spin_auto_change: Curve::new(&[(0.0, 0.8), (0.3, 0.55), (1.0, 0.4)]),
+        spin_input_filter: Curve::new(&[(0.0, 0.0), (0.05, 1.0), (0.3, 0.8), (1.0, 0.45)]),
+        max_spin_speed: 540.0,
+        max_auto_spin: 7.0,
+        min_auto_spin: 0.12,
+        heading_adjust_vs_up: Curve::new(&[(0.0, 120.0), (0.85, 110.0), (1.0, 90.0)]),
+        min_heading_vel: 0.8,
+        air_up_max_delta: Curve::new(&[(0.5, 0.15), (0.75, 0.1), (1.0, 0.07)]),
+        phys_air_align: 0.12,
+        phys_air_dont_align: 1.3,
+        traj_cone_x: 12.0,
+        traj_cone_z: 35.0,
+        traj_cone_z_vs_speed: Curve::new(&[(0.0, 0.35), (0.5, 0.45), (1.0, 0.55)]),
+        traj_cone_x2: 6.0,
+        traj_cone_z2: 12.0,
+        traj_speed_min: 1.5,
+        traj_speed_max: 3.5,
+        traj_max_time: 3.5,
+        traj_max_drop: 35.0,
+        traj_time_bonus: Curve::new(&[(0.0, 0.0), (0.1, 0.0), (0.25, 500.0), (0.45, 1000.0)]),
+        traj_force_scalar: Curve::new(&[(0.0, 0.0), (0.1, 0.3), (0.3, 1.0)]),
+        traj_score_force: 25.0,
+        traj_score_direction: 150.0,
+        traj_score_middle: 50.0,
+        traj_score_transition: 400.0,
+        traj_score_unrideable: -150_000.0,
+        traj_score_dont_align: -80_000.0,
+        traj_min_valid_time: 0.22,
+        traj_min_after_apex: 0.12,
+        traj_second_pass_delta: 0.12,
+        traj_max_adjust: 1.2,
+        traj_error_blend: 0.25,
+        traj_wall_test_dist: 0.06,
+        traj_wall_min_height: 0.5,
+        traj_wall_score: 400.0,
+        traj_wall_land_angle: 0.0,
+        traj_wall_boost: Curve::new(&[(0.5, 0.4), (1.5, 0.0)]),
+        land_angle: Curve::new(&[(0.0, 1.65), (14.0, 1.3), (30.0, 0.4)]),
+        land_max_impact: 10.0,
+        land_max_stairs: 5.5,
+        land_max_grind: 9.0,
+        danger_max_impact: 0.8,
+        danger_ignore_ticks: 5.0,
+        landing_speed_vs_ny: Curve::new(&[(0.4, 1.0), (0.55, 1.12), (0.7, 1.0)]),
+        land_sketchy_side: Curve::new(&[(0.0, 0.0), (0.3, 0.3), (0.6, 0.8), (0.9, 1.0)]),
+        land_sketchy_twist: Curve::new(&[(0.0, 0.0), (0.3, 0.5), (0.6, 0.85), (1.0, 1.0)]),
+        reset_min_time: 3.0,
+        reset_settled: 2.0,
+        reset_max_time: 18.0,
+        reset_fade: 0.4,
+        settled_speed: 0.6,
+        settled_min_time: 0.4,
+        respawn_height: 0.5,
+        respawn_radius: 0.4,
+        respawn_drop: 1.2,
+        respawn_normal_y: 0.9,
+        revert_speed: Curve::new(&[(0.0, 4.0), (0.3, 7.0), (1.2, 9.0), (2.6, 9.0), (3.1, 8.0)]),
+        revert_gain: 0.2,
+        revert_tolerance: Curve::new(&[(0.0, 35.0), (0.7, 8.0), (1.0, 8.0)]),
+        revert_duration: 1.1,
+        air_arm_extend: Curve::new(&[(0.0, 0.0), (0.3, 0.6), (0.6, 1.0)]),
+        spin_map: Curve::new(&[(0.0, 0.0), (0.3, 0.2), (1.0, 1.0)]),
+        spin_blend_in: 0.2,
+        spin_blend_out: 0.15,
+        spin_max_delta: 0.08,
+        spin_max_acc: 0.02,
         flick_misses: 8,
-        cam_slow: CamShot {
-            distance: 2.0,
-            elevation: 8.0,
-            heading: -165.0,
-            pitch: -4.0,
-            board_offset: 0.85,
-        },
-        cam_fast: CamShot {
-            distance: 2.6,
-            elevation: 6.0,
-            heading: -165.0,
-            pitch: -2.0,
-            board_offset: 0.85,
-        },
-        cam_grind: CamShot {
-            distance: 1.7,
-            elevation: 8.0,
-            heading: -165.0,
-            pitch: -8.0,
-            board_offset: 0.65,
-        },
-        cam_fast_speed: 8.0,
+        anim: AnimTuning::BUILT_IN,
+        grind: GrindTuning::BUILT_IN,
+        cam: CamTuning::BUILT_IN,
+        moves: moves::MoveTuning::BUILT_IN,
     };
 
     /// Takes over every value a `rules/tuning` entry carries. Unknown names and malformed values are
@@ -706,24 +1196,6 @@ impl Tuning {
                     }
                     None => false,
                 }
-            };
-        }
-        let field = name.rsplit('/').next().unwrap_or("");
-        let shot = name.split('/').nth(1).unwrap_or("");
-        if name.starts_with("camera_shots/") {
-            let s = match shot {
-                "chase_flat_slow" => &mut self.cam_slow,
-                "chase_flat_fast" => &mut self.cam_fast,
-                "grind_flat_slow" => &mut self.cam_grind,
-                _ => return false,
-            };
-            return match field {
-                "PositionDistance" => scalar!(s.distance),
-                "PositionElevation" => scalar!(s.elevation),
-                "PositionHeading" => scalar!(s.heading),
-                "FramingPitch" => scalar!(s.pitch),
-                "ReferenceBoardOffset" => scalar!(s.board_offset),
-                _ => false,
             };
         }
         match name {
@@ -884,6 +1356,119 @@ impl Tuning {
             "physics_wipeout/default/Wipeout_AirMaxSpeedIntoGround" => {
                 scalar!(self.land_max_impact)
             }
+            "physics_bodyspin/default/MaxDeltaForAutoVsTime" => curve!(self.spin_auto_change),
+            "physics_airstates/default/BodySpinInputFilter" => curve!(self.spin_input_filter),
+            "physics_airstates/default/MaxSpinSpeed" => scalar!(self.max_spin_speed),
+            "physics_mode/normal/MaxAutoBodySpinSpeed" => scalar!(self.max_auto_spin),
+            "physics_airstates/default/MinAutoBodySpeed" => scalar!(self.min_auto_spin),
+            "physics_airstates/default/MaxHeadingAdjustVsUpY" => curve!(self.heading_adjust_vs_up),
+            "physics_airstates/default/MinTargetHeadingVel" => scalar!(self.min_heading_vel),
+            "physics_reckoning/default/Air_MaxUpVectAngleDelta" => curve!(self.air_up_max_delta),
+            "physics_airstates/default/SpeedToAlignToGround_PhysAir" => {
+                scalar!(self.phys_air_align)
+            }
+            "physics_airstates/default/DontAlignAnglePhysicsAir" => {
+                scalar!(self.phys_air_dont_align)
+            }
+            "physics_trajectory/default/ConeAngleX" => scalar!(self.traj_cone_x),
+            "physics_trajectory/default/ConeAngleZ" => scalar!(self.traj_cone_z),
+            "physics_trajectory/default/ConeAngleZVsSpeed" => curve!(self.traj_cone_z_vs_speed),
+            "physics_trajectory/default/ConeAngleXSecondPass" => scalar!(self.traj_cone_x2),
+            "physics_trajectory/default/ConeAngleZSecondPass" => scalar!(self.traj_cone_z2),
+            "physics_trajectory/default/SpeedFactorMin" => scalar!(self.traj_speed_min),
+            "physics_trajectory/default/SpeedFactorMax" => scalar!(self.traj_speed_max),
+            "physics_trajectory/default/TrajectoryMaxTime" => scalar!(self.traj_max_time),
+            "physics_trajectory/default/TrajectoryMaxDrop" => scalar!(self.traj_max_drop),
+            "physics_trajectory/default/LandingTimeBonus" => curve!(self.traj_time_bonus),
+            "physics_trajectory/default/LandingForceScalarVsDPVelNorm" => {
+                curve!(self.traj_force_scalar)
+            }
+            "physics_trajectory/default/ScoreLandingForce" => scalar!(self.traj_score_force),
+            "physics_trajectory/default/ScoreLandingDirection" => {
+                scalar!(self.traj_score_direction)
+            }
+            "physics_trajectory/default/ScoreMiddleBonus" => scalar!(self.traj_score_middle),
+            "physics_trajectory/default/ScoreTransition" => scalar!(self.traj_score_transition),
+            "physics_trajectory/default/ScoreSurface_Unrideable" => {
+                scalar!(self.traj_score_unrideable)
+            }
+            "physics_trajectory/default/ScoreSurface_DontAlign" => {
+                scalar!(self.traj_score_dont_align)
+            }
+            "physics_trajectory/default/MinTimeForTrajectoryToBeValid" => {
+                scalar!(self.traj_min_valid_time)
+            }
+            "physics_trajectory/default/MinTimeAfterApexForTransition" => {
+                scalar!(self.traj_min_after_apex)
+            }
+            "physics_trajectory/default/MinNormalDeltaForSecondPass" => {
+                scalar!(self.traj_second_pass_delta)
+            }
+            "physics_trajectory/default/MaxTrajectoryAdjust" => scalar!(self.traj_max_adjust),
+            "physics_airstates/default/TrajErrorBlendAwayTime" => scalar!(self.traj_error_blend),
+            "physics_trajectory/default/WallRideTestDist" => scalar!(self.traj_wall_test_dist),
+            "physics_trajectory/default/WallRideMinHeightFromGround" => {
+                scalar!(self.traj_wall_min_height)
+            }
+            "physics_trajectory/default/ScoreWallrideHeight" => scalar!(self.traj_wall_score),
+            "physics_trajectory/default/WallRideAngleToAllowLanding" => {
+                scalar!(self.traj_wall_land_angle)
+            }
+            "physics_trajectory/default/WallRideBoost" => curve!(self.traj_wall_boost),
+            "physics_wipeout/default/Wipeout_AirMaxSpeedIntoStairs" => {
+                scalar!(self.land_max_stairs)
+            }
+            "physics_wipeout/default/Wipeout_AirMaxSpeedIntoCollisionNearGrind" => {
+                scalar!(self.land_max_grind)
+            }
+            "physics_wipeout/default/Wipeout_AirYTrick" => scalar!(self.danger_max_impact),
+            // An integer in the database: a 4-byte one arrives as its bits read as a float.
+            "physics_wipeout/default/FramesAtStartOfAirToIgnoreDangerZone" => match f {
+                Some(f) if f.to_bits() < 0x0080_0000 => {
+                    self.danger_ignore_ticks = f.to_bits() as f32;
+                    true
+                }
+                Some(f) if (0.0..=600.0).contains(&f) => {
+                    self.danger_ignore_ticks = f;
+                    true
+                }
+                _ => false,
+            },
+            "physics_airstates/default/LandingSpeedScalarVsGroundNormalY" => {
+                curve!(self.landing_speed_vs_ny)
+            }
+            "physics_animation/default/LandingSketchySideSpeed" => curve!(self.land_sketchy_side),
+            "physics_animation/default/LandingSketchyTwistSpin" => {
+                curve!(self.land_sketchy_twist)
+            }
+            "physics_wipeout/default/TeleportMinTimeForAutoReset" => scalar!(self.reset_min_time),
+            "physics_wipeout/default/TeleportMinTimeAfterSettlingForAutoReset" => {
+                scalar!(self.reset_settled)
+            }
+            "physics_wipeout/default/TeleportMaxTime" => scalar!(self.reset_max_time),
+            "physics_wipeout/default/TeleportAutoResetFadeOutTime" => scalar!(self.reset_fade),
+            "physics_wipeout/default/WipeoutOverSpeed" => scalar!(self.settled_speed),
+            "physics_wipeout/default/WipeoutOverMinTime" => scalar!(self.settled_min_time),
+            "Hash_12B64C0E804B0853/default/Hash_C0526C883AF0ECCA" => scalar!(self.respawn_height),
+            "Hash_12B64C0E804B0853/default/Hash_CEB092E418A5B001" => scalar!(self.respawn_radius),
+            "Hash_12B64C0E804B0853/default/Hash_8ABE098D3806D273" => scalar!(self.respawn_drop),
+            "Hash_12B64C0E804B0853/default/Hash_ADD032CACF6A1C15" => {
+                scalar!(self.respawn_normal_y)
+            }
+            "Hash_018E8A2E5028AB3F/default/Hash_DAA990E803A782A1" => curve!(self.revert_speed),
+            "Hash_018E8A2E5028AB3F/default/Hash_0E5B939FD4ECDBAA" => scalar!(self.revert_gain),
+            "Hash_018E8A2E5028AB3F/default/Hash_3387562E9BEA0AF6" => {
+                curve!(self.revert_tolerance)
+            }
+            "Hash_018E8A2E5028AB3F/default/Hash_035D9805EB9E2EE2" => {
+                scalar!(self.revert_duration)
+            }
+            "anim_motion/inair_disttocog/lo_air_arm_extend" => curve!(self.air_arm_extend),
+            "anim_motion/body_spin/spin_map" => curve!(self.spin_map),
+            "anim_motion/body_spin/spin_influence_blendin" => scalar!(self.spin_blend_in),
+            "anim_motion/body_spin/spin_influence_blendout" => scalar!(self.spin_blend_out),
+            "anim_motion/body_spin/spin_clamp_influence_delta" => scalar!(self.spin_max_delta),
+            "anim_motion/body_spin/spin_clamp_influence_deltadelta" => scalar!(self.spin_max_acc),
             "recognizer/right_stick/NumTicksPatternNotInRangeBeforeCulling" => match f {
                 Some(f) if (0.0..=63.0).contains(&f) => {
                     self.flick_misses = f as u8;
@@ -891,7 +1476,12 @@ impl Tuning {
                 }
                 _ => false,
             },
-            _ => false,
+            _ => {
+                self.grind.set(name, f, c())
+                    || self.anim.set(name, f, c(), v)
+                    || self.cam.set(name, f, c())
+                    || self.moves.set(name, f, c())
+            }
         }
     }
 
@@ -999,7 +1589,7 @@ mod tests {
                 "anim_motion/pushing/button_time_to_dv",
                 vec![0.0, 1.0, 2.0, 5.0],
             ),
-            ("camera_shots/chase_flat_fast/PositionDistance", vec![3.25]),
+            ("camera_tracker/distance/SpeedClamp", vec![3.25]),
             (
                 "recognizer/right_stick/NumTicksPatternNotInRangeBeforeCulling",
                 vec![4.0],
@@ -1014,7 +1604,7 @@ mod tests {
         assert_eq!(t.apply(&data), 4);
         assert_eq!(t.push_max_speed, 9.5);
         assert_eq!(t.push_dv.eval(0.5), 3.5);
-        assert_eq!(t.cam_fast.distance, 3.25);
+        assert_eq!(t.cam.distance_speed, 3.25);
         assert_eq!(t.flick_misses, 4);
         assert_eq!(t.steer_vs_input, Tuning::BUILT_IN.steer_vs_input);
         assert!(parse(&data[..data.len() - 1]).is_none(), "truncated");
@@ -1022,24 +1612,35 @@ mod tests {
 
     #[test]
     fn every_path_is_one_the_tuning_reads() {
-        for p in PATHS {
+        for p in all_paths() {
             let mut t = Tuning::BUILT_IN;
-            // A two-point curve also counts as a scalar (its first value).
+            // A two-point curve (or a four-value vector) also counts as a scalar (its first value).
             assert!(t.set(p, &[0.0, 1.0, 1.0, 1.0]) || t.set(p, &[1.0]), "{p}");
         }
     }
 
     #[test]
-    fn camera_headings_blend_the_short_way() {
-        let a = CamShot {
-            heading: -160.0,
-            ..Tuning::BUILT_IN.cam_slow
-        };
-        let b = CamShot {
-            heading: 180.0,
-            ..a
-        };
-        assert!((a.lerp(&b, 0.5).heading + 170.0).abs() < 1e-4);
+    fn riding_animation_values_come_through_the_rules_entry() {
+        let data = encode(&[
+            ("anim_carving/default/quickAngleOffset", vec![0.25]),
+            (
+                "physics_animation/default/AnimationTurnLeanFilter",
+                vec![0.5, 0.25, 0.0, 0.125],
+            ),
+            ("physics_animation/default/AnimationTurnGraphX", vec![12.0]),
+            ("anim_motion/auto_pump/auto_pump_rise_speed", vec![0.5]),
+            (
+                "anim_motion/crouching/crouching_max_height",
+                vec![0.0, 20.0, 0.9, 0.7],
+            ),
+        ]);
+        let mut t = Tuning::BUILT_IN;
+        assert_eq!(t.apply(&data), 5);
+        assert_eq!(t.anim.quick_offset, 0.25);
+        assert_eq!(t.anim.filter_lean, [0.5, 0.25, 0.0, 0.125]);
+        assert_eq!(t.anim.cond[11], 12.0);
+        assert_eq!(t.anim.auto_pump[2], 0.5);
+        assert!((t.anim.crouch_max_height.eval(10.0) - 0.8).abs() < 1e-6);
     }
 
     #[test]

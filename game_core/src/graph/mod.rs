@@ -45,6 +45,7 @@ pub mod opcode;
 pub mod ops;
 pub mod playback;
 pub mod push;
+pub mod riding;
 pub mod select;
 #[cfg(test)]
 mod tests;

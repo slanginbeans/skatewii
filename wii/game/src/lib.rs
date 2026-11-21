@@ -33,10 +33,12 @@ impl Gfx for WiiGfx {
     fn begin_frame(&mut self, cam: &Camera, clear_rgba: u32) {
         let eye = [cam.eye.x, cam.eye.y, cam.eye.z];
         let target = [cam.target.x, cam.target.y, cam.target.z];
+        let up = [cam.up.x, cam.up.y, cam.up.z];
         unsafe {
             ffi::fg_begin_frame(
                 eye.as_ptr(),
                 target.as_ptr(),
+                up.as_ptr(),
                 cam.fov_y_deg,
                 cam.near,
                 cam.far,
@@ -191,6 +193,7 @@ pub extern "C" fn fg_rust_init() {
     );
     let mut game = Box::new(Game::new());
     game.timer = Some(clock_us);
+    game.set_aspect(unsafe { ffi::fg_aspect() });
     // Rules first: the skater and park are set up with its tuning.
     let rules: String = match load_first("rules", RULES_PACKS) {
         Some(pack) => match game.load_rules(pack) {
@@ -215,14 +218,24 @@ pub extern "C" fn fg_rust_init() {
     log(
         false,
         &format!(
-            "tuning: push max {:.1} m/s, jump {:.2}-{:.2} m, gravity {:.1}, flick misses {}, camera {:.1}-{:.1} m",
+            "tuning: push max {:.1} m/s, jump {:.2}-{:.2} m, gravity {:.1}, flick misses {}, camera {} shots ({}), {}, aspect {:.2}",
             t.push_max_speed,
             t.jump_low,
             t.jump_high,
             t.gravity,
             t.flick_misses,
-            t.cam_slow.distance,
-            t.cam_fast.distance
+            game.camera().data.shots.defs.len(),
+            if game.camera().data.shots.imported {
+                "disc"
+            } else {
+                "built-in"
+            },
+            if game.camera().data.graph.is_some() {
+                "Skate 3's camera graph"
+            } else {
+                "built-in shot choice"
+            },
+            game.camera().aspect
         ),
     );
     // Without a pack (or with one that doesn't parse) the placeholder stays; say which.
@@ -373,6 +386,12 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
         if let Some(line) = line {
             log(false, &line);
         }
+        if auto.take_restart() {
+            game.restart_at_spawn();
+        }
+        if let Some(p) = auto.take_place() {
+            game.place(&p);
+        }
         scripted = p;
         pad = &scripted;
     }
@@ -413,11 +432,15 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
             log(
                 false,
                 &format!(
-                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
+                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, air {:.2} / {:.2} peak, camera {:.2} / {:.2} peak, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
                     c.avg_us / 1000.0,
                     c.peak_us as f32 / 1000.0,
                     t.physics_us as f32 / 1000.0,
                     t.graph_us as f32 / 1000.0,
+                    t.air_us as f32 / 1000.0,
+                    t.air_peak_us as f32 / 1000.0,
+                    t.cam_us as f32 / 1000.0,
+                    t.cam_peak_us as f32 / 1000.0,
                     t.skin_us as f32 / 1000.0,
                     t.render_us as f32 / 1000.0,
                     c.gpu_avg_us / 1000.0,
@@ -431,6 +454,8 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
                     st.mem2_free / 1024
                 ),
             );
+            game.times.air_peak_us = 0;
+            game.times.cam_peak_us = 0;
         }
     }
     // What the game noticed this frame (flicks, landings, bails, status lines).

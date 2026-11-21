@@ -34,9 +34,6 @@
 
 use super::*;
 
-/// Distance from the board's middle to each truck (m) and the wheelbase.
-pub const AXLE: f32 = 0.243;
-const WHEELBASE: f32 = 2.0 * AXLE;
 /// sin(31 deg): the trucks' kingpin angle turns a deck tilt into a truck turn.
 const KINGPIN: f32 = 0.515_038;
 /// The trucks look for the surface from this far above the board, and this far below it.
@@ -91,6 +88,8 @@ pub struct Drive {
     pub slide: Option<f32>,
     /// A move turns the board itself (kick turn, revert): no truck or heading turn.
     pub pivot: bool,
+    /// The wheels don't scrub sideways speed (a revert: Skate 3 drops the board's drag while it turns).
+    pub keep_velocity: bool,
     /// The rider is pumping on purpose (crouching and standing from the stick).
     pub intentional_pump: bool,
 }
@@ -102,6 +101,8 @@ pub struct Pump {
     pub effect: f32,
     pub time: f32,
     pub turn_rate: f32,
+    /// The speed the pump added this tick (m/s; Skate 3's pumping acceleration the pump layers read).
+    pub dv: f32,
     pub(super) last_height: f32,
     pub(super) prev_n: Option<Vec3>,
 }
@@ -141,7 +142,7 @@ impl Skater {
         self.deck_tilt += (want - self.deck_tilt) * blend;
         self.truck_ramp = (self.truck_ramp + dt).min(TRUCK_RAMP);
         let tilt = self.deck_tilt * (self.truck_ramp / TRUCK_RAMP);
-        let curvature = 2.0 * libm::tanf(KINGPIN * tilt) / WHEELBASE;
+        let curvature = 2.0 * libm::tanf(KINGPIN * tilt) / (2.0 * t.grind.deck_to_truck);
         let vel = self.ground_velocity();
         let v = vel.length();
         let mut yaw = -self.speed * curvature;
@@ -272,9 +273,11 @@ impl Skater {
             self.speed = approach(self.speed, 0.0, decel * dt);
         }
         // Side friction: sideways speed damped, no faster than grip allows.
-        let keep = libm::expf(-t.side_friction * SIDE_DAMP * dt);
-        let removal = clamp(self.slip * (1.0 - keep), -grip * dt, grip * dt);
-        self.slip -= removal;
+        if !d.keep_velocity {
+            let keep = libm::expf(-t.side_friction * SIDE_DAMP * dt);
+            let removal = clamp(self.slip * (1.0 - keep), -grip * dt, grip * dt);
+            self.slip -= removal;
+        }
 
         self.move_on_ground(park, d, dt, events);
     }
@@ -282,6 +285,8 @@ impl Skater {
     /// Moves along the ground: walls, curbs, the trucks finding the surface, and leaving it.
     fn move_on_ground(&mut self, park: &dyn Terrain, d: &Drive, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
+        // Distance from the board's middle to each truck (the disc's `DeckCenterToTruck`, else ours).
+        let axle = t.grind.deck_to_truck;
         let n = self.contact_n;
         let f = tangent(self.fwd, n);
         let mut vel = self.ground_velocity();
@@ -292,7 +297,7 @@ impl Skater {
         let len = motion.length();
         if len > 1e-6 {
             let dir = motion * (1.0 / len);
-            let lead = (dir.dot(f).abs() * AXLE).max(0.1);
+            let lead = (dir.dot(f).abs() * axle).max(0.1);
             if let Some(h) = park.raycast(self.pos + n * WALL_RAY, dir, len + lead)
                 && h.normal.dot(n) < WALL_COS
                 && h.normal.dot(dir) < -0.2
@@ -313,8 +318,8 @@ impl Skater {
         let g = t.gravity;
         let p = self.pos + vel * dt + n * (self.vn * dt - 0.5 * g * n.y * dt * dt);
         let ahead = if self.speed >= 0.0 { 1.0 } else { -1.0 };
-        let front = Self::probe(park, p + f * AXLE, n);
-        let back = Self::probe(park, p - f * AXLE, n);
+        let front = Self::probe(park, p + f * axle, n);
+        let back = Self::probe(park, p - f * axle, n);
         let (lead, trail) = if ahead > 0.0 {
             (front, back)
         } else {
@@ -322,7 +327,7 @@ impl Skater {
         };
         // Curb: the leading truck would climb more than a wheel's height at once.
         if let Some(h) = lead {
-            let rise = (h.point - (p + f * (AXLE * ahead))).dot(n);
+            let rise = (h.point - (p + f * (axle * ahead))).dot(n);
             let jump = rise - self.lead_rise;
             self.lead_rise = rise.max(0.0);
             // A step up onto a surface parallel to this one (not the start of a ramp).
@@ -349,7 +354,7 @@ impl Skater {
                     Some(h) => (h, ahead),
                     None => (trail.expect("one truck has a surface"), -ahead),
                 };
-                let c = h.point - f * (AXLE * side);
+                let c = h.point - f * (axle * side);
                 Some((p + n * (c - p).dot(n), n, None))
             }
         };
@@ -544,12 +549,14 @@ impl Skater {
         p.prev_n = Some(n);
         p.turn_rate = measured * t.pump_ang_damping + (1.0 - t.pump_ang_damping) * p.turn_rate;
         let pumping = p.turn_rate * t.pump_vs_vel.eval(v);
+        p.dv = 0.0;
         if pumping > 0.0 && effect > 0.0 && d.slide.is_none() {
             let mut dv = (pumping * t.pump_factor * effect).min(t.pump_max_accel * dt);
             if !d.intentional_pump {
                 dv *= t.pump_unintentional;
             }
             self.speed += if self.speed < 0.0 { -dv } else { dv };
+            self.pump.dv = dv;
         }
     }
 
@@ -643,8 +650,10 @@ impl Skater {
         // Left stick: sideways (right +) and forwards.
         let fh = self.fwd.horizontal().normalize_or(yaw_dir(self.heading));
         let fh = if self.speed < 0.0 { -fh } else { fh };
-        let right = Vec3::UP.cross(fh).normalize_or(Vec3::ZERO);
-        vel += right * (stick[0] * t.jump_adjust_x * along)
+        // Up x travel points to the rider's left (+X when travelling +Z): the stick to the right takes
+        // the pop the other way (SK8 ground_jump: `side * -x`).
+        let left = Vec3::UP.cross(fh).normalize_or(Vec3::ZERO);
+        vel += left * (-stick[0] * t.jump_adjust_x * along)
             + fh * (stick[1] * t.jump_adjust_z * along);
         if n.y < t.vert_align_max_ny {
             // The face's horizontal out direction: the launch's up-and-out part gets re-aimed.

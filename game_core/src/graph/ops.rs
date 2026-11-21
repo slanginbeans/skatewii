@@ -171,11 +171,24 @@ pub enum Cond {
     DistToEdge(Num),
     AngleAdjustLess,
     BodyFlipping,
+    /// IsBumped: the board's acceleration along the ground past the bump size.
+    Bumped,
     /// The physics has finished the wipeout (the rider is back on the board).
     DoneWipingOut,
     /// Conditions of systems flatground doesn't have, with the value they take here.
     Fixed(bool),
     Unsupported(Str),
+}
+
+/// ScoringGrabs settings: the scored names and the intents that pick between them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GrabScore {
+    pub base: Str,
+    pub dirs: [Str; 4],
+    pub x: Str,
+    pub y: Str,
+    pub invert_y: bool,
+    pub polar: bool,
 }
 
 /// FilterMotionGraphIntent settings (SK8 intent_filter::Settings).
@@ -274,7 +287,15 @@ pub enum Beh {
     ResetTimeSinceKickturn,
     UpdateTimeSinceKickturn,
     SetGrabType(Str),
-    ScoringGrabs,
+    /// ScoringGrabs (SK8 82BBEF60): the grab's scored name, its variants up, left, down and right (`NONE`
+    /// when absent), picked by two filtered intents (x and y, or angle and magnitude when `polar`).
+    ScoringGrabs(GrabScore),
+    /// TweakProject: the filtered `TweakX`/`TweakY` intents (scaled into the diamond |x| + |y| <= 1) as
+    /// the trees' `tweak_x`/`tweak_y` parameters.
+    TweakProject {
+        x: Option<NameId>,
+        y: Option<NameId>,
+    },
     Push(PushOp),
     CreateSlide {
         right: bool,
@@ -283,7 +304,30 @@ pub enum Beh {
         attr: Option<NameId>,
         value: Option<f32>,
     },
-    SetTurning,
+    /// SetTurning: the carve's tree parameters (`angleName`, `dirName`, `quicknessName`, `speedName`,
+    /// `holdingName`; motion-library names).
+    SetTurning {
+        names: [Option<NameId>; 5],
+    },
+    /// ApplyingBodyTilt: SettingBodyTilt runs while one of these does.
+    ApplyingBodyTilt,
+    /// SettingBodyTilt: the body tilt's tree parameter (`tilt_x`).
+    SettingBodyTilt(Option<NameId>),
+    /// Crouching: the crouch height's tree parameter (`crouchName`).
+    Crouching(Option<NameId>),
+    /// SetDistComToBoard: the centre of mass's height over the board as a tree parameter on begin
+    /// (`setManually`: a fixed height; `adjustForVel`: less the landing speed's share of a tick).
+    SetDistComToBoard {
+        attr: Option<NameId>,
+        manually: bool,
+        adjust: bool,
+    },
+    /// SetLandingData: the landing trees' `Spin`, `AvgVelY` and `disttocog`.
+    SetLandingData,
+    /// StoreLandingData: tracks the landing speed.
+    StoreLandingData,
+    /// SetManualAngle: the manual trees' `manual_angle`.
+    SetManualAngle,
     // Action graph:
     MgFromAg {
         mg: Str,
@@ -308,8 +352,59 @@ pub enum Beh {
         angle: Str,
     },
     BodyFlippingSignal,
+    /// Pumping (SK8 pumping_channel.rs): pump layers (`B_PUMP` on channels) whose weight follows the
+    /// physics' pumping.
+    Pumping,
+    /// PowerSlideSpin: the slide tree's spin (`slidespin`) from the travel along the board, on begin.
+    SlideSpin(Option<NameId>),
+    /// PowerSlideDecel: the slide tree's lean (`decel`) from the speed along the ground, smoothed.
+    SlideDecel(Option<NameId>),
+    /// SetBumpCoefficients: the bump trees' direction and weight from the board's bump (`X`, `Y`).
+    BumpCoefs {
+        x: Option<NameId>,
+        y: Option<NameId>,
+    },
+    /// MatchTwistAndLean: the body's twist and lean as tree parameters (on begin, or every update with
+    /// `update="always"`).
+    TwistLean {
+        always: bool,
+        twist: Option<NameId>,
+        lean: Option<NameId>,
+    },
+    /// Wipeout: the bail trees' lean, twist and the stick's wipeout gesture, rate-limited.
+    Wipeout {
+        lean: Option<NameId>,
+        twist: Option<NameId>,
+        gesture_x: Option<NameId>,
+        gesture_y: Option<NameId>,
+    },
+    /// EnableWipeoutGestures: the stick steers the wipeout gesture while it runs.
+    WipeoutGestures,
+    /// CharacterGesture: the d-pad's gestures on the gesture channels.
+    CharacterGesture,
+    /// BodySpin (SK8 motion_spin.rs): the body spin channels (`IA_BODYSPIN_OLLIE_FS/BS`) over the air
+    /// animation, their influence from the `BodySpin` intent.
+    BodySpin,
+    /// ControlAirLegExtension: the arms' reach in the air (`EXTEND`) against seconds coming down.
+    AirLegExtension(Option<NameId>),
+    /// SetDeckPitchAndYaw: the posed deck's yaw and pitch against the body as tree parameters on begin.
+    DeckPitchAndYaw {
+        yaw: Option<NameId>,
+        pitch: Option<NameId>,
+    },
     /// FakieHeadChannel: the fakie head and torso channel.
     FakieHead,
+    /// GrindControlFade: the grind trees' height (`distBoardToCogAnimAttribute`) on begin and their
+    /// twist (`twistAnimAttribute`) following an intent (`twistMGIntent`, `GrindBalanceX`).
+    GrindFade {
+        height: Option<NameId>,
+        twist: Option<NameId>,
+        intent: Str,
+    },
+    /// ControlGrindCrouch: the grind trees' height (`driveDistToCom`) from the crouch.
+    GrindCrouch(Option<NameId>),
+    /// CreateGrindAttributes: the grind's name and which way the rider faces as packet values.
+    GrindAttributes,
     /// Behaviours with nothing to do in flatground (hand services, debug text, off-board helpers).
     Nothing,
     Unsupported(Str),
@@ -502,7 +597,6 @@ const FIXED_FALSE: &[&str] = &[
     "OBTimeToLand",
     "OBTrajTime",
     "MongoPushFootToFar",
-    "IsBumped",
     "IsProSkater",
     "IsLandingIntoGrind",
     "WipeoutTimeSinceContact",
@@ -612,6 +706,7 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
         "DistToEdge" => Cond::DistToEdge(n()),
         "AngleAdjustByAnimationEndLessThan" => Cond::AngleAdjustLess,
         "IsBodyFlipping" => Cond::BodyFlipping,
+        "IsBumped" => Cond::Bumped,
         "IsDoneWipingOut" => Cond::DoneWipingOut,
         "IsTimeToLand" => Cond::TimeToLand(n()),
         _ if FIXED_FALSE.contains(&name) => Cond::Fixed(false),
@@ -627,32 +722,17 @@ const NOTHING: &[&str] = &[
     "JuiceHook",
     "HandBusy",
     "EndGesture",
-    "CharacterGesture",
     "SetScoreAugmentation",
-    "ControlAirLegExtension",
-    "MatchTwistAndLean",
-    "ApplyingBodyTilt",
-    "SettingBodyTilt",
-    "Crouching",
-    "Pumping",
     "BipedCadence",
     "MatchCadence",
     "MatchAirTime",
     "OffboardBodyTweakBlend",
-    "SetDistComToBoard",
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
-    "GrindControlFade",
-    "ControlGrindCrouch",
-    "CreateGrindAttributes",
-    "SetDeckPitchAndYaw",
-    "SetBumpCoefficients",
-    "TweakProject",
     "UpdateIsWeightOnNose",
     "FootPlantAbsorb",
     "SetHandPlantAnticLength",
     "ScoringHandPlants",
-    "BodySpin",
     "AirDismounting",
     "InitMovingObjects",
     "MovingObject",
@@ -661,20 +741,13 @@ const NOTHING: &[&str] = &[
     "Shove",
     "HippyJumpAntic",
     "LandOnBoard",
-    "StoreLandingData",
-    "SetLandingData",
     "AddRunoutAttribs",
-    "Wipeout",
-    "EnableWipeoutGestures",
     "ToggleBoard",
     "ResetSkaterAnimation",
     "ResetToGivenStance",
     "EndShimmy",
     "FingerFlipOut",
-    "PowerSlideDecel",
     "PowerSlideManualAtt",
-    "PowerSlideSpin",
-    "SetManualAngle",
     "SetDeckPitch",
 ];
 /// Off-board and NPC behaviours flatground doesn't run (logged once as unsupported when reached).
@@ -797,7 +870,26 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         "ResetTimeSinceKickturn" => Beh::ResetTimeSinceKickturn,
         "UpdateTimeSinceKickturn" => Beh::UpdateTimeSinceKickturn,
         "SetGrabType" => Beh::SetGrabType(a.str("grab")),
-        "ScoringGrabs" => Beh::ScoringGrabs,
+        "ScoringGrabs" => Beh::ScoringGrabs(GrabScore {
+            base: a.str("grabName"),
+            dirs: [a.str("up"), a.str("left"), a.str("down"), a.str("right")],
+            x: if a.get("intentX").is_some() {
+                a.str("intentX")
+            } else {
+                a.str("angle")
+            },
+            y: if a.get("intentY").is_some() {
+                a.str("intentY")
+            } else {
+                a.str("magnitude")
+            },
+            invert_y: a.b("invertY", false),
+            polar: a.get("intentX").is_none(),
+        }),
+        "TweakProject" => Beh::TweakProject {
+            x: lib("tweak_x"),
+            y: lib("tweak_y"),
+        },
         "InitPush" => Beh::Push(PushOp::Init),
         "PushCycle" => Beh::Push(PushOp::Cycle {
             foot: match a.get("newPushName") {
@@ -825,7 +917,27 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
             attr: a.text("attribute").and_then(lib),
             value: a.of("setToValue"),
         },
-        "SetTurning" => Beh::SetTurning,
+        "SetTurning" => Beh::SetTurning {
+            names: [
+                ("angleName", "angle"),
+                ("dirName", "dir"),
+                ("quicknessName", "quickness"),
+                ("speedName", "speedtuck"),
+                ("holdingName", "holding"),
+            ]
+            .map(|(k, d)| lib(a.text(k).unwrap_or(d))),
+        },
+        "ApplyingBodyTilt" => Beh::ApplyingBodyTilt,
+        "SettingBodyTilt" => Beh::SettingBodyTilt(lib(a.text("tilt_x").unwrap_or("tilt_x"))),
+        "Crouching" => Beh::Crouching(a.text("crouchName").and_then(lib)),
+        "SetDistComToBoard" => Beh::SetDistComToBoard {
+            attr: a.text("attribute").and_then(lib),
+            manually: a.b("setManually", false),
+            adjust: a.b("adjustForVel", false),
+        },
+        "SetLandingData" => Beh::SetLandingData,
+        "StoreLandingData" => Beh::StoreLandingData,
+        "SetManualAngle" => Beh::SetManualAngle,
         "CreateMGIntentFromAGIntent" => Beh::MgFromAg {
             mg: a.str("MGIntent"),
             ag: a.str("AGIntent"),
@@ -857,7 +969,42 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
             angle: a.str("MGIntentAngle"),
         },
         "BodyFlippingSignal" => Beh::BodyFlippingSignal,
+        "Pumping" => Beh::Pumping,
+        "PowerSlideSpin" => Beh::SlideSpin(lib("slidespin")),
+        "PowerSlideDecel" => Beh::SlideDecel(lib("decel")),
+        "SetBumpCoefficients" => Beh::BumpCoefs {
+            x: lib(a.text("X").unwrap_or("BumpX")),
+            y: lib(a.text("Y").unwrap_or("BumpY")),
+        },
+        "MatchTwistAndLean" => Beh::TwistLean {
+            always: a.text("update") == Some("always"),
+            twist: lib("Twist"),
+            lean: lib("Lean"),
+        },
+        "Wipeout" => Beh::Wipeout {
+            lean: lib("Lean"),
+            twist: lib("Twist"),
+            gesture_x: lib("WipeoutGestureX"),
+            gesture_y: lib("WipeoutGestureY"),
+        },
+        "EnableWipeoutGestures" => Beh::WipeoutGestures,
+        "CharacterGesture" => Beh::CharacterGesture,
         "FakieHeadChannel" => Beh::FakieHead,
+        "BodySpin" => Beh::BodySpin,
+        "ControlAirLegExtension" => Beh::AirLegExtension(lib("EXTEND").or_else(|| lib("extend"))),
+        "GrindControlFade" => Beh::GrindFade {
+            height: lib(a.text("distBoardToCogAnimAttribute").unwrap_or("DistToCog")),
+            twist: lib(a.text("twistAnimAttribute").unwrap_or("twist")),
+            intent: a.str("twistMGIntent"),
+        },
+        "ControlGrindCrouch" => {
+            Beh::GrindCrouch(lib(a.text("driveDistToCom").unwrap_or("disttocog")))
+        }
+        "CreateGrindAttributes" => Beh::GrindAttributes,
+        "SetDeckPitchAndYaw" => Beh::DeckPitchAndYaw {
+            yaw: a.text("yaw").and_then(lib),
+            pitch: a.text("pitch").and_then(lib),
+        },
         _ if NOTHING.contains(&name) => Beh::Nothing,
         _ if UNSUPPORTED.contains(&name) => Beh::Unsupported(NONE),
         _ => Beh::Unsupported(NONE),
@@ -927,4 +1074,25 @@ pub fn coverage<'a>(p: &Pack<'a>, ops: &[Op]) -> (usize, usize, Vec<&'a str>) {
         })
         .count();
     (ops.len() - unsupported - fixed, fixed, names)
+}
+
+/// The pump layer's tree.
+pub const PUMP_TREE: &str = "B_PUMP";
+/// The d-pad's gestures (left, right, up, down; flatground's choice from Skate 3's gesture catalogue,
+/// SK8 motion_character_gesture.rs) and their clips' stages: `<name>_BOTH_<INTO|CYC|OUT>`.
+pub const GESTURES: [&str; 4] = [
+    "B_GSTR_SHRUG",
+    "B_GSTR_PEACE",
+    "B_GSTR_SHAKA",
+    "B_GSTR_SURFSUP",
+];
+pub const GESTURE_STAGES: [&str; 3] = ["INTO", "CYC", "OUT"];
+
+/// A d-pad gesture's clip name for a stage.
+pub fn gesture_clip(direction: usize, stage: usize) -> alloc::string::String {
+    alloc::format!(
+        "{}_BOTH_{}",
+        GESTURES[direction.min(3)],
+        GESTURE_STAGES[stage.min(2)]
+    )
 }

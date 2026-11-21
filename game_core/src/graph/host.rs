@@ -17,6 +17,10 @@ use alloc::vec::Vec;
 use super::ops::{self, Beh, Cond, Flag, Group, Hook, Op, PushOp, phys};
 use super::playback::{ChannelSettings, Player, PoseProgram, Tree};
 use super::push::{self, PushCurves, PushSets, PushState};
+use super::riding::{
+    BodyTilt, Conditioner, Crouch, CrouchIntents, CrouchPhysical, GrindFade, LandingStore,
+    ManualAngle, TurnContext, TurnInput, TurnOutput, Turning,
+};
 use super::{Controller, Frame, Graph, NONE, OpId, Pack, Str};
 use crate::motion::tree::{Attr, Playback, PoseCommand};
 use crate::motion::{KIND_CURVE, KIND_SCALAR, MotionDb, NameId};
@@ -101,17 +105,46 @@ pub struct World {
     pub can_land: bool,
     /// Centre-of-mass velocity in the board's frame (x right, y up, z forward).
     pub com_vel: [f32; 3],
-    /// The rider is crouched (0..1).
-    pub crouch: f32,
+    /// The trucks or the deck touch something (grinding); wheels alone don't count.
     pub trucks_or_deck: bool,
     pub dist_to_edge: f32,
     /// Grind trick-out side allowed: 0 normal, 1 left, 2 right.
     pub grind_out: u8,
     pub blunting: bool,
+    /// Grinding facing backwards (SK8 CreateGrindAttributes' `GrindFacingBackwards`).
+    pub grind_backwards: bool,
     pub on_stairs: bool,
     /// The physics' powerslide: 0 none, 1 to the left, 2 to the right; and whether it is ending.
     pub slide: u8,
     pub slide_ending: bool,
+    /// What the riding animation reads (`graph::riding`): the processed turn input (-1..1), the lean
+    /// into the turn the physics aims for (rad), speed along the ground (m/s), world up along the
+    /// board's right side, the body's spin speed (rad/s), vertical speed and speed along the surface's
+    /// up (m/s), pumping potential (0..1), and the board's yaw rate at the landing (rad/s).
+    pub turn: f32,
+    pub lean: f32,
+    pub ground_speed: f32,
+    pub lateral_up: f32,
+    pub body_spin: f32,
+    pub vel_y: f32,
+    pub vel_up: f32,
+    pub pump_potential: f32,
+    pub landing_spin: f32,
+    /// The physics is turning a body flip (`IsBodyFlipping`).
+    pub body_flipping: bool,
+    /// The physics' pumping acceleration (Pumping).
+    pub pump_acc: f32,
+    /// The deck's travel along its nose (-1 backwards .. 1 forwards; PowerSlideSpin).
+    pub slide_dir: f32,
+    /// The board's acceleration along the ground in its frame (x right, z forward; m/s^2), with the
+    /// deck's and the ground's up taken out (SK8 ground_acceleration.rs).
+    pub ground_acc: [f32; 2],
+    /// The body's lean (about the travel) and twist (about up) while wiping out (rad).
+    pub hips: [f32; 2],
+    /// The main stick while wiping out (the wipeout gesture), none otherwise.
+    pub wipe_stick: Option<[f32; 2]>,
+    /// The pushing feet against the deck (along its nose, up; m): left, right (PushOut).
+    pub feet: [[f32; 2]; 2],
 }
 
 impl Default for World {
@@ -138,14 +171,30 @@ impl Default for World {
             landing_type: 0,
             can_land: true,
             com_vel: [0.0; 3],
-            crouch: 0.0,
-            trucks_or_deck: true,
+            trucks_or_deck: false,
             dist_to_edge: 10.0,
             grind_out: 0,
             blunting: false,
+            grind_backwards: false,
             on_stairs: false,
             slide: 0,
             slide_ending: false,
+            turn: 0.0,
+            lean: 0.0,
+            ground_speed: 0.0,
+            lateral_up: 0.0,
+            body_spin: 0.0,
+            vel_y: 0.0,
+            vel_up: 0.0,
+            pump_potential: 0.0,
+            landing_spin: 0.0,
+            body_flipping: false,
+            pump_acc: 0.0,
+            slide_dir: 1.0,
+            ground_acc: [0.0; 2],
+            hips: [0.0; 2],
+            wipe_stick: None,
+            feet: [[0.0; 2]; 2],
         }
     }
 }
@@ -162,6 +211,41 @@ struct Inst {
     s2: Str,
 }
 
+/// Per-behaviour state of the riding behaviours (`graph::riding`), kept only for the few operations
+/// that have one.
+#[derive(Clone, Copy, Debug)]
+enum RidingInst {
+    Turning(Turning),
+    Tilt(BodyTilt),
+    Crouch(Crouch),
+    Manual(ManualAngle),
+    Value(f32),
+    Spin(SpinChannels),
+    Fade(GrindFade),
+}
+
+/// BodySpin's state (SK8 motion_spin.rs): its mode (0 idle, 1 armed, 2 spinning on the ground or
+/// starting, 3 spinning in the air, 4 off: hands busy or grinding) and the two channels' influences and
+/// their rates.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpinChannels {
+    mode: u8,
+    front: f32,
+    front_d: f32,
+    back: f32,
+    back_d: f32,
+}
+
+/// The body spin channels' clips, and their names (ids no graph string has).
+pub const SPIN_FRONT: &str = "IA_BODYSPIN_OLLIE_FS_0_N";
+pub const SPIN_BACK: &str = "IA_BODYSPIN_OLLIE_BS_0_N";
+pub const CHANNEL_SPIN_FRONT: u16 = NONE - 2;
+pub const CHANNEL_SPIN_BACK: u16 = NONE - 3;
+/// The spin intent past which a spin channel starts (SK8's 0.3), and the time to land under which none
+/// starts (flatground's stand-in for SK8's prelanding query).
+const SPIN_START: f32 = 0.3;
+const SPIN_NEAR_LANDING: f32 = 0.25;
+
 /// Names the runner itself reads or writes.
 #[derive(Clone, Copy, Debug)]
 pub struct Names {
@@ -174,6 +258,7 @@ pub struct Names {
     pub is_dark: Str,
     pub tweak_x: Str,
     pub tweak_y: Str,
+    pub phys_body_spin: Str,
     pub pushing: Str,
     pub new_push: Str,
     /// The push trees' parameters (motion-library names): `HSTR_VEL_B`, `LSTR_VEL_B`, `VEL_E`.
@@ -186,6 +271,37 @@ pub struct Names {
     random_key: Option<NameId>,
     manual_into: Option<NameId>,
     default_cyc: Option<NameId>,
+    /// Riding: the playing clips' centre-of-mass height (`DISTTOCOG`), the landing trees' `Spin`,
+    /// `AvgVelY` and `disttocog`, the manual trees' `manual_angle`.
+    disttocog: Option<NameId>,
+    spin: Option<NameId>,
+    avg_vel_y: Option<NameId>,
+    manual_angle: Option<NameId>,
+    /// Graph strings: the intents the riding behaviours read and the packet values they emit.
+    fakie_turn: Str,
+    left_slide: Str,
+    right_slide: Str,
+    crouch: Str,
+    hard_turn_crouch: Str,
+    manual: Str,
+    auto_pump_angle: Str,
+    auto_pump_mag: Str,
+    turn_packet: Str,
+    slide_packet: Str,
+    new_auto_pump: Str,
+    player_pump: Str,
+    /// BodyFlippingSignal's action intents and the motion intents it makes of them.
+    front_flip: Str,
+    back_flip: Str,
+    body_spin: Str,
+    /// CreateGrindAttributes' packet values.
+    grind_backwards: Str,
+    grind_forwards: Str,
+    spin_front: Option<crate::motion::Node>,
+    /// The pump layer's tree (`B_PUMP`) and PushOut's parameters (`OUTDISTANCEX`, `OUTDISTANCEY`).
+    pump_tree: Option<crate::motion::Node>,
+    pub out_distance: [Option<NameId>; 2],
+    spin_back: Option<crate::motion::Node>,
 }
 
 /// Mutable state both graphs share.
@@ -203,6 +319,8 @@ pub struct Shared {
     pub tricks_disabled: f32,
     pub time_since_kickturn: f32,
     pub grab: Str,
+    /// The grab's scored name this tick (ScoringGrabs), or `NONE`.
+    pub grab_score: Str,
     /// The trick being scored (ScoringTrick), or `NONE`.
     pub trick: Str,
     /// Tree construction values: (key, value) as motion-library names (`Trick`, `Random`, ...).
@@ -228,6 +346,23 @@ pub struct Shared {
     pub push_speed: f32,
     /// Seconds since the rider was (re)placed on the board.
     pub time_since_teleport: f32,
+    /// The physics' animation turn conditioner and this tick's output (SetTurning reads it).
+    pub conditioner: Conditioner,
+    pub turn_out: TurnOutput,
+    /// ApplyingBodyTilt is running (SettingBodyTilt sets `TILT_X` only then).
+    pub applying_tilt: bool,
+    /// StoreLandingData's landing speed.
+    pub landing: LandingStore,
+    /// The rider's centre of mass over the board (m): the playing clips' `DISTTOCOG`.
+    pub com_height: f32,
+    /// BodyFlippingSignal's windows (s): since the flip gesture, since take-off; and the flip chosen.
+    pub flip_signal: (f32, f32, Option<usize>),
+    /// EnableWipeoutGestures is on, and the wipeout gesture (x, y) the stick has steered.
+    pub wipe_gestures: bool,
+    pub wipe_gesture: [f32; 2],
+    /// The d-pad gesture playing (CharacterGesture): direction (0 left, 1 right, 2 up, 3 down) and
+    /// stage (0 into, 1 cycle, 2 out).
+    pub gesture: Option<(u8, u8)>,
 }
 
 impl Shared {
@@ -444,6 +579,9 @@ pub struct Runner<'a> {
     mg_ops: Vec<Op>,
     ag_inst: Vec<Inst>,
     mg_inst: Vec<Inst>,
+    /// The riding behaviours' state, by operation (few operations have one).
+    ag_riding: Vec<(OpId, RidingInst)>,
+    mg_riding: Vec<(OpId, RidingInst)>,
     pub ag_ctl: Controller,
     pub mg_ctl: Controller,
     pub s: Shared,
@@ -458,6 +596,11 @@ pub const ACTION: &str = "ActionGraph_OnBoard";
 pub const FAKIE_CHANNEL: &str = "B_FAKIE_CHANNEL";
 /// The channel's name (an id no graph string has).
 pub const CHANNEL_FAKIE: u16 = NONE - 1;
+/// The pump layers' channels (SK8 `PUMP0`..`PUMP4`) and the d-pad gesture's (`GestureBoth`).
+pub const CHANNEL_PUMP: u16 = NONE - 10;
+pub const PUMP_CHANNELS: u16 = 5;
+pub const CHANNEL_GESTURE: u16 = NONE - 20;
+pub use super::ops::{GESTURE_STAGES, GESTURES, PUMP_TREE, gesture_clip};
 pub const MOTION: &str = "MotionGraph_OnBoard";
 
 impl<'a> Runner<'a> {
@@ -507,6 +650,7 @@ impl<'a> Runner<'a> {
             is_dark: id("IsDark"),
             tweak_x: id("TweakX"),
             tweak_y: id("TweakY"),
+            phys_body_spin: id("PhysBodySpin"),
             pushing: id("Pushing"),
             new_push: id("NewPush"),
             push_params: ["HSTR_VEL_B", "LSTR_VEL_B", "VEL_E"]
@@ -517,6 +661,31 @@ impl<'a> Runner<'a> {
             random_key: lib("Random"),
             manual_into: lib("manualInto"),
             default_cyc: lib("defaultcyc"),
+            disttocog: lib("DISTTOCOG"),
+            spin: lib("Spin"),
+            avg_vel_y: lib("AvgVelY"),
+            manual_angle: lib("manual_angle"),
+            fakie_turn: id("FakieTurn"),
+            left_slide: id("LeftSlide"),
+            right_slide: id("RightSlide"),
+            crouch: id("Crouch"),
+            hard_turn_crouch: id("HardTurnCrouch"),
+            manual: id("Manual"),
+            auto_pump_angle: id("AutoPumpAngle"),
+            auto_pump_mag: id("AutoPumpMag"),
+            turn_packet: id("Turn"),
+            slide_packet: id("Slide"),
+            new_auto_pump: id("NewAutoPump"),
+            grind_backwards: id("GrindFacingBackwards"),
+            grind_forwards: id("GrindFacingForwards"),
+            player_pump: id("PlayerControlledPump"),
+            front_flip: id("FrontFlip"),
+            back_flip: id("BackFlip"),
+            body_spin: id("BodySpin"),
+            spin_front: db.and_then(|d| d.find(SPIN_FRONT)),
+            pump_tree: db.and_then(|d| d.find(PUMP_TREE)),
+            out_distance: [lib("OUTDISTANCEX"), lib("OUTDISTANCEY")],
+            spin_back: db.and_then(|d| d.find(SPIN_BACK)),
         };
         let mut last_sources = Vec::new();
         for o in &mg_ops {
@@ -559,6 +728,8 @@ impl<'a> Runner<'a> {
         Some(Runner {
             ag_inst: vec![Inst::default(); ag_ops.len()],
             mg_inst: vec![Inst::default(); mg_ops.len()],
+            ag_riding: Vec::new(),
+            mg_riding: Vec::new(),
             ag_ops,
             mg_ops,
             ag_ctl,
@@ -576,6 +747,7 @@ impl<'a> Runner<'a> {
                 tricks_disabled: 0.0,
                 time_since_kickturn: 10.0,
                 grab: NONE,
+                grab_score: NONE,
                 trick: NONE,
                 construction: Vec::new(),
                 underflip_requested: false,
@@ -596,6 +768,17 @@ impl<'a> Runner<'a> {
                 },
                 push_speed: 0.0,
                 time_since_teleport: 0.0,
+                conditioner: Conditioner::default(),
+                turn_out: [0.0; 8],
+                applying_tilt: false,
+                landing: LandingStore::default(),
+                com_height: crate::tuning::AnimTuning::BUILT_IN
+                    .crouch_max_height
+                    .eval(0.0),
+                flip_signal: (0.0, 0.0, None),
+                wipe_gestures: false,
+                wipe_gesture: [0.0; 2],
+                gesture: None,
             },
             names,
             gestures,
@@ -630,10 +813,34 @@ impl<'a> Runner<'a> {
     /// One tick: `ag` must already hold this tick's action-graph intents (from the pad).
     pub fn update(&mut self, db: Option<&MotionDb>, dt: f32) {
         self.s.packet.clear();
+        self.s.grab_score = NONE;
         self.s.kickturn = None;
         self.s.tricks_disabled = (self.s.tricks_disabled - dt).max(0.0);
         self.s.time_since_kickturn += dt;
         self.s.time_since_teleport += dt;
+        // The physics' animation turn conditioner runs once per physics update (SK8
+        // physical_feedback.rs), before the graphs read it.
+        let w = self.s.world;
+        let anim = self.s.push_curves.tuning.anim;
+        self.s.turn_out = self.s.conditioner.update(
+            TurnInput {
+                speed: w.speed,
+                wobble: 0.0,
+                lean: w.lean,
+                turn: w.turn,
+                ground: w.phys == phys::GROUND,
+                mirrored: w.mirrored,
+            },
+            &anim,
+        );
+        // The rider's centre-of-mass height over the board is where the playing clips put it.
+        if let (Some(db), Some(n)) = (db, self.names.disttocog)
+            && let Some(a) = self.s.player.attribute(db, n)
+            && a.value().is_finite()
+            && a.value() > 0.0
+        {
+            self.s.com_height = a.value();
+        }
         {
             let g = &self.pack.graphs[self.action];
             let mut h = Host {
@@ -641,6 +848,7 @@ impl<'a> Runner<'a> {
                 g,
                 ops: &self.ag_ops,
                 inst: &mut self.ag_inst,
+                riding: &mut self.ag_riding,
                 s: &mut self.s,
                 n: &self.names,
                 db,
@@ -656,6 +864,7 @@ impl<'a> Runner<'a> {
                 g,
                 ops: &self.mg_ops,
                 inst: &mut self.mg_inst,
+                riding: &mut self.mg_riding,
                 s: &mut self.s,
                 n: &self.names,
                 db,
@@ -673,11 +882,12 @@ impl<'a> Runner<'a> {
     /// update resolves from the roots.
     pub fn reset(&mut self, db: Option<&MotionDb>) {
         for motion in [true, false] {
-            let (g, ops, inst, ctl) = if motion {
+            let (g, ops, inst, riding, ctl) = if motion {
                 (
                     &self.pack.graphs[self.motion],
                     &self.mg_ops,
                     &mut self.mg_inst,
+                    &mut self.mg_riding,
                     &mut self.mg_ctl,
                 )
             } else {
@@ -685,6 +895,7 @@ impl<'a> Runner<'a> {
                     &self.pack.graphs[self.action],
                     &self.ag_ops,
                     &mut self.ag_inst,
+                    &mut self.ag_riding,
                     &mut self.ag_ctl,
                 )
             };
@@ -693,6 +904,7 @@ impl<'a> Runner<'a> {
                 g,
                 ops,
                 inst,
+                riding,
                 s: &mut self.s,
                 n: &self.names,
                 db,
@@ -707,6 +919,9 @@ impl<'a> Runner<'a> {
         self.s.flags = [0; 7];
         self.s.push = PushState::default();
         self.s.time_since_teleport = 0.0;
+        self.s.applying_tilt = false;
+        self.mg_riding.clear();
+        self.ag_riding.clear();
     }
 
     /// What to pose this tick (the clips and how they blend, channels included); commits the clips'
@@ -766,6 +981,7 @@ struct Host<'x, 'a> {
     g: &'x Graph,
     ops: &'x [Op],
     inst: &'x mut [Inst],
+    riding: &'x mut Vec<(OpId, RidingInst)>,
     s: &'x mut Shared,
     n: &'x Names,
     db: Option<&'x MotionDb<'x>>,
@@ -893,7 +1109,8 @@ impl Host<'_, '_> {
             Cond::Tricking => s.flags[flag_index(Flag::Trick)] > 0,
             Cond::LandingType(t) => w.landing_type == t,
             Cond::CanLandOnBoard => w.can_land,
-            Cond::CrouchedForGrab => w.crouch > 0.5,
+            // SK8 IsCrouchedEnoughForBlendToGrabCycle: the centre of mass under 0.6 m over the board.
+            Cond::CrouchedForGrab => s.com_height < 0.6,
             // The physics decides powerslides (flatground's Skate 3 rules); the graph's side is the
             // rider's, flipped when rolling fakie (SK8 CanEnterSlide).
             Cond::ShouldLeaveSlide { .. } => w.slide == 0 || w.slide_ending,
@@ -914,7 +1131,13 @@ impl Host<'_, '_> {
             Cond::Apex => w.apex,
             Cond::DistToEdge(n) => n.matches(w.dist_to_edge),
             Cond::AngleAdjustLess => true,
-            Cond::BodyFlipping => false,
+            Cond::BodyFlipping => self.s.world.body_flipping,
+            Cond::Bumped => {
+                let m = self.s.push_curves.tuning.moves;
+                let [x, z] = self.s.world.ground_acc;
+                let x = x * m.bump_scale_x;
+                libm::sqrtf(x * x + z * z) > m.bump_min
+            }
             Cond::DoneWipingOut => w.phys != phys::WIPEOUT,
             Cond::Fixed(v) => v,
             Cond::Unsupported(n) => {
@@ -1202,16 +1425,20 @@ impl Host<'_, '_> {
                     self.s.kickturn = Some(*spin_scale);
                 }
             }
+            // SK8 riding: the timer starts when the manual ends (so a trick just after it still comes
+            // out of the manual), runs down only while not manualing, and stops when riding ends.
             Beh::SetManualOutTimer(len) => {
-                if phase == 0 {
+                if phase == 2 {
                     self.s.manual_out_timer = *len;
                 }
             }
-            Beh::UpdateManualOutTimer => {
-                if phase == 1 {
+            Beh::UpdateManualOutTimer => match phase {
+                1 if self.s.flags[flag_index(Flag::Manual)] == 0 => {
                     self.s.manual_out_timer = (self.s.manual_out_timer - dt).max(0.0);
                 }
-            }
+                2 => self.s.manual_out_timer = 0.0,
+                _ => {}
+            },
             Beh::DisableTricks(len) => {
                 if phase == 0 {
                     self.s.tricks_disabled = *len;
@@ -1222,13 +1449,150 @@ impl Host<'_, '_> {
                     self.s.time_since_kickturn = 0.0;
                 }
             }
-            Beh::UpdateTimeSinceKickturn | Beh::UpdateRidingFakie | Beh::SetTurning => {}
+            // The runner counts the time since the kick turn every tick; the physics decides riding
+            // fakie (its rolling direction).
+            Beh::UpdateTimeSinceKickturn | Beh::UpdateRidingFakie => {}
+            Beh::SetTurning { names } => self.set_turning(op, names, phase, dt),
+            Beh::ApplyingBodyTilt => match phase {
+                0 => self.s.applying_tilt = true,
+                2 => self.s.applying_tilt = false,
+                _ => {}
+            },
+            Beh::SettingBodyTilt(name) => {
+                if phase == 1 {
+                    let w = self.s.world;
+                    let anim = self.s.push_curves.tuning.anim;
+                    let on = self.s.applying_tilt;
+                    let RidingInst::Tilt(t) =
+                        self.riding_inst(op, || RidingInst::Tilt(BodyTilt::default()))
+                    else {
+                        return;
+                    };
+                    if on {
+                        let v = t.update(
+                            w.mirrored,
+                            w.lateral_up,
+                            w.body_spin,
+                            w.phys == phys::AIR,
+                            &anim,
+                        );
+                        if let Some(n) = name {
+                            self.s.player.set_param(*n, v, false);
+                        }
+                    } else {
+                        t.disable();
+                    }
+                }
+            }
+            Beh::Crouching(name) => self.crouching(op, *name, phase, dt),
+            Beh::SetDistComToBoard {
+                attr,
+                manually,
+                adjust,
+            } => {
+                if phase == 0
+                    && let Some(a) = attr
+                {
+                    // SK8 riding SetDistComToBoard: the physical height (0.65 when set by hand), less
+                    // the landing speed's share of this tick (at most 0.15) when asked.
+                    let height = if *manually { 0.65 } else { self.s.com_height };
+                    let correction = if *adjust {
+                        (dt * self.s.landing.landing_velocity).min(0.15)
+                    } else {
+                        0.0
+                    };
+                    self.s.player.set_param(*a, height - correction, false);
+                }
+            }
+            Beh::SetLandingData => match phase {
+                0 => {
+                    let w = self.s.world;
+                    let spin = if w.mirrored {
+                        w.landing_spin
+                    } else {
+                        -w.landing_spin
+                    };
+                    if let Some(n) = self.n.spin {
+                        self.s.player.set_param(n, spin, false);
+                    }
+                    if let Some(n) = self.n.avg_vel_y {
+                        let v = self.s.landing.landing_velocity;
+                        self.s.player.set_param(n, v, false);
+                    }
+                    let h = self.s.com_height;
+                    self.set_riding(op, RidingInst::Value(h));
+                }
+                1 => {
+                    if let (Some(n), Some(RidingInst::Value(h))) =
+                        (self.n.disttocog, self.get_riding(op))
+                    {
+                        self.s.player.set_param(n, h, false);
+                    }
+                }
+                _ => {}
+            },
+            Beh::StoreLandingData => {
+                if phase == 1 {
+                    let w = self.s.world;
+                    self.s.landing.update(w.phys == phys::AIR, w.vel_up);
+                }
+            }
+            Beh::SetManualAngle => match phase {
+                0 => self.set_riding(op, RidingInst::Manual(ManualAngle::default())),
+                1 => {
+                    let manual = self.s.mg.get(self.n.manual);
+                    let anim = self.s.push_curves.tuning.anim;
+                    let RidingInst::Manual(m) =
+                        self.riding_inst(op, || RidingInst::Manual(ManualAngle::default()))
+                    else {
+                        return;
+                    };
+                    let v = m.update(manual, &anim);
+                    if let Some(n) = self.n.manual_angle {
+                        self.s.player.set_param(n, v, false);
+                    }
+                }
+                _ => {}
+            },
             Beh::SetGrabType(g) => {
                 if phase == 0 {
                     self.s.grab = *g;
                 }
             }
-            Beh::ScoringGrabs => {}
+            Beh::ScoringGrabs(g) => {
+                if phase == 1 {
+                    let first = self.s.filtered.get(g.x).unwrap_or(0.0);
+                    let second = self.s.filtered.get(g.y).unwrap_or(0.0);
+                    let (x, y) = if g.polar {
+                        let y = second * libm::cosf(first);
+                        (second * libm::sinf(first), if g.invert_y { -y } else { y })
+                    } else {
+                        (first, second)
+                    };
+                    let has = g.dirs.map(|d| d != NONE);
+                    self.s.grab_score =
+                        crate::skater::grab_variant(has, x, y).map_or(g.base, |i| g.dirs[i]);
+                }
+            }
+            Beh::TweakProject { x, y } => {
+                if phase == 1 {
+                    let sx = self.s.filtered.get(self.n.tweak_x);
+                    let sy = self.s.filtered.get(self.n.tweak_y);
+                    if sx.is_some() || sy.is_some() {
+                        let (mut tx, mut ty) = (sx.unwrap_or(0.0), sy.unwrap_or(0.0));
+                        let total = tx.abs() + ty.abs();
+                        if total > 1.0 {
+                            tx /= total;
+                            ty /= total;
+                        }
+                        for (n, v) in [(*x, tx), (*y, ty)] {
+                            if let Some(n) = n {
+                                self.s.player.set_param(n, v, false);
+                            }
+                        }
+                    }
+                }
+            }
             Beh::Push(p) => self.push(op, *p, phase, dt),
             Beh::CreateSlide { right } => {
                 if phase == 0 {
@@ -1327,9 +1691,755 @@ impl Host<'_, '_> {
                     self.fakie_head(op);
                 }
             }
-            Beh::BodyFlippingSignal | Beh::Nothing => {}
+            Beh::BodySpin => match phase {
+                0 => self.set_riding(op, RidingInst::Spin(SpinChannels::default())),
+                1 => self.body_spin(op),
+                _ => {}
+            },
+            Beh::AirLegExtension(n) => match phase {
+                0 => self.set_riding(op, RidingInst::Value(0.0)),
+                1 => {
+                    // Seconds coming down (none while going up): the arms reach out as the rider falls.
+                    let w = self.s.world;
+                    let curve = self.s.push_curves.tuning.air_arm_extend;
+                    let RidingInst::Value(t) = self.riding_inst(op, || RidingInst::Value(0.0))
+                    else {
+                        return;
+                    };
+                    *t = if w.vel_y > 0.0 { 0.0 } else { *t + dt };
+                    let v = curve.eval(*t);
+                    if let Some(n) = n {
+                        self.s.player.set_param(*n, v, false);
+                    }
+                }
+                _ => {}
+            },
+            Beh::DeckPitchAndYaw { yaw, pitch } => {
+                // flatground's board isn't posed apart from the body: the deck is square to it.
+                if phase == 0 {
+                    for n in [yaw, pitch].into_iter().flatten() {
+                        self.s.player.set_param(*n, 0.0, false);
+                    }
+                }
+            }
+            Beh::GrindFade {
+                height,
+                twist,
+                intent,
+            } => {
+                let g = self.s.push_curves.tuning.grind;
+                match phase {
+                    0 => {
+                        // The height as the riding left it; the twist from the middle of its range.
+                        if let Some(h) = height {
+                            self.s.player.set_param(*h, self.s.com_height, false);
+                        }
+                        let mut f = GrindFade::default();
+                        let v = f.begin(0.5);
+                        if let Some(t) = twist {
+                            self.s.player.set_param(*t, v, true);
+                        }
+                        self.set_riding(op, RidingInst::Fade(f));
+                    }
+                    1 => {
+                        let input = self.s.mg.get(*intent).unwrap_or(0.0);
+                        let RidingInst::Fade(f) =
+                            self.riding_inst(op, || RidingInst::Fade(GrindFade::default()))
+                        else {
+                            return;
+                        };
+                        if let Some(v) = f.update(dt, input, &g)
+                            && let Some(t) = twist
+                        {
+                            self.s.player.set_param(*t, v, true);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Beh::GrindCrouch(name) => {
+                let g = self.s.push_curves.tuning.grind;
+                match phase {
+                    0 => self.set_riding(op, RidingInst::Value(self.s.com_height)),
+                    1 => {
+                        let intent = self.s.mg.get(self.n.crouch).unwrap_or(0.0);
+                        let RidingInst::Value(h) =
+                            self.riding_inst(op, || RidingInst::Value(g.height_max))
+                        else {
+                            return;
+                        };
+                        *h = super::riding::grind_crouch(*h, intent, 0.0, &g, dt);
+                        let v = *h;
+                        if let Some(n) = name {
+                            self.s.player.set_param(*n, v, false);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Beh::GrindAttributes => {
+                let w = self.s.world;
+                if phase == 1 && w.phys == phys::GRIND && w.grind != NONE {
+                    self.s.emit(w.grind, 1.0);
+                    let facing = if w.grind_backwards {
+                        self.n.grind_backwards
+                    } else {
+                        self.n.grind_forwards
+                    };
+                    self.s.emit(facing, 1.0);
+                }
+            }
+            Beh::BodyFlippingSignal => self.body_flip_signal(phase, dt),
+            Beh::Pumping => self.pumping(op, phase),
+            Beh::SlideSpin(n) => {
+                // SK8 PowerSlideSpin: on begin, the spin from how the deck travels along its nose.
+                if phase == 0
+                    && let Some(n) = *n
+                {
+                    let m = self.s.push_curves.tuning.moves;
+                    let v = -m.slide_spin.eval(self.s.world.slide_dir);
+                    self.s.player.set_param(n, v, false);
+                }
+            }
+            Beh::SlideDecel(n) => {
+                // SK8 PowerSlideDecel: the lean from the speed along the ground, smoothed.
+                let i = &mut self.inst[op as usize];
+                match phase {
+                    0 => i.v = 0.0,
+                    1 => {
+                        let m = self.s.push_curves.tuning.moves;
+                        let target = m.slide_speed_to_lean.eval(self.s.world.ground_speed);
+                        i.v = target * m.slide_smooth + (1.0 - m.slide_smooth) * i.v;
+                        if let Some(n) = *n {
+                            self.s.player.set_param(n, i.v, false);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Beh::BumpCoefs { x, y } => {
+                // SK8 SetBumpCoefficients (animation/bump.rs), on begin.
+                if phase == 0 {
+                    let m = self.s.push_curves.tuning.moves;
+                    let [ax, az] = self.s.world.ground_acc;
+                    let ax = ax * m.bump_scale_x;
+                    let mag = libm::sqrtf(ax * ax + az * az);
+                    let k =
+                        ((mag - m.bump_min) / (m.bump_max - m.bump_min).max(1e-3)).clamp(0.0, 1.0);
+                    let w = m.bump_min_blend + (1.0 - m.bump_min_blend) * k;
+                    let (dx, dz) = if mag > 1e-6 {
+                        (ax / mag, az / mag)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let sign = if self.s.world.mirrored { -1.0 } else { 1.0 };
+                    for (n, v) in [(*x, dx), (*y, dz)] {
+                        if let Some(n) = n {
+                            self.s.player.set_param(n, v * w * sign, false);
+                        }
+                    }
+                }
+            }
+            Beh::TwistLean {
+                always,
+                twist,
+                lean,
+            } => {
+                // SK8 MatchTwistAndLean: the body's twist (mirrored with the stance) and lean, read on
+                // begin (every update with `update="always"`).
+                let [hl, ht] = self.s.world.hips;
+                let tw = if self.s.world.mirrored { -ht } else { ht };
+                let i = &mut self.inst[op as usize];
+                if phase == 0 || (phase == 1 && *always) {
+                    i.v = tw;
+                    i.t = hl;
+                }
+                if phase == 1 {
+                    let (v, t) = (i.v, i.t);
+                    for (n, v) in [(*twist, v), (*lean, t)] {
+                        if let Some(n) = n {
+                            self.s.player.set_param(n, v, false);
+                        }
+                    }
+                }
+            }
+            Beh::Wipeout {
+                lean,
+                twist,
+                gesture_x,
+                gesture_y,
+            } => self.wipeout(op, phase, [*lean, *twist, *gesture_x, *gesture_y]),
+            Beh::WipeoutGestures => {
+                if phase != 1 {
+                    self.s.wipe_gestures = phase == 0;
+                }
+            }
+            Beh::CharacterGesture => self.character_gesture(phase),
+            Beh::Nothing => {}
             Beh::Unsupported(n) => self.s.unsupported(*n),
         }
+    }
+
+    /// Pumping (SK8 motion_execute_leaf.rs, animation/pumping_channel.rs): the physics' pumping
+    /// acceleration over `pump_max`, filtered and amplified, starts a pump layer (`B_PUMP` on a free
+    /// channel) each time it rises past `pump_new` and sets that layer's weight while it rises.
+    fn pumping(&mut self, op: OpId, phase: u8) {
+        let m = self.s.push_curves.tuning.moves;
+        if phase == 2 {
+            for k in 0..PUMP_CHANNELS {
+                self.s.player.end_channel(CHANNEL_PUMP - k);
+            }
+            return;
+        }
+        if phase != 1 {
+            return;
+        }
+        let input = (self.s.world.pump_acc / m.pump_max.max(1e-4)).clamp(0.0, 1.0);
+        let i = &mut self.inst[op as usize];
+        let previous = i.v;
+        i.d = input * m.pump_blend + (1.0 - m.pump_blend) * i.d;
+        i.v = m.pump_amplify.eval(i.d);
+        let (value, starts) = (i.v, previous <= m.pump_new && i.v > m.pump_new);
+        if starts {
+            let free = (0..PUMP_CHANNELS).find(|&k| !self.s.player.has_channel(CHANNEL_PUMP - k));
+            if let (Some(k), Some(db), Some(node)) = (free, self.db, self.n.pump_tree)
+                && let Ok(play) =
+                    Playback::build_node(db, node, &self.s.construction, &mut Vec::new())
+            {
+                let settings = ChannelSettings {
+                    priority: 0,
+                    keep_alive: false,
+                    speed: 1.0,
+                    blend_in: m.pump_blend_in,
+                    hold_in: false,
+                    blend_out: m.pump_blend_out,
+                    hold_out: true,
+                };
+                let tree = Tree {
+                    play,
+                    mirror: self.s.world.mirrored,
+                    name: NONE,
+                };
+                let blend = ops::TransitionDef {
+                    kind: 2,
+                    seconds: 0.1,
+                    under: false,
+                    matching: 0,
+                    channels_from_weights: false,
+                };
+                self.s.player.transition_channel(
+                    db,
+                    CHANNEL_PUMP - k,
+                    tree,
+                    settings,
+                    blend,
+                    true,
+                    true,
+                );
+                let i = &mut self.inst[op as usize];
+                i.n = k as i32;
+                i.t = value;
+            }
+        }
+        let i = &mut self.inst[op as usize];
+        if i.n >= 0 && value >= previous && value >= i.t {
+            i.t = value;
+            let c = CHANNEL_PUMP - i.n as u16;
+            self.s.player.set_channel_influence(c, value);
+        }
+    }
+
+    /// Wipeout (SK8 motion_wipeout_execute.rs): the bail trees' lean and twist follow the body's,
+    /// rate-limited; with EnableWipeoutGestures on, the stick steers the wipeout gesture (once it has
+    /// been let go to the middle, or after 80 ticks).
+    fn wipeout(&mut self, op: OpId, phase: u8, names: [Option<NameId>; 4]) {
+        let m = self.s.push_curves.tuning.moves;
+        let w = self.s.world;
+        let tau = crate::math::TAU;
+        let twist_now = {
+            let t = if w.mirrored { -w.hips[1] } else { w.hips[1] };
+            if t < 0.0 { t + tau } else { t }
+        };
+        let enabled = self.s.wipe_gestures;
+        let mut gesture = self.s.wipe_gesture;
+        let i = &mut self.inst[op as usize];
+        match phase {
+            0 => {
+                i.n = 0;
+                i.v = w.hips[0];
+                i.t = twist_now;
+                i.d = 0.0;
+                i.on = false;
+                gesture = [0.0; 2];
+            }
+            1 => {
+                if i.n > 80 {
+                    i.on = true;
+                }
+                if enabled {
+                    let target = (1.0 - m.wipe_lean_blend) * i.v + w.hips[0] * m.wipe_lean_blend;
+                    i.v += (target - i.v).clamp(-m.wipe_lean_vel, m.wipe_lean_vel);
+                    let mut delta = twist_now - i.t;
+                    if delta > crate::math::PI {
+                        delta -= tau;
+                    } else if delta < -crate::math::PI {
+                        delta += tau;
+                    }
+                    let mut vel =
+                        (delta * m.wipe_twist_blend).clamp(-m.wipe_twist_vel, m.wipe_twist_vel);
+                    if i.n >= 2 {
+                        vel = (vel - i.d).clamp(-m.wipe_twist_acc, m.wipe_twist_acc) + i.d;
+                    }
+                    i.d = vel;
+                    let t = (i.t + vel) % tau;
+                    i.t = if t < 0.0 { t + tau } else { t };
+                    let [xv, yv] = w.wipe_stick.unwrap_or([0.0; 2]);
+                    if !i.on && w.wipe_stick.is_some() && xv.abs() < 0.1 && yv.abs() < 0.1 {
+                        i.on = true;
+                    }
+                    if i.on {
+                        gesture[0] = (1.0 - m.wipe_gesture_x_blend) * gesture[0]
+                            + xv * m.wipe_gesture_x_blend;
+                        gesture[1] = (1.0 - m.wipe_gesture_y_blend) * gesture[1]
+                            + yv * m.wipe_gesture_y_blend;
+                    }
+                }
+                i.n = i.n.saturating_add(1);
+            }
+            _ => return,
+        }
+        let values = [i.v, i.t, gesture[0], gesture[1]];
+        self.s.wipe_gesture = gesture;
+        if phase == 1 {
+            for (n, v) in names.into_iter().zip(values) {
+                if let Some(n) = n {
+                    self.s.player.set_param(n, v, false);
+                }
+            }
+        }
+    }
+
+    /// CharacterGesture (SK8 motion_character_gesture.rs): a d-pad press (`GestureLeftStart` ...)
+    /// plays that direction's gesture on the gesture channel (both hands: flatground's hands are always
+    /// free on the board): its `INTO` clip, the `CYC` clip while the d-pad is held, then `OUT`; another
+    /// direction takes over; a forced brake doesn't start one.
+    fn character_gesture(&mut self, phase: u8) {
+        if phase == 2 {
+            self.s.player.end_channel(CHANNEL_GESTURE);
+            self.s.gesture = None;
+            return;
+        }
+        if phase != 1 {
+            return;
+        }
+        let Some(db) = self.db else { return };
+        let pack = self.p;
+        let id = |n: &str| pack.find(n).unwrap_or(NONE);
+        let mg = &self.s.mg;
+        let has = |n: Str| n != NONE && mg.has(n);
+        let starts = [
+            (3u8, id("GestureDownStart")),
+            (0, id("GestureLeftStart")),
+            (2, id("GestureUpStart")),
+            (1, id("GestureRightStart")),
+        ];
+        let held = [
+            id("GestureLeftHeld"),
+            id("GestureRightHeld"),
+            id("GestureUpHeld"),
+            id("GestureDownHeld"),
+        ]
+        .map(has);
+        let braking = has(id("ForceBrake"));
+        let selected = starts.iter().find(|(_, n)| has(*n)).map(|(d, _)| *d);
+        // The channel went (faded out): the gesture is over.
+        if self.s.gesture.is_some() && !self.s.player.has_channel(CHANNEL_GESTURE) {
+            self.s.gesture = None;
+        }
+        let current = self.s.gesture;
+        let start = selected
+            .filter(|&d| !braking && current.is_none_or(|(c, _)| !held[c as usize] && c != d));
+        let play = |s: &mut Shared, direction: u8, stage: u8| -> bool {
+            let first = stage == 0;
+            let Some(node) = db.find(&gesture_clip(direction as usize, stage as usize)) else {
+                return false;
+            };
+            let Ok(play) = Playback::build_node(db, node, &Vec::new(), &mut Vec::new()) else {
+                return false;
+            };
+            let settings = ChannelSettings {
+                priority: 0,
+                keep_alive: stage == 1,
+                speed: 1.0,
+                blend_in: 0.1,
+                hold_in: first,
+                blend_out: 0.1,
+                hold_out: true,
+            };
+            let blend = ops::TransitionDef {
+                kind: if first { 2 } else { 4 },
+                seconds: if first { 0.2 } else { 0.0 },
+                under: false,
+                matching: 0,
+                channels_from_weights: false,
+            };
+            let tree = Tree {
+                play,
+                mirror: false,
+                name: NONE,
+            };
+            s.player
+                .transition_channel(db, CHANNEL_GESTURE, tree, settings, blend, true, true);
+            true
+        };
+        if let Some(d) = start {
+            if play(self.s, d, 0) {
+                self.s.gesture = Some((d, 0));
+            }
+            return;
+        }
+        let Some((d, stage)) = current else { return };
+        let remaining = self.s.player.channel_remaining(CHANNEL_GESTURE);
+        if self.s.player.channel_in_transition(CHANNEL_GESTURE) || remaining >= 0.1 {
+            return;
+        }
+        match stage {
+            0 => {
+                if play(self.s, d, 1) {
+                    self.s.gesture = Some((d, 1));
+                }
+            }
+            1 if !held[d as usize] => {
+                if play(self.s, d, 2) {
+                    self.s.gesture = Some((d, 2));
+                }
+            }
+            2 => {
+                self.s.player.end_channel(CHANNEL_GESTURE);
+                self.s.gesture = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// BodyFlippingSignal (SK8 input/body_flip_signal.rs): a `FrontFlip` or `BackFlip` gesture (the
+    /// left stick's, counted only while grabbing and not pushing) becomes that motion intent while the
+    /// gesture is recent (`extend_bodyflip_gesture`) and the rider has just left the ground
+    /// (`extend_takeoff_point`); otherwise neither.
+    fn body_flip_signal(&mut self, phase: u8, dt: f32) {
+        let m = self.s.push_curves.tuning.moves;
+        let (gw, tw) = (m.flip_gesture_window, m.flip_takeoff_window);
+        let names = [self.n.front_flip, self.n.back_flip];
+        let st = &mut self.s.flip_signal;
+        match phase {
+            0 => *st = (gw, tw, st.2),
+            1 => {
+                match names.iter().position(|&n| n != NONE && self.s.ag.has(n)) {
+                    Some(i) => {
+                        st.0 = 0.0;
+                        st.2 = Some(i);
+                    }
+                    None => st.0 = (st.0 + dt).min(gw),
+                }
+                let gesture = st.0 < gw;
+                st.1 = if self.s.world.phys == phys::AIR {
+                    (st.1 + dt).min(tw)
+                } else {
+                    0.0
+                };
+                let takeoff = st.1 > 0.0 && st.1 < tw;
+                let chosen = if gesture && takeoff { st.2 } else { None };
+                for (i, &n) in names.iter().enumerate() {
+                    if n == NONE {
+                        continue;
+                    }
+                    if chosen == Some(i) {
+                        self.s.mg.set(n, 1.0);
+                    } else {
+                        self.s.mg.remove(n);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn get_riding(&self, op: OpId) -> Option<RidingInst> {
+        self.riding.iter().find(|r| r.0 == op).map(|r| r.1)
+    }
+
+    fn set_riding(&mut self, op: OpId, v: RidingInst) {
+        match self.riding.iter_mut().find(|r| r.0 == op) {
+            Some(r) => r.1 = v,
+            None => self.riding.push((op, v)),
+        }
+    }
+
+    /// The operation's riding state, made with `init` if it has none yet.
+    fn riding_inst(&mut self, op: OpId, init: impl FnOnce() -> RidingInst) -> &mut RidingInst {
+        let i = match self.riding.iter().position(|r| r.0 == op) {
+            Some(i) => i,
+            None => {
+                self.riding.push((op, init()));
+                self.riding.len() - 1
+            }
+        };
+        &mut self.riding[i].1
+    }
+
+    /// SetTurning (SK8 set_turning.rs): the carve's tree parameters from the turn conditioner, and the
+    /// `Turn` / `Slide` packet values.
+    fn set_turning(&mut self, op: OpId, names: &[Option<NameId>; 5], phase: u8, dt: f32) {
+        match phase {
+            0 => self.set_riding(op, RidingInst::Turning(Turning::default())),
+            1 => {
+                let w = self.s.world;
+                let t = self.s.push_curves.tuning;
+                let get = |s: Str| self.s.mg.get(s);
+                let ctx = TurnContext {
+                    // The graph's slide side: the physics' side, the other way round riding fakie
+                    // (as CanEnterSlide reads it).
+                    slide: (w.slide != 0 && !w.slide_ending).then_some((w.slide == 2) != w.fakie),
+                    fakie: w.fakie,
+                    mirrored: w.mirrored,
+                    forward_speed: w.forward_speed,
+                    fakie_turn: get(self.n.fakie_turn),
+                    left_slide: get(self.n.left_slide),
+                    right_slide: get(self.n.right_slide),
+                    slide_turn_value: t.slide_turn_value,
+                };
+                let c = self.s.turn_out;
+                let RidingInst::Turning(st) =
+                    self.riding_inst(op, || RidingInst::Turning(Turning::default()))
+                else {
+                    return;
+                };
+                let v = st.update(&c, ctx, dt, &t.anim);
+                for (n, value) in
+                    names
+                        .iter()
+                        .zip([v.angle, v.dir, v.quickness, v.speed_tuck, v.holding])
+                {
+                    if let Some(n) = n {
+                        self.s.player.set_param(*n, value, false);
+                    }
+                }
+                if let Some(turn) = v.turn {
+                    self.s.emit(self.n.turn_packet, turn);
+                }
+                if let Some(slide) = v.slide {
+                    self.s.emit(self.n.slide_packet, slide);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Crouching (SK8 crouching.rs): the centre-of-mass height from the crouch intents, the auto pump
+    /// and the absorption, as the `crouchName` tree parameter.
+    fn crouching(&mut self, op: OpId, name: Option<NameId>, phase: u8, dt: f32) {
+        let w = self.s.world;
+        let anim = self.s.push_curves.tuning.anim;
+        let p = CrouchPhysical {
+            vel_y: w.vel_y,
+            ground_speed: w.ground_speed,
+            pump_potential: w.pump_potential,
+            height: self.s.com_height,
+            ..CrouchPhysical::default()
+        };
+        match phase {
+            0 => self.set_riding(op, RidingInst::Crouch(Crouch::begin(p, &anim))),
+            1 => {
+                let get = |s: Str| self.s.mg.get(s);
+                let i = CrouchIntents {
+                    auto_pump_angle: get(self.n.auto_pump_angle),
+                    auto_pump_mag: get(self.n.auto_pump_mag),
+                    crouch: get(self.n.crouch),
+                    hard_turn_crouch: get(self.n.hard_turn_crouch),
+                    manual: get(self.n.manual),
+                    sliding: self.s.flags[flag_index(Flag::PowerSlide)] > 0,
+                };
+                let RidingInst::Crouch(c) =
+                    self.riding_inst(op, || RidingInst::Crouch(Crouch::begin(p, &anim)))
+                else {
+                    return;
+                };
+                let out = c.update(p, i, dt, &anim);
+                if out.new_auto_pump {
+                    self.s.emit(self.n.new_auto_pump, 1.0);
+                }
+                if out.player_pump {
+                    self.s.emit(self.n.player_pump, 1.0);
+                }
+                if let Some(n) = name {
+                    self.s.player.set_param(n, out.height, false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// BodySpin (SK8 motion_spin.rs): the body spin channels follow the `BodySpin` intent (mapped by
+    /// `spin_map`) in the air or during a trick, their influence eased by `spin_blend_in` / `_out` within
+    /// rate limits; off while the hands are busy (grabbing) or grinding.
+    fn body_spin(&mut self, op: OpId) {
+        let w = self.s.world;
+        let t = self.s.push_curves.tuning;
+        let air = w.phys == phys::AIR;
+        let doing_trick = self.s.flags[flag_index(Flag::Trick)] > 0;
+        let active = air || doing_trick;
+        let busy = self.s.grab != NONE;
+        let mut spin = self.s.mg.get(self.n.body_spin).unwrap_or(0.0);
+        if w.mirrored {
+            spin = -spin;
+        }
+        let mapped = t.spin_map.eval(spin.abs());
+        let influence = if spin >= 0.0 { mapped } else { -mapped };
+        let near = air && w.time_to_land.is_some_and(|l| l < SPIN_NEAR_LANDING);
+        let (front_node, back_node) = (self.n.spin_front, self.n.spin_back);
+        let db = self.db;
+        let RidingInst::Spin(mut c) =
+            *self.riding_inst(op, || RidingInst::Spin(SpinChannels::default()))
+        else {
+            return;
+        };
+        let mut mode = c.mode;
+        match mode {
+            0 => {
+                if w.phys == phys::GRIND {
+                    mode = 4;
+                }
+                if active {
+                    mode = if busy { 4 } else { 1 };
+                }
+            }
+            1 => {
+                if !active {
+                    mode = 0;
+                }
+                if busy {
+                    mode = 4;
+                }
+                if spin.abs() > SPIN_START {
+                    mode = 2;
+                }
+            }
+            2 => {
+                if !active {
+                    mode = 0;
+                }
+                if busy {
+                    mode = 4;
+                }
+                if air {
+                    mode = 3;
+                }
+            }
+            3 => {
+                if busy {
+                    mode = 4;
+                }
+                if !air {
+                    mode = 0;
+                }
+            }
+            _ => {
+                if !active && w.phys == phys::GROUND {
+                    mode = 0;
+                }
+            }
+        }
+        let player = &mut self.s.player;
+        match mode {
+            0 | 4 => {
+                player.end_channel(CHANNEL_SPIN_FRONT);
+                player.end_channel(CHANNEL_SPIN_BACK);
+            }
+            1 => {
+                c = SpinChannels {
+                    mode,
+                    ..SpinChannels::default()
+                }
+            }
+            _ => {
+                if mode == 2
+                    && let Some(db) = db
+                {
+                    let settings = ChannelSettings {
+                        priority: 0,
+                        keep_alive: false,
+                        speed: 1.0,
+                        blend_in: 0.2,
+                        hold_in: false,
+                        blend_out: 0.3,
+                        hold_out: false,
+                    };
+                    let start =
+                        |player: &mut Player, name: u16, node: Option<crate::motion::Node>| {
+                            if player.has_channel(name) || near {
+                                return;
+                            }
+                            let Some(node) = node else { return };
+                            let Ok(play) =
+                                Playback::build_node(db, node, &Vec::new(), &mut Vec::new())
+                            else {
+                                return;
+                            };
+                            let tree = Tree {
+                                play,
+                                mirror: w.mirrored,
+                                name: NONE,
+                            };
+                            let blend = ops::TransitionDef {
+                                kind: 2,
+                                seconds: 0.1,
+                                under: false,
+                                matching: 0,
+                                channels_from_weights: false,
+                            };
+                            player.transition_channel(db, name, tree, settings, blend, true, true);
+                        };
+                    if spin > SPIN_START {
+                        start(player, CHANNEL_SPIN_FRONT, front_node);
+                        player.end_channel(CHANNEL_SPIN_BACK);
+                    }
+                    if spin < -SPIN_START {
+                        start(player, CHANNEL_SPIN_BACK, back_node);
+                        player.end_channel(CHANNEL_SPIN_FRONT);
+                    }
+                }
+                let step = |value: &mut f32, delta: &mut f32, target: f32, blend: f32| {
+                    let desired = blend * target + (1.0 - blend) * *value - *value;
+                    *delta = desired.clamp(*delta - t.spin_max_acc, *delta + t.spin_max_acc);
+                    let next = (*value + *delta)
+                        .clamp(*value - t.spin_max_delta, *value + t.spin_max_delta);
+                    *value = next.clamp(0.0, 1.0);
+                };
+                if player.has_channel(CHANNEL_SPIN_FRONT) {
+                    let target = influence.clamp(0.0, 1.0);
+                    let blend = if target < c.front {
+                        t.spin_blend_out
+                    } else {
+                        t.spin_blend_in
+                    };
+                    step(&mut c.front, &mut c.front_d, target, blend);
+                    player.set_channel_influence(CHANNEL_SPIN_FRONT, c.front);
+                }
+                if player.has_channel(CHANNEL_SPIN_BACK) {
+                    let target = -influence.clamp(-1.0, 0.0);
+                    // SK8 keeps the original's reversed comparison on this side.
+                    let blend = if target > c.back {
+                        t.spin_blend_out
+                    } else {
+                        t.spin_blend_in
+                    };
+                    step(&mut c.back, &mut c.back_d, target, blend);
+                    player.set_channel_influence(CHANNEL_SPIN_BACK, c.back);
+                }
+            }
+        }
+        c.mode = mode;
+        self.set_riding(op, RidingInst::Spin(c));
     }
 
     /// FakieHeadChannel (SK8 motion_channels.rs FakieHead): riding fakie, the fakie channel (head and
@@ -1397,6 +2507,15 @@ impl Host<'_, '_> {
         let sets = |regular: bool, s: &Shared| s.push_sets[usize::from(regular == s.world.switch)];
         let i = &mut self.inst[op as usize];
         match (p, phase) {
+            (PushOp::Out { right }, 0) => {
+                // SK8 PushOut: the pushing foot against the deck (along its nose, up), on begin.
+                let foot = s.world.feet[usize::from(right)];
+                for (n, v) in self.n.out_distance.into_iter().zip(foot) {
+                    if let Some(n) = n {
+                        s.player.set_param(n, v, false);
+                    }
+                }
+            }
             (PushOp::Init, 0) => {
                 s.push.init();
                 s.push_count += 1;
