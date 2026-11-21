@@ -87,8 +87,10 @@ const MANUAL_SWEET: f32 = 0.35;
 pub const MANUAL_BALANCED_AT: f32 = MANUAL_MIN + MANUAL_SWEET * (MANUAL_BRAKE - MANUAL_MIN);
 const MANUAL_MIN_TIME: f32 = 0.5;
 const MANUAL_POINTS_PER_S: f32 = 120.0;
-/// Analog trigger past this holds a grab (Skate 3: any pressure).
-const GRAB_TRIGGER: f32 = 0.15;
+/// Analog trigger past this holds a grab: any pressure, as Skate 3 and the state graphs' grab intents
+/// (`graph::input`) count it; the pad's trigger dead zone (`input::TRIGGER_DEAD_ZONE`) already took out a
+/// trigger at rest, so the physics and the graphs agree on when the rider grabs.
+const GRAB_TRIGGER: f32 = 0.0;
 const GRAB_POINTS: u32 = 200;
 const GRAB_POINTS_PER_S: f32 = 150.0;
 /// Both push buttons pressed within this of each other wind up a hippie jump.
@@ -1101,8 +1103,8 @@ impl Skater {
         let touched = pad.held != 0
             || pad.stick != [0.0, 0.0]
             || flick.stick != [0.0, 0.0]
-            || pad.trig_l > 0.1
-            || pad.trig_r > 0.1;
+            || pad.trig_l > 0.0
+            || pad.trig_r > 0.0;
         self.idle = if touched { 0.0 } else { self.idle + dt };
         self.since_spawn += dt;
         self.dark = self.graph.is_some_and(|g| g.dark);

@@ -66,6 +66,19 @@ pub const C_RANGE: f32 = 92.0;
 /// Skate 3's stick conditioning: a radial dead zone, then full deflection a little before the rim.
 const DEAD_ZONE: f32 = 0.25;
 const FULL: f32 = 0.95;
+/// Analog triggers: a GameCube trigger at rest reads a few counts (1..7 of 255 on real pads), and Skate 3
+/// counts any trigger above 0 as a grab or a crouch. Below this share of full travel a trigger reads 0;
+/// above it the travel is rescaled so it still reaches 1 (flatground's own value).
+pub const TRIGGER_DEAD_ZONE: f32 = 0.1;
+
+fn trigger(raw: u8) -> f32 {
+    let v = raw as f32 / 255.0;
+    if v <= TRIGGER_DEAD_ZONE {
+        0.0
+    } else {
+        ((v - TRIGGER_DEAD_ZONE) / (1.0 - TRIGGER_DEAD_ZONE)).min(1.0)
+    }
+}
 
 fn stick(x: i8, y: i8, range: f32) -> [f32; 2] {
     let (x, y) = (x as f32 / range, y as f32 / range);
@@ -83,8 +96,8 @@ impl Pad {
         Pad {
             stick: stick(raw.stick_x, raw.stick_y, MAIN_RANGE),
             flick: stick(raw.cstick_x, raw.cstick_y, C_RANGE),
-            trig_l: raw.trig_l as f32 / 255.0,
-            trig_r: raw.trig_r as f32 / 255.0,
+            trig_l: trigger(raw.trig_l),
+            trig_r: trigger(raw.trig_r),
             held: raw.buttons,
             pressed: raw.buttons & !previous_held,
         }
@@ -120,6 +133,38 @@ mod tests {
         let p = Pad::from_raw(&r, 0);
         assert_eq!(p.stick, [0.0, 0.0]);
         assert!((p.flick[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn resting_triggers_read_zero() {
+        // A GameCube trigger at rest reads a few counts: no grab, no crouch.
+        for rest in [1u8, 4, 7, 25] {
+            let p = Pad::from_raw(
+                &PadRaw {
+                    trig_l: rest,
+                    trig_r: rest,
+                    ..Default::default()
+                },
+                0,
+            );
+            assert_eq!((p.trig_l, p.trig_r), (0.0, 0.0), "{rest}");
+        }
+        let half = Pad::from_raw(
+            &PadRaw {
+                trig_r: 128,
+                ..Default::default()
+            },
+            0,
+        );
+        assert!(half.trig_r > 0.4 && half.trig_r < 0.5, "{}", half.trig_r);
+        let full = Pad::from_raw(
+            &PadRaw {
+                trig_l: 255,
+                ..Default::default()
+            },
+            0,
+        );
+        assert_eq!(full.trig_l, 1.0);
     }
 
     #[test]
