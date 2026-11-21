@@ -98,10 +98,15 @@ content second.
 - [x] Graph runner, air: `ScoringGrabs` (grab variants by C-stick), `TweakProject` (grab tweaks),
   `BodySpin` channels, `ControlAirLegExtension` (`EXTEND`), `SetDeckPitchAndYaw`, the physics spin from the
   graph's `PhysBodySpin`, landing types and `TimeToLand` from the physics' landing prediction
-- [ ] Graph runner, next: the pose parameters still unset (pump channel, push out distance, powerslide
-  spin/decel, wipeout lean/twist, grind crouch/twist, bumps), the air leg's centre-of-mass height, the push speed
-  from the posed clips' trajectory, SK8's manual PID (PhysicsWantsManualExit), character gestures (d-pad)
-  and shoves, grind trick-outs by grind type (needs the grind physics of phase 6)
+- [x] Graph runner, phase 8: the pump layers (`Pumping`), push-out distance (`PushOut`, from the posed
+  feet), powerslide spin and deceleration, the wipeout's lean, twist and stick gesture (`Wipeout`,
+  `MatchTwistAndLean`), bumps (`IsBumped`, `SetBumpCoefficients`, from the board's acceleration along the
+  ground), the d-pad's character gestures (`CharacterGesture`, its clips converted by the importer),
+  body flips (`BodyFlippingSignal`, `IsBodyFlipping`); no tree in the trick tour plays with an unset
+  parameter
+- [ ] Graph runner, next: the air leg's centre-of-mass height, the push speed from the posed clips'
+  trajectory, SK8's manual PID (PhysicsWantsManualExit), shoves (nobody to shove), a board posed apart
+  from the body (`SetDeckPitchAndYaw`), the wipeout's body from a ragdoll, the player's own gesture picks
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
@@ -129,7 +134,14 @@ content second.
   the disc; the reset fade drawn
 - [ ] Camera, next: free look, camera shake, slow motion on long airs, the high camera, off-board shots
   beyond run-outs and hippie jumps
-- [ ] Body flips and their upside-down bails
+- [x] Body flips and their upside-down bails (phase 8, docs/graph-runner.md "The air"): front and back
+  flips from the left stick with a grab, Skate 3's start, speed and grab rules, landing off the flip or
+  falling upside down without the grab bails
+- [x] Camera after a carve (phase 8): the wind-up from the graph's anticipating flag, SK8's turning
+  steering, no one-tick stop at the pop; checked against SK8's frozen-arm shot transitions (a regression
+  test: behind within 90 ticks of a hard carve, never past 45 degrees at riding speed)
+- [x] Grind rail classes checked against SK8's probes on BlackBoxPark (handrails thin, ledges ledge), the
+  far probes' reach from the disc's truck distance
 - [ ] Skater animation (skinned, original)
 - [ ] Session goals, combo system, replay
 - [ ] Sound (ASND): rolling, pop, landing
