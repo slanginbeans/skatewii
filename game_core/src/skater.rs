@@ -78,6 +78,9 @@ const PUSH_MEMORY: f32 = 0.3;
 /// How fast the board follows the animated centre of mass in the air: the share of the gap closed a
 /// tick (SK8's rider body is physical and follows its animation; fit to its ollies' COM over the deck).
 const AIR_LEGS_FOLLOW: f32 = 0.15;
+/// Rolled off an edge without a pop, the board meets rails as if still riding for this long (s, ours:
+/// SK8's board pivots on its back wheels over a coping for about half a second at walking pace).
+const ROLL_OFF_TIME: f32 = 0.3;
 /// The posed board lifted this far (m) means the pop's tail strike has started.
 const POP_LIFT_MIN: f32 = 0.002;
 /// A repeated push puts the foot down this long after the re-push point (s, ours).
@@ -818,7 +821,7 @@ pub struct Skater {
     /// With the imported rider: the rider's centre-of-mass height over the board (m). It is the
     /// animation's while riding; from the pop's tail strike and in the air the body follows its
     /// animation only so fast (SK8's rider is physical). And in the air, its height at take-off.
-    body_com: Option<f32>,
+    pub body_com: Option<f32>,
     air_com: Option<f32>,
     /// How far the legs have lifted the board over the flight's path (m, world up).
     pub air_lift: f32,
@@ -2367,6 +2370,14 @@ impl Skater {
         if let Some(target) = self.plan.as_ref().and_then(|p| p.grind) {
             self.grind_air_assist(park, target, dt);
         }
+        // Rolled off an edge without a pop, the board is still tipping over it on its back wheels for a
+        // moment (SK8's rigid board stays on the ground pivoting): a rail it meets is ridden onto, not
+        // landed on from the air (a slow roll off a deck drops in rather than stopping on the coping).
+        let category = if self.trick.is_none() && !self.takeoff.hippy && now < ROLL_OFF_TIME {
+            Category::Ground
+        } else {
+            Category::Air
+        };
         // Fly: the known landing's flight (its start error blended away), else ballistically.
         match &self.plan {
             Some(p) => {
@@ -2388,7 +2399,7 @@ impl Skater {
                 let landable = self.normal.dot(h.normal) > 0.5 || h.normal.y > 0.6;
                 if landable {
                     self.pos = h.point;
-                    if self.try_grind(park, Category::Air, events) {
+                    if self.try_grind(park, category, events) {
                         return;
                     }
                     self.land(h.normal, h.surface, time, events);
@@ -2413,7 +2424,7 @@ impl Skater {
             self.pos = from + delta;
         }
 
-        if self.try_grind(park, Category::Air, events) {
+        if self.try_grind(park, category, events) {
             return;
         }
         if self.pos.y < park.kill_height() {
@@ -4404,6 +4415,72 @@ mod tests {
         let rail = rail.classified(&m);
         m.rails = vec![rail];
         m
+    }
+
+    #[test]
+    fn rolling_slowly_off_a_deck_drops_in_instead_of_stopping_on_the_coping() {
+        // SK8 at 1.4 m/s off a half pipe's deck: the board tips over the coping and rolls into the
+        // transition. The deck a deck's height over the coping is outside Skate 3's drop-in depth
+        // window (0.06 m), and while the board is still tipping over the edge a rail is ridden onto,
+        // not landed on (flatground caught it as a 0 m/s nose blunt or lipslide).
+        let park = coping_pipe();
+        let mut s = spawn(&park);
+        place(&mut s, v3(0.0, 4.0, 3.8), Vec3::UP, v3(0.0, 0.0, -1.0));
+        s.speed = 1.4;
+        for _ in 0..240 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            assert!(s.mode != Mode::Grind, "caught the coping at {:?}", s.pos);
+        }
+        assert!(
+            s.pos.y < 2.0 && s.speed.abs() > 3.0,
+            "{:?} {}",
+            s.pos,
+            s.speed
+        );
+    }
+
+    #[test]
+    fn the_transition_compresses_the_rider_and_springing_back_pumps() {
+        // SK8 pumping/controller.rs: the ground's angle asks the animation for a crouch
+        // (`CompressionVsGroundAngle` x `CompressionGroundScalar`, `MinCrouchVsGroundAngle`); the
+        // animated centre of mass rising over the board on a curving transition pays out speed, with
+        // no input at `UnintentionalPumpScalar` of the pump, at most 10 m/s^2 (0.117 m/s a tick).
+        let park = quarter_pipe();
+        let mut s = spawn(&park);
+        let (n, f) = (v3(0.0, 0.866, -0.5), v3(0.0, 0.5, 0.866));
+        place(&mut s, v3(0.0, 0.4, 1.5), n, f);
+        s.speed = 6.0;
+        let mut h = 0.5;
+        s.graph = Some(GraphControl {
+            pose_com: Some(h),
+            ..GraphControl::default()
+        });
+        steps(&mut s, &park, &Pad::default(), None, 2);
+        assert!(s.pump.ground_absorption < -1.0, "{:?}", s.pump);
+        assert!(s.pump.min_crouch > 0.1, "{:?}", s.pump);
+        let plain = {
+            let mut p = spawn(&park);
+            place(&mut p, v3(0.0, 0.4, 1.5), n, f);
+            p.speed = 6.0;
+            p.graph = Some(GraphControl {
+                pose_com: Some(h),
+                ..GraphControl::default()
+            });
+            steps(&mut p, &park, &Pad::default(), None, 9);
+            p.speed
+        };
+        let mut most = 0.0f32;
+        for _ in 0..7 {
+            h += 0.02;
+            s.graph = Some(GraphControl {
+                pose_com: Some(h),
+                ..GraphControl::default()
+            });
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            most = most.max(s.pump.dv);
+        }
+        assert!(s.speed > plain + 0.3, "{} vs {plain}", s.speed);
+        assert!((most - 0.7 * 10.0 * DT).abs() < 0.01, "{most}");
     }
 
     #[test]

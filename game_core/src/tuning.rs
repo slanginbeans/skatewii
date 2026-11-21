@@ -272,6 +272,14 @@ pub struct Tuning {
     pub pump_factor: f32,
     pub pump_max_accel: f32,
     pub pump_unintentional: f32,
+    /// How the ground presses the rider down (SK8 pumping/controller.rs `calculate`): the crouch the
+    /// physics asks of the animation against the ground's angle (quarter turns), the least crouch,
+    /// and the deck's angle's; times their scalars (negative: down into the board).
+    pub compression_vs_ground_angle: Curve,
+    pub min_crouch_vs_ground_angle: Curve,
+    pub compression_vs_deck_angle: Curve,
+    pub compression_ground_scale: f32,
+    pub compression_deck_scale: f32,
 
     // Jumping.
     /// Centre-of-mass heights (m): the lowest any jump reaches, and the range a flick's strength picks
@@ -421,6 +429,14 @@ pub struct Tuning {
     // Air animation (the state graphs' air behaviours).
     /// The arms' reach in the air (`EXTEND`) against seconds coming down.
     pub air_arm_extend: Curve,
+    /// ControlAirLegExtension's centre of mass over the board (`disttocog`, SK8 air_leg_extension.rs):
+    /// how fast it closes going up and coming down (m/s), its least, and before the landing how fast it
+    /// extends to how far.
+    pub air_com_up_speed: f32,
+    pub air_com_down_speed: f32,
+    pub air_com_min: f32,
+    pub preland_com_speed: f32,
+    pub preland_com: f32,
     /// The body spin channels: influence against the spin intent, its blend in and out per update, and
     /// its rate and acceleration limits.
     pub spin_map: Curve,
@@ -806,6 +822,11 @@ pub const PATHS: &[&str] = &[
     // Most pumping acceleration per second (no name in the database).
     "physics_mode/normal/Hash_D77AFD320B6241C5",
     "physics_mode/normal/UnintentionalPumpScalar",
+    "physics_pumping/default/CompressionVsGroundAngle",
+    "physics_pumping/default/MinCrouchVsGroundAngle",
+    "physics_pumping/default/CompressionVsDeckAngle",
+    "physics_pumping/default/CompressionGroundScalar",
+    "physics_pumping/default/CompressionDeckScalar",
     "physics_steering/default/Damping",
     "physics_steering/default/GeneralScalar",
     "physics_steering/default/SteeringVsInput",
@@ -901,6 +922,11 @@ pub const PATHS: &[&str] = &[
     "Hash_018E8A2E5028AB3F/default/Hash_3387562E9BEA0AF6",
     "Hash_018E8A2E5028AB3F/default/Hash_035D9805EB9E2EE2",
     "anim_motion/inair_disttocog/lo_air_arm_extend",
+    "anim_motion/inair_disttocog/goingup_disttocog_speed",
+    "anim_motion/inair_disttocog/goingdown_disttocog_speed",
+    "anim_motion/inair_disttocog/min_inair_disttocog",
+    "anim_motion/inair_disttocog/preland_disttocom_vel",
+    "anim_motion/inair_disttocog/preland_final_disttocom",
     "anim_motion/body_spin/spin_map",
     "anim_motion/body_spin/spin_influence_blendin",
     "anim_motion/body_spin/spin_influence_blendout",
@@ -1124,15 +1150,65 @@ impl Tuning {
         wallride_max_time: 1.2,
         wallride_jump_ydown: 0.6,
         wallride_jump_force: 2.5,
-        pump_damping: 0.15,
-        pump_min_change: 0.003,
-        pump_max_change: 0.008,
-        pump_vs_time: Curve::new(&[(0.0, 1.0), (0.4, 1.0), (0.7, 0.4), (1.0, 0.1)]),
-        pump_ang_damping: 0.25,
-        pump_vs_vel: Curve::new(&[(0.0, 3.0), (3.0, 1.8), (6.0, 1.0), (10.0, 0.7), (13.0, 0.1)]),
-        pump_factor: 15.0,
-        pump_max_accel: 8.0,
-        pump_unintentional: 0.6,
+        pump_damping: 0.1,
+        pump_min_change: 0.004,
+        pump_max_change: 0.006,
+        pump_vs_time: Curve::new(&[
+            (0.0, 1.0),
+            (0.402, 1.0),
+            (0.507, 0.896),
+            (0.572, 0.732),
+            (0.653, 0.432),
+            (0.741, 0.246),
+            (0.862, 0.114),
+            (0.995, 0.096),
+        ]),
+        pump_ang_damping: 0.2,
+        pump_vs_vel: Curve::new(&[
+            (0.0, 4.0),
+            (2.45, 2.443),
+            (4.56, 1.1),
+            (7.01, 1.0),
+            (8.81, 0.964),
+            (10.68, 0.571),
+            (12.2, 0.157),
+            (14.2, 0.007),
+        ]),
+        pump_factor: 18.0,
+        pump_max_accel: 10.0,
+        pump_unintentional: 0.7,
+        compression_vs_ground_angle: Curve::new(&[
+            (0.0, 0.0),
+            (0.072, 0.044),
+            (0.147, 0.196),
+            (0.238, 0.321),
+            (0.381, 0.372),
+            (0.793, 0.48),
+            (0.938, 0.757),
+            (1.0, 1.0),
+        ]),
+        min_crouch_vs_ground_angle: Curve::new(&[
+            (0.0, 0.0),
+            (0.09, 0.0),
+            (0.161, 0.03),
+            (0.34, 0.365),
+            (0.461, 0.537),
+            (0.607, 0.666),
+            (0.792, 0.75),
+            (1.0, 0.794),
+        ]),
+        compression_vs_deck_angle: Curve::new(&[
+            (0.0, 0.0),
+            (0.061, 0.253),
+            (0.112, 0.419),
+            (0.163, 0.601),
+            (0.239, 0.767),
+            (0.313, 0.878),
+            (0.371, 0.929),
+            (0.528, 1.0),
+        ]),
+        compression_ground_scale: -8.0,
+        compression_deck_scale: -8.0,
         jump_floor: 0.9,
         jump_low: 1.3,
         jump_high: 1.7,
@@ -1220,6 +1296,11 @@ impl Tuning {
         revert_tolerance: Curve::new(&[(0.0, 35.0), (0.7, 8.0), (1.0, 8.0)]),
         revert_duration: 1.1,
         air_arm_extend: Curve::new(&[(0.0, 0.0), (0.3, 0.6), (0.6, 1.0)]),
+        air_com_up_speed: 0.2,
+        air_com_down_speed: 0.4,
+        air_com_min: 0.5,
+        preland_com_speed: 2.0,
+        preland_com: 1.0,
         spin_map: Curve::new(&[(0.0, 0.0), (0.3, 0.2), (1.0, 1.0)]),
         spin_blend_in: 0.2,
         spin_blend_out: 0.1,
@@ -1387,6 +1468,19 @@ impl Tuning {
             "physics_mode/normal/PumpEffectFactor" => scalar!(self.pump_factor),
             "physics_mode/normal/Hash_D77AFD320B6241C5" => scalar!(self.pump_max_accel),
             "physics_mode/normal/UnintentionalPumpScalar" => scalar!(self.pump_unintentional),
+            "physics_pumping/default/CompressionVsGroundAngle" => {
+                curve!(self.compression_vs_ground_angle)
+            }
+            "physics_pumping/default/MinCrouchVsGroundAngle" => {
+                curve!(self.min_crouch_vs_ground_angle)
+            }
+            "physics_pumping/default/CompressionVsDeckAngle" => {
+                curve!(self.compression_vs_deck_angle)
+            }
+            "physics_pumping/default/CompressionGroundScalar" => {
+                scalar!(self.compression_ground_scale)
+            }
+            "physics_pumping/default/CompressionDeckScalar" => scalar!(self.compression_deck_scale),
             "anim_motion/hippy_flip/antic_length_to_hippy_height" => curve!(self.hippy_windup),
             "physics_jump/default/VerticalResponse" => curve!(self.vertical_response),
             "physics_jump/default/MinScalar" => scalar!(self.jump_min_scalar),
@@ -1539,6 +1633,17 @@ impl Tuning {
                 scalar!(self.revert_duration)
             }
             "anim_motion/inair_disttocog/lo_air_arm_extend" => curve!(self.air_arm_extend),
+            "anim_motion/inair_disttocog/goingup_disttocog_speed" => {
+                scalar!(self.air_com_up_speed)
+            }
+            "anim_motion/inair_disttocog/goingdown_disttocog_speed" => {
+                scalar!(self.air_com_down_speed)
+            }
+            "anim_motion/inair_disttocog/min_inair_disttocog" => scalar!(self.air_com_min),
+            "anim_motion/inair_disttocog/preland_disttocom_vel" => {
+                scalar!(self.preland_com_speed)
+            }
+            "anim_motion/inair_disttocog/preland_final_disttocom" => scalar!(self.preland_com),
             "anim_motion/body_spin/spin_map" => curve!(self.spin_map),
             "anim_motion/body_spin/spin_influence_blendin" => scalar!(self.spin_blend_in),
             "anim_motion/body_spin/spin_influence_blendout" => scalar!(self.spin_blend_out),

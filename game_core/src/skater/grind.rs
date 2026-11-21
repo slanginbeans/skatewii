@@ -70,6 +70,14 @@ const FIFTY_BALANCE: f32 = 0.9;
 /// 5-0: the rail not too far across or up the deck.
 const FIVE_RIGHT: f32 = 0.906;
 const FIVE_UP: f32 = 0.46;
+/// Dropping in (slowly riding onto a rail), the deck's centre within this far of it along the deck's
+/// up (m), SK8 families.rs's depth windows: a 5-0 (0.13; `0x3c8a71de` squared), and a tip (0.06;
+/// `0x3b6bedfa`). Rolling slowly at a coping on the deck it sits on, the deck is a deck's height
+/// above it: the board rolls off into the transition rather than stopping on it, as in Skate 3. (Other
+/// entries keep the boxes alone: flatground's board doesn't pivot onto a rail as Skate 3's rigid one
+/// does, so its deck wouldn't come within the windows.)
+const FIVE_DEPTH: f32 = 0.13;
+const TIP_DEPTH: f32 = 0.06;
 /// Boardslides: the rail's up against the deck's (cosine), and the trucks clear of the rail by more
 /// than a truck's half width; darkslides: the upside-down deck against it.
 const BOARD_UP: f32 = 0.65;
@@ -988,10 +996,13 @@ impl Skater {
             let valid = trucks.map(|h| {
                 let h = h?;
                 let d = seg_dir(&h);
+                let entry = self.admit(category, current, Family::FiveO, d, true)?;
+                if entry == Entry::DropIn && (f.deck - h.point).dot(f.up).abs() >= FIVE_DEPTH {
+                    return None;
+                }
                 if f.right.dot(d).abs() >= FIVE_RIGHT || f.up.dot(d).abs() >= FIVE_UP {
                     return None;
                 }
-                let entry = self.admit(category, current, Family::FiveO, d, true)?;
                 Some((h, entry))
             });
             let forwards = f.fwd.dot(v) > 0.0;
@@ -1023,6 +1034,9 @@ impl Skater {
             let entry = self.admit(category, current, Family::Tipslide, d, true)?;
             let descending = v.y < 0.0 && category != Category::Grind;
             if (entry == Entry::DropIn || descending) && f.deck.y <= h.point.y {
+                return None;
+            }
+            if entry == Entry::DropIn && (f.deck - h.point).dot(f.up).abs() >= TIP_DEPTH {
                 return None;
             }
             // Riding: only a tip the board is moving towards, and moving (standing still beside an

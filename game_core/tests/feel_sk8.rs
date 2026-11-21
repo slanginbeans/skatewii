@@ -245,3 +245,48 @@ fn ollies_pop_the_body_and_the_legs_lift_the_board() {
         "board dropped {quick_drop} / {high_drop} m"
     );
 }
+
+#[test]
+fn in_the_air_the_legs_tuck_and_reach_for_the_landing() {
+    // SK8's wound-up ollie: ControlAirLegExtension drives the air idle's `disttocog` from the last
+    // clip's down to `min_inair_disttocog` (0.5) and, within the time the legs need to reach out
+    // (`preland_disttocom_vel`, 2 m/s), up again: the centre of mass over the deck holds 0.50-0.51 m
+    // from 0.25 s after take-off and is 0.95 at the landing. flatground's air idle kept 0.82.
+    let Some(mut g) = imported_game("air legs") else {
+        return;
+    };
+    g.place_rider(v3(-16.0, 0.0, -17.0), 0.0, 6.0);
+    for _ in 0..90 {
+        g.update(&held(0), TICK);
+    }
+    let mut flight = Vec::new();
+    for p in 0..150 {
+        let c = game_core::input::C_RANGE as i8;
+        let cstick_y = if p < 40 {
+            -c
+        } else if p < 45 {
+            c
+        } else {
+            0
+        };
+        g.update(
+            &PadRaw {
+                flags: flag::CONNECTED,
+                cstick_y,
+                ..Default::default()
+            },
+            TICK,
+        );
+        if g.skater.is_airborne() {
+            flight.push(g.skater.body_com.expect("posed rider"));
+        }
+    }
+    let n = flight.len();
+    assert!(n > 30, "{n} ticks in the air");
+    let middle = &flight[15..n - 12];
+    assert!(
+        middle.iter().all(|h| (h - 0.51).abs() < 0.07),
+        "tucked {middle:?}"
+    );
+    assert!(flight[n - 1] > 0.85, "reaching for the landing {flight:?}");
+}

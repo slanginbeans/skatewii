@@ -141,6 +141,14 @@ pub struct Pump {
     pub turn_rate: f32,
     /// The speed the pump added this tick (m/s; Skate 3's pumping acceleration the pump layers read).
     pub dv: f32,
+    /// What the pumping tells the animation's crouch (SK8 PhysOutAnimation's crouching feedback):
+    /// the pumping (turn rate times `PumpVsVel`), the board's absorption (-speed x turn rate), the
+    /// ground's and the deck's compression and the least crouch for the ground's angle.
+    pub pumping: f32,
+    pub absorption: f32,
+    pub ground_absorption: f32,
+    pub min_crouch: f32,
+    pub deck_absorption: f32,
     pub(super) last_height: f32,
     pub(super) prev_n: Option<Vec3>,
 }
@@ -602,13 +610,22 @@ impl Skater {
         Some(out)
     }
 
-    /// Skate 3's pumping: the rider's extension times how fast the ground turns upward along the travel.
+    /// Skate 3's pumping (SK8 pumping/controller.rs `update`, `calculate`): the rider's centre of mass
+    /// rising over the board times how fast the ground turns upward along the travel. The centre of
+    /// mass is the animation's (the imported rider's), which the transition itself compresses through
+    /// the crouch this reports back (`absorption`, `ground_absorption`, `min_crouch`): riding out of a
+    /// transition the rider springs up and the pump pays it out, intentional or not. Without the rider,
+    /// the stick's crouch.
     fn update_pumping(&mut self, d: &Drive, dt: f32) {
         let t = self.tuning;
         let n = self.contact_n;
-        let height = -self.crouch * CROUCH_DEPTH;
+        let height = self.body_com.unwrap_or(-self.crouch * CROUCH_DEPTH);
         let vel = self.ground_velocity();
         let p = &mut self.pump;
+        if p.prev_n.is_none() {
+            // The first sample only records (SK8's `record_valid`).
+            p.last_height = height;
+        }
         let rising = (height - p.last_height).max(0.0);
         p.last_height = height;
         p.effect = rising * t.pump_damping + (1.0 - t.pump_damping) * p.effect;
@@ -629,9 +646,19 @@ impl Skater {
             }
             _ => 0.0,
         };
+        // The ground's angle (quarter turns) under the last tick's normal.
+        let angle = p.prev_n.map_or(0.0, |prev| {
+            libm::acosf(prev.y.clamp(0.0, 1.0)) * (2.0 / core::f32::consts::PI)
+        });
         p.prev_n = Some(n);
         p.turn_rate = measured * t.pump_ang_damping + (1.0 - t.pump_ang_damping) * p.turn_rate;
+        p.absorption = -(v * p.turn_rate);
+        p.ground_absorption =
+            t.compression_vs_ground_angle.eval(angle.clamp(0.0, 1.0)) * t.compression_ground_scale;
+        p.min_crouch = t.min_crouch_vs_ground_angle.eval(angle.clamp(0.0, 1.0));
+        p.deck_absorption = 0.0;
         let pumping = p.turn_rate * t.pump_vs_vel.eval(v);
+        p.pumping = pumping;
         p.dv = 0.0;
         if pumping > 0.0 && effect > 0.0 && d.slide.is_none() {
             let mut dv = (pumping * t.pump_factor * effect).min(t.pump_max_accel * dt);

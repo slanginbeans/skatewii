@@ -171,7 +171,16 @@ impl Driver {
             body_spin: s.spin_rate,
             vel_y: s.vel.y,
             vel_up: s.vel.dot(up),
-            pump_potential: s.pump.effect.abs().min(1.0),
+            // SK8 PhysOutAnimation's crouching feedback: the pumping (its potential), the board's
+            // absorption, the ground's compression and the least crouch.
+            pump_potential: s.pump.pumping,
+            crouch_force: s.pump.absorption,
+            crouch_ground_force: s.pump.ground_absorption,
+            crouch_min: s.pump.min_crouch,
+            crouch_deck: s.pump.deck_absorption,
+            // In the air, the rider's body over the board as the physics follows it (what SK8's air
+            // idle reads at take-off: tucked, its legs stay in); riding, the clips' own.
+            com_height: s.body_com.filter(|_| s.is_airborne()),
             // The landing classifier's signed magnitude (SK8 SetLandingData's spin).
             landing_spin: s.landing.map_or(0.0, |l| l.quality.magnitude),
             // Skate 3's landing classifier (0 straight, 1 sketchy, 2 spin, 3 slightly off).
