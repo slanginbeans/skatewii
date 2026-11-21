@@ -8,10 +8,22 @@ use super::host::{Runner, World};
 use super::input::{Gates, Intentions};
 use super::ops::phys;
 use super::{Error, Pack, Str};
+use crate::gesture::Flick;
 use crate::gesture::Shape;
 use crate::input::Pad;
 use crate::motion::MotionDb;
-use crate::skater::{Mode, Skater, Stance};
+use crate::motion::NameId;
+use crate::skater::{GraphControl, Mode, Skater, Stance};
+use crate::tuning::Tuning;
+
+/// Motion-library names the driver reads from the playing clips.
+#[derive(Clone, Copy, Debug, Default)]
+struct Clips {
+    push_contact: Option<NameId>,
+    brake_contact: Option<NameId>,
+    jump: Option<NameId>,
+    trick_height: Option<NameId>,
+}
 
 pub struct Driver {
     pub runner: Runner<'static>,
@@ -24,6 +36,11 @@ pub struct Driver {
     /// Microseconds parsing the graphs and their operations took.
     pub load_us: u32,
     shown: String,
+    clips: Clips,
+    /// The playing clips carried the jump attribute last tick.
+    jumping: bool,
+    /// The motion state's path last tick (for edges).
+    last_path: String,
 }
 
 impl Driver {
@@ -45,6 +62,14 @@ impl Driver {
             memory,
             load_us: 0,
             shown: String::new(),
+            clips: Clips {
+                push_contact: db.name_id("PUSHCONTACT"),
+                brake_contact: db.name_id("BRAKE_CONTACT"),
+                jump: db.name_id("JUMP"),
+                trick_height: db.name_id("TRICKHEIGHT"),
+            },
+            jumping: false,
+            last_path: String::new(),
         })
     }
 
@@ -81,6 +106,11 @@ impl Driver {
             com_vel: [s.slip, s.vel.y, s.speed],
             wants_runout: matches!(s.mode, Mode::Runout { .. }),
             wants_wipeout: matches!(s.mode, Mode::Bailed { .. }),
+            slide: s
+                .slide
+                .as_ref()
+                .map_or(0, |p| if p.side > 0.0 { 2 } else { 1 }),
+            slide_ending: s.slide.as_ref().is_some_and(|p| p.releasing),
             ..World::default()
         }
     }
@@ -104,6 +134,58 @@ impl Driver {
         self.cost_us = clock.map_or(0, |f| f()).wrapping_sub(t0);
     }
 
+    /// What the graphs decided for the physics this tick (after [`Driver::tick`]).
+    pub fn control(&mut self, db: &MotionDb, t: &Tuning) -> GraphControl {
+        let r = &self.runner;
+        let path = r.motion_state();
+        let has = |n: Option<NameId>| n.is_some_and(|n| r.attribute(db, n).is_some());
+        let entered = |part: &str| path.contains(part) && !self.last_path.contains(part);
+        let mut c = GraphControl {
+            push_contact: has(self.clips.push_contact) || path.contains("/PushContact/"),
+            brake_contact: has(self.clips.brake_contact),
+            kickturn: r.s.kickturn,
+            ..GraphControl::default()
+        };
+        if path.contains("/Manual/") {
+            let lean = r
+                .pack
+                .find("Manual")
+                .and_then(|m| r.s.mg.get(m))
+                .map_or(0.0, f32::abs);
+            c.manual = Some((
+                path.contains("NoseManual"),
+                lean.min(1.0),
+                path.contains("Manual/Brake") || path.contains("Manual/Out"),
+            ));
+        }
+        c.turn_round = entered("/Switch/") || entered("/PushFromFakie/");
+        if entered("/Revert/") {
+            c.revert = Some(path.contains("/Revert/Fs"));
+        }
+        // The takeoff clip's jump: pop on its first tick, as the trick the graph scores.
+        let jump = has(self.clips.jump) && r.s.world.phys == phys::GROUND;
+        if jump && !self.jumping {
+            let name = r.str(r.s.trick);
+            let name = name.strip_prefix("U_").unwrap_or(name);
+            let flick = Flick::from_gesture(name).unwrap_or(if path.contains("Nollie") {
+                Flick::NOLLIE
+            } else {
+                Flick::OLLIE
+            });
+            let gesture = r.s.mg.get(r.names.gesture_speed).unwrap_or(0.0);
+            let height = self
+                .clips
+                .trick_height
+                .and_then(|n| r.s.player.params.iter().find(|p| p.name == n))
+                .map_or(gesture, |p| p.value);
+            let over = r.packet(r.names.jump_override).unwrap_or(0.0);
+            c.pop = Some((flick, jump_strength(height, over, t)));
+        }
+        self.jumping = jump;
+        self.last_path = path;
+        c
+    }
+
     /// The motion graph's state when it changed since the last call (for the log).
     pub fn state_change(&mut self) -> Option<String> {
         let now = self.runner.motion_state();
@@ -121,4 +203,17 @@ impl Driver {
         r.s.new_unsupported.clear();
         names
     }
+}
+
+/// SK8's jump finalisation (animation attribute finalization): a trick height at or under the low clamp
+/// is the minimum hop, at or over the high clamp full height; a flick-strength override can only raise it.
+pub fn jump_strength(height: f32, override_height: f32, t: &Tuning) -> f32 {
+    let h = if height <= t.jump_clamp_low {
+        0.0
+    } else if height >= t.jump_clamp_high {
+        1.0
+    } else {
+        height
+    };
+    h.max(override_height).clamp(0.0, 1.0)
 }

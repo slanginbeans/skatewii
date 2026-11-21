@@ -428,11 +428,6 @@ impl Game {
         let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
         let t0 = now(self.timer);
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
-        let mut events = Vec::new();
-        self.skater.step(ground, &pad, &flick, dt, &mut events);
-        if events.contains(&Event::Respawned) {
-            self.flick.reset();
-        }
         if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
             let s = &self.skater;
             let land_in = matches!(s.mode, Mode::Air { .. }).then(|| {
@@ -440,7 +435,14 @@ impl Game {
                 rider::time_to_land(s.pos.y - h, s.vel.y, s.tuning.gravity)
             });
             let world = crate::graph::drive::Driver::world(s, land_in, g.input.idle());
-            g.tick(&lib.db, &pad, world, Default::default(), dt, self.timer);
+            let gates = crate::graph::input::Gates {
+                late_flips_blocked: s.trick.is_some_and(|t| t.progress() < 1.0),
+                finger_flips_blocked: s.grab.is_none(),
+                reverts_blocked: false,
+                grinding: s.mode == Mode::Grind,
+            };
+            g.tick(&lib.db, &pad, world, gates, dt, self.timer);
+            self.skater.graph = Some(g.control(&lib.db, &self.tuning));
             self.times.graph_us = g.cost_us;
             if self.log.len() < LOG_CAP {
                 if let Some(state) = g.state_change() {
@@ -450,6 +452,11 @@ impl Game {
                     self.log.push(format!("graph: unsupported {n}"));
                 }
             }
+        }
+        let mut events = Vec::new();
+        self.skater.step(ground, &pad, &flick, dt, &mut events);
+        if events.contains(&Event::Respawned) {
+            self.flick.reset();
         }
         self.cam.update(&self.skater, ground, dt);
         self.times.physics_us = now(self.timer).wrapping_sub(t0);

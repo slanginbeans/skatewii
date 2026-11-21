@@ -15,9 +15,9 @@ pub struct KickerRun {
 }
 
 /// Raw C-stick values: pulled back, and flicked forward and right (a goofy rider's kickflip).
-const BACK: (i8, i8) = (0, -80);
+const BACK: (i8, i8) = (0, -92);
 const UP_RIGHT: (i8, i8) = (50, 62);
-const UP: (i8, i8) = (0, 80);
+const UP: (i8, i8) = (0, 92);
 
 /// The C-stick at `deg` degrees clockwise from straight forward, fully over.
 fn rim(deg: f32) -> (i8, i8) {

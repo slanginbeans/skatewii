@@ -146,6 +146,10 @@ pub struct Tuning {
     pub manual_tilt: f32,
     /// Deck pitch while dragging the tail or nose to brake (degrees).
     pub manual_brake_tilt: f32,
+    /// Pop strength finalisation (state graphs): at or below `jump_clamp_low` a pop is the minimum hop,
+    /// at or above `jump_clamp_high` full height.
+    pub jump_clamp_low: f32,
+    pub jump_clamp_high: f32,
     /// Sideways wheel friction (damping of sideways speed), and the torque that turns the board back
     /// in line with its travel (per tick per m/s of sideways error), unless the stick turns harder than
     /// `straighten_max_turn`.
@@ -417,6 +421,8 @@ pub const PATHS: &[&str] = &[
     "physics_steering/default/PushScalarIncriment",
     "physics_steering/default/PushScalarMin",
     "physics_jump/default/AbsoluteMinHeight",
+    "anim_motion/jumping/clamp_low_inclusive",
+    "anim_motion/jumping/clamp_high_inclusive",
     "physics_mode/normal/JumpMinHeight",
     "physics_mode/normal/JumpMaxHeight",
     "physics_jump/default/MinHeightVsSpeed",
@@ -494,6 +500,8 @@ impl Tuning {
         steer_tilt_blend: 0.25,
         manual_tilt: 0.5,
         manual_brake_tilt: 25.0,
+        jump_clamp_low: 0.5,
+        jump_clamp_high: 0.9,
         side_friction: 60.0,
         straighten: 0.02,
         straighten_max_turn: 0.75,
@@ -713,6 +721,8 @@ impl Tuning {
             "physics_steering/default/SteeringTiltBlending" => scalar!(self.steer_tilt_blend),
             "physics_manual/default/Tilt_TiltScalar" => scalar!(self.manual_tilt),
             "physics_manual/default/BrakeTiltAngle" => scalar!(self.manual_brake_tilt),
+            "anim_motion/jumping/clamp_low_inclusive" => scalar!(self.jump_clamp_low),
+            "anim_motion/jumping/clamp_high_inclusive" => scalar!(self.jump_clamp_high),
             "anim_motion/power_slide/slide_speed_threshold" => scalar!(self.slide_speed_threshold),
             "anim_motion/power_slide/slide_min_entry" => scalar!(self.slide_min_entry),
             "anim_motion/power_slide/well_into_slide_time" => scalar!(self.well_into_slide_time),

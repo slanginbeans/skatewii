@@ -108,6 +108,9 @@ pub struct World {
     pub grind_out: u8,
     pub blunting: bool,
     pub on_stairs: bool,
+    /// The physics' powerslide: 0 none, 1 to the left, 2 to the right; and whether it is ending.
+    pub slide: u8,
+    pub slide_ending: bool,
 }
 
 impl Default for World {
@@ -140,6 +143,8 @@ impl Default for World {
             grind_out: 0,
             blunting: false,
             on_stairs: false,
+            slide: 0,
+            slide_ending: false,
         }
     }
 }
@@ -168,6 +173,7 @@ pub struct Names {
     pub is_dark: Str,
     pub tweak_x: Str,
     pub tweak_y: Str,
+    pub pushing: Str,
     /// Motion-library names: the construction keys `Trick` and `Random`, `manualInto`, `defaultcyc`.
     trick_key: Option<NameId>,
     random_key: Option<NameId>,
@@ -419,6 +425,7 @@ impl<'a> Runner<'a> {
             is_dark: id("IsDark"),
             tweak_x: id("TweakX"),
             tweak_y: id("TweakY"),
+            pushing: id("Pushing"),
             trick_key: lib("Trick"),
             random_key: lib("Random"),
             manual_into: lib("manualInto"),
@@ -710,9 +717,11 @@ impl Host<'_, '_> {
             Cond::UnderflipRequested => s.underflip_requested,
             Cond::Random => self.s.random() & 1 == 0,
             Cond::ComVel { axis, num } => num.matches(w.com_vel[axis as usize]),
+            // Past the push's out point with no push button held (SK8: the repush deadline keeps a
+            // held push cycling).
             Cond::BreakOutOfPush => {
                 let len = s.player.length();
-                len <= 0.0 || s.player.time() >= 0.6 * len
+                (len <= 0.0 || s.player.time() >= 0.6 * len) && !s.ag.has(self.n.pushing)
             }
             Cond::SurfaceSlope(n) => n.matches(w.surface_slope),
             Cond::SkateSlope(n) => n.matches(w.skate_slope),
@@ -732,8 +741,13 @@ impl Host<'_, '_> {
             Cond::LandingType(t) => w.landing_type == t,
             Cond::CanLandOnBoard => w.can_land,
             Cond::CrouchedForGrab => w.crouch > 0.5,
-            Cond::ShouldLeaveSlide { right } => !s.slide_grabbed[usize::from(right)],
-            Cond::CanEnterSlide { .. } => w.speed > 1.0,
+            // The physics decides powerslides (flatground's Skate 3 rules); the graph's side is the
+            // rider's, flipped when rolling fakie (SK8 CanEnterSlide).
+            Cond::ShouldLeaveSlide { .. } => w.slide == 0 || w.slide_ending,
+            Cond::CanEnterSlide { right } => {
+                let r = right != w.fakie;
+                w.slide == if r { 2 } else { 1 } && !w.slide_ending
+            }
             Cond::GrindTrickOutAllowed(t) => {
                 let k = match self.p.str(t) {
                     "left" => 1,
