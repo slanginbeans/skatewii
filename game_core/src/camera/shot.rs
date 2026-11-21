@@ -123,7 +123,7 @@ impl Shot {
     /// Before any shot was chosen.
     pub const START: Shot = Shot {
         distance: 2.0,
-        lens: 14.0,
+        lens: 12.0,
         smoothing: [0.8; 4],
         weights: [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         board_offset: 0.0,

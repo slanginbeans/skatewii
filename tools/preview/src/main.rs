@@ -392,7 +392,7 @@ fn main() {
                 && (*i == 0
                     || !matches!(
                         args[i - 1].as_str(),
-                        "--skater" | "--every" | "--park" | "--rules" | "--motion" | "--index"
+                        "--skater" | "--every" | "--park" | "--rules" | "--motion"
                     ))
         })
         .map(|(_, a)| PathBuf::from(a))
@@ -573,31 +573,6 @@ fn main() {
         let path = out.join("park_overview.png");
         raster.save(&path);
         println!("        wrote {}", path.display());
-    }
-    // --menu [--index <parks.txt>]: the start menu, the pause menu and the loading screen over the park.
-    if args.iter().any(|a| a == "--menu") {
-        let index = value("--index")
-            .and_then(|p| fs::read_to_string(p).ok())
-            .map(|t| game_core::menu::parse_index(&t))
-            .unwrap_or_default();
-        game.set_locations(index.locations);
-        game.location = index.default.unwrap_or(0);
-        for name in ["menu_start", "menu_pause", "menu_loading"] {
-            match name {
-                "menu_start" => game.open_start_menu(),
-                "menu_pause" => game.menu = Some(game_core::menu::Menu::pause(0)),
-                _ => {
-                    game.menu = None;
-                    game.loading = Some("MALOOF MONEY CUP  3620 KB".into());
-                }
-            }
-            game.update(&PadRaw::default(), 1.0 / 60.0);
-            game.render(&mut raster);
-            let path = out.join(format!("{name}.png"));
-            raster.save(&path);
-            println!("        wrote {}", path.display());
-        }
-        return;
     }
     // --rails: how the park's rails were classified, and what the probes beside each segment meet.
     if args.iter().any(|a| a == "--rails") {
@@ -837,8 +812,6 @@ fn main() {
 fn rails_report(game: &Game) {
     use game_core::rails::{RailClass, side_of, upright};
     let t = game.terrain();
-    // The far probes reach out by the deck-centre-to-truck distance (the rules pack's, else ours).
-    let far = game.skater.tuning.grind.deck_to_truck;
     let mut counts = std::collections::BTreeMap::new();
     for (i, r) in t.rails().iter().enumerate() {
         for (k, w) in r.points.windows(2).enumerate() {
@@ -861,8 +834,8 @@ fn rails_report(game: &Game) {
             };
             let h0 = line(c + side * 0.09, up * 0.04);
             let h1 = line(c - side * 0.09, up * 0.04);
-            let h2 = line(c + side * far, up * (far * 1.06));
-            let h3 = line(c - side * far, up * (far * 1.06));
+            let h2 = line(c + side * 0.243, up * 0.258);
+            let h3 = line(c - side * 0.243, up * 0.258);
             let h4 = line(c, up * 0.04);
             let drop = t
                 .raycast(c - Vec3::UP * 0.3, -Vec3::UP, 10.0)
