@@ -120,7 +120,8 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
     };
     let has = |r: &str| duration(r) > 0.0;
     match s.mode {
-        Mode::Bailed { time } => {
+        // A runout reuses the bail clips for now.
+        Mode::Bailed { time } | Mode::Runout { time } => {
             // The fall, then getting up (holding its last frame until the respawn).
             let fall = duration("bail/fall");
             if time < fall {
@@ -304,18 +305,18 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                 } else {
                     PUSH
                 };
-                let role = if p.count == 0 && has(set[0]) {
-                    set[0]
-                } else if p.count % 2 == 1 || !has(set[2]) {
-                    set[1]
-                } else {
-                    set[2]
+                // The foot coming down (the first push winds up with `into`), on the ground, swinging
+                // back.
+                let (stage, time) = p.stage();
+                let (role, time) = match stage {
+                    0 if p.count == 0 && has(set[0]) => (set[0], time),
+                    0 => (set[2], duration(set[2]) - p.down + time),
+                    1 => (set[1], time),
+                    _ => (set[2], time),
                 };
+                let role = if has(role) { role } else { set[1] };
                 if p.turning <= 0.0 && has(role) {
-                    return Pick {
-                        role,
-                        time: p.time(),
-                    };
+                    return Pick { role, time };
                 }
             }
             let landing = s.landing.map(|l| (land_role(l.kind), l.time));
@@ -415,8 +416,13 @@ pub struct Rider {
     head_bones: Vec<usize>,
     torso_bones: Vec<usize>,
     mirror: bool,
+    graph_posed: bool,
     a: Vec<Local>,
     b: Vec<Local>,
+    /// The state graphs' pose stack: poses and their bones' channel weights (see
+    /// `graph::playback::PoseOp`), and a sampled clip's channel weights.
+    stack: Vec<(Vec<Local>, Vec<f32>, bool)>,
+    weights: Vec<f32>,
 }
 
 impl Rider {
@@ -440,8 +446,11 @@ impl Rider {
             head_bones,
             torso_bones,
             mirror: false,
+            graph_posed: false,
             a: vec![Local::IDENTITY; n],
             b: vec![Local::IDENTITY; n],
+            stack: Vec::new(),
+            weights: vec![1.0; n],
         };
         r.pose_and_skin(Mat3::IDENTITY);
         r
@@ -504,7 +513,110 @@ impl Rider {
         self.pose_and_skin(rot);
     }
 
+    /// One step driven by the state graphs: blends the clips the motion graph plays (`leaves`, weights
+    /// summing to 1), each sampled and mirrored for the stance its tree started in before blending, so a
+    /// stance change crossfades instead of popping. False (nothing drawn new) when the clips can't be
+    /// posed on this skeleton.
+    pub fn update_graph(
+        &mut self,
+        lib: &crate::motion::Library,
+        prog: &crate::graph::playback::PoseProgram,
+        rot: Mat3,
+    ) -> bool {
+        use crate::graph::playback::PoseOp;
+        let n = self.a.len();
+        let mut depth = 0usize;
+        for op in &prog.ops {
+            match *op {
+                PoseOp::Group { start, end } => {
+                    if self.stack.len() <= depth {
+                        self.stack
+                            .push((vec![Local::IDENTITY; n], vec![1.0; n], false));
+                    }
+                    let (pose, chan, valid) = &mut self.stack[depth];
+                    let mut total = 0.0;
+                    for l in &prog.leaves[start as usize..end as usize] {
+                        let Some(clip) = lib.pose(l.clip) else {
+                            continue;
+                        };
+                        if !self
+                            .character
+                            .sample_clip(&clip, l.time, l.mirror, &mut self.b)
+                        {
+                            return false;
+                        }
+                        self.character
+                            .channel_weights(&clip, l.mirror, &mut self.weights);
+                        if total == 0.0 {
+                            pose.copy_from_slice(&self.b);
+                            chan.copy_from_slice(&self.weights);
+                        } else {
+                            let k = l.weight / (total + l.weight);
+                            for ((a, b), (c, w)) in pose
+                                .iter_mut()
+                                .zip(&self.b)
+                                .zip(chan.iter_mut().zip(&self.weights))
+                            {
+                                *a = a.blend(b, k);
+                                *c += (w - *c) * k;
+                            }
+                        }
+                        total += l.weight;
+                    }
+                    *valid = total > 0.0;
+                    depth += 1;
+                }
+                PoseOp::Blend(_) | PoseOp::Channel { .. } => {
+                    if depth < 2 {
+                        return false;
+                    }
+                    let (low, high) = self.stack.split_at_mut(depth - 1);
+                    let (a, ca, va) = &mut low[depth - 2];
+                    let (b, cb, vb) = &high[0];
+                    match (*va, *vb) {
+                        (_, false) => {}
+                        (false, true) => {
+                            a.copy_from_slice(b);
+                            ca.copy_from_slice(cb);
+                            *va = true;
+                        }
+                        (true, true) => {
+                            for i in 0..n {
+                                let k = match *op {
+                                    PoseOp::Channel { weight, first } => {
+                                        (weight * if first { ca[i] } else { cb[i] }).clamp(0.0, 1.0)
+                                    }
+                                    PoseOp::Blend(w) => w,
+                                    PoseOp::Group { .. } => 0.0,
+                                };
+                                a[i] = a[i].blend(&b[i], k);
+                                ca[i] += (cb[i] - ca[i]) * k;
+                            }
+                        }
+                    }
+                    depth -= 1;
+                }
+            }
+        }
+        if depth == 0 || !self.stack[0].2 {
+            return false;
+        }
+        self.a.copy_from_slice(&self.stack[0].0);
+        self.graph_posed = true;
+        let ch = &mut self.character;
+        ch.pose(&self.a);
+        let c = &rot.cols;
+        ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), false);
+        true
+    }
+
+    /// The last pose came from the state graphs' clips (mirrored per tree, not at skin time).
+    pub fn graph_posed(&self) -> bool {
+        self.graph_posed
+    }
+
     fn pose_and_skin(&mut self, rot: Mat3) {
+        self.graph_posed = false;
         let ch = &mut self.character;
         if !ch.sample(self.cur.role, self.cur.time, &mut self.a) {
             ch.sample("idle", self.cur.time, &mut self.a);
@@ -580,12 +692,9 @@ mod tests {
     }
 
     fn trick(t: Trick, flips: u8) -> Option<ActiveTrick> {
-        Some(ActiveTrick {
-            flick: Flick::of(t),
-            t: 0.1,
-            duration: 0.4,
-            flips,
-        })
+        let mut a = ActiveTrick::new(Flick::of(t));
+        (a.t, a.duration, a.flips) = (0.1, 0.4, flips);
+        Some(a)
     }
 
     #[test]
@@ -604,25 +713,23 @@ mod tests {
         s.crouch = 0.0;
         let mut push = Push {
             t: 0.3,
-            held: 0.2,
-            mongo: false,
-            base: 0.0,
-            count: 0,
-            button: 0,
-            turning: 0.0,
-            delay: 0.0,
+            down: 0.4,
+            contact: 0.15,
+            recover: 0.8,
+            ..Push::default()
         };
+        // Foot coming down, on the ground, swinging back.
         s.push = Some(push);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push/into");
-        push.count = 1;
+        push.t = 0.45;
         s.push = Some(push);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push/cyc1");
-        push.count = 2;
+        push.t = 0.7;
         s.push = Some(push);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push/cyc2");
         // Mongo: this pack only has its first cycle.
         push.mongo = true;
-        push.count = 1;
+        push.t = 0.45;
         s.push = Some(push);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "mongo/cyc1");
         s.push = None;
@@ -650,7 +757,7 @@ mod tests {
             side: 1.0,
             amount: 1.0,
             time: 0.4,
-            releasing: false,
+            ..Powerslide::default()
         });
         // Goofy, board turned left: backside.
         let p = pick(&s, 0.0, 0.0, &dur);
@@ -665,14 +772,15 @@ mod tests {
             nose: false,
             balance: 0.0,
             time: 1.2,
-            brake: 0.8,
+            brake: 1.0,
+            ..Manual::default()
         });
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "tailbrake");
         s.manual = Some(Manual {
             nose: true,
             balance: 0.0,
             time: 1.2,
-            brake: 0.0,
+            ..Manual::default()
         });
         // No nose manual clip in this pack: plain riding.
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");

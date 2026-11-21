@@ -151,6 +151,10 @@ impl DevLog {
                     out.push(format!("BAIL: {why}{numbers}"));
                 }
                 Event::Respawned => out.push(String::from("respawned")),
+                Event::RanOut => out.push(format!(
+                    "RUNOUT: {} (stepped off, back on where it stops)",
+                    s.bail_reason.unwrap_or("?")
+                )),
                 Event::ManualLost => out.push(String::from("manual: tipped over")),
                 Event::Launched if s.hippie_air() => out.push(format!(
                     "hippie jump at {:.1} m/s, up {:.2} m/s",
@@ -198,8 +202,8 @@ impl DevLog {
             && self.frames.is_multiple_of(15)
         {
             out.push(format!(
-                "manual: balance {:+.2}, C-stick y {:+.2} (light hold {:.2}..{:.2}), brake {:.2}",
-                m.balance, flick.stick[1], 0.25, 0.9, m.brake
+                "manual: balance {:+.2}, C-stick y {:+.2} (hold {:.2}..{:.2}, balanced near {:.2}), brake {:.2}",
+                m.balance, flick.stick[1], 0.1, 0.9, crate::skater::MANUAL_BALANCED_AT, m.brake
             ));
         }
         let manual = s.manual.is_some();
@@ -246,6 +250,7 @@ impl DevLog {
             Mode::Rolling => "rolling",
             Mode::Air { .. } => "air",
             Mode::Bailed { .. } => "bailed",
+            Mode::Runout { .. } => "runout",
             Mode::Grind => "grind",
         };
         let line = format!(

@@ -4,6 +4,7 @@
 #   make package    -> ../dist/apps/flatground/{boot.dol,meta.xml}: copy that folder to SD:/apps/
 #                      plus data/ with the packs converted from your own Skate 3 disc image, when one is
 #                      found (fg_import build: converts only what is missing or out of date; FG_NO_ASSETS=1 skips)
+#   make package RUST_PROFILE=dolphin -> the same, built without LTO (quicker; for testing)
 #   make run WIILOAD=tcp:<wii-ip>   -> send to a Wii running the Homebrew Channel
 
 ifeq ($(strip $(DEVKITPRO)),)
@@ -22,7 +23,10 @@ LDFLAGS := -g $(MACHDEP) -L$(OGC)/lib/wii -Wl,--gc-sections
 LIBS    := -lwiiuse -lbte -lfat -logc -lm
 
 RUST_TARGET := powerpc-unknown-linux-gnu
-RUSTLIB     := ../target/$(RUST_TARGET)/release/libfg_game.a
+# Cargo profile for the game and the converter: release (default), or dolphin for quicker test builds
+# (no LTO; `build.bat fast`).
+RUST_PROFILE ?= release
+RUSTLIB     := ../target/$(RUST_TARGET)/$(RUST_PROFILE)/libfg_game.a
 BUILD_ID    ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo dev)
 
 BUILD := build
@@ -33,8 +37,11 @@ all: $(BUILD)/flatground.dol
 
 # Cargo tracks its own dependencies; always ask it.
 rustlib:
-	FG_BUILD_ID=$(BUILD_ID) cargo build --release -p fg_game --target $(RUST_TARGET)
+	FG_BUILD_ID=$(BUILD_ID) cargo build --profile $(RUST_PROFILE) -p fg_game --target $(RUST_TARGET)
+# The empty recipe makes make look at the library's time again after cargo ran (without one it keeps
+# the old time and doesn't relink).
 $(RUSTLIB): rustlib
+	@:
 
 $(BUILD):
 	mkdir -p $@
@@ -58,7 +65,7 @@ assets:
 ifeq ($(FG_NO_ASSETS),1)
 	@echo "[assets] FG_NO_ASSETS=1: not converting."
 else
-	cargo run --release -q -p fg_import -- build $(addprefix --search ,$(ISO_SEARCH)) --cache $(REPO)/imported/build --dest $(DIST)/apps/flatground/data
+	cargo run --profile $(RUST_PROFILE) -q -p fg_import -- build $(addprefix --search ,$(ISO_SEARCH)) --cache $(REPO)/imported/build --dest $(DIST)/apps/flatground/data
 endif
 
 package: all

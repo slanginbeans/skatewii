@@ -31,8 +31,20 @@ content second.
 - [x] Air spin with Skate 3's wind-up; hippie jumps; held double/triple kickflips
 - [x] Ramps and quarter pipes you can go vertical on: the board follows any surface under its trucks (ray
   probes against the park's triangles), airs out over coping, wallrides, pumping, bails from impacts
-- [ ] Scripted Dolphin runs from `game_core::autoplay`, with screenshots in CI-like checks
-- [ ] Late flips, finger flips, dark catches, board-sideways flicks (shapes are already converted)
+- [x] Fixed 60 Hz simulation (Skate 3's tick) on every TV: PAL50 runs one or two ticks a frame and draws
+  between the last two; flicks are read at 60 Hz
+- [x] SK8-style board core (`skater/board.rs`): a full velocity with sideways slip, truck-curvature
+  steering with grip, downhill heading and steep-face turn torques, natural air off crests and lips,
+  ground-normal smoothing, wall slides with a collision yaw, runouts, wheel-height curbs, push and brake
+  timing from the imported clips, SK8 powerslides, vert pops re-aimed up, SK8 wallrides (needs a floor),
+  pumping by curvature; every curve from the disc through the rules pack
+- [ ] Calibrate the flatground-own scales (brake, powerslide grip, side grip) against SK8 runs
+- [ ] Grinds from riding (into coping, onto curbs and ledges): the lock-on hook is ready (`try_grind`)
+- [x] Scripted Dolphin runs from `game_core::autoplay` (`autoplay.txt`, `tools/dolphin_test.ps1`)
+- [ ] Screenshots from scripted runs in CI-like checks
+- [x] Late flips, finger flips, under flips, dark catches: recognised and selected by the state graphs (Z is
+  the dark catch); the board does what the clips do (the imported board is skinned to the clips'
+  board bone), landings bail only inside the clips' danger zone, dark catches ride dark
 
 ## Phase 2: Renderer
 - [ ] Display lists for static geometry (built once, `GX_CallDispList`)
@@ -51,6 +63,24 @@ content second.
 - [x] `fg_import park`: grind rails from the spline sections
 - [x] `fg_import park`: the park's textured models (Pres stream, material -> texture binding)
 - [x] `fg_import rules`: Skate 3's riding tuning (AttribSys database) and flick shapes (`.pat`)
+- [x] `fg_import motion`: every clip's attribute tracks and events, every animation tree, and the poses of
+  every clip the on-board motion graph plays (`motion.fgpak`, loaded at start-up); tree playback in
+  `game_core::motion::tree` (SK8's semantics)
+- [x] Run Skate 3's on-board action and motion graphs from the player's disc (`motion/graph`,
+  `game_core::graph`, docs/graph-runner.md): SK8's state selection, behaviours, intents, crossfades; the
+  rider plays the graph's trees (mirrored per tree), and the graph decides pushes (push contact), foot
+  brakes (brake contact), pops (the takeoff's jump, SK8 trick height), manuals (no fail, pitch servo),
+  kick turns, reverts, turning round out of fakie; every gesture file recognised in parallel
+- [x] Graph runner, phase 4: held manuals last as long as the stick is held; SK8's push behaviours (push
+  strength, the push trees' coefficients, repush deadline) drive both the push clips and the board;
+  channel blends by bone weight and the fakie head and torso channel; air tricks through to the board
+  (late/finger/under flips, dark catches, multi-flips up to 4, landings from the clips' danger zone);
+  operations typed at import (graph load 217 ms -> 13 ms on the Wii); simultaneous gestures in SK8's
+  hash-bucket order; the trick tour does all of it in Dolphin
+- [ ] Graph runner, next: CalcLandingQuality and landing types from the landing behaviours, the push speed
+  from the posed clips' trajectory, SK8's manual PID (PhysicsWantsManualExit), character gestures (d-pad)
+  and shoves, grind trick-outs by grind type (needs the grind physics of phase 6), camera shots from the
+  graph (phase 7)
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)

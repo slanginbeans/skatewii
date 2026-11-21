@@ -18,7 +18,7 @@ use crate::model::Models;
 use crate::pack::Pack;
 use crate::park::{Park, Terrain};
 use crate::rider::{self, Rider};
-use crate::skater::{Event, Mode, STEP, Skater, Stance};
+use crate::skater::{ClipTiming, Event, Mode, STEP, Skater, Stance};
 use crate::tuning::Tuning;
 use crate::world::ImportedPark;
 
@@ -27,6 +27,34 @@ const SKY: u32 = rgb(150, 196, 232);
 const IMPORTED_TO_BOARD: Mat3 = Mat3::IDENTITY;
 const POPUP_TIME: f32 = 1.8;
 const HINT_TIME: f32 = 12.0;
+/// The simulation's fixed step: Skate 3's tuning is per 1/60 s tick, so the skater, the flick reader and
+/// the camera always step at 60 Hz whatever the TV runs at (PAL50 draws between two ticks).
+pub const TICK: f32 = 1.0 / 60.0;
+/// A drawn skater further than this (m) from where it was a tick ago was teleported: not blended.
+const TELEPORT: f32 = 2.0;
+
+/// What is drawn of one simulation tick: the board's frame and the camera.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct View {
+    base: Xform,
+    cam: crate::gfx::Camera,
+}
+
+/// `a` to `b` by `k` (0..1): positions blended, the frame turned part way (re-squared).
+fn blend_xform(a: &Xform, b: &Xform, k: f32) -> Xform {
+    if k >= 1.0 || (b.pos - a.pos).length() > TELEPORT {
+        return *b;
+    }
+    let up = a.rot.cols[1]
+        .lerp(b.rot.cols[1], k)
+        .normalize_or(b.rot.cols[1]);
+    let nose = a.rot.cols[2].lerp(b.rot.cols[2], k);
+    let nose = (nose - up * nose.dot(up)).normalize_or(b.rot.cols[2]);
+    Xform::new(
+        Mat3::from_cols(up.cross(nose), up, nose),
+        a.pos.lerp(b.pos, k),
+    )
+}
 
 /// Frame timing measured by the platform, over windows of a second: the CPU's own work (update + render, not
 /// counting waits), the time spent waiting for the GPU to finish, the time idle until the next refresh, and
@@ -89,6 +117,8 @@ pub struct SectionTimes {
     /// Park meshes and vertices drawn last frame.
     pub park_draws: u32,
     pub park_verts: u32,
+    /// Skate 3's state graphs (input intents, both graphs, animation advance), part of `physics_us`.
+    pub graph_us: u32,
 }
 
 struct Popup {
@@ -106,6 +136,16 @@ pub struct Game {
     models: Models,
     /// The player's imported skater, drawn instead of the box placeholder when loaded.
     rider: Option<Rider>,
+    /// Skate 3's motion library (`fg_import motion`): clip timing, attribute tracks, animation trees and
+    /// poses. Loaded but not played yet.
+    pub motion: Option<crate::motion::Library<'static>>,
+    /// Skate 3's action and motion graphs from the motion pack (`motion/graph`), run every tick when
+    /// present (see `graph`).
+    pub graph: Option<crate::graph::drive::Driver>,
+    /// Gesture files from the rules pack, by name (for the graph's input).
+    gesture_sets: Vec<(&'static str, Vec<gesture::Shape>)>,
+    /// The clips the motion graph plays this frame (reused buffer).
+    pose: crate::graph::playback::PoseProgram,
     pub skater: Skater,
     flick: FlickInput,
     /// This frame's flick-stick reading (for the preview and tests).
@@ -134,6 +174,13 @@ pub struct Game {
     pub timer: Option<fn() -> u32>,
     pub times: SectionTimes,
     render_times: core::cell::Cell<(u32, u32, u32)>,
+    /// Simulated time minus shown time (s): ticks run until the simulation is at or just past the frame.
+    ahead: f32,
+    /// Ticks run since the start.
+    pub ticks: u64,
+    /// The view one tick before the current one, and where between the two the frame is drawn (0..1).
+    prev_view: Option<View>,
+    alpha: f32,
 }
 
 /// Lines kept while nobody takes them.
@@ -179,6 +226,10 @@ impl Game {
             frame_cost: None,
             notice: None,
             rider: None,
+            motion: None,
+            graph: None,
+            gesture_sets: Vec::new(),
+            pose: Default::default(),
             imported_park: None,
             log: Vec::new(),
             devlog: DevLog::new(),
@@ -186,6 +237,10 @@ impl Game {
             timer: None,
             times: SectionTimes::default(),
             render_times: core::cell::Cell::new((0, 0, 0)),
+            ahead: 0.0,
+            ticks: 0,
+            prev_view: None,
+            alpha: 1.0,
         }
     }
 
@@ -196,6 +251,32 @@ impl Game {
         Ok(())
     }
 
+    /// Loads a motion library pack (`fg_import motion`). The bytes stay borrowed for the rest of the game.
+    /// Its push and brake clips also time the rider's feet in the physics ([`ClipTiming`]).
+    pub fn load_motion(
+        &mut self,
+        pack: &'static [u8],
+    ) -> Result<&crate::motion::Library<'static>, crate::motion::LibraryError> {
+        let lib = crate::motion::Library::parse(pack)?;
+        self.skater.clips = ClipTiming::from_motion(&lib.db);
+        self.graph = None;
+        if let Ok(p) = Pack::parse(pack)
+            && let Some(e) = p.find("motion/graph")
+        {
+            let t0 = self.timer.map_or(0, |f| f());
+            let ops = p.find(crate::graph::opcode::ENTRY).map(|o| o.data);
+            match crate::graph::drive::Driver::new(e.data, ops, &lib.db, self.gesture_sets()) {
+                Ok(mut d) => {
+                    d.load_us = self.timer.map_or(0, |f| f()).wrapping_sub(t0);
+                    d.set_tuning(&self.tuning);
+                    self.graph = Some(d)
+                }
+                Err(e) => self.notice = Some(format!("state graphs unreadable ({e:?})")),
+            }
+        }
+        Ok(self.motion.insert(lib))
+    }
+
     pub fn rider(&self) -> Option<&Rider> {
         self.rider.as_ref()
     }
@@ -203,7 +284,9 @@ impl Game {
     /// Rides an imported park (`fg_import park`) instead of the demo park, starting at its spawn.
     pub fn load_park(&mut self, pack: &'static [u8]) -> Result<(), collision::Error> {
         let p = ImportedPark::parse(pack)?;
+        let clips = self.skater.clips;
         self.skater = Skater::spawn_with(&p.mesh, self.tuning, self.stance);
+        self.skater.clips = clips;
         self.cam = ChaseCam::new(&self.skater);
         self.imported_park = Some(p);
         Ok(())
@@ -225,9 +308,42 @@ impl Game {
             shapes = s.len();
             self.flick = FlickInput::with_shapes(s);
         }
+        self.gesture_sets.clear();
+        for name in crate::graph::input::RIGHT_SETS
+            .iter()
+            .chain(&crate::graph::input::LEFT_SETS)
+        {
+            if let Some(e) = pack.find(&format!("rules/gestures/{name}"))
+                && let Some(s) = gesture::parse(e.data)
+            {
+                self.gesture_sets.push((name, s));
+            }
+        }
+        let sets = self.gesture_sets();
+        if let Some(g) = &mut self.graph {
+            g.set_gestures(sets);
+            g.set_tuning(&self.tuning);
+        }
         self.skater.tuning = self.tuning;
         self.cam = ChaseCam::new(&self.skater);
         Ok((values, shapes))
+    }
+
+    /// A shape of a gesture file from the rules pack (`skaterls`, `SlideFs180` ...), if loaded.
+    pub fn gesture_shape(&self, set: &str, name: &str) -> Option<&gesture::Shape> {
+        self.gesture_sets
+            .iter()
+            .find(|s| s.0 == set)
+            .and_then(|s| s.1.iter().find(|x| x.name == name))
+    }
+
+    /// The gesture files for the graph's input: the disc's, else flatground's own flick shapes.
+    fn gesture_sets(&self) -> Vec<(&'static str, Vec<gesture::Shape>)> {
+        if self.gesture_sets.is_empty() {
+            alloc::vec![("skater", gesture::built_in())]
+        } else {
+            self.gesture_sets.clone()
+        }
     }
 
     /// Sets the rider's natural stance (Skate 3's default is goofy).
@@ -245,65 +361,44 @@ impl Game {
         terrain(&self.imported_park, &self.park)
     }
 
-    /// One fixed step (1/60 s on NTSC and PAL60, 1/50 s on PAL50).
+    /// One displayed frame of `dt` seconds (1/60 on NTSC and PAL60, 1/50 on PAL50): runs as many fixed
+    /// [`TICK`]s as it takes to reach the frame's time (one at 60 Hz; one or two at 50 Hz), then poses the
+    /// rider once. A PAL50 frame is drawn between the last two ticks.
     pub fn update(&mut self, raw: &PadRaw, dt: f32) {
-        let pad = Pad::from_raw(raw, self.prev_held);
-        self.prev_held = raw.buttons;
         self.connected = raw.flags & flag::CONNECTED != 0;
-        self.clock += dt;
         self.events.clear();
-
-        let mut flick = self.flick.update(pad.flick, self.tuning.flick_misses);
-        let rolling = self.skater.mode == Mode::Rolling;
-        let grinding = self.skater.mode == Mode::Grind;
-        if !(rolling || grinding) {
-            flick.flick = None;
+        self.ahead -= dt;
+        // A little slack so float error never runs (or skips) a tick at 60 Hz.
+        while self.ahead < -1e-4 {
+            self.prev_view = Some(self.view());
+            self.tick(raw);
+            self.ahead += TICK;
         }
-        self.flick_out = flick;
+        self.alpha = (1.0 - self.ahead / TICK).clamp(0.0, 1.0);
         let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
-        let t0 = now(self.timer);
-        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
-        self.skater.step(ground, &pad, &flick, dt, &mut self.events);
-        if self.events.contains(&Event::Respawned) {
-            self.flick.reset();
-        }
-        self.cam.update(&self.skater, ground, dt);
         let t1 = now(self.timer);
         if self.rider.is_some() {
             let rot = self.imported_xform().rot;
             let s = &self.skater;
+            let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
             let ground = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
             let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, s.tuning.gravity);
-            if let Some(r) = &mut self.rider {
+            let mut posed = false;
+            if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
+            {
+                g.runner.pose(&mut self.pose);
+                posed = r.update_graph(lib, &self.pose, rot);
+            }
+            if !posed && let Some(r) = &mut self.rider {
                 r.update(&self.skater, self.clock, land_in, dt, rot);
             }
         }
         let t2 = now(self.timer);
+        self.times.skin_us = t2.wrapping_sub(t1);
         let (render_us, park_draws, park_verts) = self.render_times.get();
-        self.times = SectionTimes {
-            physics_us: t1.wrapping_sub(t0),
-            skin_us: t2.wrapping_sub(t1),
-            render_us,
-            park_draws,
-            park_verts,
-        };
-        // Development log: what happened this frame, and a status line now and then.
-        if self.log.len() < LOG_CAP {
-            let cam = self.cam.distance();
-            self.devlog.observe(
-                &self.skater,
-                raw,
-                &self.flick_out,
-                &self.events,
-                cam,
-                &mut self.log,
-            );
-            self.status_timer += dt;
-            if self.status_timer >= STATUS_EVERY {
-                self.status_timer = 0.0;
-                self.log.push(self.devlog.status(&self.skater, cam));
-            }
-        }
+        self.times.render_us = render_us;
+        self.times.park_draws = park_draws;
+        self.times.park_verts = park_verts;
 
         for e in &self.events {
             match e {
@@ -335,12 +430,126 @@ impl Game {
         }
     }
 
+    /// One fixed 1/60 s step of the simulation: input, flick reader (so flicks are sampled at 60 Hz, as
+    /// Skate 3 reads them), skater, camera, log.
+    fn tick(&mut self, raw: &PadRaw) {
+        let dt = TICK;
+        let pad = Pad::from_raw(raw, self.prev_held);
+        self.prev_held = raw.buttons;
+        self.clock += dt;
+        self.ticks += 1;
+        let mut flick = self.flick.update(pad.flick, self.tuning.flick_misses);
+        let rolling = self.skater.mode == Mode::Rolling;
+        let grinding = self.skater.mode == Mode::Grind;
+        if !(rolling || grinding) {
+            flick.flick = None;
+        }
+        self.flick_out = flick;
+        let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
+        let t0 = now(self.timer);
+        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
+            let s = &self.skater;
+            let land_in = matches!(s.mode, Mode::Air { .. }).then(|| {
+                let h = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
+                rider::time_to_land(s.pos.y - h, s.vel.y, s.tuning.gravity)
+            });
+            let world = g.world(s, land_in, g.input.idle());
+            let gates = crate::graph::input::Gates {
+                late_flips_blocked: s.trick.is_some_and(|t| t.progress() < 1.0),
+                finger_flips_blocked: s.grab.is_none(),
+                reverts_blocked: false,
+                grinding: s.mode == Mode::Grind,
+                ..Default::default()
+            };
+            g.tick(&lib.db, &pad, world, gates, dt, self.timer);
+            self.skater.graph = Some(g.control(&lib.db, &self.tuning));
+            self.times.graph_us = g.cost_us;
+            if self.log.len() < LOG_CAP {
+                if let Some(state) = g.state_change() {
+                    self.log.push(format!("graph: {state}"));
+                }
+                for n in g.new_unsupported() {
+                    self.log.push(format!("graph: unsupported {n}"));
+                }
+            }
+        }
+        let mut events = Vec::new();
+        self.skater.step(ground, &pad, &flick, dt, &mut events);
+        if events.contains(&Event::Respawned) {
+            self.flick.reset();
+        }
+        self.cam.update(&self.skater, ground, dt);
+        self.times.physics_us = now(self.timer).wrapping_sub(t0);
+        // Development log: what happened this tick, and a status line now and then.
+        if self.log.len() < LOG_CAP {
+            let cam = self.cam.distance();
+            self.devlog.observe(
+                &self.skater,
+                raw,
+                &self.flick_out,
+                &events,
+                cam,
+                &mut self.log,
+            );
+            self.status_timer += dt;
+            if self.status_timer >= STATUS_EVERY {
+                self.status_timer = 0.0;
+                self.log.push(self.devlog.status(&self.skater, cam));
+            }
+        }
+        self.events.extend(events);
+    }
+
+    /// The board's frame and the camera as they are now.
+    fn view(&self) -> View {
+        View {
+            base: self.skater_base(),
+            cam: self.cam.camera(),
+        }
+    }
+
+    /// The board's frame to draw: between the last two ticks on PAL50.
+    fn drawn_base(&self) -> Xform {
+        let cur = self.skater_base();
+        match &self.prev_view {
+            Some(p) => blend_xform(&p.base, &cur, self.alpha),
+            None => cur,
+        }
+    }
+
+    /// The camera to draw with (blended like the skater).
+    pub fn drawn_camera(&self) -> crate::gfx::Camera {
+        let cur = self.cam.camera();
+        match &self.prev_view {
+            Some(p) if self.alpha < 1.0 && (cur.eye - p.cam.eye).length() < TELEPORT => {
+                crate::gfx::Camera {
+                    eye: p.cam.eye.lerp(cur.eye, self.alpha),
+                    target: p.cam.target.lerp(cur.target, self.alpha),
+                    ..cur
+                }
+            }
+            _ => cur,
+        }
+    }
+
+    /// Where between the last two ticks the frame is drawn (1: on the latest).
+    pub fn blend(&self) -> f32 {
+        self.alpha
+    }
+
+    /// The drawn skater's position (blended between ticks).
+    pub fn drawn_pos(&self) -> crate::math::Vec3 {
+        self.drawn_base().pos
+    }
+
     pub fn render(&self, gfx: &mut dyn Gfx) {
         let now = || self.timer.map_or(0, |f| f());
         let t0 = now();
-        gfx.begin_frame(&self.cam.camera(), SKY);
+        let cam = self.drawn_camera();
+        gfx.begin_frame(&cam, SKY);
         let (draws, verts) = match &self.imported_park {
-            Some(p) => p.draw(gfx, self.cam.camera().eye),
+            Some(p) => p.draw(gfx, cam.eye),
             None => {
                 gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34());
                 (1, self.park_mesh.len() as u32)
@@ -380,10 +589,12 @@ impl Game {
             .as_ref()
             .is_some_and(|r| r.character.has_clip("bail/fall"));
         let tip = match self.skater.mode {
-            Mode::Bailed { time } if !animated => Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
+            Mode::Bailed { time } | Mode::Runout { time } if !animated => {
+                Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48)
+            }
             _ => Mat3::IDENTITY,
         };
-        self.skater_base()
+        self.drawn_base()
             .then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
             .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, 0.0, 0.0)))
     }
@@ -397,7 +608,7 @@ impl Game {
             return;
         }
         let s = &self.skater;
-        let base = self.skater_base();
+        let base = self.drawn_base();
 
         // Board: lifts and turns under the feet while a trick plays.
         let (mut lift, mut board_rot) = (0.0, Mat3::IDENTITY);
@@ -408,6 +619,10 @@ impl Game {
             board_rot =
                 Mat3::rot_y(shove * PI * p).mul(&Mat3::rot_z(flip * t.flips as f32 * TAU * p));
         }
+        // Caught dark (or riding dark): grip down.
+        if s.dark || s.trick.is_some_and(|t| t.dark && t.progress() >= 1.0) {
+            board_rot = board_rot.mul(&Mat3::rot_z(PI));
+        }
         let pivot = 0.09;
         let board = base
             .then(&Xform::new(board_rot, v3(0.0, pivot + lift, 0.0)))
@@ -416,7 +631,7 @@ impl Game {
 
         // Rider: tucks with the board, falls over on a bail.
         let (rider_pos, rider_rot) = match s.mode {
-            Mode::Bailed { time } => (
+            Mode::Bailed { time } | Mode::Runout { time } => (
                 v3(0.0, 0.0, 0.0),
                 Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
             ),
@@ -490,7 +705,9 @@ impl Game {
         if let Some(n) = &self.notice
             && self.clock < HINT_TIME
         {
-            hud::text_centered(&mut m, SCREEN_W / 2.0, 366.0, 3.0, n, rgb(255, 230, 90));
+            // As big as fits across the screen.
+            let px = ((SCREEN_W - 32.0) / (4.0 * n.chars().count().max(1) as f32)).min(3.0);
+            hud::text_centered(&mut m, SCREEN_W / 2.0, 366.0, px, n, rgb(255, 230, 90));
         }
         if !self.connected {
             hud::text_centered(
@@ -587,6 +804,71 @@ mod tests {
             g.update(&PadRaw::default(), 1.0 / 60.0);
         }
         assert!(g.log.len() <= LOG_CAP + 8);
+    }
+
+    fn held(buttons: u32) -> PadRaw {
+        PadRaw {
+            flags: flag::CONNECTED,
+            buttons,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_simulation_ticks_at_60_hz_on_any_tv() {
+        // NTSC: one tick a frame, drawn on the latest tick.
+        let mut g = Game::new();
+        for _ in 0..60 {
+            g.update(&held(crate::input::btn::A), 1.0 / 60.0);
+            assert_eq!(g.blend(), 1.0);
+        }
+        assert_eq!(g.ticks, 60);
+        // PAL50: 50 frames are 60 ticks (one or two a frame), drawn between the last two.
+        let mut p = Game::new();
+        let mut doubles = 0;
+        for _ in 0..50 {
+            let before = p.ticks;
+            p.update(&held(crate::input::btn::A), 1.0 / 50.0);
+            let n = p.ticks - before;
+            assert!((1..=2).contains(&n), "{n}");
+            doubles += (n == 2) as u32;
+        }
+        assert_eq!(p.ticks, 60);
+        assert_eq!(doubles, 10);
+        // The same input for the same time gives the same skater, whatever the frame rate.
+        assert_eq!(g.skater.pos, p.skater.pos);
+        assert_eq!(g.skater.speed, p.skater.speed);
+    }
+
+    #[test]
+    fn pal50_draws_between_the_last_two_ticks() {
+        let mut g = Game::new();
+        let mut seen_between = false;
+        for _ in 0..50 {
+            let before = g.skater.pos;
+            g.update(&held(crate::input::btn::A), 1.0 / 50.0);
+            let (prev, cur) = (g.prev_view.unwrap().base.pos, g.skater.pos);
+            let drawn = g.drawn_pos();
+            let k = g.blend();
+            assert!((0.0..=1.0).contains(&k));
+            // On the line between the last two ticks, at `k`.
+            assert!((drawn - prev.lerp(cur, k)).length() < 1e-4);
+            if k < 0.99 && (cur - before).length() > 1e-3 {
+                seen_between = true;
+                assert!((drawn - cur).length() > 1e-5);
+            }
+        }
+        assert!(seen_between);
+        // A press seen on a two-tick frame is one press, not two.
+        let mut g = Game::new();
+        g.update(&held(0), 1.0 / 50.0);
+        let mut pushes = 0;
+        for i in 0..5 {
+            let b = if i == 0 { crate::input::btn::A } else { 0 };
+            g.update(&held(b), 1.0 / 50.0);
+            pushes += g.skater.push.is_some() as u32;
+        }
+        assert!(pushes >= 1);
     }
 
     /// Draws nothing.

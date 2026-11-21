@@ -17,6 +17,10 @@ static int ok = 1;
     } while (0)
 static uint32_t clock_ms;
 static uint32_t ms(void) { return clock_ms; }
+static int locks, unlocks, kicks;
+static void fake_lock(void) { locks++; }
+static void fake_unlock(void) { unlocks++; }
+static void fake_kick(void) { kicks++; }
 
 static int count_logs(const char *dir) {
     DIR *d = opendir(dir);
@@ -37,7 +41,7 @@ static int read_log(char *buf, int cap) {
 }
 
 int main(void) {
-    char dir[] = "/tmp/flatground_logtest", logdir[64], cmd[96], buf[8192];
+    char dir[] = "/tmp/flatground_logtest", logdir[64], cmd[96], buf[65536];
     const char *tail[LOG_TAIL_LINES];
     int i, n;
     snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s", dir, dir);
@@ -77,6 +81,30 @@ int main(void) {
         n = log_tail(tail, 1);
         CHECK(n == 1 && strlen(tail[0]) < 400, "over-long lines are cut");
     }
+    log_close();
+
+    // With a writer thread: lines and important lines only kick the writer; the file waits for log_flush().
+    log_open(dir, (time_t)1900000000);
+    log_set_writer(fake_lock, fake_unlock, fake_kick);
+    log_printf("queued");
+    log_important("ERROR: something");
+    CHECK(read_log(buf, sizeof(buf)) == 0 && kicks == 1, "with a writer, the game never writes itself");
+    CHECK(locks > 0 && locks == unlocks, "the buffer is locked and unlocked in pairs");
+    log_tick();
+    CHECK(read_log(buf, sizeof(buf)) == 0, "... not even on tick");
+    log_flush();
+    read_log(buf, sizeof(buf));
+    CHECK(strstr(buf, "queued") && strstr(buf, "ERROR: something"), "the writer's flush writes them");
+    // A full buffer drops lines instead of waiting, and says so.
+    {
+        char big[300];
+        memset(big, 'y', sizeof(big));
+        for (i = 0; i < 200; i++) log_line(big, sizeof(big), 0);
+        log_flush();
+        read_log(buf, sizeof(buf));
+        CHECK(strstr(buf, "log lines dropped") != NULL, "a full buffer drops lines and the file says so");
+    }
+    log_set_writer(NULL, NULL, NULL);
     log_close();
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd)) return 1;

@@ -24,9 +24,11 @@ inside the repo folder, so put the image there (`*.iso` is git-ignored) or point
 `build.bat dolphin` then starts the game in Dolphin (the regular build from dolphin-emu.org) with its own
 profile in `out/dolphin` and `dist/` as the virtual SD card, so it loads the same files a Wii would. Dolphin is
 looked for in the usual places, then `FG_DOLPHIN`, then `dolphin=<path>` in `fg_local.txt`.
+`build.bat fast` builds without link-time optimisation (Cargo profile `dolphin`): much quicker, a little slower
+to run, good for testing. `tools\dolphin_test.ps1` does a whole scripted test run (docs/logging.md).
 
-The game shows on start-up whether the imported skater, park and rules loaded (`RULES: DISC` or
-`BUILT-IN`), and its CPU time per frame (average and the
+The game shows on start-up whether the imported skater, park, rules and motion library loaded (`RULES: DISC`
+or `BUILT-IN`), and its CPU time per frame (average and the
 worst frame of the last second; the budget at 60 Hz is 16.7 ms) in the top left corner.
 
 ## By hand
@@ -58,8 +60,10 @@ clips (`anim/<bank>/<clip>`) and every reference pose (`anim/<bank>/pose/<name>`
 more than the Wii has, so pick clips with `--clips` (ollies and kickflips: about 2 MB). `--from` takes another
 `.abin`, or a `.big` to take every bank in it.
 
-Layouts: `game_core/src/anim.rs`. Rotations are stored as Q15 quaternions and translations as 16-bit
-values scaled to each clip's range. Scale is stored only when a clip uses it.
+Layouts: `game_core/src/anim.rs`. Rotations are stored as their three smallest quaternion components
+(16 bits each) and translations as 16-bit values scaled to each clip's range; a bone whose translation never
+changes stores it once. Scale is stored only when a clip uses it. (The game still reads the older layout with
+four-component rotations and per-frame translations.)
 
 Clips on the disc store motion relative to the bank's `RIG_TPOSE` pose, the game's bind pose. The importer
 composes that pose in, the same arithmetic as the game's `AddBindPose` (rotation = bind ⊗ clip,
@@ -72,7 +76,7 @@ cargo run --release -p fg_import -- skater path/to/skate3.iso --lod 2
 ```
 Builds the default skater from the disc's fallback recipe (`data/cacrecipes/SavedRecipeFallbackMale.bin`).
 That is 10 parts: arms, feet, hair, eyes/teeth, shirt, pants, head, deck, trucks and wheels. Writes
-`imported/skater.fgpak` (about 2.7 MiB at `--lod 2`):
+`imported/skater.fgpak` (about 1.6 MiB at `--lod 2`):
 
 | Entry | Kind |
 |---|---|
@@ -142,6 +146,33 @@ How the skinning fits together, all checked against the previews:
 - Character positions are int16 × 2⁻¹⁴ with +0.8 m on Y (fixed by the game's shader). Normals are
   cross(tangent, binormal).
 - Only the hair's alpha is coverage. The other diffuse textures keep masks in alpha, which is dropped.
+
+### The motion library
+```bash
+cargo run --release -p fg_import -- motion path/to/skate3.iso [--budget 20] [--list]
+```
+Writes `imported/motion.fgpak`: what Skate 3's skating animation runs on, from `OnBoard.abin` and the on-board
+motion graph (`data/state/MotionGraph_OnBoard.stategraph`, both in `miscload.big`). The build converts it too.
+
+| Entry | What |
+|---|---|
+| `motion/db` | every clip of the bank (2,672): frames, frame rate, base speed, loop/phase flags, and its attribute records (name, kind, begin/end, payload): untimed values such as `SPEED`, `ANGLE`, `VEL_E`, `ANTICSTRENGTH`, and timed events and windows such as `JUMP`, `PUSHCONTACT`, `PUSH_CONTACT` (a bone), `MANUALINTO`, `EARLYOUT`, `MIDOUT`, `CANTRANSTOUNDERFLIP`, `UNDERFLIPWINDOWEND`. Plus every animation tree (1,108): blend spaces, phase blends, selectors and selection spaces with their parameters and children |
+| `motion/clip/<NAME>` | the poses of every clip the motion graph plays, directly or through its trees, in the clip layout above |
+| `motion/graph` | the on-board action graph (`ActionGraph_OnBoard.stategraph`) and motion graph, compiled for the game's graph runner: states, transitions with priorities and hooks, condition expressions with their masks, and every behaviour, condition and hook with its attributes (about 610 KiB). See [graph-runner.md](graph-runner.md) |
+
+Format and API: `game_core/src/motion/` (`MotionDb` for lookups, attribute values at a time and events in a
+time step; `tree::Playback` builds and plays a tree as SK8 does: clocks in phase, parameters, attribute
+queries, the list of poses to blend). The bank's record layouts and the tree semantics come from
+SK8-ENGINE/skate-3-rust-engine.
+
+Poses are taken by area of the graph, in this order, until `--budget` (MiB, default 20) is used: riding,
+push, brake, anticipation, tricks, manual, landing, kickturn, revert, switch, powerslide, grind, air, grab,
+then the rest (skitching, handplants, getting on and off). The converter prints each area's size and what
+was left out. From the US/EU disc all of it fits: 2,165 clips, about 19 MiB. `--list` prints every graph
+reference with its state path and every attribute name with how many clips carry it.
+
+The game loads it at start-up and logs how many clips, poses, trees and attribute records it holds, and
+runs the two state graphs every tick ([graph-runner.md](graph-runner.md)).
 
 ### A park
 ```bash

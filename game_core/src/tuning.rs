@@ -94,8 +94,20 @@ pub struct Tuning {
     pub push_hold_time: Curve,
     /// Speed a push adds (m/s) against how much of `push_hold_time` the button was held (0..1).
     pub push_dv: Curve,
-    /// Length of one push cycle (s): the next push can start after this.
-    pub push_cycle: f32,
+    /// Latest point of a push's recovery (as a share of it, 0..1) where the next push may start, and how
+    /// much that point follows speed rather than push strength (0..1). Skate 3's re-push rule.
+    pub push_out_max: f32,
+    pub push_out_speed_weight: f32,
+    /// Most speed a held, repeated push adds (m/s).
+    pub push_hold_cap: f32,
+    /// How many frames (1/60 s) the push trees' start-speed blends take to cross their whole range,
+    /// against the strength blend; and the strength blend's, against speed.
+    pub push_blend_speed_frames: Curve,
+    pub push_blend_acc_frames: Curve,
+    /// A first push this soon after the rider was put on the board pushes as if held (s).
+    pub push_teleport_window: f32,
+    /// No pushing or foot braking on slopes steeper than this (degrees).
+    pub push_slope_limit: f32,
 
     // Rolling resistance and braking.
     /// Deceleration (m/s^2) against speed, always.
@@ -105,10 +117,19 @@ pub struct Tuning {
     pub no_input_time: f32,
     /// Extra deceleration against speed on two wheels.
     pub friction_manual: Curve,
-    /// Foot brake and tail brake strength (deceleration = force * `brake_scale`).
+    /// Foot brake and tail brake strength (deceleration = force * `brake_scale` * `braking_scalar`).
     pub foot_brake: f32,
     pub tail_brake: f32,
+    /// flatground's own calibration from Skate 3's brake forces to a deceleration (m/s^2 per unit).
     pub brake_scale: f32,
+    /// The surface's braking factor (smooth concrete).
+    pub braking_scalar: f32,
+    /// Below this speed (m/s) a braking board is held still.
+    pub brake_slow_speed: f32,
+    /// The rolling-resistance corrector moves the speed by at most `friction_max_change *
+    /// speed_general_amount` per tick.
+    pub friction_max_change: f32,
+    pub speed_general_amount: f32,
 
     // Steering.
     /// How quickly steering follows the stick: 0 never, 1 at once (per 1/60 s).
@@ -125,6 +146,119 @@ pub struct Tuning {
     pub push_steer_drop: f32,
     pub push_steer_rise: f32,
     pub push_steer_min: f32,
+    /// How quickly the deck tilt follows the steering (per 1/60 s).
+    pub steer_tilt_blend: f32,
+    /// Steering scale on two wheels.
+    pub manual_tilt: f32,
+    /// Deck pitch while dragging the tail or nose to brake (degrees).
+    pub manual_brake_tilt: f32,
+    /// The manual balance servo (SK8's manual controller): the deck pitch aims at
+    /// (0.25 + 0.75 lean) x `manual_max_tilt` degrees plus a gentle wobble, and a PID correction (gains
+    /// per 1/60 s tick; the derivative term is limited to `manual_d_limit`, the error to
+    /// `manual_max_error` rad) turns the deck towards it.
+    pub manual_max_tilt: f32,
+    pub manual_p: f32,
+    pub manual_i: f32,
+    pub manual_d: f32,
+    pub manual_d_limit: f32,
+    pub manual_max_error: f32,
+    /// Wobble: sin(2 pi `manual_noise_freq` t) x `manual_noise_scale` rad, scaled by
+    /// `manual_noise_vs_speed` (against speed in m/s).
+    pub manual_noise_freq: f32,
+    pub manual_noise_scale: f32,
+    pub manual_noise_vs_speed: Curve,
+    /// Pop strength finalisation (state graphs): at or below `jump_clamp_low` a pop is the minimum hop,
+    /// at or above `jump_clamp_high` full height.
+    pub jump_clamp_low: f32,
+    pub jump_clamp_high: f32,
+    /// Sideways wheel friction (damping of sideways speed), and the torque that turns the board back
+    /// in line with its travel (per tick per m/s of sideways error), unless the stick turns harder than
+    /// `straighten_max_turn`.
+    pub side_friction: f32,
+    pub straighten: f32,
+    pub straighten_max_turn: f32,
+    /// Downhill heading torque on slopes: strength, and its scale against slope (0 flat .. 1 vertical)
+    /// and against speed / `heading_adjust_max_speed`.
+    pub heading_adjust: f32,
+    pub heading_adjust_max_speed: f32,
+    pub heading_vs_slope: Curve,
+    pub heading_vs_speed: Curve,
+    /// Extra stick turn on steep faces: strength, against slope, against speed / 8 m/s, and against the
+    /// yaw rate already opposing it (rad per tick).
+    pub turn_torque: f32,
+    pub turn_torque_vs_slope: Curve,
+    pub turn_torque_vs_speed: Curve,
+    pub turn_torque_vs_neg_ang_vel: Curve,
+
+    // Powerslides.
+    /// Least speed to start one (and below which it ends), the least slide amount at first, how long a
+    /// slide lasts at least (s), and the trucks' turn during it.
+    pub slide_speed_threshold: f32,
+    pub slide_min_entry: f32,
+    pub well_into_slide_time: f32,
+    pub slide_turn_value: f32,
+    /// Where a held slide relaxes to (against the stick's slide amount), and how much it relaxes against
+    /// speed.
+    pub slide_input_remap: Curve,
+    pub slide_remap_vs_speed: Curve,
+    /// "Not sliding": `slide_speed_factor(speed) * (1 - |cos angle|)` under `not_sliding_threshold(cos
+    /// angle)` for longer than `not_sliding_time(cos angle)` ends the slide.
+    pub slide_speed_factor: Curve,
+    pub not_sliding_threshold: Curve,
+    pub not_sliding_time: Curve,
+
+    // Ground contact and walls.
+    /// Leaving the ground: the surface further than `natural_air_max_dist` (m) below the board, or more
+    /// than `natural_air_min_dist` for `natural_air_time` (s).
+    pub natural_air_max_dist: f32,
+    pub natural_air_min_dist: f32,
+    pub natural_air_time: f32,
+    /// How quickly the board's drawn up follows the ground under it (per tick).
+    pub ground_normal_blend: f32,
+    /// Hitting a wall: the speed it pushes the board away at (m/s), the most it may change the velocity,
+    /// and the yaw that turns the board along it (rad per tick, against the angle / pi between travel and
+    /// the wall's normal) for `collision_torque_time` s, fading by `collision_torque_fade` per tick.
+    pub wall_push_away: f32,
+    pub wall_max_vel_delta: f32,
+    pub collision_torque: Curve,
+    pub collision_torque_time: f32,
+    pub collision_torque_fade: f32,
+    /// Closing speed into a wall (m/s) that takes the rider off: on the ground and in the air.
+    pub wipe_ground_closing: f32,
+    pub wipe_air_closing: f32,
+
+    // Vert, wallrides, pumping.
+    /// Popping off a steep face: the vertical re-aim (ground normal y below `vert_align_max_ny` and a
+    /// launch direction y above `vert_align_min_dir_y`), its lean range (rad) and blend, and the share
+    /// of the off-the-face speed kept when rolling off vert without a pop.
+    pub vert_align_max_ny: f32,
+    pub vert_align_min_dir_y: f32,
+    pub vert_align_max_angle: f32,
+    pub vert_align_factor: f32,
+    pub natural_air_off_verts: f32,
+    /// Wallrides: gravity held off (share of g) against seconds on the wall; the most the floor may face
+    /// the wall (dot); the height above the floor (m) and look-ahead (s) that end it; the longest ride;
+    /// and the jump off it (share of the falling speed kept, push from the wall in m/s).
+    pub wallride_antigravity: Curve,
+    pub wallride_max_dot_floor: f32,
+    pub wallride_jump_height: f32,
+    pub wallride_lookahead: f32,
+    pub wallride_max_time: f32,
+    pub wallride_jump_ydown: f32,
+    pub wallride_jump_force: f32,
+    /// Pumping: the rider's extension (m per tick) smoothed by `pump_damping`, ignored under
+    /// `pump_min_change`, capped at `pump_max_change`, fading with `pump_vs_time`; times the ground's
+    /// turn rate along travel (smoothed by `pump_ang_damping`) times `pump_vs_vel(speed)` times
+    /// `pump_factor`; at most `pump_max_accel` m/s^2, scaled by `pump_unintentional` unless on purpose.
+    pub pump_damping: f32,
+    pub pump_min_change: f32,
+    pub pump_max_change: f32,
+    pub pump_vs_time: Curve,
+    pub pump_ang_damping: f32,
+    pub pump_vs_vel: Curve,
+    pub pump_factor: f32,
+    pub pump_max_accel: f32,
+    pub pump_unintentional: f32,
 
     // Jumping.
     /// Centre-of-mass heights (m): the lowest any jump reaches, and the range a flick's strength picks
@@ -137,6 +271,19 @@ pub struct Tuning {
     pub jump_speed_range: f32,
     pub hippy_low: f32,
     pub hippy_high: f32,
+    /// Hippie jump strength (0..1) against seconds wound up.
+    pub hippy_windup: Curve,
+    /// Pop strength along the surface normal against the slope (0 flat .. 1 vertical), never under
+    /// `jump_min_scalar`.
+    pub vertical_response: Curve,
+    pub jump_min_scalar: f32,
+    /// Extra upward speed on near-vertical faces (scale against the normal's y), at most
+    /// `jump_y_bonus_max` m/s.
+    pub jump_y_vs_normal_y: Curve,
+    pub jump_y_bonus_max: f32,
+    /// The left stick nudges a pop sideways and forwards (share of the pop speed).
+    pub jump_adjust_x: f32,
+    pub jump_adjust_z: f32,
 
     // Air spin.
     /// Spin speed (rad/s) per unit of stick against time in the air.
@@ -215,12 +362,88 @@ pub const PATHS: &[&str] = &[
     "anim_motion/pushing/button_time_max",
     "anim_motion/pushing/button_time_to_dv",
     "anim_motion/pushing/last_push_out_time",
+    "anim_motion/pushing/dynamic_out_factor_speed_vs_acc",
+    "anim_motion/pushing/max_holding_acc",
+    "anim_motion/pushing/blend_speed_over_frames",
+    "anim_motion/pushing/blend_acc_over_frames",
+    "anim_motion/pushing/pushing_usemaxpushfromteleporttime",
+    "anim_motion/pushing/disable_push_brake_at_slope",
     "physics_surfaces/smooth/FrictionVsSpeedNew",
     "physics_friction/default/FrictionVsSpeed_NoInput",
     "physics_friction/default/NoInputTime",
     "physics_friction/default/FrictionVsSpeed_Manual",
     "physics_brakes/default/FootBrakeForce",
     "physics_brakes/default/TailBrakeForce",
+    "physics_brakes/default/SlowSpeed",
+    "physics_surfaces/smooth/BrakingScalar",
+    "physics_surfaces/smooth/Friction_MaxSpeedChange",
+    "physics_speed_conservation/default/GeneralAmount",
+    "physics_surfaces/smooth/SideFriction_Scalar",
+    "physics_surfaces/smooth/StraightenOut_Scalar",
+    "physics_heading/default/StraightenMaxTurnInput",
+    "physics_heading/default/HeadingAdjustFactor",
+    "physics_heading/default/HeadingAdjustMaxSpeed",
+    "physics_heading/default/HeadingAdjustVsSlope",
+    "physics_heading/default/HeadingAdjustVsSpeed",
+    "physics_heading/default/TurnTorqueScalar",
+    "physics_heading/default/TurnTorqueVsSlope",
+    "physics_heading/default/TurnTorqueVsSpeed",
+    "physics_heading/default/TurnTorqueVsNegAngVel",
+    "physics_steering/default/SteeringTiltBlending",
+    "physics_manual/default/Tilt_TiltScalar",
+    "physics_manual/default/BrakeTiltAngle",
+    "physics_manual/default/MaxTiltAngle",
+    "physics_manual/default/ManualScalar_P",
+    "physics_manual/default/ManualScalar_I",
+    "physics_manual/default/ManualScalar_D",
+    "physics_manual/default/D_Scalar_Limit",
+    "physics_manual/default/MaxAngleDiff",
+    "physics_manual/default/ProceduralNoiseFreq",
+    "physics_manual/default/ProceduralNoiseScalar",
+    "physics_manual/default/NoiseVsSpeed",
+    "anim_motion/power_slide/slide_speed_threshold",
+    "anim_motion/power_slide/slide_min_entry",
+    "anim_motion/power_slide/well_into_slide_time",
+    "anim_motion/power_slide/slide_turn_value",
+    "anim_motion/power_slide/slide_speed_factor",
+    "anim_motion/power_slide/not_sliding_threshold",
+    "anim_motion/power_slide/not_sliding_time_thresh",
+    "physics_slide/default/slide_input_remap",
+    // Slide relaxation against speed (the database has no name for this field).
+    "physics_slide/default/Hash_DE162591FD9D91D7",
+    "physics_airstates/default/NaturalAirMaxDist",
+    "physics_airstates/default/NaturalAirMinDist",
+    "physics_airstates/default/NaturalAirTime",
+    "physics_reckoning/default/GroundNormalSmoothing",
+    "physics_reckoning/default/VertJumpAlignMaxGroundNormalY",
+    "physics_reckoning/default/VertJumpAlignMinJumpDirY",
+    "physics_reckoning/default/VertJumpAlignMaxAngle",
+    "physics_reckoning/default/VertJumpAlignFactor",
+    "physics_trajectory/default/NaturalAirOffVertsScalar",
+    "physics_collision/default/TargetDisplacementVel",
+    "physics_collision/default/MaxVelDelta",
+    "physics_collision/default/CollisionTorqueVsAngle",
+    "physics_collision/default/CollisionTorqueMaxTime",
+    "physics_collision/default/CollisionTorqueFadeoff",
+    "physics_mode/normal/Wipeout_GroundXZAcceleration",
+    "physics_wipeout/default/Wipeout_AirXZAcceleration",
+    "physics_feet/default/WallRideAntiGravityVsTime",
+    "physics_feet/default/WallRideMaxDotFloorWall",
+    "physics_feet/default/WallRideAutoJumpHeight",
+    "physics_feet/default/WallRideVelTimeToConsider",
+    "physics_feet/default/WallRideMaxTime",
+    "physics_feet/default/WallRideAutoJumpYDownScalar",
+    "physics_feet/default/WallRideAutoJumpForce",
+    "physics_pumping/default/PumpEffectDamping",
+    "physics_pumping/default/MinChangeInCOMBeforePumping",
+    "physics_pumping/default/MaxDeltaHeightAllowedPerFrame",
+    "physics_pumping/default/PumpVsTime",
+    "physics_pumping/default/AngularSpeedDamping",
+    "physics_pumping/default/PumpVsVel",
+    "physics_mode/normal/PumpEffectFactor",
+    // Most pumping acceleration per second (no name in the database).
+    "physics_mode/normal/Hash_D77AFD320B6241C5",
+    "physics_mode/normal/UnintentionalPumpScalar",
     "physics_steering/default/Damping",
     "physics_steering/default/GeneralScalar",
     "physics_steering/default/SteeringVsInput",
@@ -231,6 +454,8 @@ pub const PATHS: &[&str] = &[
     "physics_steering/default/PushScalarIncriment",
     "physics_steering/default/PushScalarMin",
     "physics_jump/default/AbsoluteMinHeight",
+    "anim_motion/jumping/clamp_low_inclusive",
+    "anim_motion/jumping/clamp_high_inclusive",
     "physics_mode/normal/JumpMinHeight",
     "physics_mode/normal/JumpMaxHeight",
     "physics_jump/default/MinHeightVsSpeed",
@@ -238,6 +463,13 @@ pub const PATHS: &[&str] = &[
     "physics_jump/default/SpeedResponseMaxSpeed",
     "physics_jump/default/HippyJumpMinHeight",
     "physics_jump/default/HippyJumpMaxHeight",
+    "anim_motion/hippy_flip/antic_length_to_hippy_height",
+    "physics_jump/default/VerticalResponse",
+    "physics_jump/default/MinScalar",
+    "physics_jump/default/JumpYScalarVsGroundNormalY",
+    "physics_jump/default/JumpYBonusMax",
+    "physics_jump/default/JumpAdjustXFactor",
+    "physics_jump/default/JumpAdjustZFactor",
     "physics_bodyspin/default/PropBodySpinVsTime",
     "physics_bodyspin/default/MaxDeltaVsTime",
     "physics_bodyspin/default/MaxDeltaOppositeDirection",
@@ -274,7 +506,13 @@ impl Tuning {
         push_tick_limit_fast: 0.4,
         push_hold_time: Curve::constant(0.3),
         push_dv: Curve::new(&[(0.0, 1.0), (1.0, 4.0)]),
-        push_cycle: 0.6,
+        push_out_max: 0.6,
+        push_out_speed_weight: 0.5,
+        push_hold_cap: 3.5,
+        push_blend_speed_frames: Curve::constant(6.0),
+        push_blend_acc_frames: Curve::constant(6.0),
+        push_teleport_window: 0.5,
+        push_slope_limit: 40.0,
         friction: Curve::new(&[(0.0, 0.0), (8.0, 0.05), (30.0, 1.0)]),
         friction_no_input: Curve::new(&[(0.0, 0.1), (8.0, 0.45)]),
         no_input_time: 2.5,
@@ -282,6 +520,10 @@ impl Tuning {
         foot_brake: 45.0,
         tail_brake: 32.0,
         brake_scale: 0.06,
+        braking_scalar: 1.0,
+        brake_slow_speed: 0.02,
+        friction_max_change: 0.4,
+        speed_general_amount: 0.2,
         steer_follow: 0.75,
         steer_scalar: 0.6,
         steer_vs_input: Curve::new(&[(0.0, 0.0), (0.2, 0.02), (1.0, 0.8)]),
@@ -291,6 +533,90 @@ impl Tuning {
         push_steer_drop: 0.02,
         push_steer_rise: 0.05,
         push_steer_min: 0.5,
+        steer_tilt_blend: 0.25,
+        manual_tilt: 0.5,
+        manual_brake_tilt: 25.0,
+        manual_max_tilt: 20.0,
+        manual_p: 0.06,
+        manual_i: 0.02,
+        manual_d: -0.75,
+        manual_d_limit: 0.05,
+        manual_max_error: 0.12,
+        manual_noise_freq: 1.2,
+        manual_noise_scale: 0.04,
+        manual_noise_vs_speed: Curve::new(&[(0.0, 0.3), (8.0, 1.0)]),
+        jump_clamp_low: 0.5,
+        jump_clamp_high: 0.9,
+        side_friction: 60.0,
+        straighten: 0.02,
+        straighten_max_turn: 0.75,
+        heading_adjust: 0.025,
+        heading_adjust_max_speed: 7.5,
+        heading_vs_slope: Curve::new(&[(0.0, 0.0), (0.06, 0.0), (0.2, 0.8), (0.3, 1.0)]),
+        heading_vs_speed: Curve::new(&[(0.0, 1.0), (0.4, 0.75), (0.7, 0.25), (1.0, 0.0)]),
+        turn_torque: 0.06,
+        turn_torque_vs_slope: Curve::new(&[
+            (0.0, 0.0),
+            (0.3, 0.0),
+            (0.45, 0.15),
+            (0.65, 0.6),
+            (0.8, 1.0),
+        ]),
+        turn_torque_vs_speed: Curve::new(&[(0.0, 1.0), (0.5, 0.8), (1.0, 0.1)]),
+        turn_torque_vs_neg_ang_vel: Curve::new(&[
+            (0.0, 1.0),
+            (0.05, 0.3),
+            (0.1, 0.05),
+            (0.5, 0.03),
+        ]),
+        slide_speed_threshold: 1.2,
+        slide_min_entry: 0.25,
+        well_into_slide_time: 0.25,
+        slide_turn_value: 0.35,
+        slide_input_remap: Curve::new(&[(0.0, 0.0), (0.5, 0.12), (0.75, 0.35), (1.0, 1.0)]),
+        slide_remap_vs_speed: Curve::new(&[(0.0, 0.0), (3.0, 0.0), (7.0, 0.8), (9.0, 1.0)]),
+        slide_speed_factor: Curve::new(&[(0.0, 0.0), (1.2, 1.0)]),
+        not_sliding_threshold: Curve::new(&[(-1.0, 0.5), (0.0, 0.04), (1.0, 0.04)]),
+        not_sliding_time: Curve::constant(0.12),
+        natural_air_max_dist: 0.1,
+        natural_air_min_dist: 0.05,
+        natural_air_time: 0.25,
+        ground_normal_blend: 0.3,
+        wall_push_away: 0.8,
+        wall_max_vel_delta: 10.0,
+        collision_torque: Curve::new(&[
+            (0.0, 0.0),
+            (0.3, 0.0),
+            (0.5, 0.03),
+            (0.7, 0.05),
+            (0.8, 0.05),
+            (0.85, 0.0),
+        ]),
+        collision_torque_time: 0.4,
+        collision_torque_fade: 0.92,
+        wipe_ground_closing: 7.5,
+        wipe_air_closing: 3.5,
+        vert_align_max_ny: 0.25,
+        vert_align_min_dir_y: 0.75,
+        vert_align_max_angle: 0.1,
+        vert_align_factor: 1.0,
+        natural_air_off_verts: 0.5,
+        wallride_antigravity: Curve::new(&[(0.0, 0.12), (0.05, 0.1), (0.12, 0.0)]),
+        wallride_max_dot_floor: 0.45,
+        wallride_jump_height: 0.5,
+        wallride_lookahead: 0.3,
+        wallride_max_time: 1.2,
+        wallride_jump_ydown: 0.6,
+        wallride_jump_force: 2.5,
+        pump_damping: 0.15,
+        pump_min_change: 0.003,
+        pump_max_change: 0.008,
+        pump_vs_time: Curve::new(&[(0.0, 1.0), (0.4, 1.0), (0.7, 0.4), (1.0, 0.1)]),
+        pump_ang_damping: 0.25,
+        pump_vs_vel: Curve::new(&[(0.0, 3.0), (3.0, 1.8), (6.0, 1.0), (10.0, 0.7), (13.0, 0.1)]),
+        pump_factor: 15.0,
+        pump_max_accel: 8.0,
+        pump_unintentional: 0.6,
         jump_floor: 0.9,
         jump_low: 1.3,
         jump_high: 1.7,
@@ -299,6 +625,19 @@ impl Tuning {
         jump_speed_range: 25.0,
         hippy_low: 1.3,
         hippy_high: 1.6,
+        hippy_windup: Curve::new(&[(0.0, 0.0), (0.25, 0.2), (0.5, 1.0)]),
+        vertical_response: Curve::new(&[
+            (0.0, 1.0),
+            (0.5, 1.0),
+            (0.7, 0.5),
+            (0.85, 0.15),
+            (1.0, 0.08),
+        ]),
+        jump_min_scalar: 0.15,
+        jump_y_vs_normal_y: Curve::new(&[(0.0, 1.4), (0.1, 1.3), (0.2, 1.05), (0.25, 1.0)]),
+        jump_y_bonus_max: 1.2,
+        jump_adjust_x: 0.15,
+        jump_adjust_z: 0.15,
         spin_speed: Curve::new(&[(0.0, 3.0), (0.4, 7.5), (1.0, 6.0), (2.0, 3.5)]),
         spin_change: Curve::new(&[(0.0, 1.0), (0.4, 0.5), (1.0, 0.15)]),
         spin_reverse_change: 0.2,
@@ -397,7 +736,120 @@ impl Tuning {
             "physics_mode/normal/MaxPushDVEnd" => scalar!(self.push_tick_limit_fast),
             "anim_motion/pushing/button_time_max" => curve!(self.push_hold_time),
             "anim_motion/pushing/button_time_to_dv" => curve!(self.push_dv),
-            "anim_motion/pushing/last_push_out_time" => scalar!(self.push_cycle),
+            "anim_motion/pushing/last_push_out_time" => scalar!(self.push_out_max),
+            "anim_motion/pushing/dynamic_out_factor_speed_vs_acc" => {
+                scalar!(self.push_out_speed_weight)
+            }
+            "anim_motion/pushing/max_holding_acc" => scalar!(self.push_hold_cap),
+            "anim_motion/pushing/blend_speed_over_frames" => curve!(self.push_blend_speed_frames),
+            "anim_motion/pushing/blend_acc_over_frames" => curve!(self.push_blend_acc_frames),
+            "anim_motion/pushing/pushing_usemaxpushfromteleporttime" => {
+                scalar!(self.push_teleport_window)
+            }
+            "anim_motion/pushing/disable_push_brake_at_slope" => scalar!(self.push_slope_limit),
+            "physics_brakes/default/SlowSpeed" => scalar!(self.brake_slow_speed),
+            "physics_surfaces/smooth/BrakingScalar" => scalar!(self.braking_scalar),
+            "physics_surfaces/smooth/Friction_MaxSpeedChange" => scalar!(self.friction_max_change),
+            "physics_speed_conservation/default/GeneralAmount" => {
+                scalar!(self.speed_general_amount)
+            }
+            "physics_surfaces/smooth/SideFriction_Scalar" => scalar!(self.side_friction),
+            "physics_surfaces/smooth/StraightenOut_Scalar" => scalar!(self.straighten),
+            "physics_heading/default/StraightenMaxTurnInput" => scalar!(self.straighten_max_turn),
+            "physics_heading/default/HeadingAdjustFactor" => scalar!(self.heading_adjust),
+            "physics_heading/default/HeadingAdjustMaxSpeed" => {
+                scalar!(self.heading_adjust_max_speed)
+            }
+            "physics_heading/default/HeadingAdjustVsSlope" => curve!(self.heading_vs_slope),
+            "physics_heading/default/HeadingAdjustVsSpeed" => curve!(self.heading_vs_speed),
+            "physics_heading/default/TurnTorqueScalar" => scalar!(self.turn_torque),
+            "physics_heading/default/TurnTorqueVsSlope" => curve!(self.turn_torque_vs_slope),
+            "physics_heading/default/TurnTorqueVsSpeed" => curve!(self.turn_torque_vs_speed),
+            "physics_heading/default/TurnTorqueVsNegAngVel" => {
+                curve!(self.turn_torque_vs_neg_ang_vel)
+            }
+            "physics_steering/default/SteeringTiltBlending" => scalar!(self.steer_tilt_blend),
+            "physics_manual/default/Tilt_TiltScalar" => scalar!(self.manual_tilt),
+            "physics_manual/default/BrakeTiltAngle" => scalar!(self.manual_brake_tilt),
+            "physics_manual/default/MaxTiltAngle" => scalar!(self.manual_max_tilt),
+            "physics_manual/default/ManualScalar_P" => scalar!(self.manual_p),
+            "physics_manual/default/ManualScalar_I" => scalar!(self.manual_i),
+            "physics_manual/default/ManualScalar_D" => scalar!(self.manual_d),
+            "physics_manual/default/D_Scalar_Limit" => scalar!(self.manual_d_limit),
+            "physics_manual/default/MaxAngleDiff" => scalar!(self.manual_max_error),
+            "physics_manual/default/ProceduralNoiseFreq" => scalar!(self.manual_noise_freq),
+            "physics_manual/default/ProceduralNoiseScalar" => scalar!(self.manual_noise_scale),
+            "physics_manual/default/NoiseVsSpeed" => curve!(self.manual_noise_vs_speed),
+            "anim_motion/jumping/clamp_low_inclusive" => scalar!(self.jump_clamp_low),
+            "anim_motion/jumping/clamp_high_inclusive" => scalar!(self.jump_clamp_high),
+            "anim_motion/power_slide/slide_speed_threshold" => scalar!(self.slide_speed_threshold),
+            "anim_motion/power_slide/slide_min_entry" => scalar!(self.slide_min_entry),
+            "anim_motion/power_slide/well_into_slide_time" => scalar!(self.well_into_slide_time),
+            "anim_motion/power_slide/slide_turn_value" => scalar!(self.slide_turn_value),
+            "anim_motion/power_slide/slide_speed_factor" => curve!(self.slide_speed_factor),
+            "anim_motion/power_slide/not_sliding_threshold" => curve!(self.not_sliding_threshold),
+            "anim_motion/power_slide/not_sliding_time_thresh" => curve!(self.not_sliding_time),
+            "physics_slide/default/slide_input_remap" => curve!(self.slide_input_remap),
+            "physics_slide/default/Hash_DE162591FD9D91D7" => curve!(self.slide_remap_vs_speed),
+            "physics_airstates/default/NaturalAirMaxDist" => scalar!(self.natural_air_max_dist),
+            "physics_airstates/default/NaturalAirMinDist" => scalar!(self.natural_air_min_dist),
+            "physics_airstates/default/NaturalAirTime" => scalar!(self.natural_air_time),
+            "physics_reckoning/default/GroundNormalSmoothing" => scalar!(self.ground_normal_blend),
+            "physics_reckoning/default/VertJumpAlignMaxGroundNormalY" => {
+                scalar!(self.vert_align_max_ny)
+            }
+            "physics_reckoning/default/VertJumpAlignMinJumpDirY" => {
+                scalar!(self.vert_align_min_dir_y)
+            }
+            "physics_reckoning/default/VertJumpAlignMaxAngle" => scalar!(self.vert_align_max_angle),
+            "physics_reckoning/default/VertJumpAlignFactor" => scalar!(self.vert_align_factor),
+            "physics_trajectory/default/NaturalAirOffVertsScalar" => {
+                scalar!(self.natural_air_off_verts)
+            }
+            "physics_collision/default/TargetDisplacementVel" => scalar!(self.wall_push_away),
+            "physics_collision/default/MaxVelDelta" => scalar!(self.wall_max_vel_delta),
+            "physics_collision/default/CollisionTorqueVsAngle" => curve!(self.collision_torque),
+            "physics_collision/default/CollisionTorqueMaxTime" => {
+                scalar!(self.collision_torque_time)
+            }
+            "physics_collision/default/CollisionTorqueFadeoff" => {
+                scalar!(self.collision_torque_fade)
+            }
+            "physics_mode/normal/Wipeout_GroundXZAcceleration" => {
+                scalar!(self.wipe_ground_closing)
+            }
+            "physics_wipeout/default/Wipeout_AirXZAcceleration" => scalar!(self.wipe_air_closing),
+            "physics_feet/default/WallRideAntiGravityVsTime" => curve!(self.wallride_antigravity),
+            "physics_feet/default/WallRideMaxDotFloorWall" => {
+                scalar!(self.wallride_max_dot_floor)
+            }
+            "physics_feet/default/WallRideAutoJumpHeight" => scalar!(self.wallride_jump_height),
+            "physics_feet/default/WallRideVelTimeToConsider" => scalar!(self.wallride_lookahead),
+            "physics_feet/default/WallRideMaxTime" => scalar!(self.wallride_max_time),
+            "physics_feet/default/WallRideAutoJumpYDownScalar" => {
+                scalar!(self.wallride_jump_ydown)
+            }
+            "physics_feet/default/WallRideAutoJumpForce" => scalar!(self.wallride_jump_force),
+            "physics_pumping/default/PumpEffectDamping" => scalar!(self.pump_damping),
+            "physics_pumping/default/MinChangeInCOMBeforePumping" => {
+                scalar!(self.pump_min_change)
+            }
+            "physics_pumping/default/MaxDeltaHeightAllowedPerFrame" => {
+                scalar!(self.pump_max_change)
+            }
+            "physics_pumping/default/PumpVsTime" => curve!(self.pump_vs_time),
+            "physics_pumping/default/AngularSpeedDamping" => scalar!(self.pump_ang_damping),
+            "physics_pumping/default/PumpVsVel" => curve!(self.pump_vs_vel),
+            "physics_mode/normal/PumpEffectFactor" => scalar!(self.pump_factor),
+            "physics_mode/normal/Hash_D77AFD320B6241C5" => scalar!(self.pump_max_accel),
+            "physics_mode/normal/UnintentionalPumpScalar" => scalar!(self.pump_unintentional),
+            "anim_motion/hippy_flip/antic_length_to_hippy_height" => curve!(self.hippy_windup),
+            "physics_jump/default/VerticalResponse" => curve!(self.vertical_response),
+            "physics_jump/default/MinScalar" => scalar!(self.jump_min_scalar),
+            "physics_jump/default/JumpYScalarVsGroundNormalY" => curve!(self.jump_y_vs_normal_y),
+            "physics_jump/default/JumpYBonusMax" => scalar!(self.jump_y_bonus_max),
+            "physics_jump/default/JumpAdjustXFactor" => scalar!(self.jump_adjust_x),
+            "physics_jump/default/JumpAdjustZFactor" => scalar!(self.jump_adjust_z),
             "physics_surfaces/smooth/FrictionVsSpeedNew" => curve!(self.friction),
             "physics_friction/default/FrictionVsSpeed_NoInput" => curve!(self.friction_no_input),
             "physics_friction/default/NoInputTime" => scalar!(self.no_input_time),
@@ -448,18 +900,25 @@ impl Tuning {
         let speed_k = self
             .steer_vs_speed
             .eval((speed.abs() / self.steer_speed_range).clamp(0.0, 1.0));
-        let tilt = self.steer_scalar
+        // Skate 3 multiplies by the signed turn value itself (not just its sign): half a stick tilts the
+        // deck far less than half of a full one.
+        self.steer_scalar
             * self.steer_vs_input.eval(input.abs())
             * speed_k
             * push_scalar
-            * (1.0 + hard.abs() * self.hard_turn_boost);
-        if input < 0.0 { -tilt } else { tilt }
+            * (1.0 + hard.abs() * self.hard_turn_boost)
+            * input.clamp(-1.0, 1.0)
     }
 
     /// The speed a push adds when the button was held for `held` seconds at `speed`.
     pub fn push_gain(&self, held: f32, speed: f32) -> f32 {
         let full = self.push_hold_time.eval(speed).max(0.01);
         self.push_dv.eval((held / full).clamp(0.0, 1.0))
+    }
+
+    /// Most the rolling-resistance corrector may change the speed (m/s^2).
+    pub fn corrector_limit(&self) -> f32 {
+        self.friction_max_change * self.speed_general_amount * 60.0
     }
 
     /// Most speed one tick of push contact may add at `speed`.

@@ -7,10 +7,13 @@
 
 #[allow(dead_code)] // the ported reader exposes more of the format than the converter uses
 pub mod abin;
+pub mod meta;
 pub mod vbr;
 
 use abin::{Bank, Codec, Hierarchy, PartEntry, Record, RecordData};
-use game_core::anim::{ANIM_HEADER, FLAG_LOOP, FLAG_SCALE, NAME_LEN};
+use game_core::anim::{
+    ANIM_HEADER, FLAG_CHANNEL, FLAG_LOOP, FLAG_PACKED, FLAG_SCALE, NAME_LEN, pack_rotation,
+};
 
 /// One bone's sample: scale xyz, rotation quaternion xyzw, translation xyz.
 pub type Sqt = [f32; 10];
@@ -20,6 +23,8 @@ pub struct ClipFrames {
     pub looping: bool,
     /// `frames[frame][bone]`
     pub frames: Vec<Vec<Sqt>>,
+    /// A channel animation's weight per bone (how much of each bone a channel blend takes from it).
+    pub channel: Option<Vec<f32>>,
 }
 
 pub fn decode_clip(bank: &Bank, record: &Record) -> Result<ClipFrames, String> {
@@ -40,11 +45,46 @@ pub fn decode_clip(bank: &Bank, record: &Record) -> Result<ClipFrames, String> {
     if !(fps.is_finite() && fps > 0.0) {
         return Err("invalid frame rate".into());
     }
+    let frames = decode_parts(bank, &clip.parts, count as usize)?;
+    let channel = if clip.channel_animation() {
+        Some(channel_weights(bank, &clip.parts)?)
+    } else {
+        None
+    };
     Ok(ClipFrames {
         fps,
         looping: clip.looping(),
-        frames: decode_parts(bank, &clip.parts, count as usize)?,
+        frames,
+        channel,
     })
+}
+
+/// A channel animation's per-bone weights, each part's words placed at its bone range (SK8
+/// animation_frames/native.rs).
+fn channel_weights(bank: &Bank, parts: &[PartEntry]) -> Result<Vec<f32>, String> {
+    let hierarchy = bank.hierarchy().ok_or("bank has no hierarchy")?;
+    let mut weights = vec![1.0f32; hierarchy.bone_count as usize];
+    let bytes = bank.bytes();
+    for (entry, layout) in parts.iter().zip(&hierarchy.parts) {
+        let part = entry.part.as_ref().ok_or("animation part is absent")?;
+        let range = part
+            .channel_weights
+            .as_ref()
+            .ok_or("channel weights are absent")?;
+        for lane in 0..layout.bone_count as usize {
+            let at = range.start + lane * 4;
+            let w = bytes
+                .get(at..at + 4)
+                .ok_or("channel weights out of range")?;
+            let w = f32::from_be_bytes(w.try_into().unwrap());
+            let bone = layout.sqt_offset as usize + lane;
+            if !w.is_finite() || bone >= weights.len() {
+                return Err("bad channel weight".into());
+            }
+            weights[bone] = w;
+        }
+    }
+    Ok(weights)
 }
 
 /// Name of the pose every clip is relative to (SK8: SkaterAnim::AddBindPose with `RIG_TPOSE`).
@@ -123,6 +163,7 @@ pub fn decode_pose(bank: &Bank, record: &Record) -> Result<ClipFrames, String> {
         fps: 30.0,
         looping: false,
         frames: decode_parts(bank, &pose.parts, 1)?,
+        channel: None,
     })
 }
 
@@ -213,8 +254,8 @@ fn quantise(v: f32, (min, step): (f32, f32)) -> u16 {
     }
 }
 
-/// Animation entry (`game_core::anim::Clip`). Rotations are normalised; quaternion sign is made
-/// continuous along time so the game can lerp neighbouring frames.
+/// Animation entry (`game_core::anim::Clip`, packed layout): rotations as their three smallest components,
+/// translations stored once for bones whose translation never moves.
 pub fn encode_clip(c: &ClipFrames) -> Vec<u8> {
     let bones = c.frames.first().map_or(0, Vec::len);
     let samples = || c.frames.iter().flatten();
@@ -227,11 +268,27 @@ pub fn encode_clip(c: &ClipFrames) -> Vec<u8> {
             (1.0, 0.0)
         }
     });
-    let mut out = Vec::with_capacity(ANIM_HEADER + c.frames.len() * bones * 20);
+    // A bone's translation moves if it changes by more than a quantisation step on any axis.
+    let moving: Vec<bool> = (0..bones)
+        .map(|b| {
+            (0..3).any(|i| {
+                let (lo, hi) = c
+                    .frames
+                    .iter()
+                    .map(|f| f[b][7 + i])
+                    .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+                hi - lo > t[i].1.max(1e-6)
+            })
+        })
+        .collect();
+    let mut out = Vec::with_capacity(ANIM_HEADER + c.frames.len() * bones * 12);
     out.extend_from_slice(&(bones as u16).to_be_bytes());
     out.extend_from_slice(&(c.frames.len() as u16).to_be_bytes());
     put_f32(&mut out, c.fps);
-    let flags = if c.looping { FLAG_LOOP } else { 0 } | if has_scale { FLAG_SCALE } else { 0 };
+    let flags = FLAG_PACKED
+        | if c.looping { FLAG_LOOP } else { 0 }
+        | if has_scale { FLAG_SCALE } else { 0 }
+        | if c.channel.is_some() { FLAG_CHANNEL } else { 0 };
     out.extend_from_slice(&flags.to_be_bytes());
     for r in t.iter().chain(&sc) {
         put_f32(&mut out, r.0);
@@ -240,36 +297,49 @@ pub fn encode_clip(c: &ClipFrames) -> Vec<u8> {
         put_f32(&mut out, r.1);
     }
     out.resize(ANIM_HEADER, 0);
-    let mut previous: Vec<[f32; 4]> = vec![[0.0, 0.0, 0.0, 1.0]; bones];
+    out.extend(moving.iter().map(|&m| m as u8));
+    out.resize(out.len().next_multiple_of(4), 0);
+    let put_t = |out: &mut Vec<u8>, s: &Sqt| {
+        for i in 0..3 {
+            out.extend_from_slice(&quantise(s[7 + i], t[i]).to_be_bytes());
+        }
+    };
+    if let Some(first) = c.frames.first() {
+        for (b, s) in first.iter().enumerate() {
+            if !moving[b] {
+                put_t(&mut out, s);
+            }
+        }
+    }
+    out.resize(out.len().next_multiple_of(4), 0);
     for frame in &c.frames {
         for (bone, s) in frame.iter().enumerate() {
-            let mut q = [s[3], s[4], s[5], s[6]];
+            let q = [s[3], s[4], s[5], s[6]];
             let len = q.iter().map(|v| v * v).sum::<f32>().sqrt();
-            q = if len > 1e-6 {
+            let q = if len > 1e-6 {
                 q.map(|v| v / len)
             } else {
                 [0.0, 0.0, 0.0, 1.0]
             };
-            if q.iter()
-                .zip(&previous[bone])
-                .map(|(a, b)| a * b)
-                .sum::<f32>()
-                < 0.0
-            {
-                q = q.map(|v| -v);
+            for w in pack_rotation(q) {
+                out.extend_from_slice(&w.to_be_bytes());
             }
-            previous[bone] = q;
-            for v in q {
-                out.extend_from_slice(&((v * 32767.0).round() as i16).to_be_bytes());
-            }
-            for i in 0..3 {
-                out.extend_from_slice(&quantise(s[7 + i], t[i]).to_be_bytes());
+            if moving[bone] {
+                put_t(&mut out, s);
             }
             if has_scale {
                 for i in 0..3 {
                     out.extend_from_slice(&quantise(s[i], sc[i]).to_be_bytes());
                 }
             }
+        }
+    }
+    if let Some(w) = &c.channel {
+        out.resize(out.len().next_multiple_of(4), 0);
+        let at = out.len() as u32;
+        out[60..64].copy_from_slice(&at.to_be_bytes());
+        for b in 0..bones {
+            put_f32(&mut out, w.get(b).copied().unwrap_or(1.0));
         }
     }
     out
@@ -286,7 +356,7 @@ mod tests {
         let frame = |k: f32| -> Vec<Sqt> {
             vec![
                 [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, k, 0.0],
-                // Second bone flips quaternion sign between frames; the encoder must make it continuous.
+                // Second bone flips quaternion sign between frames (the same rotation either way).
                 [
                     1.0,
                     1.0,
@@ -299,18 +369,31 @@ mod tests {
                     2.0,
                     -3.0 * k,
                 ],
+                // Third bone never moves: its translation is stored once.
+                [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.5, 0.25, -0.75],
             ]
         };
         let c = ClipFrames {
             fps: 30.0,
             looping: true,
             frames: vec![frame(1.0), frame(-1.0)],
+            channel: None,
         };
         let bytes = encode_clip(&c);
         let clip = Clip::parse(&bytes).unwrap();
         assert_eq!(
             (clip.bones(), clip.frames(), clip.fps(), clip.looping()),
-            (2, 2, 30.0, true)
+            (3, 2, 30.0, true)
+        );
+        let still = clip.sample(1, 2);
+        assert!(
+            (still.translation[0] - 0.5).abs() < 1e-3 && (still.translation[2] + 0.75).abs() < 1e-3,
+            "{still:?}"
+        );
+        assert!(
+            bytes.len() < ANIM_HEADER + 2 * 3 * 14,
+            "packed: {} bytes",
+            bytes.len()
         );
         let s = clip.sample(1, 1);
         assert!((s.translation[2] - 3.0).abs() < 1e-3);
@@ -323,8 +406,29 @@ mod tests {
             .zip(&s.rotation)
             .map(|(x, y)| x * y)
             .sum();
-        assert!(dot > 0.99, "sign kept continuous: {dot}");
+        assert!(dot.abs() > 0.99, "same rotation: {dot}");
         assert!((clip.sample(1, 0).translation[1] + 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn channel_animations_keep_their_bone_weights() {
+        let frame = vec![[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]; 3];
+        let mut c = ClipFrames {
+            fps: 30.0,
+            looping: false,
+            frames: vec![frame.clone(), frame],
+            channel: Some(vec![0.0, 0.25, 1.0]),
+        };
+        let bytes = encode_clip(&c);
+        let clip = Clip::parse(&bytes).unwrap();
+        assert!(clip.is_channel());
+        assert_eq!([0, 1, 2].map(|b| clip.channel_weight(b)), [0.0, 0.25, 1.0]);
+        // Not a channel animation: every bone weighs 1.
+        c.channel = None;
+        let bytes = encode_clip(&c);
+        let clip = Clip::parse(&bytes).unwrap();
+        assert!(!clip.is_channel());
+        assert_eq!(clip.channel_weight(0), 1.0);
     }
 
     #[test]
@@ -336,6 +440,7 @@ mod tests {
             fps: 30.0,
             looping: false,
             frames: vec![vec![[2.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]]],
+            channel: None,
         };
         add_bind_pose(&mut c, &bind);
         let s = c.frames[0][0];

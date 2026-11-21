@@ -17,6 +17,7 @@ use alloc::string::{String, ToString};
 use core::ffi::CStr;
 use core::ptr;
 
+use game_core::autoplay::Autoplay;
 use game_core::character;
 use game_core::game::{FrameCost, Game};
 use game_core::gfx::{Camera, Gfx, TexVertex, Texture, Vertex};
@@ -112,6 +113,20 @@ const RULES_PACKS: &[&CStr] = &[
     c"usb:/apps/flatground/data/rules.fgpak",
 ];
 
+/// Skate 3's motion library: clip timing, attribute tracks and events, animation trees, poses
+/// (`fg_import motion`).
+const MOTION_PACKS: &[&CStr] = &[
+    c"sd:/apps/flatground/data/motion.fgpak",
+    c"usb:/apps/flatground/data/motion.fgpak",
+];
+
+/// A file in the app folder that turns on hands-off play (`game_core::autoplay::Autoplay`): scripted test
+/// runs in Dolphin (`tools/dolphin_test.ps1`) and on a Wii. Its contents are ignored.
+const AUTOPLAY_FILES: &[&CStr] = &[
+    c"sd:/apps/flatground/autoplay.txt",
+    c"usb:/apps/flatground/autoplay.txt",
+];
+
 /// A whole file, or `None`. Loaded once and kept for the rest of the game: the GPU reads textures straight
 /// out of packs.
 fn load(path: &CStr) -> Option<&'static [u8]> {
@@ -156,6 +171,9 @@ fn log(important: bool, line: &str) {
 fn clock_us() -> u32 {
     unsafe { ffi::fg_time_us() }
 }
+
+/// Hands-off play, when `autoplay.txt` is in the app folder.
+static mut AUTOPLAY: *mut Autoplay = ptr::null_mut();
 
 /// The one game instance. Only touched from the main thread, through the two entry points below.
 static mut GAME: *mut Game = ptr::null_mut();
@@ -256,10 +274,76 @@ pub extern "C" fn fg_rust_init() {
         },
         None => "DEMO".into(),
     };
-    let notice = format!("SKATER: {skater}  PARK: {park}  RULES: {rules}");
+    let motion_start = clock_us();
+    let motion: String = match load_first("motion", MOTION_PACKS) {
+        Some(pack) => match game.load_motion(pack) {
+            Ok(lib) => {
+                let db = &lib.db;
+                let timed = db
+                    .clips()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        db.attributes(i as u16)
+                            .iter()
+                            .filter(|a| !a.untimed())
+                            .count()
+                    })
+                    .sum::<usize>();
+                log(
+                    false,
+                    &format!(
+                        "motion: {} clips ({} with poses), {} trees, {} attribute tracks ({} timed events/windows), {} names",
+                        db.clips().len(),
+                        lib.pose_count(),
+                        db.trees().len(),
+                        db.attribute_count(),
+                        timed,
+                        db.names()
+                    ),
+                );
+                "DISC".into()
+            }
+            Err(e) => {
+                log(true, &format!("motion: unreadable ({e:?})"));
+                "UNREADABLE".into()
+            }
+        },
+        None => "NONE".into(),
+    };
+    let motion_us = clock_us().wrapping_sub(motion_start);
+    if let Some(g) = &game.graph {
+        let r = &g.runner;
+        let (done, nothing, unsupported) = r.coverage();
+        let mut st = ffi::FgFrameStats::default();
+        unsafe { ffi::fg_frame_stats(&mut st) };
+        log(
+            false,
+            &format!(
+                "graph: action {} states, motion {} states / {} transitions / {} operations ({} run, {} no-op, unsupported: {}); {} KB parsed in {:.1} ms (motion pack read + parsed in {:.1} ms); MEM1 {} KB free, MEM2 {} KB free",
+                r.action_graph().states.len(),
+                r.motion_graph().states.len(),
+                r.motion_graph().transitions.len(),
+                r.motion_graph().ops.len() + r.action_graph().ops.len(),
+                done,
+                nothing,
+                unsupported.join(" "),
+                g.memory / 1024,
+                g.load_us as f32 / 1000.0,
+                motion_us as f32 / 1000.0,
+                st.mem1_free / 1024,
+                st.mem2_free / 1024
+            ),
+        );
+    }
+    let notice = format!("SKATER: {skater}  PARK: {park}  RULES: {rules}  MOTION: {motion}");
     log(true, &format!("ready: {notice}, stance {:?}", game.stance));
     game.notice = Some(notice);
     game.frame_cost = Some(FrameCost::default());
+    if AUTOPLAY_FILES.iter().any(|p| load(p).is_some()) {
+        log(true, "autoplay: on (trick tour, repeated)");
+        unsafe { AUTOPLAY = Box::into_raw(Box::new(Autoplay::new())) };
+    }
     unsafe { GAME = Box::into_raw(game) };
 }
 
@@ -273,14 +357,25 @@ fn error_text(e: character::Error) -> String {
     }
 }
 
-/// One fixed step plus one rendered frame.
+/// One displayed frame: the game runs its fixed 60 Hz ticks for `dt` (1/60, or 1/50 on PAL50), then
+/// renders.
 ///
 /// # Safety
 /// `pad` must point to a valid `FgPadRaw`; `fg_rust_init` must have been called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
     let game = unsafe { &mut *GAME };
-    let pad = unsafe { &*pad };
+    let mut pad = unsafe { &*pad };
+    // Hands-off play replaces the controller.
+    let scripted;
+    if let Some(auto) = unsafe { AUTOPLAY.as_mut() } {
+        let (p, line) = auto.next(game);
+        if let Some(line) = line {
+            log(false, &line);
+        }
+        scripted = p;
+        pad = &scripted;
+    }
     let start = clock_us();
     game.update(pad, dt);
     game.render(&mut WiiGfx);
@@ -318,10 +413,11 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
             log(
                 false,
                 &format!(
-                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
+                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
                     c.avg_us / 1000.0,
                     c.peak_us as f32 / 1000.0,
                     t.physics_us as f32 / 1000.0,
+                    t.graph_us as f32 / 1000.0,
                     t.skin_us as f32 / 1000.0,
                     t.render_us as f32 / 1000.0,
                     c.gpu_avg_us / 1000.0,

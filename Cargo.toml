@@ -17,3 +17,11 @@ opt-level = 2
 lto = true
 codegen-units = 1
 debug = 1
+
+# Quicker builds for testing in Dolphin (`build.bat fast`, `make RUST_PROFILE=dolphin`): no LTO, parallel
+# codegen. Slower code than release; ship release builds.
+[profile.dolphin]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 2

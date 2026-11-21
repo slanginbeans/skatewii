@@ -6,6 +6,7 @@
 #include <wiiuse/wpad.h>
 #include <fat.h>
 #include <ogc/lwp_watchdog.h>
+#include <ogc/cond.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -376,6 +377,54 @@ void fg_frame_stats(FgFrameStats *out) {
     out->_pad = 0;
 }
 
+// The log's background writer: a low-priority thread that writes buffered lines to the card every couple of
+// seconds (or sooner when kicked), so the game never waits for the card. It runs while the game waits for the
+// next refresh.
+static lwp_t writer;
+static mutex_t log_mutex;
+static cond_t log_cond;
+static volatile int writer_on;
+static void writer_lock(void) {
+    LWP_MutexLock(log_mutex);
+}
+static void writer_unlock(void) {
+    LWP_MutexUnlock(log_mutex);
+}
+static void writer_kick(void) {
+    LWP_CondSignal(log_cond);
+}
+static void *writer_main(void *arg) {
+    (void)arg;
+    while (writer_on) {
+        struct timespec wait = {LOG_FLUSH_MS / 1000, (LOG_FLUSH_MS % 1000) * 1000000};
+        LWP_MutexLock(log_mutex);
+        LWP_CondTimedWait(log_cond, log_mutex, &wait);
+        LWP_MutexUnlock(log_mutex);
+        log_flush();
+    }
+    return NULL;
+}
+static void start_writer(void) {
+    if (LWP_MutexInit(&log_mutex, false) < 0 || LWP_CondInit(&log_cond) < 0) {
+        return;
+    }
+    writer_on = 1;
+    if (LWP_CreateThread(&writer, writer_main, NULL, NULL, 16 * 1024, 20) < 0) {
+        writer_on = 0;
+        return;
+    }
+    log_set_writer(writer_lock, writer_unlock, writer_kick);
+}
+static void stop_writer(void) {
+    if (!writer_on) {
+        return;
+    }
+    writer_on = 0;
+    writer_kick();
+    LWP_JoinThread(writer, NULL);
+    log_set_writer(NULL, NULL, NULL);
+}
+
 // Milliseconds since the log was started (the CPU timer counts from 2000, not from power-on).
 static u64 log_epoch;
 static uint32_t boot_ms(void) {
@@ -398,6 +447,9 @@ void fg_log_start(const char *argv0) {
     if (!stored && mount() && strncmp(dir, "usb:", 4) != 0) {
         stored = log_open("usb:/apps/flatground", time(NULL));
     }
+    if (stored) {
+        start_writer();
+    }
     log_important("flatground session: started from %s, log %s", argv0 ? argv0 : "(no path)",
                   stored ? log_path() : "not stored (no writable SD/USB)");
     const char *tv = "?";
@@ -416,18 +468,13 @@ void fg_log_start(const char *argv0) {
 }
 
 void fg_log_tick(void) {
-    // Writing to the card happens here every couple of seconds: say when it takes long enough to cost a
-    // frame (the next line shows up with the next write).
-    u32 t0 = fg_time_us();
+    // With the writer thread running this does nothing; without one (it failed to start) the game writes.
     log_tick();
-    u32 spent = fg_time_us() - t0;
-    if (spent > 3000) {
-        log_printf("log write to the card took %u.%u ms", spent / 1000, (spent / 100) % 10);
-    }
 }
 
 void fg_log_stop(void) {
     log_important("session over (quit to the loader)");
+    stop_writer();
     log_close();
 }
 
@@ -439,6 +486,7 @@ void fg_panic(const char *msg, uint32_t len) {
     log_important("CRASH: %.*s", (int)len, msg);
     char path[224];
     snprintf(path, sizeof(path), "%s", log_path()[0] ? log_path() : "(not stored)");
+    stop_writer();
     log_close();
     GX_AbortFrame();
     void *fb = xfb[cur_fb];

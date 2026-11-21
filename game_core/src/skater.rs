@@ -1,20 +1,27 @@
-//! Board physics. The board has a full orientation (its nose direction on the surface and the surface's
-//! normal) and a signed speed along its nose. On the ground it follows whatever is under its trucks, found
-//! by casting a ray down from each truck: flat ground, banks, curved transitions and vertical walls alike,
-//! with gravity acting along the surface, so a quarter pipe slows you down, sends you back fakie or out over
-//! the coping. The trucks turn the board about the surface normal. In the air the board keeps its attitude
-//! and eases it towards the surface it is going to land on. Deterministic. Skate 3's riding rules on top: stance (goofy or regular, switch,
-//! fakie), pushing that grows with how long you hold the button, foot, tail and nose brakes, powerslides,
-//! deck-tilt steering, flick tricks whose strength sets the pop, air spin that rewards a wind-up, and
-//! landing rules. The numbers come from [`Tuning`] (Skate 3's own when the player's disc supplied them).
+//! The skater: what the rider does (stance, pushing, braking, powerslides, manuals, kick turns, reverts,
+//! flick tricks, grabs, grinds, landings, bails) on top of the board's physics (`board`: one rigid board
+//! on two trucks with a full velocity, riding whatever is under its wheels: flat ground, banks, curved
+//! transitions and walls). In the air the board flies ballistically and eases towards the surface it is
+//! going to land on. Deterministic, stepped at Skate 3's 60 Hz. The numbers come from [`Tuning`] (Skate
+//! 3's own when the player's disc supplied them) and the push and brake timing from [`ClipTiming`] (Skate
+//! 3's clips when the player imported the motion library).
+//!
+//! The rider's state logic below hands the board a [`Drive`] each tick: the steering, whether a pushing
+//! or braking foot is on the ground and how hard, a powerslide's angle, a manual, a move that turns the
+//! board itself. A state graph driven by Skate 3's own clips can produce the same inputs later.
 //!
 //! Conventions: `heading` is where the board's nose points (in the rider's frame: the end the rider's
-//! front foot is on), `speed` is along it, negative when rolling tail first (fakie). Riding switch means
-//! the rider stands with the other foot forward; the drawn skater is then mirrored.
+//! front foot is on), `speed` is along it, negative when rolling tail first (fakie), `slip` sideways
+//! (+ to the board's right). Riding switch means the rider stands with the other foot forward; the drawn
+//! skater is then mirrored.
+
+mod board;
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+pub use board::{AXLE, Drive, Pump, WALLRIDE_MIN_HEIGHT, WallRide};
 
 use crate::flick::FlickOut;
 use crate::gesture::{self, Flick, Group, Trick};
@@ -25,56 +32,36 @@ use crate::park::Park;
 use crate::park::Terrain;
 use crate::tuning::Tuning;
 
-/// Highest ledge you can roll up without popping.
+/// Highest ledge a bailed rider walks up (m).
 pub const STEP: f32 = 0.12;
-/// Distance from the board's middle to each truck (m).
-const AXLE: f32 = 0.26;
-/// The trucks look for the surface from this far above the board, and this far below it.
-const PROBE_UP: f32 = 0.35;
-const PROBE_DOWN: f32 = 0.18;
-/// Walls are looked for this far above the board (anything lower is rolled up onto).
-const WALL_RAY: f32 = STEP + 0.02;
-/// A surface turned further than this from the one under the board (cosine) is a wall, not the next bit
-/// of a curve.
-const WALL_COS: f32 = 0.64;
-/// Rolling into a wall faster than this (m/s, into it) is a bail; in the air, the second.
-const WALL_BAIL: f32 = 6.0;
-const AIR_WALL_BAIL: f32 = 5.5;
 /// Landing with the board tilted further than this from the surface (rad) is a bail.
 const LAND_TILT: f32 = 40.0 * PI / 180.0;
 /// How fast the board turns towards the surface it will land on (rad/s).
 const AIR_TILT_RATE: f32 = 3.0;
-/// Riding across a face steeper than this (normal y) is a wallride: gravity is held off for a moment.
-const WALL_STEEP: f32 = 0.5;
-const WALLRIDE_HOLD: f32 = 0.35;
-const WALLRIDE_FADE: f32 = 0.55;
-const WALLRIDE_POINTS: u32 = 250;
-/// Pumping: extending out of a crouch on a transition adds speed (m/s for a full crouch, on a 45-degree
-/// face). Skate 3 pumps through its physics; this is flatground's stand-in.
-const PUMP_GAIN: f32 = 2.2;
-/// Turn rate (rad/s) for a deck tilt of 1. (Skate 3 turns through its truck physics; this is
-/// flatground's stand-in.)
-const TURN_RATE: f32 = 4.2;
-/// Turning on two wheels is gentler.
-const MANUAL_TURN: f32 = 0.5;
 /// Below this speed a hard sideways stick kick-turns on the spot.
 const KICKTURN_SPEED: f32 = 1.0;
 const KICKTURN_RATE: f32 = 4.5;
 const KICKTURN_STICK: f32 = 0.75;
-/// Rolling tail first faster than this is fakie at once; above `FAKIE_SLOW` after `FAKIE_TIME`.
+/// Rolling tail first faster than this is fakie at once; above `FAKIE_SLOW` after `FAKIE_TIME`; never
+/// within `FAKIE_GRACE` of a spawn (Skate 3's riding-fakie rules).
 const FAKIE_FAST: f32 = 1.0;
 const FAKIE_SLOW: f32 = 0.5;
 const FAKIE_TIME: f32 = 0.2;
-/// When the pushing foot is on the ground, as a share of the push cycle.
-const PUSH_CONTACT: (f32, f32) = (0.18, 0.7);
+const FAKIE_GRACE: f32 = 1.0;
 /// Turning round from fakie to push switch takes this long (the push waits for it).
 const SWITCH_TURN_TIME: f32 = 0.15;
-/// Powerslide: least speed to start one, how sideways the board turns (rad), and how fast it scrubs speed.
-const SLIDE_MIN_SPEED: f32 = 2.0;
-const SLIDE_ANGLE: f32 = 1.35;
-const SLIDE_DECEL: f32 = 4.5;
+/// A push press is remembered this long while the button is held (Skate 3's new-push window).
+const PUSH_MEMORY: f32 = 0.3;
+/// A repeated push puts the foot down this long after the re-push point (s, ours).
+const PUSH_REPEAT_DOWN: f32 = 0.1;
+/// Powerslides: the board angle eases at this rate (rad/s, ours); a held slide relaxes after this long
+/// (s).
+const SLIDE_TURN_RATE: f32 = 8.0;
+const SLIDE_RELAX: f32 = 0.5;
 /// Down on the ground after a bail before respawning: long enough for the fall and get-up clips.
 const BAIL_TIME: f32 = 2.2;
+/// Stepping off the board after a runout and back on.
+const RUNOUT_TIME: f32 = 1.2;
 /// Landing with the board further off the travel direction than this (as sin of the angle) is sketchy:
 /// Skate 3's "straight" landing limit.
 const STRAIGHT_LANDING: f32 = 0.2;
@@ -92,10 +79,12 @@ const REVERT_TIME: f32 = 0.3;
 const REVERT_POINTS: u32 = 100;
 /// Manuals: C-stick deflection that holds one (beyond is the tail or nose brake), how long it must be
 /// held before the manual starts (so a quick flick doesn't start one), the balance sweet spot.
-const MANUAL_MIN: f32 = 0.25;
+const MANUAL_MIN: f32 = 0.1;
 const MANUAL_BRAKE: f32 = 0.9;
 const MANUAL_ENGAGE: f32 = 0.12;
-const MANUAL_SWEET: f32 = 0.55;
+const MANUAL_SWEET: f32 = 0.35;
+/// The C-stick deflection a manual balances at (for the log).
+pub const MANUAL_BALANCED_AT: f32 = MANUAL_MIN + MANUAL_SWEET * (MANUAL_BRAKE - MANUAL_MIN);
 const MANUAL_MIN_TIME: f32 = 0.5;
 const MANUAL_POINTS_PER_S: f32 = 120.0;
 /// Analog trigger past this holds a grab (Skate 3: any pressure).
@@ -104,7 +93,6 @@ const GRAB_POINTS: u32 = 200;
 const GRAB_POINTS_PER_S: f32 = 150.0;
 /// Both push buttons pressed within this of each other wind up a hippie jump.
 const HIPPY_CHORD: f32 = 0.08;
-const HIPPY_MAX_WINDUP: f32 = 0.6;
 const HIPPY_POINTS: u32 = 150;
 /// Most flips a held kickflip or heelflip can reach.
 const MAX_FLIPS: u8 = 3;
@@ -119,7 +107,6 @@ const SLIDE_FRICTION: f32 = 1.6;
 const GRIND_ANGLED: f32 = 20.0 * PI / 180.0;
 /// Across the rail with the rail this far towards an end of the board (m): a nose or tail slide.
 const TIP_SLIDE: f32 = 0.2;
-const GRIND_MIN_ENTRY: f32 = 1.5;
 const GRIND_MIN_SPEED: f32 = 0.6;
 const GRIND_MIN_TIME: f32 = 0.15;
 const GRIND_POINTS: u32 = 150;
@@ -158,8 +145,22 @@ pub enum Mode {
     Bailed {
         time: f32,
     },
+    /// Stepped off the board after hitting something (Skate 3's runout): back on it where it stopped.
+    Runout {
+        time: f32,
+    },
     /// On a rail (details in `Skater::grind`).
     Grind,
+}
+
+impl Mode {
+    /// Off the board: a bail or a runout (drawn the same for now), and seconds since.
+    pub fn off_board(&self) -> Option<f32> {
+        match *self {
+            Mode::Bailed { time } | Mode::Runout { time } => Some(time),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,15 +212,21 @@ pub struct Grab {
     pub time: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Manual {
     /// On the front wheels.
     pub nose: bool,
     /// -1..1: 0 is balanced; reaching -1 or 1 drops the manual.
     pub balance: f32,
     pub time: f32,
-    /// 0..1: dragging the tail (or nose) to brake.
+    /// 0 or 1: dragging the tail (or nose) to brake.
     pub brake: f32,
+    /// Deck pitch (rad): down to the brake angle while braking.
+    pub pitch: f32,
+    /// Balance servo state (state graphs): the correction turning the deck each tick (rad per tick)
+    /// and the filtered pitch error.
+    pub correction: f32,
+    pub filtered_error: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -231,11 +238,36 @@ pub struct ActiveTrick {
     pub duration: f32,
     /// Flips of a held kickflip or heelflip (1 otherwise).
     pub flips: u8,
+    /// With the state graphs: how far through the trick its clips are (0..1, 1 done). One clock: the
+    /// clip's, not `duration`.
+    pub clock: Option<f32>,
+    /// Done after the first trick (a late flip, a finger flip).
+    pub late: bool,
+    /// Caught dark (grip down).
+    pub dark: bool,
+    /// The graph's name for it (string id), to tell a new trick from the one playing.
+    pub id: u16,
 }
 
 impl ActiveTrick {
+    pub fn new(flick: Flick) -> ActiveTrick {
+        ActiveTrick {
+            flick,
+            t: 0.0,
+            duration: trick_duration(flick.trick),
+            flips: 1,
+            clock: None,
+            late: false,
+            dark: false,
+            id: u16::MAX,
+        }
+    }
+
     /// 0..1 progress of the board animation.
     pub fn progress(&self) -> f32 {
+        if let Some(c) = self.clock {
+            return c.clamp(0.0, 1.0);
+        }
         if self.duration <= 0.0 {
             1.0
         } else {
@@ -255,18 +287,167 @@ impl ActiveTrick {
         } else {
             String::from(self.flick.trick.name())
         };
-        match self.flips {
+        let base = match self.flips {
             2 => format!("DOUBLE {base}"),
             3 => format!("TRIPLE {base}"),
+            4 => format!("QUADRUPLE {base}"),
             _ => base,
+        };
+        let base = if self.late {
+            format!("LATE {base}")
+        } else {
+            base
+        };
+        if self.dark {
+            format!("{base} DARK CATCH")
+        } else {
+            base
         }
     }
 }
 
-/// A push in progress.
+/// One set of push clips (Skate 3 blends four: slow or fast, strong or gentle): how long the foot takes
+/// to come down, stays down and swings back (s), and the speeds the push starts and ends at (m/s).
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PushSet {
+    pub into: f32,
+    pub contact: f32,
+    pub recover: f32,
+    pub vel_b: f32,
+    pub vel_e: f32,
+}
+
+/// Timing the rider's clips give the physics: the push sets (slow strong, fast strong, slow gentle, fast
+/// gentle) and the brake foot's time to touch down. Skate 3's own when the motion library was imported
+/// (`ClipTiming::from_motion`), else flatground's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipTiming {
+    pub push: [PushSet; 4],
+    pub brake_down: f32,
+}
+
+/// Skate 3's push clips by set (as `ClipTiming::push`), each `_INTO`, `_CYC1` (the foot on the ground)
+/// and `_CYC2` (the swing back).
+const PUSH_CLIPS: [&str; 4] = [
+    "R_PUSHLSP_HSTR_N_0",
+    "R_PUSHHSP_HSTR_N_0",
+    "R_PUSHLSP_LSTR_N_0",
+    "R_PUSHHSP_LSTR_N_0",
+];
+const BRAKE_INTO_CLIP: &str = "R_BRAKE_N_N_0_INTO";
+
+impl ClipTiming {
+    /// flatground's own timing.
+    pub const BUILT_IN: ClipTiming = ClipTiming {
+        push: [
+            PushSet {
+                into: 0.45,
+                contact: 0.15,
+                recover: 0.8,
+                vel_b: 0.0,
+                vel_e: 4.0,
+            },
+            PushSet {
+                into: 0.45,
+                contact: 0.1,
+                recover: 0.8,
+                vel_b: 8.0,
+                vel_e: 10.0,
+            },
+            PushSet {
+                into: 0.45,
+                contact: 0.15,
+                recover: 0.8,
+                vel_b: 0.0,
+                vel_e: 1.5,
+            },
+            PushSet {
+                into: 0.45,
+                contact: 0.1,
+                recover: 0.8,
+                vel_b: 8.0,
+                vel_e: 8.5,
+            },
+        ],
+        brake_down: 0.15,
+    };
+
+    /// Reads the push and brake clips' lengths and speeds from the player's motion library; anything
+    /// missing keeps the built-in value.
+    pub fn from_motion(db: &crate::motion::MotionDb) -> ClipTiming {
+        let mut c = ClipTiming::BUILT_IN;
+        let len = |name: &str| db.clip_index(name).map(|i| db.clip(i).length());
+        let attr = |name: &str, a: &str| {
+            let i = db.clip_index(name)?;
+            db.attribute_at(i, a, 0.0).map(|v| v.value)
+        };
+        for (set, base) in c.push.iter_mut().zip(PUSH_CLIPS) {
+            let into = format!("{base}_INTO");
+            let cyc1 = format!("{base}_CYC1");
+            let cyc2 = format!("{base}_CYC2");
+            if let (Some(a), Some(b), Some(r)) = (len(&into), len(&cyc1), len(&cyc2))
+                && a > 0.0
+                && b > 0.0
+                && r > 0.0
+            {
+                set.into = a;
+                set.contact = b;
+                set.recover = r;
+            }
+            if let Some(v) = attr(&cyc1, "HSTR_VEL_B").or_else(|| attr(&cyc1, "LSTR_VEL_B")) {
+                set.vel_b = v;
+            }
+            if let Some(v) = attr(&cyc1, "VEL_E") {
+                set.vel_e = v;
+            }
+        }
+        if let Some(b) = len(BRAKE_INTO_CLIP)
+            && b > 0.0
+        {
+            c.brake_down = b;
+        }
+        c
+    }
+
+    /// The strong and gentle sets blended for `speed`: (into, contact, recover, gentle end speed, strong
+    /// end speed, the speeds the slow and fast sets start at).
+    fn blend(&self, speed: f32) -> (f32, f32, f32, f32, f32, f32, f32) {
+        let k = |a: &PushSet, b: &PushSet| {
+            let w = b.vel_b - a.vel_b;
+            if w.abs() < 1e-3 {
+                0.0
+            } else {
+                ((speed - a.vel_b) / w).clamp(0.0, 1.0)
+            }
+        };
+        let [ss, fs, sg, fg] = &self.push;
+        let ks = k(ss, fs);
+        let kg = k(sg, fg);
+        let l = |a: f32, b: f32, k: f32| a + (b - a) * k;
+        (
+            l(ss.into, fs.into, ks),
+            l(ss.contact, fs.contact, ks),
+            l(ss.recover, fs.recover, ks),
+            l(sg.vel_e, fg.vel_e, kg),
+            l(ss.vel_e, fs.vel_e, ks),
+            ss.vel_b,
+            fs.vel_b,
+        )
+    }
+}
+
+impl Default for ClipTiming {
+    fn default() -> Self {
+        Self::BUILT_IN
+    }
+}
+
+/// A push in progress: the foot comes down (`down` s; the first push of a run winds up with the `into`
+/// clip), stays on the ground (`contact` s) while the board chases `target`, then swings back
+/// (`recover` s). The next push may start `out` of the way through the swing.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Push {
-    /// Seconds since this push started (it waits for a switch turn first, then runs one cycle).
+    /// Seconds since this push started (it waits for a switch turn first).
     pub t: f32,
     /// How long the button has been held during this push.
     pub held: f32,
@@ -282,6 +463,17 @@ pub struct Push {
     pub turning: f32,
     /// How long that turn took (the push's own clock starts after it).
     pub delay: f32,
+    pub down: f32,
+    pub contact: f32,
+    pub recover: f32,
+    /// Speed the board chases while the foot is down (set when it touches).
+    pub target: Option<f32>,
+    /// Re-push point as a share of the swing back.
+    pub out: f32,
+    /// A later press waiting for the re-push point.
+    pub queued: Option<u32>,
+    /// Started by holding the button on from the last push (its strength is capped).
+    pub held_repeat: bool,
 }
 
 impl Push {
@@ -289,25 +481,47 @@ impl Push {
     pub fn time(&self) -> f32 {
         (self.t - self.delay).max(0.0)
     }
+
+    /// Which part of the push it is (0 foot coming down, 1 on the ground, 2 swinging back) and the
+    /// seconds into that part.
+    pub fn stage(&self) -> (usize, f32) {
+        let t = self.time();
+        if t < self.down {
+            (0, t)
+        } else if t < self.down + self.contact {
+            (1, t - self.down)
+        } else {
+            (2, t - self.down - self.contact)
+        }
+    }
+
+    /// The pushing foot is on the ground.
+    pub fn in_contact(&self) -> bool {
+        self.turning <= 0.0 && self.stage().0 == 1
+    }
 }
 
 /// Braking with the foot (X).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FootBrake {
     pub time: f32,
     /// Let go: the foot comes back up (seconds since).
     pub released: Option<f32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Powerslide {
-    /// +1 sliding with the board turned left of travel, -1 right.
+    /// +1 sliding with the stick to the right (the board turned one way), -1 left.
     pub side: f32,
-    /// 0..1 how far the board has turned sideways.
+    /// 0..1 how far the board has turned sideways (1: square across).
     pub amount: f32,
     pub time: f32,
     /// Let go: the board straightens out.
     pub releasing: bool,
+    /// The board's angle from travel (rad, signed like `side`).
+    pub angle: f32,
+    /// How long the board has looked "not sliding" (nearly in line).
+    pub not_sliding: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -326,6 +540,8 @@ pub enum Event {
         points: u32,
     },
     Bailed,
+    /// Stepped off the board after a hit (no respawn).
+    RanOut,
     Respawned,
     /// Tipped out of a manual (no points, a little speed lost).
     ManualLost,
@@ -344,17 +560,23 @@ struct Takeoff {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Skater {
     pub tuning: Tuning,
+    pub clips: ClipTiming,
     pub stance: Stance,
     pub pos: Vec3,
     /// Where the board's nose points: a unit vector along the surface (in the air, the board's own nose).
     pub fwd: Vec3,
     /// The nose's direction seen from above (yaw), kept in step with `fwd`.
     pub heading: f32,
-    /// Speed along `heading` while rolling (negative: tail first).
+    /// Speed along the nose on the ground (negative: tail first), and sideways (+ right).
     pub speed: f32,
-    /// Velocity while in the air.
+    pub slip: f32,
+    /// The velocity: in the air the flight; on the ground the same as `speed` and `slip` along the
+    /// surface (kept in step every tick).
     pub vel: Vec3,
+    /// The board's up: on the ground the surface's normal smoothed, in the air its own attitude.
     pub normal: Vec3,
+    /// The ground's normal under the trucks (unsmoothed: what the physics rides on).
+    pub contact_n: Vec3,
     pub mode: Mode,
     /// Extra yaw spun in the air, relative to `heading` at take-off.
     pub spin: f32,
@@ -369,13 +591,36 @@ pub struct Skater {
     pub switch: bool,
     /// Rolling tail first (Skate 3's fakie detection: a moment of backwards speed).
     pub fakie: bool,
+    /// Riding dark (the board grip down after a dark catch; the state graphs decide).
+    pub dark: bool,
     fakie_timer: f32,
+    /// Seconds since the rider was put on the board (spawn or respawn).
+    pub since_spawn: f32,
     takeoff: Takeoff,
     pub push: Option<Push>,
-    /// Steering is weaker while pushing (1 = full).
+    /// The last push press, while it is remembered (button, seconds since).
+    push_press: Option<(u32, f32)>,
+    /// Steering is weaker while a pushing foot is down (1 = full).
     push_steer: f32,
     /// Smoothed turn input, -1..1 (drawn: the rider leans into turns).
     pub steer: f32,
+    /// The deck's tilt that turns the trucks (rad), and seconds since the wheels came down (the trucks'
+    /// turn ramps back in).
+    pub deck_tilt: f32,
+    truck_ramp: f32,
+    /// The board's yaw rate last tick (rad/s).
+    pub yaw_rate: f32,
+    /// A wall hit turning the board along the wall: yaw rate (rad/s) and seconds left.
+    collide: Option<(f32, f32)>,
+    /// Seconds since the last wall hit.
+    wall_clock: f32,
+    /// Speed away from the surface while the wheels are lifted (m/s), and how long the gap has been
+    /// over Skate 3's short natural-air distance.
+    vn: f32,
+    gap_time: f32,
+    /// How much the leading truck climbed last tick (m).
+    lead_rise: f32,
+    pub pump: Pump,
     /// Seconds since the player last touched anything (rolling resistance rises after a while).
     idle: f32,
     /// 0..1, how far the skater is crouched (drawn).
@@ -396,6 +641,8 @@ pub struct Skater {
     regrind_block: Option<(usize, f32)>,
     pub brake: Option<FootBrake>,
     pub slide: Option<Powerslide>,
+    /// Last tick's powerslide reading of the stick (entry window side, continuous amount).
+    last_slide: (f32, f32),
     pub revert: Option<Revert>,
     /// Kick-turning on the spot: direction (+1 left), seconds.
     pub kickturn: Option<(f32, f32)>,
@@ -406,17 +653,63 @@ pub struct Skater {
     since_b: f32,
     /// Why the last bail happened (for the log).
     pub bail_reason: Option<&'static str>,
-    /// Riding across a steep face: seconds on it, and how fast it is sliding down (m/s).
-    pub wallride: Option<(f32, f32)>,
+    /// Riding a wall.
+    pub wallride: Option<WallRide>,
     /// The surface the board is expected to land on (its normal), refreshed every few frames in the air.
     land_up: Vec3,
     predict_in: u32,
-    /// Crouch on the last frame (for pumping).
-    last_crouch: f32,
     /// The C-stick's y in gesture space this frame (+ towards the player): picks 5-0s and nosegrinds.
     grind_stick: f32,
     /// The numbers behind the last landing check (for the log).
     pub last_landing: Option<LandingCheck>,
+    /// What Skate 3's state graphs decided this tick, when they run (`crate::graph`); `None` rides on
+    /// flatground's own rules.
+    pub graph: Option<GraphControl>,
+    /// A graph-driven push in contact: the speed it started at, the speed it chases, seconds left.
+    graph_push: Option<(f32, f32, f32)>,
+}
+
+/// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GraphControl {
+    /// A push clip's foot is on the ground (its `PUSHCONTACT` window): only then does a push drive.
+    pub push_contact: bool,
+    /// The speed the push chases while the foot is down: where the push trees' coefficients end
+    /// (`graph::push`).
+    pub push_target: Option<f32>,
+    /// A brake clip's foot is down (`BRAKE_CONTACT`): only then does the foot brake slow the board.
+    pub brake_contact: bool,
+    /// The takeoff clip reached its jump: pop now, as this trick, at this strength (0..1).
+    pub pop: Option<(Flick, f32)>,
+    /// Manualing (nose manual), the stick's lean (0..1) and whether it is dragging to brake.
+    pub manual: Option<(bool, f32, bool)>,
+    /// Kick-turn steering is on (spin scale).
+    pub kickturn: Option<f32>,
+    /// A revert gesture (true: frontside).
+    pub revert: Option<bool>,
+    /// The graph turns the rider round (riding fakie into switch, or pushing out of fakie).
+    pub turn_round: bool,
+    /// The trick the graph is animating in the air (`None`: none, or it is done).
+    pub air_trick: Option<AirTrick>,
+    /// The playing clips are in their `DANGERZONE`: the board isn't caught yet, landing now bails.
+    pub danger: bool,
+    /// Dark: the board was caught grip down (a dark catch), and is ridden that way until the graph
+    /// says otherwise.
+    pub dark: bool,
+}
+
+/// A trick the state graph is animating in the air.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AirTrick {
+    /// What it looks like (for the drawn board and the score).
+    pub flick: Flick,
+    pub flips: u8,
+    /// How far through its clips (0..1).
+    pub progress: f32,
+    /// A late flip or finger flip (started in the air).
+    pub late: bool,
+    /// The graph's name for it (string id).
+    pub id: u16,
 }
 
 /// What a landing was judged on.
@@ -532,8 +825,14 @@ pub struct Grind {
 pub struct Steering {
     pub turn: f32,
     pub hard: f32,
-    /// -1 left, +1 right, 0 none.
+    /// In a powerslide's entry window: -1 left, +1 right, 0 none.
     pub slide: f32,
+    /// The stick's slide amount for a slide either way while it is fully over in the (wide) arc that holds
+    /// one (0: not held there): about 0.56 straight back, less further round.
+    pub hold_right: f32,
+    pub hold_left: f32,
+    /// The entry window's amount (signed like `slide`; 0 outside it).
+    pub slide_amount: f32,
 }
 
 /// Angle 0 is the stick pulled straight back, +-pi straight forward, positive to the right.
@@ -567,6 +866,19 @@ pub fn steering(stick: [f32; 2]) -> Steering {
         } else if a.abs() < 0.91 && a != 0.0 {
             s.slide = a.signum();
         }
+        // Skate 3's slide intents: right from 90 degrees left of straight back round to about 115
+        // degrees right, and the mirror for left.
+        if a > -PI / 2.0 && a < 2.0 {
+            s.hold_right = (2.0 - a) * 0.28;
+        }
+        if a > -2.0 && a < PI / 2.0 {
+            s.hold_left = (2.0 + a) * 0.28;
+        }
+        s.slide_amount = match s.slide {
+            x if x > 0.0 => s.hold_right,
+            x if x < 0.0 => -s.hold_left,
+            _ => 0.0,
+        };
     }
     s
 }
@@ -580,12 +892,15 @@ impl Skater {
         let (pos, heading) = park.spawn();
         Skater {
             tuning,
+            clips: ClipTiming::BUILT_IN,
             stance,
             pos,
             heading,
             speed: 0.0,
+            slip: 0.0,
             vel: Vec3::ZERO,
             normal: Vec3::UP,
+            contact_n: Vec3::UP,
             mode: Mode::Rolling,
             spin: 0.0,
             spin_rate: 0.0,
@@ -596,11 +911,23 @@ impl Skater {
             trick: None,
             switch: false,
             fakie: false,
+            dark: false,
             fakie_timer: 0.0,
+            since_spawn: 0.0,
             takeoff: Takeoff::default(),
             push: None,
+            push_press: None,
             push_steer: 1.0,
             steer: 0.0,
+            deck_tilt: 0.0,
+            truck_ramp: 1.0,
+            yaw_rate: 0.0,
+            collide: None,
+            wall_clock: f32::INFINITY,
+            vn: 0.0,
+            gap_time: 0.0,
+            lead_rise: 0.0,
+            pump: Pump::default(),
             idle: 0.0,
             crouch: 0.0,
             crouch_nose: false,
@@ -614,6 +941,7 @@ impl Skater {
             regrind_block: None,
             brake: None,
             slide: None,
+            last_slide: (0.0, 0.0),
             revert: None,
             kickturn: None,
             hippy: None,
@@ -621,18 +949,21 @@ impl Skater {
             since_b: f32::INFINITY,
             bail_reason: None,
             last_landing: None,
+            graph: None,
+            graph_push: None,
             wallride: None,
             land_up: Vec3::UP,
             predict_in: 0,
-            last_crouch: 0.0,
             grind_stick: 0.0,
             fwd: yaw_dir(heading),
         }
     }
 
-    /// Back to the spawn point, keeping the tuning and stance.
+    /// Back to the spawn point, keeping the tuning, clip timing and stance.
     pub fn respawn(&mut self, park: &dyn Terrain) {
+        let clips = self.clips;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
+        self.clips = clips;
     }
 
     pub fn is_airborne(&self) -> bool {
@@ -714,7 +1045,7 @@ impl Skater {
     pub fn board_yaw_offset(&self) -> f32 {
         let mut y = 0.0;
         if let Some(s) = &self.slide {
-            y += s.side * s.amount * SLIDE_ANGLE;
+            y += s.angle;
         }
         if let Some(r) = &self.revert {
             // The revert turns the board through half a turn; `heading` flips at the end.
@@ -748,10 +1079,17 @@ impl Skater {
 
     /// Ground direction of the board's nose, following the slope under it.
     fn surface_forward(&self) -> Vec3 {
-        tangent(self.fwd, self.normal)
+        tangent(self.fwd, self.contact_n)
     }
 
-    /// Advances one fixed step.
+    /// Turns the board end for end without changing how it moves (the rider turns round with it).
+    fn flip_board(&mut self) {
+        self.fwd = -self.fwd;
+        self.speed = -self.speed;
+        self.slip = -self.slip;
+    }
+
+    /// Advances one fixed step (1/60 s: Skate 3's tick).
     pub fn step(
         &mut self,
         park: &dyn Terrain,
@@ -766,6 +1104,8 @@ impl Skater {
             || pad.trig_l > 0.1
             || pad.trig_r > 0.1;
         self.idle = if touched { 0.0 } else { self.idle + dt };
+        self.since_spawn += dt;
+        self.dark = self.graph.is_some_and(|g| g.dark);
         let rolling = self.mode == Mode::Rolling;
         let crouch = if rolling && self.manual.is_none() {
             flick
@@ -803,6 +1143,19 @@ impl Skater {
             }
         }
         self.step_mode(park, pad, flick, dt, events);
+        if self.mode == Mode::Rolling {
+            // The drawn board follows the ground smoothly; the velocity is the ground's.
+            let k = 1.0
+                - libm::powf(
+                    1.0 - self.tuning.ground_normal_blend.clamp(0.0, 1.0),
+                    dt * 60.0,
+                );
+            self.normal = self
+                .normal
+                .lerp(self.contact_n, k)
+                .normalize_or(self.contact_n);
+            self.vel = self.ground_velocity() + self.contact_n * self.vn;
+        }
         self.sync_heading();
     }
 
@@ -818,7 +1171,7 @@ impl Skater {
             Mode::Rolling => self.roll(park, pad, flick, dt, events),
             Mode::Air { time } => self.fly(park, pad, flick, time + dt, dt, events),
             Mode::Grind => self.slide_rail(park, flick, dt, events),
-            Mode::Bailed { time } => {
+            Mode::Bailed { time } | Mode::Runout { time } => {
                 let time = time + dt;
                 let h = self.vel.horizontal() * (1.0 - smooth(3.0, dt));
                 self.vel = Vec3 { y: 0.0, ..h };
@@ -826,11 +1179,29 @@ impl Skater {
                 self.pos.y = park
                     .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
                     .height;
-                if time >= BAIL_TIME {
-                    self.respawn(park);
-                    events.push(Event::Respawned);
-                } else {
-                    self.mode = Mode::Bailed { time };
+                match self.mode {
+                    Mode::Bailed { .. } if time >= BAIL_TIME => {
+                        self.respawn(park);
+                        events.push(Event::Respawned);
+                    }
+                    Mode::Runout { .. } if time >= RUNOUT_TIME => {
+                        // Back on the board where it stopped.
+                        let n = park
+                            .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
+                            .normal;
+                        self.contact_n = n;
+                        self.normal = n;
+                        self.fwd = tangent(self.fwd, n);
+                        self.speed = 0.0;
+                        self.slip = 0.0;
+                        self.vn = 0.0;
+                        self.vel = Vec3::ZERO;
+                        self.fakie = false;
+                        self.fakie_timer = 0.0;
+                        self.mode = Mode::Rolling;
+                    }
+                    Mode::Bailed { .. } => self.mode = Mode::Bailed { time },
+                    _ => self.mode = Mode::Runout { time },
                 }
             }
         }
@@ -859,6 +1230,28 @@ impl Skater {
         peak.min(1.0)
     }
 
+    /// Skate 3's fakie flag: a moment of rolling tail first; never just after a spawn, and off again
+    /// once rolling backwards slowly.
+    fn update_fakie(&mut self, dt: f32) {
+        if self.revert.is_some() {
+            return;
+        }
+        let back = -self.speed;
+        if self.since_spawn < FAKIE_GRACE || back <= FAKIE_SLOW {
+            self.fakie = false;
+            self.fakie_timer = 0.0;
+        } else if back > FAKIE_FAST {
+            self.fakie = true;
+        } else {
+            self.fakie_timer += dt;
+            if self.fakie_timer > FAKIE_TIME {
+                self.fakie = true;
+            }
+        }
+    }
+
+    /// The rider's state on the ground (fakie, revert, powerslide, kick turn, steering, pushing, braking,
+    /// hippie jump, flicks), then the board's physics with what the rider does to it.
     fn roll(
         &mut self,
         park: &dyn Terrain,
@@ -869,25 +1262,16 @@ impl Skater {
     ) {
         let t = self.tuning;
         let ticks = dt * 60.0;
-        self.update_manual(flick, dt, events);
+        let tail_brake = self.update_manual(flick, dt, events);
         let st = steering(pad.stick);
-
-        // Fakie: a moment of rolling tail first (not while a revert is turning the board).
-        if self.revert.is_none() {
-            let back = -self.speed;
-            if back > FAKIE_FAST {
-                self.fakie = true;
-            } else if back > FAKIE_SLOW {
-                self.fakie_timer += dt;
-                if self.fakie_timer > FAKIE_TIME {
-                    self.fakie = true;
-                }
-            } else {
-                self.fakie_timer = 0.0;
-                if self.speed >= 0.0 {
-                    self.fakie = false;
-                }
-            }
+        self.update_fakie(dt);
+        if self.graph.is_some_and(|g| g.turn_round) && (self.fakie || self.speed < 0.0) {
+            // Skate 3 turns the rider round: same travel, the other foot forward.
+            self.flip_board();
+            self.switch = !self.switch;
+            self.fakie = false;
+            self.fakie_timer = 0.0;
+            events.push(Event::Switched);
         }
 
         // Revert: a powerslide flick just after landing spins the board half round.
@@ -895,8 +1279,7 @@ impl Skater {
             r.time += dt;
             if r.time >= REVERT_TIME {
                 self.revert = None;
-                self.fwd = -self.fwd;
-                self.speed = -self.speed;
+                self.flip_board();
                 self.fakie = self.speed < 0.0;
                 self.fakie_timer = 0.0;
                 events.push(Event::Landed {
@@ -904,7 +1287,15 @@ impl Skater {
                     points: REVERT_POINTS,
                 });
             }
-        } else if st.slide != 0.0
+        } else if let Some(fs) = self.graph.and_then(|g| g.revert) {
+            self.revert = Some(Revert {
+                side: if fs { 1.0 } else { -1.0 },
+                time: 0.0,
+            });
+            self.slide = None;
+            self.landing = None;
+        } else if self.graph.is_none()
+            && st.slide != 0.0
             && self.landing.is_some_and(|l| l.time < REVERT_WINDOW)
             && self.manual.is_none()
             && self.speed.abs() > 1.0
@@ -916,357 +1307,369 @@ impl Skater {
             self.landing = None;
         }
 
-        // Powerslide: main stick fully back and to one side.
-        let sliding_input = st.slide != 0.0 && self.manual.is_none() && self.revert.is_none();
-        match &mut self.slide {
-            Some(s) if sliding_input && !s.releasing => {
-                s.time += dt;
-                s.amount = (s.amount + dt * 5.0).min(1.0);
-                self.speed = approach(self.speed, 0.0, SLIDE_DECEL * s.amount * dt);
-                if self.speed.abs() < 0.3 {
-                    s.releasing = true;
-                }
-            }
-            Some(s) => {
-                s.releasing = true;
-                s.amount -= dt * 4.0;
-                if s.amount <= 0.0 {
-                    self.slide = None;
-                }
-            }
-            None if sliding_input && self.speed.abs() > SLIDE_MIN_SPEED => {
-                self.slide = Some(Powerslide {
-                    side: st.slide,
-                    amount: 0.0,
-                    time: 0.0,
-                    releasing: false,
-                });
-                self.push = None;
-            }
-            None => {}
-        }
+        self.update_slide(&st, dt);
 
         // Kick turn: slow, stick hard to the side.
-        let kick = self.speed.abs() < KICKTURN_SPEED
-            && pad.stick[0].abs() > KICKTURN_STICK
-            && self.manual.is_none()
-            && self.slide.is_none()
-            && self.revert.is_none()
-            && self
-                .push
-                .is_none_or(|p| p.t > self.tuning.push_cycle * PUSH_CONTACT.1);
+        // With the state graphs, its KickTurn state (speed and stick gates) turns the board.
+        let graph_kick = self.graph.and_then(|g| g.kickturn);
+        let kick = match (self.graph, graph_kick) {
+            (Some(_), Some(_)) => pad.stick[0] != 0.0 && self.manual.is_none(),
+            (Some(_), None) => false,
+            (None, _) => {
+                self.speed.abs() < KICKTURN_SPEED
+                    && pad.stick[0].abs() > KICKTURN_STICK
+                    && self.manual.is_none()
+                    && self.slide.is_none()
+                    && self.revert.is_none()
+                    && self.push.is_none_or(|p| p.stage().0 == 2)
+            }
+        };
         if kick {
             let dir = -pad.stick[0].signum();
             let time = self.kickturn.map_or(0.0, |k| k.1) + dt;
             self.kickturn = Some((dir, time));
-            self.fwd = rotate(self.fwd, self.normal, dir * KICKTURN_RATE * dt);
+            let rate = KICKTURN_RATE * graph_kick.map_or(1.0, |k| k.clamp(0.25, 2.0));
+            self.fwd = rotate(self.fwd, self.contact_n, dir * rate * dt);
         } else {
             self.kickturn = None;
         }
 
-        // Carving: Skate 3's deck tilt from the stick, eased in.
+        // Steering: Skate 3's reading of the stick, eased in. A powerslide's trucks hold a steady turn.
         let follow = 1.0 - libm::powf(1.0 - t.steer_follow.clamp(0.0, 1.0), ticks);
-        let turn_in = if self.slide.is_some() || kick {
-            0.0
-        } else {
-            st.turn
-        };
-        let turn_in = if st.hard != 0.0 {
-            turn_in.signum()
-        } else {
-            turn_in
+        let turn_in = match &self.slide {
+            Some(s) if !s.releasing => s.side * t.slide_turn_value,
+            Some(_) => 0.0,
+            None if kick => 0.0,
+            None if st.hard != 0.0 => st.turn.signum(),
+            None => st.turn,
         };
         self.steer += (turn_in - self.steer) * follow;
-        self.push_steer = if self.push.is_some() {
-            (self.push_steer - t.push_steer_drop * ticks).max(t.push_steer_min)
-        } else {
-            (self.push_steer + t.push_steer_rise * ticks).min(1.0)
-        };
-        let tilt = t.steer_tilt(self.steer, self.speed, st.hard, self.push_steer);
-        let manual = if self.manual.is_some() {
-            MANUAL_TURN
-        } else {
-            1.0
-        };
-        let roll_k = clamp(self.speed.abs() / 0.6, 0.0, 1.0);
-        self.fwd = rotate(
-            self.fwd,
-            self.normal,
-            -tilt * TURN_RATE * manual * roll_k * dt,
-        );
 
         // Pushing (A: the usual push, B: mongo), hippie jump (both), foot brake (X).
         self.update_hippy(pad, dt, events);
         if self.mode != Mode::Rolling {
             return;
         }
-        self.update_push(pad, dt, events);
-        self.update_brake(pad, dt);
+        // With the state graphs, a push only drives while the push clip's foot is down, and the foot
+        // brake only once the brake clip's foot touches.
+        let push_target = match self.graph {
+            Some(g) => self.graph_push(g.push_contact, g.push_target, dt),
+            None => self.update_push(pad, dt, events),
+        };
+        let foot_brake = match self.graph {
+            Some(g) => {
+                self.update_brake(pad, dt);
+                self.brake.is_some() && g.brake_contact
+            }
+            None => self.update_brake(pad, dt),
+        };
+        let brake = t.brake_scale
+            * t.braking_scalar
+            * if tail_brake {
+                t.tail_brake
+            } else if foot_brake {
+                t.foot_brake
+            } else {
+                0.0
+            };
 
-        // Slope pulls you downhill (capped); rolling resistance always slows you, more so when the player
-        // has left the controls alone for a while, and on two wheels.
-        let fwd = self.surface_forward();
-        let g = t.gravity;
-        let tangential_gravity = Vec3::UP * -g + self.normal * (g * self.normal.y);
-        let slope = clamp(
-            tangential_gravity.dot(fwd),
-            -t.max_slope_accel,
-            t.max_slope_accel,
-        );
-        self.speed += slope * dt;
-        let v = self.speed.abs();
-        let mut friction = t.friction.eval(v);
-        if self.idle > t.no_input_time {
-            friction += t.friction_no_input.eval(v);
-        }
-        if self.manual.is_some() {
-            friction += t.friction_manual.eval(v);
-        }
-        self.speed = approach(self.speed, 0.0, friction * dt);
-
-        // Pumping: on a transition, standing up out of a crouch adds speed.
-        let steepness = (1.0 - self.normal.y).clamp(0.0, 1.0);
-        let extend = (self.last_crouch - self.crouch).max(0.0);
-        self.last_crouch = self.crouch;
-        if steepness > 0.02 && extend > 0.0 && self.manual.is_none() {
-            let gain = PUMP_GAIN * extend * (steepness / 0.29).min(1.0);
-            self.speed += if self.speed < 0.0 { -gain } else { gain };
-        }
-
-        if let Some(f) = flick.flick {
-            let f = gesture::select(f, self.flick_group(), self.mirrored());
-            if let Some((t, _)) = self.wallride.take() {
+        // The trick to pop: the state graph's (its takeoff clip reached the jump), else the flick.
+        let pop = match self.graph {
+            Some(g) => g.pop,
+            None => flick.flick.map(|f| {
+                (
+                    gesture::select(f, self.flick_group(), self.mirrored()),
+                    flick.strength,
+                )
+            }),
+        };
+        if let Some((f, strength)) = pop {
+            if let Some(w) = self.wallride.take() {
                 // Popping off a wall: away from it as well as up.
-                events.push(Event::Landed {
-                    name: "WALLRIDE".into(),
-                    points: WALLRIDE_POINTS + (t * 200.0) as u32,
-                });
-                self.vel = fwd * self.speed + self.normal * 2.5;
-                self.pos += self.normal * 0.05;
+                if w.time > 0.0 {
+                    events.push(Event::Landed {
+                        name: "WALLRIDE".into(),
+                        points: 250 + (w.time * 200.0) as u32,
+                    });
+                }
+                let n = self.contact_n;
+                self.vel = self.ground_velocity() + n * 2.5;
+                self.pos += n * 0.05;
                 self.take_off(Some(f));
-                self.vel.y += self.pop_speed(self.tuning.jump_height(flick.strength, 0.0)) * 0.6;
+                self.vel.y += self.pop_speed(self.tuning.jump_height(strength, 0.0)) * 0.6;
                 events.push(Event::Popped(f));
                 return;
             }
-            self.pop(f, flick.strength, fwd, events);
+            self.pop(f, strength, pad.stick, events);
             return;
         }
 
-        self.follow_surface(park, dt, events);
-        if self.mode == Mode::Rolling {
-            self.update_wallride(dt, events);
-        }
-    }
-
-    /// Looks for the surface under a point of the board: a ray along -`n` from a little above it.
-    fn probe(park: &dyn Terrain, at: Vec3, n: Vec3) -> Option<crate::park::Hit> {
-        park.raycast(at + n * PROBE_UP, -n, PROBE_UP + PROBE_DOWN)
-    }
-
-    /// One step along the surface: walls stop the board (or bail it), the trucks find the surface ahead
-    /// and the board settles on it, and running out of surface (a lip, a ledge, the coping) launches it.
-    fn follow_surface(&mut self, park: &dyn Terrain, dt: f32, events: &mut Vec<Event>) {
-        let n = self.normal.normalize_or(Vec3::UP);
-        let f = tangent(self.fwd, n);
-        let motion = f * (self.speed * dt);
-        let len = motion.length();
-        if len > 1e-6 {
-            let dir = motion * (1.0 / len);
-            if let Some(h) = park.raycast(self.pos + n * WALL_RAY, dir, len + AXLE)
-                && h.normal.dot(n) < WALL_COS
-                && h.normal.dot(dir) < -0.2
-            {
-                let into = -(f * self.speed).dot(h.normal);
-                if into > WALL_BAIL {
-                    self.vel = f * self.speed * 0.3;
-                    self.bail("ran into a wall", events);
-                } else {
-                    // Bump off it.
-                    self.speed *= -0.15;
-                    self.slide = None;
-                    self.wallride = None;
-                }
-                return;
-            }
-        }
-        let p = self.pos + motion;
-        let front = Self::probe(park, p + f * AXLE, n);
-        let back = Self::probe(park, p - f * AXLE, n);
-        let (lead, trail) = if self.speed >= 0.0 {
-            (front, back)
-        } else {
-            (back, front)
+        let drive = Drive {
+            turn: self.steer,
+            hard: if self.slide.is_some() { 0.0 } else { st.hard },
+            raw_turn: if self.slide.is_some() || kick {
+                0.0
+            } else {
+                st.turn
+            },
+            push_target,
+            brake,
+            manual: self.manual.is_some(),
+            slide: self
+                .slide
+                .as_ref()
+                .filter(|s| !s.releasing)
+                .map(|s| s.angle),
+            pivot: kick || self.revert.is_some(),
+            intentional_pump: flick.crouch > 0.0 || self.crouch > 0.05,
         };
-        match (front, back) {
-            (Some(a), Some(b)) => {
-                let nn = (a.normal + b.normal).normalize_or(n);
-                self.fwd = tangent((a.point - b.point).normalize_or(f), nn);
-                self.normal = nn;
-                self.pos = (a.point + b.point) * 0.5;
+        self.ride(park, &drive, dt, events);
+    }
+
+    /// Powerslides (Skate 3's rules): the main stick swung fully back to one side, at speed, starts one;
+    /// it holds while the stick stays fully over anywhere in a wide arc and lasts at least
+    /// `well_into_slide_time`; it ends when let go, too slow, or the board has come back in line. The
+    /// board's angle from its travel follows how far back the stick is, and relaxes after a while.
+    fn update_slide(&mut self, st: &Steering, dt: f32) {
+        let t = self.tuning;
+        let (last_side, last_amount) = self.last_slide;
+        self.last_slide = (st.slide, st.slide_amount);
+        let speed = self.ground_velocity().length();
+        let blocked = self.manual.is_some() || self.revert.is_some();
+        let Some(s) = &mut self.slide else {
+            // Newly in the entry window, moving towards straight back.
+            let entered = st.slide != 0.0 && last_side == 0.0;
+            let inward = last_amount.abs() <= st.slide_amount.abs();
+            if entered && inward && !blocked && speed > t.slide_speed_threshold {
+                self.slide = Some(Powerslide {
+                    side: st.slide,
+                    ..Powerslide::default()
+                });
+                self.push = None;
             }
-            _ if lead.is_none() && (trail.is_none() || Self::probe(park, p, n).is_none()) => {
-                // Rolled off an edge: a lip, a ledge, the coping. The board leaves the surface.
-                self.pos = p + n * 0.05;
-                self.vel = f * self.speed;
-                self.wallride = None;
-                self.take_off(None);
-                events.push(Event::Launched);
-                return;
+            return;
+        };
+        s.time += dt;
+        if s.releasing {
+            s.angle = approach(s.angle, 0.0, SLIDE_TURN_RATE * dt);
+            s.amount = (s.angle.abs() / (PI / 2.0)).min(1.0);
+            if s.angle == 0.0 {
+                self.slide = None;
+            }
+            return;
+        }
+        // The stick's slide amount for this side (0: no longer held over).
+        let held = if s.side > 0.0 {
+            st.hold_right
+        } else {
+            st.hold_left
+        };
+        let mut amount = held;
+        if s.time < t.well_into_slide_time {
+            amount = amount.max(t.slide_min_entry);
+        }
+        let mut target = amount * PI;
+        if s.time > SLIDE_RELAX {
+            let relaxed = t.slide_input_remap.eval(amount) * PI;
+            let w = t.slide_remap_vs_speed.eval(speed) * (s.time - SLIDE_RELAX).clamp(0.0, 1.0);
+            target += (relaxed - target) * w;
+        }
+        s.angle = approach(s.angle, s.side * target, SLIDE_TURN_RATE * dt);
+        s.amount = (s.angle.abs() / (PI / 2.0)).min(1.0);
+        let c = cosf(s.angle);
+        let sliding = t.slide_speed_factor.eval(speed) * (1.0 - c.abs());
+        s.not_sliding = if sliding < t.not_sliding_threshold.eval(c) {
+            s.not_sliding + dt
+        } else {
+            0.0
+        };
+        let well_into = s.time >= t.well_into_slide_time;
+        let done = held == 0.0
+            || speed <= t.slide_speed_threshold
+            || s.not_sliding > t.not_sliding_time.eval(c)
+            || blocked;
+        if well_into && done {
+            s.releasing = true;
+        }
+    }
+
+    /// Pushing under the state graph: its push states decide when the foot is down (`contact`, then the
+    /// push sets' contact time) and the speed the board chases (`target`: the speed the push trees'
+    /// coefficients end at, as Skate 3 takes the push from the blended clips).
+    fn graph_push(&mut self, contact: bool, target: Option<f32>, dt: f32) -> Option<f32> {
+        let (base, end, left) = match self.graph_push {
+            Some((b, e, l)) if l > 0.0 => (b, e, l - dt),
+            _ if contact => {
+                let (_, contact_time, ..) = self.clips.blend(self.speed.max(0.0));
+                (self.speed, 0.0, contact_time)
             }
             _ => {
-                // One truck on: keep its height and carry on.
-                let h = lead.or(trail).expect("one truck has a surface");
-                let off = if lead.is_some() { 1.0 } else { -1.0 } * self.speed.signum() * AXLE;
-                let axle = p + f * off;
-                self.pos = p + n * (h.point - axle).dot(n);
+                self.graph_push = None;
+                return None;
             }
-        }
-        // Hanging under an overhang, or stopped on a near-vertical face: fall off it.
-        if self.normal.y < -0.2
-            || (self.normal.y < 0.15 && self.speed.abs() < 0.8 && self.wallride.is_none())
-        {
-            self.vel = self.surface_forward() * self.speed + self.normal * 0.5;
-            self.pos += self.normal * 0.02;
-            self.take_off(None);
-            events.push(Event::Launched);
-        }
+        };
+        let end = target
+            .unwrap_or(end)
+            .min(self.tuning.push_max_speed)
+            .max(end);
+        self.graph_push = Some((base, end, left));
+        Some(end)
     }
 
-    /// Riding across a steep face is a wallride: gravity is held off for a moment, then the board slides
-    /// down the wall and jumps off it.
-    fn update_wallride(&mut self, dt: f32, events: &mut Vec<Event>) {
-        let across = self.surface_forward().y.abs() < 0.5;
-        if !(self.normal.y < WALL_STEEP && across && self.speed.abs() > 1.0) {
-            if let Some((t, _)) = self.wallride.take()
-                && t > 0.2
-            {
-                events.push(Event::Landed {
-                    name: "WALLRIDE".into(),
-                    points: WALLRIDE_POINTS + (t * 200.0) as u32,
-                });
-            }
-            return;
-        }
-        let (mut t, mut drop) = self.wallride.unwrap_or((0.0, 0.0));
-        t += dt;
-        let hold = 1.0 - ((t - WALLRIDE_HOLD) / WALLRIDE_FADE).clamp(0.0, 1.0);
-        drop += self.tuning.gravity * (1.0 - hold) * dt;
-        let down = tangent(-Vec3::UP, self.normal);
-        self.pos += down * (drop * dt);
-        self.manual = None;
-        self.push = None;
-        if hold <= 0.0 || drop > 2.5 {
-            // Off the wall: a little hop away from it.
-            events.push(Event::Landed {
-                name: "WALLRIDE".into(),
-                points: WALLRIDE_POINTS + (t * 200.0) as u32,
-            });
-            self.wallride = None;
-            self.vel = self.surface_forward() * self.speed + self.normal * 2.0 + down * drop;
-            self.pos += self.normal * 0.05;
-            self.take_off(None);
-            events.push(Event::Launched);
-            return;
-        }
-        self.wallride = Some((t, drop));
-    }
-
-    fn update_push(&mut self, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
+    /// Pushing: returns the speed the board chases while the pushing foot is on the ground.
+    fn update_push(&mut self, pad: &Pad, dt: f32, events: &mut Vec<Event>) -> Option<f32> {
         let t = self.tuning;
+        // A press is remembered for a moment while the button is held.
+        let pressed = [btn::A, btn::B].into_iter().find(|b| pad.was_pressed(*b));
+        if let Some(b) = pressed {
+            self.push_press = Some((b, 0.0));
+        } else if let Some((b, s)) = &mut self.push_press {
+            *s += dt;
+            if *s > PUSH_MEMORY || !pad.is_held(*b) {
+                self.push_press = None;
+            }
+        }
+        let both = pad.is_held(btn::A) && pad.is_held(btn::B);
+        let steep =
+            libm::acosf(self.contact_n.y.clamp(-1.0, 1.0)) > t.push_slope_limit * PI / 180.0;
         let blocked = self.manual.is_some()
             || self.slide.is_some()
             || self.revert.is_some()
             || self.hippy.is_some()
+            || self.wallride.is_some()
+            || both
+            || steep
             || self.brake.is_some_and(|b| b.released.is_none());
         if blocked {
             self.push = None;
-            return;
+            return None;
         }
-        let pressed = [btn::A, btn::B].into_iter().find(|b| pad.was_pressed(*b));
-        if let Some(p) = &mut self.push {
-            p.t += dt;
-            if p.turning > 0.0 {
-                p.turning -= dt;
-                return;
+        let Some(mut p) = self.push else {
+            if let Some((b, _)) = self.push_press.take() {
+                self.start_push(b, 0, events);
             }
-            let held = pad.is_held(p.button);
-            let cycle = t.push_cycle.max(0.2);
-            let pt = p.time();
-            let k = pt / cycle;
-            if k < PUSH_CONTACT.0 {
-                p.base = self.speed.max(0.0);
-            }
-            if held && k < PUSH_CONTACT.1 {
+            return None;
+        };
+        p.t += dt;
+        if p.turning > 0.0 {
+            p.turning -= dt;
+            self.push = Some(p);
+            return None;
+        }
+        let held = pad.is_held(p.button);
+        if let Some(b) = pressed {
+            p.queued = Some(b);
+        }
+        let (stage, _) = p.stage();
+        if stage == 0 {
+            p.base = self.speed;
+            if held {
                 p.held += dt;
             }
-            if (PUSH_CONTACT.0..PUSH_CONTACT.1).contains(&k) {
-                // The push's speed is spread over the foot's time on the ground, as the push animation
-                // drives it in Skate 3, and each push adds less the closer the board is to its top push
-                // speed (flatground's stand-in for the animation's own foot speed).
-                let room = (t.push_max_speed - p.base).max(0.0) / t.push_max_speed.max(0.01);
-                let gain = t.push_gain(p.held, p.base) * room;
-                let contact = (PUSH_CONTACT.1 - PUSH_CONTACT.0) * cycle;
-                let target = (p.base + gain).min(t.push_max_speed);
-                let step = (gain * dt / contact).min(t.push_tick_limit(self.speed) * dt * 60.0);
-                let gap = (target - self.speed).max(0.0);
-                self.speed += step.min(gap);
-            }
-            if pt >= cycle {
-                // Holding the button keeps pushing; another press starts the next push.
-                let next = if held { Some(p.button) } else { pressed };
-                let count = p.count + 1;
-                self.push = None;
-                if let Some(b) = next {
-                    self.start_push(b, count, events);
-                }
-            } else if let Some(b) = pressed
-                && k >= PUSH_CONTACT.1
-            {
-                // Pressing again late in the cycle chains the next push straight away.
-                let count = p.count + 1;
-                self.start_push(b, count, events);
-            }
-        } else if let Some(b) = pressed {
-            self.start_push(b, 0, events);
         }
+        let mut target = None;
+        if stage == 1 {
+            if held {
+                p.held += dt;
+            }
+            // How hard: from how long the button was held (a held repeat is capped).
+            let mut dv = t.push_gain(p.held, p.base.max(0.0));
+            if p.held_repeat {
+                dv = dv.min(t.push_hold_cap);
+            }
+            let (_, _, _, gentle_end, strong_end, slow_b, fast_b) = self.clips.blend(p.base);
+            let lo = gentle_end.min(strong_end);
+            let end = (dv + p.base.max(0.0)).clamp(lo, strong_end.max(lo));
+            let end = end.min(t.push_max_speed);
+            let tgt = p.target.map_or(end, |old| old.max(end));
+            p.target = Some(tgt);
+            target = Some(tgt);
+            // Where in the swing back the next push may start (Skate 3's out factor).
+            let dv0 = t.push_dv.eval(0.0);
+            let dv1 = t.push_dv.eval(1.0);
+            let first = slow_b + dv0;
+            let speed_k = if fast_b - first > 1e-3 {
+                ((p.base.max(0.0) - first) / (fast_b - first)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let strength_k = if dv1 - dv0 > 1e-3 {
+                ((dv - dv0) / (dv1 - dv0)).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let w = t.push_out_speed_weight.clamp(0.0, 1.0);
+            p.out = (strength_k * (1.0 - w) + speed_k * w)
+                .max(0.0)
+                .min(t.push_out_max);
+        }
+        let pt = p.time();
+        let repush = p.down + p.contact + p.out * p.recover;
+        let end = p.down + p.contact + p.recover;
+        let next = if held { Some(p.button) } else { p.queued };
+        if stage == 2 && pt >= repush && next.is_some() {
+            let count = p.count + 1;
+            let by_hold = held && p.queued.is_none();
+            self.push = None;
+            self.start_push(next.unwrap_or(btn::A), count, events);
+            if let Some(q) = &mut self.push {
+                q.held_repeat = by_hold;
+            }
+        } else if pt >= end {
+            self.push = None;
+        } else {
+            self.push = Some(p);
+        }
+        target
     }
 
     fn start_push(&mut self, button: u32, count: u32, events: &mut Vec<Event>) {
         let mut turning = 0.0;
-        if self.fakie || self.speed < -0.3 {
+        if self.fakie || self.speed < -FAKIE_SLOW {
             // Skate 3 turns the rider round to push switch: same travel, the other foot forward.
-            self.fwd = -self.fwd;
-            self.speed = -self.speed;
+            self.flip_board();
             self.switch = !self.switch;
             self.fakie = false;
             self.fakie_timer = 0.0;
             turning = SWITCH_TURN_TIME;
             events.push(Event::Switched);
         }
-        self.speed = self.speed.max(0.0);
         // Skate 3 pushes with the mongo set when riding switch (for a rider who pushes regular).
         let mongo = (button == btn::B) != self.switch;
+        let (into, contact, recover, ..) = self.clips.blend(self.speed.max(0.0));
+        self.push_press = None;
         self.push = Some(Push {
-            t: 0.0,
-            held: 0.0,
             mongo,
             base: self.speed,
             count,
             button,
             turning,
             delay: turning,
+            down: if count == 0 { into } else { PUSH_REPEAT_DOWN },
+            contact,
+            recover,
+            out: self.tuning.push_out_max,
+            ..Push::default()
         });
     }
 
-    fn update_brake(&mut self, pad: &Pad, dt: f32) {
+    /// The foot brake (X): returns whether the braking foot is on the ground.
+    fn update_brake(&mut self, pad: &Pad, dt: f32) -> bool {
         let t = self.tuning;
-        let can = self.manual.is_none() && self.slide.is_none() && self.revert.is_none();
+        let steep =
+            libm::acosf(self.contact_n.y.clamp(-1.0, 1.0)) > t.push_slope_limit * PI / 180.0;
+        let can = self.manual.is_none()
+            && self.slide.is_none()
+            && self.revert.is_none()
+            && self.wallride.is_none()
+            && !steep;
         let held = pad.is_held(btn::X) && can;
         match &mut self.brake {
             Some(b) if held && b.released.is_none() => {
                 b.time += dt;
                 self.push = None;
-                self.speed = approach(self.speed, 0.0, t.foot_brake * t.brake_scale * dt);
+                // The foot has to reach the ground first.
+                return b.time >= self.clips.brake_down;
             }
             Some(b) => {
                 let r = b.released.unwrap_or(0.0) + dt;
@@ -1284,22 +1687,27 @@ impl Skater {
             }
             None => {}
         }
+        false
     }
 
-    /// Both push buttons together wind up a hippie jump; letting go jumps off the board and back on.
+    /// Both push buttons together wind up a hippie jump; letting go jumps off the board and back on,
+    /// along the surface's normal (weaker on steep faces, as a pop is).
     fn update_hippy(&mut self, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
         let both = pad.is_held(btn::A) && pad.is_held(btn::B);
         match self.hippy {
             Some(t) if both => self.hippy = Some(t + dt),
             Some(t) => {
                 self.hippy = None;
-                let k = (t / HIPPY_MAX_WINDUP).clamp(0.0, 1.0);
                 let tu = self.tuning;
-                let h = tu.hippy_low + (tu.hippy_high - tu.hippy_low) * k;
-                let up = sqrtf((2.0 * tu.gravity * (h - tu.jump_floor)).max(0.0));
-                let fwd = self.surface_forward();
-                self.vel = fwd * self.speed + Vec3::UP * up;
-                self.pos += Vec3::UP * 0.02;
+                let k = tu.hippy_windup.eval(t).clamp(0.0, 1.0);
+                let k_speed = (self.speed.abs() / tu.jump_speed_range.max(0.01)).clamp(0.0, 1.0);
+                let lo = tu.jump_floor
+                    + tu.jump_low_vs_speed.eval(k_speed) * (tu.hippy_low - tu.jump_floor);
+                let hi = tu.jump_floor
+                    + tu.jump_high_vs_speed.eval(k_speed) * (tu.hippy_high - tu.jump_floor);
+                let up = self.pop_speed(lo + (hi - lo) * k);
+                self.vel = self.pop_velocity(up, [0.0, 0.0]);
+                self.pos += self.contact_n * 0.02;
                 self.take_off(None);
                 self.takeoff.hippy = true;
                 events.push(Event::Launched);
@@ -1341,8 +1749,11 @@ impl Skater {
     }
 
     /// Manuals from the C-stick: held lightly back (towards the player) or forward, for a moment. The
-    /// stick past the manual zone drags the tail (or nose) to brake.
-    fn update_manual(&mut self, flick: &FlickOut, dt: f32, events: &mut Vec<Event>) {
+    /// stick past the manual zone drags the tail (or nose) to brake: returns whether it is.
+    fn update_manual(&mut self, flick: &FlickOut, dt: f32, events: &mut Vec<Event>) -> bool {
+        if let Some(g) = self.graph {
+            return self.graph_manual(g.manual, dt, events);
+        }
         let [x, y] = flick.stick;
         let len = sqrtf(x * x + y * y);
         // Mostly up or down only.
@@ -1362,38 +1773,89 @@ impl Skater {
                 self.manual = Some(Manual {
                     // Stick away from the player: the front wheels.
                     nose: y < 0.0,
-                    balance: 0.0,
-                    time: 0.0,
-                    brake: 0.0,
+                    ..Manual::default()
                 });
                 self.push = None;
                 self.brake = None;
             }
-            return;
+            return false;
         };
         // How hard the stick leans towards the manual's wheels.
         let toward = if m.nose { -y } else { y };
         if toward < MANUAL_MIN || !vertical {
             self.end_manual(events);
-            return;
+            return false;
         }
         m.time += dt;
-        m.brake = ((len - MANUAL_BRAKE) * 10.0).clamp(0.0, 1.0);
+        // Skate 3's tail brake: full force at once in the brake zone, the deck tipped to its angle.
+        m.brake = if len > MANUAL_BRAKE { 1.0 } else { 0.0 };
+        let pitch = m.brake * self.tuning.manual_brake_tilt * PI / 180.0;
+        m.pitch = approach(m.pitch, pitch, 3.0 * dt);
         let push = ((toward - MANUAL_MIN) / (MANUAL_BRAKE - MANUAL_MIN)).min(1.0);
         // Unstable like a real manual: any tilt grows, the stick past its sweet spot tips you further
         // over, and a steady wobble keeps you correcting.
         m.balance +=
             (m.balance * 1.6 + (push - MANUAL_SWEET) * 2.0 + 0.5 * sinf(m.time * 2.3)) * dt;
-        if m.brake > 0.0 {
-            let t = self.tuning;
-            self.speed = approach(self.speed, 0.0, t.tail_brake * t.brake_scale * m.brake * dt);
-        }
+        let braking = m.brake > 0.0;
         if m.balance.abs() >= 1.0 {
             self.manual = None;
             self.manual_lock = true;
             self.speed *= 0.85;
             events.push(Event::ManualLost);
+            return false;
         }
+        braking
+    }
+
+    /// A manual the state graph holds (engaged and left as the graph says; it never tips over): the deck
+    /// pitch servoes to a target that grows with the stick's lean (SK8's manual controller aims at
+    /// (0.25 + 0.75 lean) of the most tilt), or to the brake angle while dragging.
+    fn graph_manual(
+        &mut self,
+        want: Option<(bool, f32, bool)>,
+        dt: f32,
+        events: &mut Vec<Event>,
+    ) -> bool {
+        let Some((nose, lean, brake)) = want else {
+            if self.manual.is_some() {
+                self.end_manual(events);
+            }
+            return false;
+        };
+        if self.manual.is_none_or(|m| m.nose != nose) {
+            self.end_manual(events);
+            self.manual = Some(Manual {
+                nose,
+                ..Manual::default()
+            });
+            self.push = None;
+            self.brake = None;
+        }
+        let t = &self.tuning;
+        let speed = libm::fabsf(self.speed);
+        let m = self.manual.as_mut().unwrap();
+        let started = m.time > 0.0;
+        m.time += dt;
+        m.brake = if brake { 1.0 } else { 0.0 };
+        // SK8's manual controller: the target grows with the lean; while dragging it is the brake angle
+        // with no wobble.
+        let reach = 0.25 + 0.75 * lean.clamp(0.0, 1.0);
+        let target = if brake {
+            t.manual_brake_tilt * reach * PI / 180.0
+        } else {
+            let wobble = libm::sinf(2.0 * PI * t.manual_noise_freq * m.time) * t.manual_noise_scale;
+            t.manual_max_tilt * reach * PI / 180.0 + t.manual_noise_vs_speed.eval(speed) * wobble
+        };
+        // PID on the deck pitch, per 1/60 s tick (the deck turns by the accumulated correction).
+        let ticks = (dt * 60.0).max(0.0);
+        let error = (target - m.pitch).clamp(-t.manual_max_error, t.manual_max_error);
+        m.filtered_error = 0.95 * m.filtered_error + 0.05 * error;
+        let last_turn = if started { m.correction } else { 0.0 };
+        let derivative = (last_turn * t.manual_d).clamp(-t.manual_d_limit, t.manual_d_limit);
+        m.correction += derivative + m.filtered_error * t.manual_i + error * t.manual_p;
+        m.pitch += m.correction * ticks;
+        m.balance = 0.0;
+        brake
     }
 
     /// Ends a manual on purpose (stick released, or popped out of): scores it if it was long enough.
@@ -1415,11 +1877,11 @@ impl Skater {
         sqrtf((2.0 * t.gravity * (height - t.jump_floor)).max(0.0))
     }
 
-    fn pop(&mut self, f: Flick, strength: f32, fwd: Vec3, events: &mut Vec<Event>) {
+    fn pop(&mut self, f: Flick, strength: f32, stick: [f32; 2], events: &mut Vec<Event>) {
         self.end_manual(events);
         let h = self.tuning.jump_height(strength, self.speed);
-        self.vel = fwd * self.speed + self.normal * self.pop_speed(h);
-        self.pos += self.normal * 0.02;
+        self.vel = self.pop_velocity(self.pop_speed(h), stick);
+        self.pos += self.contact_n * 0.02;
         self.take_off(Some(f));
         events.push(Event::Popped(f));
     }
@@ -1439,6 +1901,11 @@ impl Skater {
         self.kickturn = None;
         self.hippy = None;
         self.wallride = None;
+        self.collide = None;
+        self.vn = 0.0;
+        self.gap_time = 0.0;
+        self.lead_rise = 0.0;
+        self.pump = Pump::default();
         self.predict_in = 0;
         self.land_up = self.normal;
         self.spin = 0.0;
@@ -1449,12 +1916,7 @@ impl Skater {
             switch: self.switch,
             hippy: false,
         };
-        self.trick = f.map(|f| ActiveTrick {
-            flick: f,
-            t: 0.0,
-            duration: trick_duration(f.trick),
-            flips: 1,
-        });
+        self.trick = f.map(ActiveTrick::new);
     }
 
     fn fly(
@@ -1484,7 +1946,9 @@ impl Skater {
         self.spin += turn;
         self.fwd = rotate(self.fwd, Vec3::UP, turn);
         self.normal = rotate(self.normal, Vec3::UP, turn);
-        if let Some(tr) = &mut self.trick {
+        if let Some(g) = self.graph {
+            self.follow_graph_trick(&g);
+        } else if let Some(tr) = &mut self.trick {
             tr.t += dt;
             // Holding a kickflip or heelflip on the stick keeps it flipping.
             let flip_only = matches!(tr.flick.trick, Trick::Kickflip | Trick::Heelflip);
@@ -1525,16 +1989,15 @@ impl Skater {
                     self.land(h.normal, time, events);
                     return;
                 }
-                // A wall: slide along it, or bail if it was hit hard.
-                let into = -self.vel.dot(h.normal);
-                if into > AIR_WALL_BAIL {
-                    self.pos = h.point + h.normal * 0.05;
-                    self.vel += h.normal * (into * 0.8);
-                    self.bail("hit a wall in the air", events);
+                // A wall: a wallride if there is a floor well below, else off it (or off the board).
+                if h.normal.y.abs() < 0.5 && self.try_air_wallride(park, &h, events) {
                     return;
                 }
-                self.vel += h.normal * (into * 1.1);
                 self.pos = h.point + h.normal * 0.02;
+                match self.hit_wall(h.normal, self.vel, true, events) {
+                    Some(v) => self.vel = v,
+                    None => return,
+                }
                 moved = true;
             }
         }
@@ -1601,10 +2064,43 @@ impl Skater {
         }
     }
 
+    /// In the air under the state graphs, the board does what the graph's clips do: the trick (a late
+    /// flip or finger flip starts one), its flips, how far through it is, a dark catch.
+    fn follow_graph_trick(&mut self, g: &GraphControl) {
+        match g.air_trick {
+            Some(a) => {
+                let fresh = a.late && self.trick.is_none_or(|t| t.id != a.id);
+                if fresh {
+                    let mut t = ActiveTrick::new(a.flick);
+                    t.late = true;
+                    self.trick = Some(t);
+                }
+                if let Some(t) = &mut self.trick {
+                    if t.id == u16::MAX || fresh {
+                        t.id = a.id;
+                    }
+                    t.clock = Some(if g.danger { a.progress.min(0.99) } else { 1.0 });
+                    t.flips = t.flips.max(a.flips);
+                }
+            }
+            None => {
+                if let Some(t) = &mut self.trick {
+                    t.clock = Some(1.0);
+                }
+            }
+        }
+        if let Some(t) = &mut self.trick {
+            t.dark |= g.dark;
+        }
+    }
+
     /// Coming down onto a rail locks on. Which grind or slide it is comes from how the board meets it, as
     /// in Skate 3: its angle to the rail, where along the board the rail crosses, which way the nose
     /// points, and (along it) the C-stick for 5-0s and nosegrinds.
-    fn try_grind(&mut self, park: &dyn Terrain) -> bool {
+    ///
+    /// Phase-6 hook: the same lock-on test is what a grind from riding (into coping, onto a curb or ledge)
+    /// will call, with the ground velocity.
+    pub(crate) fn try_grind(&mut self, park: &dyn Terrain) -> bool {
         let free = self.trick.is_none_or(|t| t.progress() >= 1.0);
         if self.vel.y > 0.0 || self.grab.is_some() || !free {
             return false;
@@ -1644,7 +2140,8 @@ impl Skater {
             };
             let frontside = across_motion && chest.dot(to_far) > 0.0;
             let kind = GrindKind::from_contact(angle, cross, nose_far, self.grind_stick);
-            let along = vh.dot(dh);
+            // Speed along the rail: the whole 3-D velocity along it (Skate 3), no minimum.
+            let along = self.vel.dot(d);
             let dir = if along >= 0.0 { 1.0 } else { -1.0 };
             let into = self
                 .trick_label()
@@ -1665,13 +2162,14 @@ impl Skater {
                 nose
             };
             self.normal = Vec3::UP;
+            self.contact_n = Vec3::UP;
             self.spin_rate = 0.0;
             self.pos = p;
             self.grind = Some(Grind {
                 rail: i,
                 s: n.s,
                 dir,
-                speed: along.abs().max(GRIND_MIN_ENTRY),
+                speed: along.abs(),
                 kind,
                 frontside,
                 time: 0.0,
@@ -1739,6 +2237,7 @@ impl Skater {
         let backwards = self.fwd.dot(travel) < 0.0;
         self.fwd = if backwards { -travel } else { travel };
         self.normal = Vec3::UP;
+        self.contact_n = Vec3::UP;
         self.grind = None;
         self.regrind_block = Some((g.rail, 0.4));
         self.vel = travel * g.speed.max(0.0);
@@ -1748,8 +2247,10 @@ impl Skater {
         match flick.flick {
             Some(f) => {
                 let f = gesture::select(f, Group::Square, self.mirrored());
-                let h = self.tuning.jump_height(flick.strength, g.speed);
-                self.vel += Vec3::UP * self.pop_speed(h);
+                let t = self.tuning;
+                let h = t.jump_height(flick.strength, g.speed);
+                let response = t.vertical_response.eval(0.0).max(t.jump_min_scalar);
+                self.vel += Vec3::UP * (self.pop_speed(h) * response);
                 self.take_off(Some(f));
                 events.push(Event::Popped(f));
             }
@@ -1772,7 +2273,79 @@ impl Skater {
         self.push = None;
         self.brake = None;
         self.slide = None;
+        self.revert = None;
+        self.kickturn = None;
+        self.hippy = None;
+        self.collide = None;
         events.push(Event::Bailed);
+    }
+
+    /// Stepped off the board after a hit the rider could run out of: no bail, back on the board where it
+    /// stops (Skate 3's runout).
+    fn run_out(&mut self, reason: &'static str, events: &mut Vec<Event>) {
+        self.bail_reason = Some(reason);
+        self.wallride = None;
+        self.mode = Mode::Runout { time: 0.0 };
+        self.trick = None;
+        self.grab = None;
+        self.grabbed = None;
+        self.manual = None;
+        self.landing = None;
+        self.push = None;
+        self.brake = None;
+        self.slide = None;
+        self.revert = None;
+        self.kickturn = None;
+        self.hippy = None;
+        self.collide = None;
+        events.push(Event::RanOut);
+    }
+
+    /// Coming down onto a steep face with a floor well below it (not a quarter pipe or bowl): the board
+    /// turns onto the wall and rides it. Returns whether it did.
+    fn try_air_wallride(
+        &mut self,
+        park: &dyn Terrain,
+        h: &crate::park::Hit,
+        events: &mut Vec<Event>,
+    ) -> bool {
+        let t = self.tuning;
+        let n = h.normal;
+        let along = self.vel - n * self.vel.dot(n);
+        let free = self.trick.is_none_or(|t| t.progress() >= 1.0) && self.grab.is_none();
+        if along.length() < 1.0 || !free {
+            return false;
+        }
+        let Some((floor, height)) = Self::floor_under(park, h.point, n) else {
+            return false;
+        };
+        if floor.dot(n) >= t.wallride_max_dot_floor || height < WALLRIDE_MIN_HEIGHT {
+            return false;
+        }
+        if let Some((name, points)) = self.trick_label() {
+            events.push(Event::Landed {
+                name: format!("{}{name}", self.stance_prefix()),
+                points,
+            });
+        }
+        self.mode = Mode::Rolling;
+        self.pos = h.point;
+        self.contact_n = n;
+        self.normal = n;
+        let travel = along.normalize_or(tangent(self.fwd, n));
+        let backwards = tangent(self.fwd, n).dot(travel) < 0.0;
+        self.fwd = if backwards { -travel } else { travel };
+        self.vn = 0.0;
+        self.gap_time = 0.0;
+        self.truck_ramp = 0.0;
+        self.set_ground_velocity(along);
+        self.fakie = backwards;
+        self.trick = None;
+        self.spin = 0.0;
+        self.spin_rate = 0.0;
+        self.takeoff.hippy = false;
+        self.start_wallride(true);
+        true
     }
 
     /// Holds a grab while a trigger is down (once any flip has finished). L is the left hand, R the
@@ -1828,7 +2401,11 @@ impl Skater {
         let backwards = off.abs() > PI / 2.0;
         let crooked_signed = if backwards { wrap_angle(off + PI) } else { off };
         let crooked = crooked_signed.abs();
-        let trick_done = self.trick.is_none_or(|t| t.progress() >= 1.0);
+        // With the state graphs, the clips say whether the board is caught (no `DANGERZONE`).
+        let trick_done = match self.graph {
+            Some(g) => !g.danger,
+            None => self.trick.is_none_or(|t| t.progress() >= 1.0),
+        };
         // Still holding a grab when the wheels touch down also takes you out.
         let reason = if !trick_done {
             Some("landed before the trick finished")
@@ -1882,7 +2459,14 @@ impl Skater {
                 0.97
             };
         self.speed = speed * keep * if backwards { -1.0 } else { 1.0 };
-        self.vel = Vec3::ZERO;
+        self.slip = 0.0;
+        self.vn = 0.0;
+        self.gap_time = 0.0;
+        self.lead_rise = 0.0;
+        self.contact_n = n;
+        self.truck_ramp = 0.0;
+        self.pump = Pump::default();
+        self.vel = self.fwd * self.speed;
         self.fakie = backwards;
         self.fakie_timer = 0.0;
         // Half-turns spun with the body, named frontside or backside for the rider's stance.
@@ -2006,6 +2590,13 @@ mod tests {
         }
     }
 
+    /// A skater on `park`, past the just-spawned fakie grace.
+    fn spawn(park: &dyn Terrain) -> Skater {
+        let mut s = Skater::spawn(park);
+        s.since_spawn = FAKIE_GRACE;
+        s
+    }
+
     fn flicked(f: Flick) -> FlickOut {
         FlickOut {
             flick: Some(f),
@@ -2066,10 +2657,10 @@ mod tests {
     #[test]
     fn a_tap_pushes_less_than_a_hold_and_pushing_caps() {
         let park = flat();
-        let mut tap = Skater::spawn(&park);
+        let mut tap = spawn(&park);
         steps(&mut tap, &park, &press(btn::A), None, 1);
         steps(&mut tap, &park, &Pad::default(), None, 60);
-        let mut held = Skater::spawn(&park);
+        let mut held = spawn(&park);
         steps(&mut held, &park, &press(btn::A), None, 1);
         steps(&mut held, &park, &hold(btn::A), None, 30);
         steps(&mut held, &park, &Pad::default(), None, 30);
@@ -2081,7 +2672,7 @@ mod tests {
             tap.speed
         );
         // Holding A keeps pushing, up to the top push speed.
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         steps(&mut s, &park, &press(btn::A), None, 1);
         steps(&mut s, &park, &hold(btn::A), None, 60 * 3);
         assert!(s.speed <= s.tuning.push_max_speed + 1e-3);
@@ -2094,71 +2685,213 @@ mod tests {
     }
 
     #[test]
-    fn top_push_speed_takes_several_pushes() {
+    fn pushes_follow_the_clip_timing_and_caps() {
         let park = flat();
-        for tuning in [Tuning::BUILT_IN, {
-            // Skate 3's own push numbers have a stronger full push.
-            let mut t = Tuning::BUILT_IN;
-            t.push_max_speed = 8.5;
-            t.push_dv = crate::tuning::Curve::new(&[(0.0, 0.75), (1.0, 4.5)]);
-            t
-        }] {
-            let mut s = Skater::spawn_with(&park, tuning, Stance::Goofy);
-            steps(&mut s, &park, &press(btn::A), None, 1);
-            let mut at = Vec::new();
-            for _ in 0..5 {
-                steps(&mut s, &park, &hold(btn::A), None, 40);
-                at.push(s.speed);
-            }
-            let top = tuning.push_max_speed;
-            // Two pushes in (about 1.3 s) it is still well short of the top...
-            assert!(at[1] < top - 1.5, "{at:?}");
-            // ...and keeps gaining a little less each time.
-            assert!(
-                at[4] > at[2] && at[4] - at[3] < at[2] - at[1] + 0.2,
-                "{at:?}"
-            );
+        let c = ClipTiming::BUILT_IN;
+        // From a standstill nothing happens until the foot comes down (the push's wind-up).
+        let mut s = spawn(&park);
+        steps(&mut s, &park, &press(btn::A), None, 1);
+        let wind_up = (c.push[0].into * 60.0) as usize;
+        steps(&mut s, &park, &hold(btn::A), None, wind_up - 2);
+        assert!(s.speed.abs() < 1e-3, "{}", s.speed);
+        // Then the board chases the push's end speed, a limited amount a tick.
+        let mut last = s.speed;
+        for _ in 0..6 {
+            steps(&mut s, &park, &hold(btn::A), None, 1);
+            assert!(s.speed - last <= s.tuning.push_tick_limit_slow + 1e-4);
+            last = s.speed;
         }
+        assert!(s.speed > 0.5);
+        // A full first push ends at the strong slow clip's end speed.
+        steps(&mut s, &park, &Pad::default(), None, 40);
+        assert!((s.speed - c.push[0].vel_e).abs() < 0.15, "{}", s.speed);
+        // A tap ends at the gentle one's.
+        let mut tap = spawn(&park);
+        steps(&mut tap, &park, &press(btn::A), None, 1);
+        steps(&mut tap, &park, &Pad::default(), None, 60);
+        assert!((tap.speed - c.push[2].vel_e).abs() < 0.15, "{}", tap.speed);
+        // Holding on: each repeat adds at most the held-push cap, and never past the top push speed.
+        let mut s = spawn(&park);
+        steps(&mut s, &park, &press(btn::A), None, 1);
+        let mut at = Vec::new();
+        let mut gains = Vec::new();
+        let mut base = 0.0;
+        for _ in 0..(60 * 6) {
+            let before = s.push.map(|p| p.count);
+            steps(&mut s, &park, &hold(btn::A), None, 1);
+            if let (Some(b), Some(p)) = (before, s.push)
+                && p.count != b
+            {
+                at.push(s.speed);
+                gains.push(s.speed - base);
+                base = s.speed;
+            }
+            assert!(s.speed <= s.tuning.push_max_speed + 1e-3);
+        }
+        assert!(at.len() >= 3, "{at:?}");
+        assert!(
+            gains[1..]
+                .iter()
+                .all(|g| *g <= s.tuning.push_hold_cap + 0.05),
+            "{gains:?}"
+        );
+        assert!(s.speed > s.tuning.push_max_speed - 0.5, "{}", s.speed);
     }
 
     #[test]
-    fn b_pushes_mongo_and_x_brakes() {
+    fn push_and_brake_timing_comes_from_the_motion_library() {
+        use crate::motion::write::{AttrIn, ClipIn, write};
+        // Made-up clips for the slow strong set only, and the brake's wind-up.
+        let clip = |name: String, frames: f32, attrs: Vec<(&str, f32)>| ClipIn {
+            name,
+            fps: 60.0,
+            frames,
+            base_speed: 1.0,
+            andale_flags: 0,
+            has_pose: false,
+            attrs: attrs
+                .into_iter()
+                .map(|(n, v)| AttrIn {
+                    name: n.into(),
+                    kind: crate::motion::KIND_SCALAR,
+                    begin: -1.0,
+                    end: -1.0,
+                    words: alloc::vec![v.to_bits()],
+                })
+                .collect(),
+        };
+        let base = PUSH_CLIPS[0];
+        let mut clips = alloc::vec![
+            clip(format!("{base}_INTO"), 31.0, alloc::vec![("VEL_E", 3.0)]),
+            clip(
+                format!("{base}_CYC1"),
+                7.0,
+                alloc::vec![("HSTR_VEL_B", 0.5), ("VEL_E", 3.0)]
+            ),
+            clip(format!("{base}_CYC2"), 61.0, alloc::vec![("VEL_E", 3.0)]),
+            clip(BRAKE_INTO_CLIP.into(), 13.0, alloc::vec![]),
+        ];
+        clips.sort_by(|a, b| a.name.cmp(&b.name));
+        let bytes = write(&clips, &[]);
+        let db = crate::motion::MotionDb::parse(&bytes).unwrap();
+        let c = ClipTiming::from_motion(&db);
+        let set = c.push[0];
+        assert!((set.into - 0.5).abs() < 1e-5 && (set.contact - 0.1).abs() < 1e-5);
+        assert!((set.recover - 1.0).abs() < 1e-5);
+        assert_eq!((set.vel_b, set.vel_e), (0.5, 3.0));
+        assert!((c.brake_down - 0.2).abs() < 1e-5);
+        assert_eq!(
+            c.push[1],
+            ClipTiming::BUILT_IN.push[1],
+            "missing sets stay built in"
+        );
+    }
+
+    #[test]
+    fn a_press_during_a_push_waits_for_the_repush_point() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
+        steps(&mut s, &park, &press(btn::A), None, 1);
+        let into = (s.clips.push[0].into * 60.0) as usize;
+        steps(&mut s, &park, &Pad::default(), None, into + 1);
+        let p = s.push.expect("pushing");
+        assert_eq!(p.stage().0, 1, "{p:?}");
+        // A tap while the foot is down is kept, and starts the next push only at the re-push point.
+        steps(&mut s, &park, &press(btn::A), None, 1);
+        assert_eq!(
+            s.push.map(|p| (p.count, p.queued.is_some())),
+            Some((0, true))
+        );
+        let mut next_at = None;
+        for i in 0..90 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            if next_at.is_none() && s.push.is_some_and(|p| p.count == 1) {
+                next_at = Some(i);
+            }
+        }
+        let next_at = next_at.expect("the next push started");
+        assert!(next_at as f32 >= p.contact * 60.0 - 3.0, "{next_at}");
+        // Both buttons cancel a push.
+        let mut s = spawn(&park);
+        steps(&mut s, &park, &press(btn::A), None, 1);
+        steps(&mut s, &park, &hold(btn::A | btn::B), None, 1);
+        assert!(s.push.is_none());
+    }
+
+    #[test]
+    fn b_pushes_mongo_and_the_brake_waits_for_the_foot() {
+        let park = flat();
+        let mut s = spawn(&park);
         steps(&mut s, &park, &press(btn::B), None, 1);
         assert!(s.push.is_some_and(|p| p.mongo));
         steps(&mut s, &park, &hold(btn::B), None, 120);
         assert!(s.speed > 2.0);
+        // Nothing until the braking foot reaches the ground...
         let v = s.speed;
-        steps(&mut s, &park, &hold(btn::X), None, 30);
+        let down = (s.clips.brake_down * 60.0) as usize;
+        steps(&mut s, &park, &hold(btn::X), None, down - 1);
         assert!(s.brake.is_some());
+        assert!(s.speed > v - 0.05, "{v} -> {}", s.speed);
+        // ...then it slows the board and holds it still.
+        steps(&mut s, &park, &hold(btn::X), None, 40);
         assert!(s.speed < v - 1.0, "foot brake: {v} -> {}", s.speed);
         steps(&mut s, &park, &hold(btn::X), None, 300);
         assert_eq!(s.speed, 0.0);
     }
 
-    #[test]
-    fn powerslide_scrubs_speed_and_turns_the_board() {
-        let park = flat();
-        let mut s = Skater::spawn(&park);
-        s.speed = 6.0;
-        let a = 30.0 * PI / 180.0;
-        let pad = Pad {
+    /// The main stick at `deg` degrees from straight back (+ right), fully over.
+    fn stick_back(deg: f32) -> Pad {
+        let a = deg * PI / 180.0;
+        Pad {
             stick: [sinf(a), -cosf(a)],
             ..Default::default()
-        };
-        steps(&mut s, &park, &pad, None, 30);
+        }
+    }
+
+    #[test]
+    fn powerslide_holds_curves_and_ends() {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 6.0;
+        let yaw0 = s.travel_yaw();
+        steps(&mut s, &park, &stick_back(30.0), None, 30);
         let sl = s.slide.expect("sliding");
-        assert!(sl.amount > 0.9 && s.board_yaw_offset().abs() > 1.0);
-        assert!(s.speed < 4.5, "{}", s.speed);
+        // The board is well round from its travel (how far follows the stick), and speed scrubs off.
+        assert!(
+            sl.amount > 0.6 && s.board_yaw_offset().abs() > 1.0,
+            "{sl:?}"
+        );
+        assert!(s.speed < 5.0, "{}", s.speed);
+        // The path curves (the trucks hold a turn).
+        assert!(wrap_angle(s.travel_yaw() - yaw0).abs() > 0.05);
+        // Swinging the stick round the side keeps it (the wide holding arc).
+        steps(&mut s, &park, &stick_back(100.0), None, 10);
+        assert!(s.slide.is_some_and(|s| !s.releasing));
+        // Letting go ends it, and the board comes back in line.
         steps(&mut s, &park, &Pad::default(), None, 30);
         assert!(s.slide.is_none());
+        // A slide lasts at least its minimum time even after a flick.
+        let mut s = spawn(&park);
+        s.speed = 6.0;
+        steps(&mut s, &park, &stick_back(30.0), None, 2);
+        steps(&mut s, &park, &Pad::default(), None, 5);
+        assert!(s.slide.is_some_and(|s| !s.releasing));
+        // Holding the stick in the entry window doesn't start another one, and slow riding ends it.
+        let mut s = spawn(&park);
+        s.speed = 3.0;
+        steps(&mut s, &park, &stick_back(30.0), None, 240);
+        assert!(s.speed.abs() < 2.0);
+        assert!(s.slide.is_none() || s.slide.is_some_and(|s| s.releasing));
+        let mut s = spawn(&park);
+        s.speed = 0.8;
+        steps(&mut s, &park, &stick_back(30.0), None, 5);
+        assert!(s.slide.is_none(), "too slow to slide");
     }
 
     #[test]
     fn ollie_lands_on_flat_and_a_quicker_flick_pops_higher() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 5.0;
         let ev = steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 120);
         assert_eq!(ev[0], Event::Popped(Flick::OLLIE));
@@ -2167,7 +2900,7 @@ mod tests {
         assert!(s.pos.z > 3.0);
 
         let apex = |strength: f32| {
-            let mut s = Skater::spawn(&park);
+            let mut s = spawn(&park);
             s.speed = 4.0;
             let mut ev = Vec::new();
             let f = FlickOut {
@@ -2192,7 +2925,7 @@ mod tests {
         for t in gesture::TRICKS {
             for nollie in [false, true] {
                 let f = Flick { trick: t, nollie };
-                let mut s = Skater::spawn(&park);
+                let mut s = spawn(&park);
                 s.speed = 4.0;
                 let ev = steps(&mut s, &park, &Pad::default(), Some(f), 120);
                 assert!(!ev.contains(&Event::Bailed), "{f:?}: {ev:?}");
@@ -2200,7 +2933,7 @@ mod tests {
             }
         }
         // Nollie names.
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 4.0;
         let f = Flick {
             trick: Trick::TreFlip,
@@ -2228,7 +2961,7 @@ mod tests {
     #[test]
     fn holding_the_kickflip_flips_it_again() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 4.0;
         // A big pop so there is time for two flips.
         s.tuning.jump_high = 2.4;
@@ -2256,7 +2989,7 @@ mod tests {
     #[test]
     fn landing_sideways_bails_and_respawns() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 4.0;
         let mut ev = steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
         s.set_spin(PI / 2.0);
@@ -2270,7 +3003,7 @@ mod tests {
     #[test]
     fn half_spin_lands_fakie_then_pushing_turns_round_to_switch() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 4.0;
         let mut ev = steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
         s.set_spin(PI);
@@ -2285,7 +3018,7 @@ mod tests {
         assert!(s.switch && !s.fakie && s.speed > 0.0 && s.mirrored());
         assert!(s.heading.abs() < 0.1, "nose leads again");
         // A fakie flick is named as such.
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = -4.0;
         steps(&mut s, &park, &Pad::default(), None, 2);
         assert!(s.fakie);
@@ -2302,18 +3035,29 @@ mod tests {
     #[test]
     fn rolling_backwards_slowly_is_not_fakie_at_once() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = -0.7;
         steps(&mut s, &park, &Pad::default(), None, 5);
         assert!(!s.fakie);
         steps(&mut s, &park, &Pad::default(), None, 15);
+        assert!(s.fakie);
+        // Creeping back slower than Skate 3's limit is not fakie.
+        s.speed = -0.4;
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        assert!(!s.fakie);
+        // Never just after a spawn.
+        let mut s = Skater::spawn(&park);
+        s.speed = -4.0;
+        steps(&mut s, &park, &Pad::default(), None, 30);
+        assert!(!s.fakie);
+        steps(&mut s, &park, &Pad::default(), None, 40);
         assert!(s.fakie);
     }
 
     #[test]
     fn revert_after_landing_fakie_rides_forward_again() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 5.0;
         steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
         s.set_spin(PI);
@@ -2339,7 +3083,7 @@ mod tests {
     fn slightly_crooked_landing_is_sketchy() {
         let park = flat();
         let land = |spin: f32| {
-            let mut s = Skater::spawn(&park);
+            let mut s = spawn(&park);
             s.speed = 5.0;
             let mut ev = steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
             s.set_spin(spin);
@@ -2366,7 +3110,7 @@ mod tests {
     fn big_drops_land_heavy_and_bigger_ones_bail() {
         let park = flat();
         let drop = |h: f32| {
-            let mut s = Skater::spawn(&park);
+            let mut s = spawn(&park);
             s.pos.y = h;
             s.take_off(None);
             let mut ev = Vec::new();
@@ -2408,7 +3152,7 @@ mod tests {
     #[test]
     fn manuals_score_when_balanced_and_tip_over_when_not() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         let ev = hold_manual(&mut s, &park, 2.0, true);
         assert!(!ev.contains(&Event::ManualLost), "{ev:?}");
         let m = s.manual.expect("in a manual");
@@ -2421,7 +3165,7 @@ mod tests {
         let ev = hold_manual(&mut s, &park, 5.0, false);
         assert!(ev.contains(&Event::ManualLost), "{ev:?}");
         // Stick forward: a nose manual.
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 5.0;
         let f = FlickOut {
             stick: [0.0, -0.5],
@@ -2448,7 +3192,7 @@ mod tests {
     #[test]
     fn a_quick_pull_for_an_ollie_is_not_a_manual() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 4.0;
         let mut ev = Vec::new();
         for y in [0.5, 1.0, 1.0, 1.0, 1.0, 1.0] {
@@ -2466,7 +3210,7 @@ mod tests {
     #[test]
     fn hippie_jump_from_both_push_buttons() {
         let park = flat();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 4.0;
         let both = btn::A | btn::B;
         let mut ev = steps(&mut s, &park, &press(both), None, 1);
@@ -2483,7 +3227,7 @@ mod tests {
             trig_r,
             ..Default::default()
         };
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 5.0;
         let mut ev = steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 5);
         ev.extend(steps(&mut s, &park, &grab(1.0), None, 18));
@@ -2505,7 +3249,7 @@ mod tests {
     fn a_wound_up_spin_turns_further() {
         let park = flat();
         let spun = |windup: bool| {
-            let mut s = Skater::spawn(&park);
+            let mut s = spawn(&park);
             s.speed = 4.0;
             let mut ev = Vec::new();
             // Either the stick is already over (no wind-up), or it is thrown across just before the pop.
@@ -2566,7 +3310,7 @@ mod tests {
 
     /// Ollies towards the rail; `spin` (rad) is set just after the pop.
     fn ollie_at_rail(park: &Park, spin: f32) -> (Skater, Vec<Event>) {
-        let mut s = Skater::spawn(park);
+        let mut s = spawn(park);
         s.speed = 5.0;
         let mut ev = steps(&mut s, park, &Pad::default(), Some(Flick::OLLIE), 1);
         s.set_spin(spin);
@@ -2665,7 +3409,7 @@ mod tests {
     #[test]
     fn an_unfinished_flip_does_not_lock_on() {
         let park = rail_park(10.0);
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 5.0;
         s.tuning.jump_high = 1.0; // a low pop: still flipping over the rail
         s.tuning.jump_low = 1.0;
@@ -2763,7 +3507,7 @@ mod tests {
     #[test]
     fn rolls_up_a_quarter_pipe_and_comes_back_fakie() {
         let park = quarter_pipe();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 6.0;
         let (ev, top) = run(&mut s, &park, 60 * 5);
         assert!(!ev.contains(&Event::Bailed), "{ev:?}");
@@ -2776,7 +3520,7 @@ mod tests {
     #[test]
     fn airs_out_over_the_coping_and_lands_back_in_fakie() {
         let park = quarter_pipe();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         s.speed = 10.0;
         let (ev, top) = run(&mut s, &park, 60 * 5);
         assert!(ev.contains(&Event::Launched), "{ev:?}");
@@ -2791,24 +3535,64 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_wall_bump_bounces_and_a_fast_one_bails() {
+    fn walls_keep_speed_along_them_and_hard_hits_take_you_off() {
         let park = quarter_pipe();
-        let wall_run = |speed: f32| {
-            let mut s = Skater::spawn(&park);
+        let wall_run = |speed: f32, yaw: f32| {
+            let mut s = spawn(&park);
             s.pos = v3(-4.0, 0.0, -12.0);
+            s.set_heading(yaw);
             s.speed = speed;
-            run(&mut s, &park, 120)
+            let (ev, _) = run(&mut s, &park, 120);
+            (s, ev)
         };
-        let (ev, _) = wall_run(3.0);
-        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
-        let (ev, _) = wall_run(9.0);
+        // Head on and slow: stopped and pushed off, no bail.
+        let (_, ev) = wall_run(3.0, 0.0);
+        assert!(
+            !ev.contains(&Event::Bailed) && !ev.contains(&Event::RanOut),
+            "{ev:?}"
+        );
+        // Upright single hits a bit over the limit: a runout, no respawn.
+        let (s, ev) = wall_run(9.0, 0.0);
+        assert!(ev.contains(&Event::RanOut), "{ev:?}");
+        assert!(!ev.contains(&Event::Respawned));
+        assert_eq!(s.mode, Mode::Rolling, "back on the board");
+        // Far over it: a bail.
+        let (_, ev) = wall_run(14.0, 0.0);
         assert!(ev.contains(&Event::Bailed), "{ev:?}");
+    }
+
+    #[test]
+    fn a_glancing_wall_hit_keeps_speed_and_turns_the_board_along_it() {
+        let park = quarter_pipe();
+        let mut s = spawn(&park);
+        // 25 degrees off parallel into the wall across z = -6 (x = -5..-3).
+        s.pos = v3(-0.5, 0.0, -7.5);
+        s.set_heading(-65.0 * PI / 180.0);
+        s.speed = 6.0;
+        let mut ev = Vec::new();
+        let mut hit = None;
+        for _ in 0..60 {
+            let before = s.ground_velocity().length();
+            s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
+            if s.collide.is_some() && hit.is_none() {
+                hit = Some((before, s.ground_velocity().length()));
+            }
+        }
+        let (before, after) = hit.expect("hit the wall");
+        assert!(
+            !ev.contains(&Event::Bailed) && !ev.contains(&Event::RanOut),
+            "{ev:?}"
+        );
+        // Only the part into the wall went: most of the speed is kept (the old model reversed it).
+        assert!(after > before * 0.8, "{before} -> {after}");
+        // The board ends up running along the wall (towards -x), not into it or back off it.
+        assert!(s.fwd.x < -0.85, "{:?}", s.fwd);
     }
 
     #[test]
     fn landing_tilted_against_a_steep_face_bails() {
         let park = quarter_pipe();
-        let mut s = Skater::spawn(&park);
+        let mut s = spawn(&park);
         // Just above the face, the board tipped the other way: no time to turn it flat.
         s.pos = v3(9.5, 2.1, -7.0);
         s.normal = rotate(Vec3::UP, v3(0.0, 0.0, 1.0), -50.0 * PI / 180.0);
@@ -2822,47 +3606,290 @@ mod tests {
     }
 
     #[test]
-    fn riding_across_the_vert_is_a_wallride_that_jumps_off() {
+    fn a_quarter_pipe_is_no_wallride_but_a_wall_with_a_floor_is() {
         let park = quarter_pipe();
-        let mut s = Skater::spawn(&park);
-        // On the vert, rolling along it.
-        s.pos = v3(-3.0, 3.4, 3.0);
-        s.normal = v3(0.0, 0.0, -1.0);
-        s.fwd = v3(1.0, 0.0, 0.0);
+        // On the vert, rolling along it: the floor under it curves up into it, so no wallride.
+        let mut s = spawn(&park);
+        place(
+            &mut s,
+            v3(-3.0, 3.4, 3.0),
+            v3(0.0, 0.0, -1.0),
+            v3(1.0, 0.0, 0.0),
+        );
         s.speed = 6.0;
         let (ev, _) = run(&mut s, &park, 90);
         assert!(
-            ev.iter()
+            !ev.iter()
                 .any(|e| matches!(e, Event::Landed { name, .. } if name == "WALLRIDE")),
             "{ev:?}"
         );
+        // Flying into the free-standing wall a metre over the flat: it rides it and jumps off.
+        let mut s = spawn(&park);
+        s.pos = v3(-3.2, 1.3, -5.8);
+        s.take_off(None);
+        s.vel = v3(-3.0, 1.0, -1.0);
+        let mut ev = Vec::new();
+        let mut rode = false;
+        for _ in 0..90 {
+            s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
+            rode |= s.wallride.is_some();
+        }
+        assert!(rode, "{ev:?}");
+        assert!(ev.contains(&Event::Launched), "jumped off: {ev:?}");
+        assert!(!ev.contains(&Event::Bailed), "{ev:?} {:?}", s.bail_reason);
     }
 
     #[test]
-    fn pumping_on_a_transition_adds_speed() {
-        let park = quarter_pipe();
-        let speed_after = |pump: bool| {
-            let mut s = Skater::spawn(&park);
-            s.pos = v3(0.0, 0.11, 0.8);
-            s.normal = v3(0.0, 0.966, -0.259);
-            s.fwd = v3(0.0, 0.259, 0.966);
+    fn pumping_pays_on_a_curved_transition_not_on_a_flat_bank() {
+        let run_pump = |park: &dyn Terrain, at: Vec3, n: Vec3, f: Vec3, pump: bool| {
+            let mut s = spawn(park);
+            place(&mut s, at, n, f);
             s.speed = 4.0;
             let mut ev = Vec::new();
             for i in 0..30 {
                 let crouch = if pump && i < 12 { 1.0 } else { 0.0 };
-                let f = FlickOut {
+                let fl = FlickOut {
                     crouch,
                     stick: [0.0, if crouch > 0.0 { 1.0 } else { 0.0 }],
                     ..FlickOut::default()
                 };
-                s.step(&park, &Pad::default(), &f, DT, &mut ev);
+                s.step(park, &Pad::default(), &fl, DT, &mut ev);
             }
             (s.speed, s.pos.y)
         };
-        let (plain, _) = speed_after(false);
-        let (pumped, y) = speed_after(true);
+        let qp = quarter_pipe();
+        let (n, f) = (v3(0.0, 0.966, -0.259), v3(0.0, 0.259, 0.966));
+        let (plain, _) = run_pump(&qp, v3(0.0, 0.11, 0.8), n, f, false);
+        let (pumped, y) = run_pump(&qp, v3(0.0, 0.11, 0.8), n, f, true);
         assert!(y > 0.2, "on the transition: {y}");
-        assert!(pumped > plain + 0.3, "{pumped} vs {plain}");
+        assert!(pumped > plain + 0.2, "{pumped} vs {plain}");
+        // A flat bank doesn't curve: nothing to pump.
+        let bank = bank(20.0);
+        let (n, f) = bank_frame(20.0);
+        let (plain, _) = run_pump(&bank, v3(0.0, 0.5, 1.37), n, f, false);
+        let (pumped, _) = run_pump(&bank, v3(0.0, 0.5, 1.37), n, f, true);
+        assert!((pumped - plain).abs() < 0.05, "{pumped} vs {plain}");
+    }
+
+    /// Flat ground towards -z, then a plane rising at `deg` along +z from z = 0, 10 m wide.
+    fn bank(deg: f32) -> crate::collision::TriMesh {
+        let rise = libm::tanf(deg * PI / 180.0) * 20.0;
+        mesh(&[
+            [
+                [-5.0, 0.0, -20.0],
+                [5.0, 0.0, -20.0],
+                [5.0, 0.0, 0.0],
+                [-5.0, 0.0, 0.0],
+            ],
+            [
+                [-5.0, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [5.0, rise, 20.0],
+                [-5.0, rise, 20.0],
+            ],
+        ])
+    }
+
+    /// The up and uphill directions of `bank(deg)`'s slope.
+    fn bank_frame(deg: f32) -> (Vec3, Vec3) {
+        let a = deg * PI / 180.0;
+        (v3(0.0, cosf(a), -sinf(a)), v3(0.0, sinf(a), cosf(a)))
+    }
+
+    /// A test park from quads (each two triangles).
+    fn mesh(quads: &[[[f32; 3]; 4]]) -> crate::collision::TriMesh {
+        let mut tris: Vec<([[f32; 3]; 3], u16, u16)> = Vec::new();
+        for [a, b, c, d] in quads {
+            tris.push(([*a, *b, *c], 0, 0));
+            tris.push(([*a, *c, *d], 0, 0));
+        }
+        crate::collision::TriMesh::parse(
+            &crate::collision::encode(&tris),
+            (v3(0.0, 0.0, -10.0), 0.0),
+        )
+        .unwrap()
+    }
+
+    /// Puts a rolling board at `pos` on a surface with normal `n`, its nose along `f`.
+    fn place(s: &mut Skater, pos: Vec3, n: Vec3, f: Vec3) {
+        s.pos = pos;
+        s.normal = n;
+        s.contact_n = n;
+        s.fwd = f;
+        s.sync_heading();
+    }
+
+    #[test]
+    fn a_crest_throws_the_board_into_the_air_at_speed_only() {
+        // A flat deck a metre up, then a 30-degree slope down along +z.
+        let drop = libm::tanf(30.0 * PI / 180.0) * 10.0;
+        let park = mesh(&[
+            [
+                [-5.0, 1.0, -20.0],
+                [5.0, 1.0, -20.0],
+                [5.0, 1.0, 0.0],
+                [-5.0, 1.0, 0.0],
+            ],
+            [
+                [-5.0, 1.0, 0.0],
+                [5.0, 1.0, 0.0],
+                [5.0, 1.0 - drop, 10.0],
+                [-5.0, 1.0 - drop, 10.0],
+            ],
+        ]);
+        let over = |speed: f32| {
+            let mut s = spawn(&park);
+            place(&mut s, v3(0.0, 1.0, -2.0), Vec3::UP, v3(0.0, 0.0, 1.0));
+            s.speed = speed;
+            let mut ev = Vec::new();
+            let mut lowest_gap: f32 = 0.0;
+            for _ in 0..60 {
+                s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
+                let g = park.ground(s.pos.x, s.pos.z, s.pos.y + 0.1).height;
+                lowest_gap = lowest_gap.max(s.pos.y - g);
+            }
+            (ev, lowest_gap, s)
+        };
+        let (ev, gap, _) = over(8.0);
+        assert!(ev.contains(&Event::Launched), "{ev:?}");
+        assert!(gap > 0.3, "flew clear of the slope: {gap}");
+        let (ev, gap, s) = over(1.5);
+        assert!(!ev.contains(&Event::Launched), "{ev:?}");
+        assert!(gap < 0.08, "{gap}");
+        assert_eq!(s.mode, Mode::Rolling);
+    }
+
+    #[test]
+    fn a_curb_is_hit_not_climbed() {
+        // A 10 cm step across the flat.
+        let park = mesh(&[
+            [
+                [-5.0, 0.0, -20.0],
+                [5.0, 0.0, -20.0],
+                [5.0, 0.0, 0.0],
+                [-5.0, 0.0, 0.0],
+            ],
+            [
+                [-5.0, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [5.0, 0.1, 0.0],
+                [-5.0, 0.1, 0.0],
+            ],
+            [
+                [-5.0, 0.1, 0.0],
+                [5.0, 0.1, 0.0],
+                [5.0, 0.1, 5.0],
+                [-5.0, 0.1, 5.0],
+            ],
+        ]);
+        let mut s = spawn(&park);
+        place(&mut s, v3(0.0, 0.0, -2.0), Vec3::UP, v3(0.0, 0.0, 1.0));
+        s.speed = 3.0;
+        let (_, top) = run(&mut s, &park, 60);
+        assert!(top < 0.05, "climbed the curb: {top}");
+        assert!(s.pos.z < 0.0);
+    }
+
+    #[test]
+    fn steering_curves_with_speed_and_slips_when_fast() {
+        let park = flat();
+        // Yaw rate for a full right turn, holding `speed` (after the tilt has eased in).
+        let turn = |speed: f32| {
+            let mut s = spawn(&park);
+            // Not quite fully over (fully over and stopped is a kick turn).
+            let pad = Pad {
+                stick: [0.7, 0.0],
+                ..Default::default()
+            };
+            let mut ev = Vec::new();
+            let mut slip: f32 = 0.0;
+            let mut h0 = 0.0;
+            for i in 0..90 {
+                s.speed = speed;
+                if i == 30 {
+                    h0 = s.heading;
+                }
+                s.step(&park, &pad, &FlickOut::default(), DT, &mut ev);
+                slip = slip.max((s.slip / speed.max(0.1)).abs());
+            }
+            (wrap_angle(s.heading - h0) / 1.0, slip)
+        };
+        let (stopped, _) = turn(0.0);
+        assert!(stopped.abs() < 1e-3, "no turning when stopped: {stopped}");
+        let (slow, slow_slip) = turn(1.5);
+        let (medium, _) = turn(3.0);
+        // Turning right (towards -x) and about twice the yaw rate at twice the speed: the trucks' curve.
+        assert!(slow < 0.0 && medium < 0.0);
+        assert!(
+            medium.abs() > slow.abs() * 1.6 && medium.abs() < slow.abs() * 2.4,
+            "{slow} {medium}"
+        );
+        // Fast: grip runs out and the board drifts.
+        let (_, fast_slip) = turn(9.0);
+        assert!(slow_slip < 0.03, "{slow_slip}");
+        assert!(fast_slip > 0.05, "{fast_slip}");
+        // Half a stick turns far less than half of a full one (Skate 3's signed tilt).
+        let t = Tuning::BUILT_IN;
+        assert!(t.steer_tilt(0.5, 3.0, 0.0, 1.0) < 0.5 * t.steer_tilt(1.0, 3.0, 0.0, 1.0));
+        // Rolling backwards the trucks turn the board the other way.
+        let mut s = spawn(&park);
+        let pad = Pad {
+            stick: [1.0, 0.0],
+            ..Default::default()
+        };
+        for _ in 0..30 {
+            s.speed = -2.0;
+            steps(&mut s, &park, &pad, None, 1);
+        }
+        assert!(s.heading > 0.05, "{}", s.heading);
+    }
+
+    #[test]
+    fn slow_boards_swing_downhill_on_a_bank() {
+        let park = bank(25.0);
+        let (n, up) = bank_frame(25.0);
+        let across = v3(1.0, 0.0, 0.0);
+        let swing = |speed: f32| {
+            let mut s = spawn(&park);
+            place(
+                &mut s,
+                v3(0.0, 2.0 * libm::tanf(25.0 * PI / 180.0), 2.0),
+                n,
+                across,
+            );
+            s.speed = speed;
+            let mut ev = Vec::new();
+            for _ in 0..30 {
+                s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
+            }
+            // How far the nose has turned downhill (towards -z along the slope).
+            -s.fwd.dot(up)
+        };
+        let slow = swing(1.5);
+        let fast = swing(9.0);
+        assert!(slow > 0.3, "swung down: {slow}");
+        assert!(fast < slow * 0.5, "barely at speed: {fast} vs {slow}");
+    }
+
+    #[test]
+    fn popping_on_vert_goes_up_not_out() {
+        let park = quarter_pipe();
+        let mut s = spawn(&park);
+        // On the vert, rolling straight up it.
+        place(&mut s, v3(0.0, 3.3, 3.0), v3(0.0, 0.0, -1.0), Vec3::UP);
+        s.speed = 3.0;
+        let mut ev = Vec::new();
+        s.step(&park, &Pad::default(), &flicked(Flick::OLLIE), DT, &mut ev);
+        assert!(s.is_airborne(), "{ev:?}");
+        // Straight up (a little back in), not thrown out over the flat.
+        assert!(s.vel.y > 2.5, "{:?}", s.vel);
+        assert!(s.vel.z.abs() < 0.5, "{:?}", s.vel);
+        // On flat ground the same pop goes straight up from the board.
+        let mut s = spawn(&park);
+        s.pos = v3(0.0, 0.0, -10.0);
+        s.speed = 3.0;
+        s.step(&park, &Pad::default(), &flicked(Flick::OLLIE), DT, &mut ev);
+        assert!(s.vel.y > 2.0 && (s.vel.z - 3.0).abs() < 0.2, "{:?}", s.vel);
     }
 
     #[test]
@@ -2880,5 +3907,175 @@ mod tests {
             Some("BS 180 AIR")
         );
         assert_eq!(landed_name("", None, 0, false, None), None);
+    }
+
+    #[test]
+    fn graph_pushes_drive_only_once_the_foot_is_down() {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.graph = Some(GraphControl::default());
+        steps(&mut s, &park, &hold(btn::A), None, 30);
+        assert!(s.speed.abs() < 0.05, "no contact yet: {}", s.speed);
+        s.graph = Some(GraphControl {
+            push_contact: true,
+            push_target: Some(3.0),
+            ..GraphControl::default()
+        });
+        steps(&mut s, &park, &hold(btn::A), None, 1);
+        s.graph = Some(GraphControl::default());
+        steps(&mut s, &park, &hold(btn::A), None, 30);
+        assert!(s.speed > 1.0, "the push drove: {}", s.speed);
+    }
+
+    #[test]
+    fn graph_flicks_pop_only_on_the_graphs_jump() {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 3.0;
+        s.graph = Some(GraphControl::default());
+        steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 5);
+        assert_eq!(s.mode, Mode::Rolling, "a flick alone doesn't pop");
+        s.graph = Some(GraphControl {
+            pop: Some((Flick::of(crate::gesture::Trick::Kickflip), 1.0)),
+            ..GraphControl::default()
+        });
+        let ev = steps(&mut s, &park, &Pad::default(), None, 1);
+        assert!(matches!(s.mode, Mode::Air { .. }));
+        assert!(
+            ev.iter().any(
+                |e| matches!(e, Event::Popped(f) if f.trick == crate::gesture::Trick::Kickflip)
+            )
+        );
+    }
+
+    #[test]
+    fn graph_manuals_hold_without_tipping_over_and_pitch_with_the_stick() {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 4.0;
+        s.graph = Some(GraphControl {
+            manual: Some((false, 1.0, false)),
+            ..GraphControl::default()
+        });
+        steps(&mut s, &park, &Pad::default(), None, 600);
+        let m = s.manual.expect("still manualing after 10 s");
+        let full = m.pitch;
+        assert!(full > 0.0);
+        // The balance servo settles at the full-lean tilt, give or take its wobble, and stays there.
+        let aim = s.tuning.manual_max_tilt * PI / 180.0;
+        let wobble = s.tuning.manual_noise_scale * s.tuning.manual_noise_vs_speed.eval(4.0) + 0.01;
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for _ in 0..240 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            let p = s.manual.unwrap().pitch;
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        assert!(
+            lo > aim - wobble && hi < aim + wobble,
+            "pitch {lo}..{hi}, aim {aim}"
+        );
+        s.graph = Some(GraphControl {
+            manual: Some((false, 0.0, false)),
+            ..GraphControl::default()
+        });
+        steps(&mut s, &park, &Pad::default(), None, 60);
+        assert!(
+            s.manual.unwrap().pitch < full * 0.5,
+            "a light lean pitches less"
+        );
+        s.graph = Some(GraphControl::default());
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        assert!(s.manual.is_none(), "the graph ended it");
+    }
+
+    #[test]
+    fn graph_turns_the_rider_round_out_of_fakie() {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = -2.0;
+        s.fakie = true;
+        let was = s.switch;
+        s.graph = Some(GraphControl {
+            turn_round: true,
+            ..GraphControl::default()
+        });
+        let ev = steps(&mut s, &park, &Pad::default(), None, 1);
+        assert_ne!(s.switch, was);
+        assert!(!s.fakie && s.speed > 0.0);
+        assert!(ev.contains(&Event::Switched));
+    }
+
+    /// Pops with the graph and steps until the board is back down, with `air` the graph's view of the
+    /// air (its trick, the danger zone, dark) on every tick.
+    fn graph_air(air: impl Fn(u32) -> GraphControl) -> (Skater, Vec<Event>) {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 3.0;
+        s.graph = Some(GraphControl {
+            pop: Some((Flick::OLLIE, 1.0)),
+            ..GraphControl::default()
+        });
+        let mut ev = steps(&mut s, &park, &Pad::default(), None, 1);
+        let mut k = 0;
+        while matches!(s.mode, Mode::Air { .. }) && k < 300 {
+            s.graph = Some(air(k));
+            ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+            k += 1;
+        }
+        (s, ev)
+    }
+
+    #[test]
+    fn graph_landings_bail_only_while_the_clips_say_the_board_is_not_caught() {
+        let trick = |late| AirTrick {
+            flick: Flick::of(crate::gesture::Trick::Kickflip),
+            flips: 1,
+            progress: 0.5,
+            late,
+            id: 3,
+        };
+        // Still in the danger zone at touchdown: a bail.
+        let (s, _) = graph_air(|_| GraphControl {
+            air_trick: Some(trick(false)),
+            danger: true,
+            ..GraphControl::default()
+        });
+        assert!(matches!(s.mode, Mode::Bailed { .. }), "{:?}", s.mode);
+        // The same trick caught in time: a clean landing, however long `trick_duration` says.
+        let (s, ev) = graph_air(|k| GraphControl {
+            air_trick: Some(trick(false)),
+            danger: k < 10,
+            ..GraphControl::default()
+        });
+        assert_eq!(s.mode, Mode::Rolling);
+        assert!(ev.iter().any(|e| matches!(e, Event::Landed { .. })));
+    }
+
+    #[test]
+    fn graph_late_flips_become_the_trick_and_dark_catches_ride_dark() {
+        let (s, ev) = graph_air(|k| GraphControl {
+            air_trick: (k > 5).then_some(AirTrick {
+                flick: Flick::of(crate::gesture::Trick::Kickflip),
+                flips: 2,
+                progress: 0.5,
+                late: true,
+                id: 9,
+            }),
+            dark: k > 5,
+            ..GraphControl::default()
+        });
+        assert_eq!(s.mode, Mode::Rolling, "{ev:?}");
+        let name = ev
+            .iter()
+            .find_map(|e| match e {
+                Event::Landed { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(name.contains("LATE DOUBLE KICKFLIP"), "{name}");
+        assert!(name.contains("DARK"), "{name}");
+        assert!(s.dark, "riding dark while the graph says so");
     }
 }

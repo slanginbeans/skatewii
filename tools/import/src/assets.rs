@@ -39,6 +39,11 @@ fn jobs() -> Vec<Job> {
             args: vec!["--lod".into(), "2".into()],
         },
         Job {
+            name: "motion",
+            files: &["motion.fgpak"],
+            args: Vec::new(),
+        },
+        Job {
             name: "rules",
             files: &["rules.fgpak"],
             args: Vec::new(),
@@ -215,6 +220,7 @@ fn convert(iso: &Path, job: &Job, out: &Path) -> Res<()> {
         "skater" => skater::run(&mut disc, &args),
         "park" => park::run(&mut disc, &args),
         "rules" => crate::rules::run(&mut disc, &args),
+        "motion" => crate::motion::run(&mut disc, &args),
         other => Err(format!("unknown job {other}").into()),
     }
 }

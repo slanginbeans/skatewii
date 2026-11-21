@@ -19,6 +19,7 @@ rem    build.bat noupdate   the same without updating
 rem    build.bat clean      delete the build output
 rem    build.bat nopause    don't wait for a key at the end
 rem    build.bat dolphin    build, then start the game in Dolphin (tools\dolphin.ps1)
+rem    build.bat fast       quicker build for testing (no LTO: Cargo profile "dolphin")
 rem  Switches combine (build.bat noupdate nopause).
 rem
 rem  Optional settings (set them before running, e.g. set FG_SD=E:):
@@ -42,6 +43,7 @@ set "UPDATE=1"
 rem Wait for a key at the end only when double-clicked (no arguments).
 set "PAUSE=1"
 set "DOLPHIN=0"
+set "FAST=0"
 if not "%~1"=="" set "PAUSE=0"
 for %%A in (%*) do (
     if /i "%%~A"=="clean" set "TARGET=clean"
@@ -49,10 +51,11 @@ for %%A in (%*) do (
     if /i "%%~A"=="noupdate" set "UPDATE=0"
     if /i "%%~A"=="nopause" set "PAUSE=0"
     if /i "%%~A"=="dolphin" set "DOLPHIN=1"
+    if /i "%%~A"=="fast" set "FAST=1"
     if /i "%%~A"=="showargs" set "SHOWARGS=1"
 )
 if defined SHOWARGS (
-    echo TARGET=%TARGET% UPDATE=%UPDATE% PAUSE=%PAUSE% DOLPHIN=%DOLPHIN% SD=%FG_SD%
+    echo TARGET=%TARGET% UPDATE=%UPDATE% PAUSE=%PAUSE% DOLPHIN=%DOLPHIN% FAST=%FAST% SD=%FG_SD%
     endlocal
     exit /b 0
 )
@@ -89,6 +92,9 @@ if errorlevel 1 (
 
 :build
 rem ---- 2/3. build and package -------------------------------------------------
+rem "fast": the Cargo profile without LTO (passed to make as RUST_PROFILE).
+set "MAKEARGS="
+if "%FAST%"=="1" set "MAKEARGS=RUST_PROFILE=dolphin"
 rem devkitPro's Windows installer puts its tools under X:\devkitPro\msys2 (any drive), and its
 rem make has to run inside that shell, so it usually isn't on the normal PATH.
 set "DKP="
@@ -108,7 +114,7 @@ if defined DKP (
     if /i not "%TARGET%"=="clean" call :ensure_rust
     if errorlevel 1 goto failed
     echo [build] Using devkitPro in %DKP%: make %TARGET%
-    "%DKP%\msys2\usr\bin\bash.exe" -l "%WINBUILD%" %TARGET%
+    "%DKP%\msys2\usr\bin\bash.exe" -l "%WINBUILD%" %TARGET% %MAKEARGS%
     if errorlevel 1 goto failed
     goto done
 )
@@ -120,7 +126,7 @@ if defined DEVKITPPC (
         if errorlevel 1 goto failed
         set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
         echo [build] Using devkitPro: make -C wii %TARGET%
-        make -C wii %TARGET%
+        make -C wii %TARGET% %MAKEARGS%
         if errorlevel 1 goto failed
         goto done
     )
@@ -145,7 +151,7 @@ if errorlevel 1 (
 )
 echo [build] Using Docker ^(devkitpro/devkitppc^): make %TARGET%
 echo         The first run also downloads Rust into .toolchain\ ^(a few minutes^).
-"%DOCKER%" run --rm -v "%cd%":/src -w /src devkitpro/devkitppc sh tools/docker-build.sh %TARGET%
+"%DOCKER%" run --rm -v "%cd%":/src -w /src devkitpro/devkitppc sh tools/docker-build.sh %TARGET% %MAKEARGS%
 if errorlevel 1 goto failed
 goto done
 

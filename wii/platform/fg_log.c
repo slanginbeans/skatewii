@@ -10,20 +10,40 @@
 
 #include "fg_log.h"
 
-#define BUF_SIZE 16384
+#define BUF_SIZE 32768
 #define LINE_MAX_ 400 // the stats line runs long
 
 static FILE *s_file;
 static char s_path[224];
+// Lines waiting to be written, and the copy being written (outside the lock).
 static char s_buf[BUF_SIZE];
 static int s_len;
+static char s_out[BUF_SIZE];
+static unsigned s_dropped;
 static uint32_t (*s_ms)(void);
 static uint32_t s_last_flush;
 static char s_tail[LOG_TAIL_LINES][LINE_MAX_];
 static int s_tail_n, s_tail_next;
+// Set when a background writer owns the file (see log_set_writer).
+static void (*s_lock)(void);
+static void (*s_unlock)(void);
+static void (*s_kick)(void);
 
 void log_set_clock(uint32_t (*ms)(void)) { s_ms = ms; }
 const char *log_path(void) { return s_file ? s_path : ""; }
+
+void log_set_writer(void (*lock_fn)(void), void (*unlock_fn)(void), void (*kick_fn)(void)) {
+    s_lock = lock_fn;
+    s_unlock = unlock_fn;
+    s_kick = kick_fn;
+}
+
+static void lock(void) {
+    if (s_lock) s_lock();
+}
+static void unlock(void) {
+    if (s_unlock) s_unlock();
+}
 
 static int cmp_names(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
@@ -71,9 +91,18 @@ int log_open(const char *dir, time_t now) {
     return s_file != NULL;
 }
 
+// Appends a finished line; returns 0 if the buffer had no room (the line is still in the tail).
+static int append(const char *line, int n) {
+    if (s_len + n + 2 > BUF_SIZE) return 0;
+    memcpy(s_buf + s_len, line, (size_t)n);
+    s_len += n;
+    s_buf[s_len++] = '\n';
+    return 1;
+}
+
 static void add(const char *text, uint32_t len) {
     char line[LINE_MAX_];
-    int n, ts;
+    int n, ts, room, busy;
     uint32_t ms = s_ms ? s_ms() : 0;
     ts = snprintf(line, sizeof(line), "[%5u.%03u] ", (unsigned)(ms / 1000), (unsigned)(ms % 1000));
     if (len > (uint32_t)(LINE_MAX_ - ts - 1)) len = (uint32_t)(LINE_MAX_ - ts - 1);
@@ -81,22 +110,33 @@ static void add(const char *text, uint32_t len) {
     n = ts + (int)len;
     line[n] = 0;
     while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+    lock();
     // The in-memory tail, for the crash screen.
     snprintf(s_tail[s_tail_next], LINE_MAX_, "%s", line);
     s_tail_next = (s_tail_next + 1) % LOG_TAIL_LINES;
     if (s_tail_n < LOG_TAIL_LINES) s_tail_n++;
-    // The file buffer.
-    if (s_len + n + 2 > BUF_SIZE) log_flush();
-    if (s_len + n + 2 <= BUF_SIZE) {
-        memcpy(s_buf + s_len, line, (size_t)n);
-        s_len += n;
-        s_buf[s_len++] = '\n';
+    room = append(line, n);
+    if (!room && !s_kick) {
+        // No writer thread: write out here and try again.
+        unlock();
+        log_flush();
+        lock();
+        room = append(line, n);
     }
+    if (!room) s_dropped++;
+    busy = s_len > BUF_SIZE * 3 / 4;
+    unlock();
+    if (busy && s_kick) s_kick();
 }
 
 void log_line(const char *text, uint32_t len, int important) {
     add(text, len);
-    if (important) log_flush();
+    if (important) {
+        if (s_kick)
+            s_kick();
+        else
+            log_flush();
+    }
 }
 
 static void addv(const char *fmt, va_list ap) {
@@ -118,25 +158,38 @@ void log_important(const char *fmt, ...) {
     va_start(ap, fmt);
     addv(fmt, ap);
     va_end(ap);
-    log_flush();
+    if (s_kick)
+        s_kick();
+    else
+        log_flush();
 }
 
 void log_flush(void) {
-    if (s_file && s_len) {
-        fwrite(s_buf, 1, (size_t)s_len, s_file);
+    int n;
+    unsigned dropped;
+    // Take the waiting lines under the lock, write them outside it.
+    lock();
+    n = s_len;
+    if (n) memcpy(s_out, s_buf, (size_t)n);
+    s_len = 0;
+    dropped = s_dropped;
+    s_dropped = 0;
+    unlock();
+    if (s_file && (n || dropped)) {
+        if (dropped) fprintf(s_file, "(%u log lines dropped: the buffer was full)\n", dropped);
+        fwrite(s_out, 1, (size_t)n, s_file);
         fflush(s_file);
         // Commit to the card: the SD driver keeps the file's size in a cache until the file is closed or
         // synced, and a crash, power-off or emulator stop never closes it.
         fsync(fileno(s_file));
-        s_len = 0;
-    } else if (!s_file && s_len > BUF_SIZE / 2) {
-        s_len = 0; // no card: the tail still has the latest lines
     }
     s_last_flush = s_ms ? s_ms() : 0;
 }
 
 void log_tick(void) {
-    uint32_t now = s_ms ? s_ms() : 0;
+    uint32_t now;
+    if (s_kick) return; // the writer thread does it
+    now = s_ms ? s_ms() : 0;
     if (s_len && now - s_last_flush >= LOG_FLUSH_MS) log_flush();
 }
 

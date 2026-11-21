@@ -1,7 +1,8 @@
-//! End-to-end: the whole move set through the real input path in the demo park.
+//! End-to-end: the whole move set through the real input path in the demo park (flatground's own
+//! riding rules: no imported data).
 
 use game_core::Game;
-use game_core::autoplay::TrickTour;
+use game_core::autoplay::{MANUAL_TICKS, TrickTour};
 use game_core::skater::{Event, Mode};
 
 #[test]
@@ -14,7 +15,7 @@ fn trick_tour_does_every_move() {
     let mut slide_frames = 0;
     let mut fakie_frames = 0;
     let mut leaned = (false, false);
-    for _ in 0..(60 * 40) {
+    for _ in 0..(60 * 60) {
         let pad = script.next(&game);
         game.update(&pad, 1.0 / 60.0);
         seen.extend(game.events.iter().cloned());
@@ -38,18 +39,23 @@ fn trick_tour_does_every_move() {
             _ => None,
         })
         .collect();
+    let has = |part: &str| names.iter().any(|n| n.contains(part));
     assert!(script.done(), "{names:?} {seen:?}");
     assert_eq!(names.first(), Some(&"KICKFLIP"), "{seen:?}");
     assert!(leaned.0 && leaned.1, "carved both ways");
-    assert!(manual_frames > 60, "{manual_frames}");
-    assert!(names.contains(&"MANUAL"), "{names:?}");
+    assert!(manual_frames >= MANUAL_TICKS, "{manual_frames}");
+    assert!(script.seen.manual >= MANUAL_TICKS, "{:?}", script.seen);
+    assert!(has("MANUAL"), "{names:?}");
+    assert!(script.seen.kick_turn, "{:?}", script.seen);
     assert!(grab_frames > 10, "{grab_frames}");
-    assert!(names.contains(&"OLLIE INDY"), "{names:?}");
-    assert!(names.contains(&"360 FLIP"), "{names:?}");
-    assert!(names.iter().any(|n| n.ends_with("180 OLLIE")), "{names:?}");
+    assert!(has("OLLIE INDY"), "{names:?}");
+    assert!(has("REVERT") && script.seen.revert, "{names:?}");
+    assert!(has("360 FLIP") || has("LASER FLIP"), "{names:?}");
+    assert!(has("180 OLLIE"), "{names:?}");
     assert!(fakie_frames > 10, "{fakie_frames}");
     assert!(seen.contains(&Event::Switched), "{names:?}");
+    assert!(has("KICKFLIP") && has("HEELFLIP"), "{names:?}");
     assert!(slide_frames > 10, "{slide_frames}");
-    assert!(names.iter().any(|n| n.contains("HIPPIE JUMP")), "{names:?}");
+    assert!(has("HIPPIE JUMP"), "{names:?}");
     assert_eq!(seen.last(), Some(&Event::Bailed), "{seen:?}");
 }

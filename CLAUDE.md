@@ -32,5 +32,6 @@ An original skateboarding game for the Nintendo Wii, written in Rust (see README
 
 ## Conventions
 - Y up, metres, seconds. Yaw 0 faces +Z, positive yaw turns towards +X.
-- Fixed timestep from the platform (1/60, or 1/50 on PAL50). Keep simulation deterministic.
+- The simulation steps at a fixed 1/60 s (`game::TICK`) whatever the display rate; on PAL50 a frame runs one
+  or two ticks and drawing blends between the last two. Keep simulation deterministic.
 - Colours are `0xRRGGBBAA` (`gfx::rgb`).
