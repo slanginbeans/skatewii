@@ -42,8 +42,9 @@ content second.
 - [ ] Grinds from riding (into coping, onto curbs and ledges): the lock-on hook is ready (`try_grind`)
 - [x] Scripted Dolphin runs from `game_core::autoplay` (`autoplay.txt`, `tools/dolphin_test.ps1`)
 - [ ] Screenshots from scripted runs in CI-like checks
-- [ ] Late flips, finger flips, dark catches, board-sideways flicks: recognised and selected by the state
-  graphs (Z is the dark catch); their board motion in the physics is still to do
+- [x] Late flips, finger flips, under flips, dark catches: recognised and selected by the state graphs (Z is
+  the dark catch); the board does what the clips do (the imported board is skinned to the clips'
+  board bone), landings bail only inside the clips' danger zone, dark catches ride dark
 
 ## Phase 2: Renderer
 - [ ] Display lists for static geometry (built once, `GX_CallDispList`)
@@ -70,10 +71,16 @@ content second.
   rider plays the graph's trees (mirrored per tree), and the graph decides pushes (push contact), foot
   brakes (brake contact), pops (the takeoff's jump, SK8 trick height), manuals (no fail, pitch servo),
   kick turns, reverts, turning round out of fakie; every gesture file recognised in parallel
-- [ ] Graph runner, next: channels (fakie head/torso, arm gestures), physics from the push/landing
-  behaviours (push coefficients, CalcLandingQuality, landing types into the physics), multi-flip holds and
-  late/finger/under flips through to the board's motion, grind trick-outs by grind type (needs the grind
-  physics of phase 6), camera shots from the graph (phase 7), a faster load (214 ms on the Wii)
+- [x] Graph runner, phase 4: held manuals last as long as the stick is held; SK8's push behaviours (push
+  strength, the push trees' coefficients, repush deadline) drive both the push clips and the board;
+  channel blends by bone weight and the fakie head and torso channel; air tricks through to the board
+  (late/finger/under flips, dark catches, multi-flips up to 4, landings from the clips' danger zone);
+  operations typed at import (graph load 217 ms -> 13 ms on the Wii); simultaneous gestures in SK8's
+  hash-bucket order; the trick tour does all of it in Dolphin
+- [ ] Graph runner, next: CalcLandingQuality and landing types from the landing behaviours, the push speed
+  from the posed clips' trajectory, SK8's manual PID (PhysicsWantsManualExit), character gestures (d-pad)
+  and shoves, grind trick-outs by grind type (needs the grind physics of phase 6), camera shots from the
+  graph (phase 7)
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
