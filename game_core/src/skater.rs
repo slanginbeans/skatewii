@@ -223,6 +223,10 @@ pub struct Manual {
     pub brake: f32,
     /// Deck pitch (rad): down to the brake angle while braking.
     pub pitch: f32,
+    /// Balance servo state (state graphs): the correction turning the deck each tick (rad per tick)
+    /// and the filtered pitch error.
+    pub correction: f32,
+    pub filtered_error: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1827,18 +1831,29 @@ impl Skater {
             self.push = None;
             self.brake = None;
         }
-        let max = self.tuning.manual_brake_tilt * 0.5;
+        let t = &self.tuning;
+        let speed = libm::fabsf(self.speed);
         let m = self.manual.as_mut().unwrap();
+        let started = m.time > 0.0;
         m.time += dt;
         m.brake = if brake { 1.0 } else { 0.0 };
+        // SK8's manual controller: the target grows with the lean; while dragging it is the brake angle
+        // with no wobble.
+        let reach = 0.25 + 0.75 * lean.clamp(0.0, 1.0);
         let target = if brake {
-            self.tuning.manual_brake_tilt
+            t.manual_brake_tilt * reach * PI / 180.0
         } else {
-            (0.25 + 0.75 * lean) * max
-        } * PI
-            / 180.0;
-        // A stiff, damped servo: most of the error gone in about a tenth of a second.
-        m.pitch += (target - m.pitch) * (1.0 - libm::expf(-20.0 * dt));
+            let wobble = libm::sinf(2.0 * PI * t.manual_noise_freq * m.time) * t.manual_noise_scale;
+            t.manual_max_tilt * reach * PI / 180.0 + t.manual_noise_vs_speed.eval(speed) * wobble
+        };
+        // PID on the deck pitch, per 1/60 s tick (the deck turns by the accumulated correction).
+        let ticks = (dt * 60.0).max(0.0);
+        let error = (target - m.pitch).clamp(-t.manual_max_error, t.manual_max_error);
+        m.filtered_error = 0.95 * m.filtered_error + 0.05 * error;
+        let last_turn = if started { m.correction } else { 0.0 };
+        let derivative = (last_turn * t.manual_d).clamp(-t.manual_d_limit, t.manual_d_limit);
+        m.correction += derivative + m.filtered_error * t.manual_i + error * t.manual_p;
+        m.pitch += m.correction * ticks;
         m.balance = 0.0;
         brake
     }
@@ -3946,6 +3961,21 @@ mod tests {
         let m = s.manual.expect("still manualing after 10 s");
         let full = m.pitch;
         assert!(full > 0.0);
+        // The balance servo settles at the full-lean tilt, give or take its wobble, and stays there.
+        let aim = s.tuning.manual_max_tilt * PI / 180.0;
+        let wobble = s.tuning.manual_noise_scale * s.tuning.manual_noise_vs_speed.eval(4.0) + 0.01;
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for _ in 0..240 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            let p = s.manual.unwrap().pitch;
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        assert!(
+            lo > aim - wobble && hi < aim + wobble,
+            "pitch {lo}..{hi}, aim {aim}"
+        );
         s.graph = Some(GraphControl {
             manual: Some((false, 0.0, false)),
             ..GraphControl::default()
