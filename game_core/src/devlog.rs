@@ -230,9 +230,13 @@ impl DevLog {
         if grinding != self.grinding {
             if let Some(g) = &s.grind {
                 out.push(format!(
-                    "grind: {} on rail {} at {:.1} m/s",
-                    g.kind.name(),
+                    "grind: {} ({}, {:?}, {:?}) on rail {} ({}) at {:.1} m/s",
+                    g.display(),
+                    g.graph_name(),
+                    g.family,
+                    g.entry,
                     g.rail,
+                    g.class.name(),
                     g.speed
                 ));
             }

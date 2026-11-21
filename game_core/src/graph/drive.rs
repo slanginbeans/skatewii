@@ -13,7 +13,7 @@ use crate::gesture::Shape;
 use crate::input::Pad;
 use crate::motion::MotionDb;
 use crate::motion::NameId;
-use crate::skater::{AirTrick, GraphControl, GrindKind, Mode, Skater, Stance};
+use crate::skater::{AirTrick, Family, GRAPH_NAMES, GraphControl, Mode, Skater, Stance};
 use crate::tuning::Tuning;
 
 /// Motion-library names the driver reads from the playing clips.
@@ -42,24 +42,10 @@ pub struct Driver {
     jumping: bool,
     /// The motion state's path last tick (for edges).
     last_path: String,
-    /// The graph's grind names (`FS_50_50` ...) by [`GrindKind`] and side (backside, frontside).
-    grinds: [[Str; 2]; 11],
+    /// The graph's string for each grind name the physics publishes (`skater::GRAPH_NAMES`: Skate 3's
+    /// `IsGrinding` grindName values, `BF_` variants included).
+    grinds: Vec<Str>,
 }
-
-/// The graph's name for each of the physics' grinds (Skate 3's `IsGrinding` grindName values).
-const GRIND_NAMES: [(GrindKind, &str); 11] = [
-    (GrindKind::FiftyFifty, "50_50"),
-    (GrindKind::FiveO, "5_O"),
-    (GrindKind::Nosegrind, "NOSEGRIND"),
-    (GrindKind::Crooked, "CROOK"),
-    (GrindKind::Willy, "WILLY"),
-    (GrindKind::Feeble, "FEEBLE"),
-    (GrindKind::Smith, "SMITH"),
-    (GrindKind::Boardslide, "BOARD"),
-    (GrindKind::Lipslide, "LIP"),
-    (GrindKind::Noseslide, "NOSESLIDE"),
-    (GrindKind::Tailslide, "TAILSLIDE"),
-];
 
 impl Driver {
     /// `entry`: the `motion/graph` pack entry. `sets`: gesture files by name (`skater`, `skaterls`, ...).
@@ -74,12 +60,10 @@ impl Driver {
         let typed = ops.and_then(|o| super::opcode::decode(o, entry.len()));
         let memory = pack.graphs.iter().map(|g| g.memory()).sum();
         let input = Intentions::new(&pack, sets);
-        let grinds = GRIND_NAMES.map(|(_, n)| {
-            ["BS_", "FS_"].map(|side| {
-                pack.find(&alloc::format!("{side}{n}"))
-                    .unwrap_or(super::NONE)
-            })
-        });
+        let grinds = GRAPH_NAMES
+            .iter()
+            .map(|n| pack.find(n).unwrap_or(super::NONE))
+            .collect();
         let runner = Runner::with_ops(pack, Some(db), typed).ok_or(Error::Bad)?;
         Ok(Driver {
             runner,
@@ -141,9 +125,20 @@ impl Driver {
             wants_runout: matches!(s.mode, Mode::Runout { .. }),
             wants_wipeout: matches!(s.mode, Mode::Bailed { .. }),
             grind: s.grind.as_ref().map_or(super::NONE, |g| {
-                let k = GRIND_NAMES.iter().position(|n| n.0 == g.kind).unwrap_or(0);
-                self.grinds[k][usize::from(g.frontside)]
+                let name = g.graph_name();
+                GRAPH_NAMES
+                    .iter()
+                    .position(|n| *n == name)
+                    .map_or(super::NONE, |k| self.grinds[k])
             }),
+            // A blunt (Skate 3's backslash family) and a darkslide's way out (SK8 grind/contact.rs:
+            // on a ledge, 2 when the board's nose points to the high side, else 1; elsewhere by which
+            // side of the rail the board is on).
+            blunting: s
+                .grind
+                .as_ref()
+                .is_some_and(|g| g.family == Family::Backslash),
+            grind_out: s.grind.as_ref().map_or(0, |g| darkslide_out(s, g)),
             slide: s
                 .slide
                 .as_ref()
@@ -229,7 +224,7 @@ impl Driver {
             c.revert = Some(path.contains("/Revert/Fs"));
         }
         // The takeoff clip's jump: pop on its first tick, as the trick the graph scores.
-        let jump = has(self.clips.jump) && r.s.world.phys == phys::GROUND;
+        let jump = has(self.clips.jump) && matches!(r.s.world.phys, phys::GROUND | phys::GRIND);
         if jump && !self.jumping {
             let name = r.str(r.s.trick);
             let name = name.strip_prefix("U_").unwrap_or(name);
@@ -414,4 +409,18 @@ pub fn jump_strength(height: f32, override_height: f32, t: &Tuning) -> f32 {
         height
     };
     h.max(override_height).clamp(0.0, 1.0)
+}
+
+/// A darkslide's way out for the graph's `GrindTrickOutTypeAllowed` (SK8 grind/contact.rs): 0 for every
+/// other grind; on a ledge 2 when the board's nose points to the high side, else 1; on a rail 1 when the
+/// board's middle is to its nose side of the rail, else 2.
+fn darkslide_out(s: &Skater, g: &crate::skater::Grind) -> u8 {
+    if g.family != Family::Darkslide {
+        return 0;
+    }
+    if g.class.is_ledge() {
+        return if g.high.dot(s.fwd) > 0.0 { 2 } else { 1 };
+    }
+    let across = (s.pos - g.point).horizontal();
+    if across.dot(s.fwd) > 0.0 { 1 } else { 2 }
 }

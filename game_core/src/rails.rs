@@ -99,6 +99,9 @@ pub struct Rail {
     cum: Vec<f32>,
     /// Per segment (between points `i` and `i + 1`): its class and high side.
     pub classes: Vec<SegmentClass>,
+    /// The rail's bounding box.
+    pub min: Vec3,
+    pub max: Vec3,
 }
 
 /// The nearest point of a rail to some position.
@@ -134,11 +137,31 @@ impl Rail {
             cum.push(total);
         }
         let classes = alloc::vec![SegmentClass::default(); points.len().saturating_sub(1)];
+        let (mut min, mut max) = (Vec3::ZERO, Vec3::ZERO);
+        for (i, p) in points.iter().enumerate() {
+            if i == 0 {
+                (min, max) = (*p, *p);
+            }
+            min = v3(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+            max = v3(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+        }
         Rail {
             points,
             cum,
             classes,
+            min,
+            max,
         }
+    }
+
+    /// Whether `p` is within `margin` of the rail's bounding box.
+    pub fn near(&self, p: Vec3, margin: f32) -> bool {
+        p.x >= self.min.x - margin
+            && p.x <= self.max.x + margin
+            && p.y >= self.min.y - margin
+            && p.y <= self.max.y + margin
+            && p.z >= self.min.z - margin
+            && p.z <= self.max.z + margin
     }
 
     /// The same rail with its segments classified against the park ([`classify`]).

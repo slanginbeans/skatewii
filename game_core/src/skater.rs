@@ -1,7 +1,8 @@
 //! The skater: what the rider does (stance, pushing, braking, powerslides, manuals, kick turns, reverts,
 //! flick tricks, grabs, grinds, landings, bails) on top of the board's physics (`board`: one rigid board
 //! on two trucks with a full velocity, riding whatever is under its wheels: flat ground, banks, curved
-//! transitions and walls). In the air (`air`) the board flies the landing Skate 3's trajectory selector
+//! transitions and walls). Grinds (`grind`) follow Skate 3's contact boxes, families, controls and
+//! names. In the air (`air`) the board flies the landing Skate 3's trajectory selector
 //! picks at take-off, spins with Skate 3's body spin controller (which keeps a let-go spin going and,
 //! with the stick let go, turns the body towards the landing) and turns its up to the landing surface
 //! just before touching down. Landings are classified as Skate 3 does (`landing`); bails come only from
@@ -21,6 +22,7 @@
 
 mod air;
 mod board;
+mod grind;
 mod landing;
 mod respawn;
 
@@ -28,8 +30,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub use air::{BodySpin, Plan};
+pub use air::{BodySpin, GrindTarget, Plan};
 pub use board::{AXLE, Drive, Pump, WALLRIDE_MIN_HEIGHT, WallRide};
+pub use grind::{
+    Approach, ApproachPose, Assist, Category, Contact, DECK_HEIGHT, Entry, Family, GRAPH_NAMES,
+    GRIND_MASS, Grind, GrindKind, Jumper, Lean, display_name, name_of, segment_box,
+};
 pub use landing::Quality;
 pub use respawn::{Checkpoints, Recovery};
 
@@ -99,21 +105,6 @@ const HIPPY_CHORD: f32 = 0.08;
 const HIPPY_POINTS: u32 = 150;
 /// Most flips a held kickflip or heelflip can reach (Skate 3: four).
 const MAX_FLIPS: u8 = 4;
-/// How close (m, seen from above) the board has to come down to a rail to lock on.
-const GRIND_REACH: f32 = 0.4;
-/// Board within this of across the rail: across it (a slide).
-const GRIND_ACROSS: f32 = 30.0 * PI / 180.0;
-const GRIND_FRICTION: f32 = 0.8;
-/// Slides (the deck on the rail) drag more than grinds (the trucks on it).
-const SLIDE_FRICTION: f32 = 1.6;
-/// Board within this of the rail's direction is along it; beyond `GRIND_ACROSS` from along it is across.
-const GRIND_ANGLED: f32 = 20.0 * PI / 180.0;
-/// Across the rail with the rail this far towards an end of the board (m): a nose or tail slide.
-const TIP_SLIDE: f32 = 0.2;
-const GRIND_MIN_SPEED: f32 = 0.6;
-const GRIND_MIN_TIME: f32 = 0.15;
-const GRIND_POINTS: u32 = 150;
-const GRIND_POINTS_PER_S: f32 = 200.0;
 
 /// Which foot the rider naturally has forward.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -720,8 +711,14 @@ pub struct Skater {
     /// The longest grab of this jump that was let go of (scored on landing).
     grabbed: Option<Grab>,
     pub grind: Option<Grind>,
-    /// The rail just left and how long until it can be locked onto again.
+    /// A rail just leaned off and how long until it can be locked onto again.
     regrind_block: Option<(usize, f32)>,
+    /// Grind-out energy and the time since the last pop out of a grind (SK8 `Jumper`).
+    pub jumper: Jumper,
+    /// Where the rider came from, for a grind's FS/BS (SK8 chromosome history).
+    pub approach: Approach,
+    /// The grind air assist towards the rail the flight was steered onto.
+    pub air_assist: Option<Assist>,
     pub brake: Option<FootBrake>,
     pub slide: Option<Powerslide>,
     /// Last tick's powerslide reading of the stick (entry window side, continuous amount).
@@ -742,8 +739,10 @@ pub struct Skater {
     pub checkpoints: Checkpoints,
     riding_ticks: u32,
     pub recovery: Recovery,
-    /// The C-stick's y in gesture space this frame (+ towards the player): picks 5-0s and nosegrinds.
-    grind_stick: f32,
+    /// The C-stick's y this tick (+ away from the player, Skate 3's `PhysGrindUpDown`) and both sticks'
+    /// x (`PhysGrindTranslation`): a grind's pitch and yaw.
+    grind_pitch_input: f32,
+    grind_sticks_x: f32,
     /// The numbers behind the last landing check (for the log).
     pub last_landing: Option<LandingCheck>,
     /// What Skate 3's state graphs decided this tick, when they run (`crate::graph`); `None` rides on
@@ -815,103 +814,6 @@ pub struct LandingCheck {
     /// Speed into the ground (m/s) and along it.
     pub impact: f32,
     pub speed: f32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GrindKind {
-    /// Board along the rail, both trucks on it.
-    FiftyFifty,
-    /// Along it on the back truck (C-stick held back) / the front truck (held forward).
-    FiveO,
-    Nosegrind,
-    /// Angled across it on the front truck: nose over the far side, or over the near side.
-    Crooked,
-    Willy,
-    /// Angled across it on the back truck: nose over the far side, or over the near side.
-    Feeble,
-    Smith,
-    /// Across it on the deck: the front end went over the rail (boardslide) or the tail did (lipslide).
-    Boardslide,
-    Lipslide,
-    /// Across it on the nose or the tail.
-    Noseslide,
-    Tailslide,
-}
-
-impl GrindKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            GrindKind::FiftyFifty => "50-50",
-            GrindKind::FiveO => "5-0",
-            GrindKind::Nosegrind => "NOSEGRIND",
-            GrindKind::Crooked => "CROOKED GRIND",
-            GrindKind::Willy => "WILLY GRIND",
-            GrindKind::Feeble => "FEEBLE GRIND",
-            GrindKind::Smith => "SMITH GRIND",
-            GrindKind::Boardslide => "BOARDSLIDE",
-            GrindKind::Lipslide => "LIPSLIDE",
-            GrindKind::Noseslide => "NOSESLIDE",
-            GrindKind::Tailslide => "TAILSLIDE",
-        }
-    }
-
-    /// The deck (not the trucks) is on the rail.
-    pub fn is_slide(self) -> bool {
-        matches!(
-            self,
-            GrindKind::Boardslide
-                | GrindKind::Lipslide
-                | GrindKind::Noseslide
-                | GrindKind::Tailslide
-        )
-    }
-
-    /// Which way the board sits on the rail, from its angle to it (0 along, pi/2 across), where along the
-    /// board the rail crosses (m, + towards the nose), whether the nose points to the far side of the
-    /// rail, and the C-stick (+y towards the player).
-    pub fn from_contact(angle: f32, cross: f32, nose_far: bool, stick_y: f32) -> GrindKind {
-        if angle < GRIND_ANGLED {
-            if stick_y > 0.35 {
-                GrindKind::FiveO
-            } else if stick_y < -0.35 {
-                GrindKind::Nosegrind
-            } else {
-                GrindKind::FiftyFifty
-            }
-        } else if angle < PI / 2.0 - GRIND_ACROSS {
-            match (cross >= 0.0, nose_far) {
-                (true, true) => GrindKind::Crooked,
-                (true, false) => GrindKind::Willy,
-                (false, true) => GrindKind::Feeble,
-                (false, false) => GrindKind::Smith,
-            }
-        } else if cross > TIP_SLIDE {
-            GrindKind::Noseslide
-        } else if cross < -TIP_SLIDE {
-            GrindKind::Tailslide
-        } else if nose_far {
-            GrindKind::Boardslide
-        } else {
-            GrindKind::Lipslide
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Grind {
-    /// Index into the terrain's rails.
-    pub rail: usize,
-    /// Distance along the rail.
-    pub s: f32,
-    /// +1 travelling towards the rail's end, -1 towards its start.
-    pub dir: f32,
-    pub speed: f32,
-    pub kind: GrindKind,
-    /// Frontside: the rider faced the rail coming onto it.
-    pub frontside: bool,
-    pub time: f32,
-    /// The trick that took the skater onto the rail (named with the grind).
-    pub into: Option<(String, u32)>,
 }
 
 /// Skate 3's reading of the main stick on the ground: turn, hard turn and powerslide amounts.
@@ -1032,6 +934,9 @@ impl Skater {
             grabbed: None,
             grind: None,
             regrind_block: None,
+            jumper: Jumper::default(),
+            approach: Approach::default(),
+            air_assist: None,
             brake: None,
             slide: None,
             last_slide: (0.0, 0.0),
@@ -1048,7 +953,8 @@ impl Skater {
             checkpoints: Checkpoints::default(),
             riding_ticks: 0,
             recovery: Recovery::default(),
-            grind_stick: 0.0,
+            grind_pitch_input: 0.0,
+            grind_sticks_x: 0.0,
             fwd: yaw_dir(heading),
         }
     }
@@ -1239,7 +1145,12 @@ impl Skater {
             0.0
         };
         self.crouch += (crouch - self.crouch) * smooth(18.0, dt);
-        self.grind_stick = flick.stick[1];
+        self.grind_pitch_input = pad.flick[1];
+        self.grind_sticks_x = clamp(pad.stick[0] + pad.flick[0], -1.0, 1.0);
+        self.jumper.tick();
+        if self.mode != Mode::Grind {
+            self.approach.away = self.approach.away.saturating_add(1);
+        }
         if flick.crouch > 0.0 {
             self.crouch_nose = flick.stick[1] < 0.0;
         }
@@ -1299,6 +1210,8 @@ impl Skater {
             let since = (self.since_spawn * 60.0) as u32;
             self.checkpoints
                 .observe(&self.tuning, park, at, self.riding_ticks, since);
+            let pose = self.approach_pose();
+            self.approach.ride(pose);
         } else {
             self.riding_ticks = 0;
         }
@@ -1316,7 +1229,7 @@ impl Skater {
         match self.mode {
             Mode::Rolling => self.roll(park, pad, flick, dt, events),
             Mode::Air { time } => self.fly(park, pad, flick, time + dt, dt, events),
-            Mode::Grind => self.slide_rail(park, flick, dt, events),
+            Mode::Grind => self.slide_rail(park, pad, flick, dt, events),
             Mode::Bailed { time } | Mode::Runout { time } => {
                 let time = time + dt;
                 let h = self.vel.horizontal() * (1.0 - smooth(3.0, dt));
@@ -1549,6 +1462,10 @@ impl Skater {
             intentional_pump: flick.crouch > 0.0 || self.crouch > 0.05,
         };
         self.ride(park, &drive, dt, events);
+        // Riding onto a rail: into coping, off a ledge's top, up a bank into a ledge.
+        if self.mode == Mode::Rolling {
+            self.try_grind(park, Category::Ground, events);
+        }
     }
 
     /// One tick of a revert (SK8 revert_state.rs): the yaw rate eases (by `revert_gain` a tick) to the
@@ -2047,6 +1964,9 @@ impl Skater {
     }
 
     fn take_off(&mut self, f: Option<Flick>) {
+        let pose = self.approach_pose();
+        self.approach.take_off(pose);
+        self.air_assist = None;
         self.mode = Mode::Air { time: 0.0 };
         // Rolling off a ledge mid-manual just ends it (no points: it wasn't finished).
         self.manual = None;
@@ -2097,6 +2017,7 @@ impl Skater {
                         ground: self.takeoff.ground.unwrap_or(Vec3::UP),
                         on_vert: self.takeoff.on_vert,
                         lean: self.takeoff.lean,
+                        grind: self.jumper.cooldown == 0,
                     },
                 );
                 self.selector.countdown = air::QUERY_EVERY;
@@ -2107,41 +2028,8 @@ impl Skater {
         if let Some(mut p) = self.selector.update(&t, park) {
             p.adopted = now;
             p.offset = self.pos - p.flight.at(now - p.start);
-            p.rail = Self::flight_meets_rail(park, &p, now);
             self.plan = Some(p);
         }
-    }
-
-    /// The planned flight comes down within reach of a rail before its landing: a grind is coming, and
-    /// the landing assist leaves the spin alone (Skate 3 hands it to its grind assist then; flatground's
-    /// grind targeting is Phase 6).
-    fn flight_meets_rail(park: &dyn Terrain, p: &Plan, now: f32) -> bool {
-        let from = p.flight.at(now - p.start);
-        let reach = (p.contact.point - from).horizontal().length() + 2.0;
-        let near: Vec<&crate::rails::Rail> = park
-            .rails()
-            .iter()
-            .filter(|r| r.nearest(from).is_some_and(|n| n.dist_h < reach))
-            .collect();
-        if near.is_empty() {
-            return false;
-        }
-        let mut t = (now - p.start).max(0.0);
-        while t <= p.contact.time {
-            let at = p.flight.at(t);
-            let falling = p.flight.vel_at(t).y <= 0.0;
-            if falling
-                && near.iter().any(|r| {
-                    r.nearest(at).is_some_and(|n| {
-                        n.dist_h <= GRIND_REACH && (-0.15..=0.3).contains(&(at.y - n.point.y))
-                    })
-                })
-            {
-                return true;
-            }
-            t += 2.0 / 60.0;
-        }
-        false
     }
 
     fn fly(
@@ -2164,7 +2052,7 @@ impl Skater {
         let stick = self.spin_input(pad);
         let auto = match &self.plan {
             Some(p) => match p.heading {
-                Some(h) if stick == 0.0 && !p.rail => {
+                Some(h) if stick == 0.0 && p.grind.is_none() => {
                     let lead = if self.takeoff.fakie {
                         -self.fwd
                     } else {
@@ -2226,10 +2114,15 @@ impl Skater {
         }
         self.update_grab(pad, flick, dt);
 
+        // A flight steered onto a rail: the grind air assist moves and turns the board towards it.
+        if let Some(target) = self.plan.as_ref().and_then(|p| p.grind) {
+            self.grind_air_assist(park, target, dt);
+        }
         // Fly: the known landing's flight (its start error blended away), else ballistically.
         match &self.plan {
             Some(p) => {
-                let next = p.target(time, t.traj_error_blend);
+                let assist = self.air_assist.map_or(Vec3::ZERO, |a| a.offset);
+                let next = p.target(time, t.traj_error_blend) + assist;
                 self.vel = (next - self.pos) * (1.0 / dt.max(1e-4));
             }
             None => self.vel.y -= t.gravity * dt,
@@ -2246,7 +2139,7 @@ impl Skater {
                 let landable = self.normal.dot(h.normal) > 0.5 || h.normal.y > 0.6;
                 if landable {
                     self.pos = h.point;
-                    if self.try_grind(park, events) {
+                    if self.try_grind(park, Category::Air, events) {
                         return;
                     }
                     self.land(h.normal, h.surface, time, events);
@@ -2271,7 +2164,7 @@ impl Skater {
             self.pos = from + delta;
         }
 
-        if self.try_grind(park, events) {
+        if self.try_grind(park, Category::Air, events) {
             return;
         }
         if self.pos.y < park.kill_height() {
@@ -2331,178 +2224,6 @@ impl Skater {
         }
         if let Some(t) = &mut self.trick {
             t.dark |= g.dark;
-        }
-    }
-
-    /// Coming down onto a rail locks on. Which grind or slide it is comes from how the board meets it, as
-    /// in Skate 3: its angle to the rail, where along the board the rail crosses, which way the nose
-    /// points, and (along it) the C-stick for 5-0s and nosegrinds.
-    ///
-    /// Phase-6 hook: the same lock-on test is what a grind from riding (into coping, onto a curb or ledge)
-    /// will call, with the ground velocity.
-    pub(crate) fn try_grind(&mut self, park: &dyn Terrain, events: &mut Vec<Event>) -> bool {
-        let free = self.trick.is_none_or(|t| t.progress() >= 1.0);
-        if self.vel.y > 0.0 || self.grab.is_some() || !free {
-            return false;
-        }
-        let into_limit = self.tuning.land_max_grind;
-        let nose = self.fwd.horizontal().normalize_or(yaw_dir(self.heading));
-        for (i, rail) in park.rails().iter().enumerate() {
-            if self.regrind_block.is_some_and(|(r, _)| r == i) {
-                continue;
-            }
-            let Some(n) = rail.nearest(self.pos) else {
-                continue;
-            };
-            let (p, d) = rail.at(n.s);
-            if n.dist_h > GRIND_REACH || !(-0.15..=0.3).contains(&(self.pos.y - p.y)) {
-                continue;
-            }
-            let dh = d.horizontal().normalize_or(d);
-            let along_dot = nose.dot(dh);
-            let angle = libm::acosf(along_dot.abs().min(1.0));
-            // Where the board's long axis crosses the rail (m from the middle, + towards the nose).
-            let cross2 = |a: Vec3, b: Vec3| a.x * b.z - a.z * b.x;
-            let denom = cross2(nose, dh);
-            let cross = if denom.abs() > 0.2 {
-                cross2(p - self.pos, dh) / denom
-            } else {
-                0.0
-            };
-            // Coming at the rail from one side: the nose over the far side, and facing it or not.
-            let vh = self.vel.horizontal();
-            let perp = vh - dh * vh.dot(dh);
-            let across_motion = perp.length() > 0.3;
-            let to_far = perp.normalize_or(Vec3::ZERO);
-            let nose_far = !across_motion || nose.dot(to_far) > 0.0;
-            let chest = {
-                let right = self.normal.cross(self.fwd).normalize_or(Vec3::ZERO);
-                if self.mirrored() { -right } else { right }
-            };
-            let frontside = across_motion && chest.dot(to_far) > 0.0;
-            // Skate 3 wipes out coming down onto a rail faster than its limit.
-            if -self.vel.y > into_limit {
-                self.pos = p;
-                self.vel = self.vel.horizontal();
-                self.bail("came down onto the rail too fast", events);
-                return true;
-            }
-            let kind = GrindKind::from_contact(angle, cross, nose_far, self.grind_stick);
-            // Speed along the rail: the whole 3-D velocity along it (Skate 3), no minimum.
-            let along = self.vel.dot(d);
-            let dir = if along >= 0.0 { 1.0 } else { -1.0 };
-            let into = self
-                .trick_label()
-                .map(|(n, p)| (format!("{}{n}", self.stance_prefix()), p));
-            // Settle the board on the rail the way it came in: along it (either way round), across it, or
-            // angled.
-            let travel = d * dir;
-            let side = v3(-travel.z, 0.0, travel.x).normalize_or(Vec3::ZERO);
-            self.fwd = if angle < GRIND_ANGLED {
-                if along_dot * dir >= 0.0 {
-                    travel
-                } else {
-                    -travel
-                }
-            } else if angle > PI / 2.0 - GRIND_ACROSS {
-                if nose.dot(side) >= 0.0 { side } else { -side }
-            } else {
-                nose
-            };
-            self.normal = Vec3::UP;
-            self.contact_n = Vec3::UP;
-            self.spin_rate = 0.0;
-            self.pos = p;
-            self.grind = Some(Grind {
-                rail: i,
-                s: n.s,
-                dir,
-                speed: along.abs(),
-                kind,
-                frontside,
-                time: 0.0,
-                into,
-            });
-            self.trick = None;
-            self.grabbed = None;
-            self.takeoff.hippy = false;
-            self.mode = Mode::Grind;
-            return true;
-        }
-        false
-    }
-
-    /// One step along the rail: gravity along it, a little friction; off the end, out of speed, or
-    /// popped off with a flick.
-    fn slide_rail(
-        &mut self,
-        park: &dyn Terrain,
-        flick: &FlickOut,
-        dt: f32,
-        events: &mut Vec<Event>,
-    ) {
-        let (Some(mut g), Some(rail)) = (
-            self.grind.clone(),
-            self.grind.as_ref().and_then(|g| park.rails().get(g.rail)),
-        ) else {
-            // The rail went away (a park reload): just drop.
-            self.grind = None;
-            self.take_off(None);
-            return;
-        };
-        let (_, d) = rail.at(g.s);
-        let friction = if g.kind.is_slide() {
-            SLIDE_FRICTION
-        } else {
-            GRIND_FRICTION
-        };
-        g.speed += (-self.tuning.gravity * d.y * g.dir - friction) * dt;
-        g.s += g.dir * g.speed * dt;
-        g.time += dt;
-        let (p, d) = rail.at(g.s);
-        let travel = d * g.dir;
-        self.pos = p;
-        self.speed = g.speed;
-        let off_end = g.s <= 0.0 || g.s >= rail.length();
-        let done = flick.flick.is_some() || off_end || g.speed < GRIND_MIN_SPEED;
-        self.grind = Some(g.clone());
-        if !done {
-            return;
-        }
-        // Leaving the rail: score it, square the board back up and fly off along it.
-        if g.time >= GRIND_MIN_TIME {
-            let side = if g.frontside { "FS" } else { "BS" };
-            let name = match &g.into {
-                Some((t, _)) => format!("{t} {side} {}", g.kind.name()),
-                None => format!("{side} {}", g.kind.name()),
-            };
-            let points = g.into.as_ref().map_or(0, |t| t.1)
-                + GRIND_POINTS
-                + (g.time * GRIND_POINTS_PER_S) as u32;
-            events.push(Event::Landed { name, points });
-        }
-        // Square the board back up along the rail, nose first or tail first, whichever is nearer.
-        let backwards = self.fwd.dot(travel) < 0.0;
-        self.fwd = if backwards { -travel } else { travel };
-        self.normal = Vec3::UP;
-        self.contact_n = Vec3::UP;
-        self.grind = None;
-        self.regrind_block = Some((g.rail, 0.4));
-        self.vel = travel * g.speed.max(0.0);
-        self.pos += Vec3::UP * 0.02;
-        // Fakie onto the rail (board backwards): still fakie leaving it.
-        self.fakie = backwards;
-        match flick.flick {
-            Some(f) => {
-                let f = gesture::select(f, Group::Square, self.mirrored());
-                let t = self.tuning;
-                let h = t.jump_height(flick.strength, g.speed);
-                let response = t.vertical_response.eval(0.0).max(t.jump_min_scalar);
-                self.vel += Vec3::UP * (self.pop_speed(h) * response);
-                self.take_off(Some(f));
-                events.push(Event::Popped(f));
-            }
-            None => self.take_off(None),
         }
     }
 
@@ -2901,7 +2622,13 @@ mod tests {
         }
     }
 
-    fn steps(s: &mut Skater, park: &Park, pad: &Pad, flick: Option<Flick>, n: usize) -> Vec<Event> {
+    fn steps(
+        s: &mut Skater,
+        park: &dyn Terrain,
+        pad: &Pad,
+        flick: Option<Flick>,
+        n: usize,
+    ) -> Vec<Event> {
         let mut ev = Vec::new();
         for i in 0..n {
             let f = match flick {
@@ -3801,27 +3528,51 @@ mod tests {
         );
     }
 
-    /// Flat ground with a 0.5 m high rail along +Z from z = 0 to z = `len`.
+    /// Flat ground with a 0.5 m high thin rail along +Z from z = 0 to z = `len`.
     fn rail_park(len: f32) -> Park {
         let mut p = flat();
-        p.spawn = Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: -3.0,
-        };
+        p.spawn = v3(0.0, 0.0, -3.0);
         p.rails = vec![crate::rails::Rail::new(vec![
-            Vec3 {
-                x: 0.0,
-                y: 0.5,
-                z: 0.0,
-            },
-            Vec3 {
-                x: 0.0,
-                y: 0.5,
-                z: len,
-            },
+            v3(0.0, 0.5, 0.0),
+            v3(0.0, 0.5, len),
         ])];
         p
+    }
+
+    /// Flat ground with a 0.4 m high ledge (top over x 0..2, z -10..10), its edge at x = 0 a rail.
+    fn ledge_park() -> crate::collision::TriMesh {
+        let mut tris: Vec<([[f32; 3]; 3], u16, u16)> = Vec::new();
+        let mut quad = |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]| {
+            tris.push(([a, b, c], 0, 0));
+            tris.push(([a, c, d], 0, 0));
+        };
+        quad(
+            [-20.0, 0.0, -30.0],
+            [-20.0, 0.0, 30.0],
+            [20.0, 0.0, 30.0],
+            [20.0, 0.0, -30.0],
+        );
+        quad(
+            [0.0, 0.4, -10.0],
+            [0.0, 0.4, 10.0],
+            [2.0, 0.4, 10.0],
+            [2.0, 0.4, -10.0],
+        );
+        quad(
+            [0.0, 0.0, -10.0],
+            [0.0, 0.4, -10.0],
+            [0.0, 0.4, 10.0],
+            [0.0, 0.0, 10.0],
+        );
+        let mut m = crate::collision::TriMesh::parse(
+            &crate::collision::encode(&tris),
+            (v3(-0.6, 0.0, -9.0), 0.0),
+        )
+        .unwrap();
+        let rail = crate::rails::Rail::new(vec![v3(0.0, 0.4, -10.0), v3(0.0, 0.4, 10.0)]);
+        let rail = rail.classified(&m);
+        m.rails = vec![rail];
+        m
     }
 
     /// Ollies towards the rail; `spin` (rad) is set just after the pop.
@@ -3842,13 +3593,20 @@ mod tests {
     #[test]
     fn ollie_onto_a_rail_grinds_and_scores_off_the_end() {
         let park = rail_park(4.0);
-        let (mut s, _) = ollie_at_rail(&park, 0.0);
-        assert_eq!(s.mode, Mode::Grind);
+        let (mut s, ev) = ollie_at_rail(&park, 0.0);
+        assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+        // Onto the rail's start on the front truck, both trucks on it a moment later.
+        steps(&mut s, &park, &Pad::default(), None, 6);
         let g = s.grind.clone().unwrap();
-        assert_eq!(g.kind, GrindKind::FiftyFifty);
-        assert!(g.dir > 0.0 && (s.pos.y - 0.5).abs() < 1e-5);
+        assert_eq!(g.family, Family::FiftyFifty);
+        assert_eq!(g.class, crate::rails::RailClass::Thin);
+        assert!(g.dir > 0.0 && (s.pos.y - 0.5).abs() < 1e-3, "{:?}", s.pos);
         let ev = steps(&mut s, &park, &Pad::default(), None, 120);
-        assert_eq!(landed(&ev), ["OLLIE BS 50-50"], "{ev:?}");
+        let names = landed(&ev);
+        assert!(
+            names.len() == 1 && names[0].starts_with("OLLIE ") && names[0].ends_with(" 50-50"),
+            "{ev:?}"
+        );
         assert!(!ev.contains(&Event::Bailed), "{ev:?}");
         assert_eq!(s.mode, Mode::Rolling);
         assert!(s.pos.z > 4.0);
@@ -3858,15 +3616,13 @@ mod tests {
     fn board_across_the_rail_is_a_boardslide_and_a_flick_pops_off() {
         let park = rail_park(20.0);
         let (mut s, _) = ollie_at_rail(&park, PI / 2.0);
-        assert_eq!(
-            s.grind.as_ref().map(|g| g.kind),
-            Some(GrindKind::Boardslide)
-        );
+        assert_eq!(s.grind.as_ref().map(|g| g.family), Some(Family::Boardslide));
         steps(&mut s, &park, &Pad::default(), None, 20);
         assert_eq!(s.mode, Mode::Grind);
         let ev = steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
         assert!(
-            matches!(&ev[..], [Event::Landed { name, .. }, Event::Popped(_)] if name == "OLLIE BS BOARDSLIDE"),
+            matches!(&ev[..], [Event::Landed { name, .. }, Event::Popped(_)]
+                if name.ends_with("BOARDSLIDE") || name.ends_with("LIPSLIDE")),
             "{ev:?}"
         );
         assert!(s.is_airborne() && s.vel.y > 0.0);
@@ -3875,51 +3631,407 @@ mod tests {
     }
 
     #[test]
-    fn an_angled_board_locks_into_an_angled_grind() {
+    fn an_angled_board_locks_into_a_one_truck_grind() {
         let park = rail_park(10.0);
-        let (s, _) = ollie_at_rail(&park, 45.0 * PI / 180.0);
-        let kind = s.grind.as_ref().map(|g| g.kind);
+        let (s, ev) = ollie_at_rail(&park, 40.0 * PI / 180.0);
+        let g = s.grind.as_ref().expect("grinding");
+        assert_eq!(g.family, Family::FiveO, "{ev:?}");
         assert!(
             matches!(
-                kind,
-                Some(GrindKind::Crooked | GrindKind::Willy | GrindKind::Feeble | GrindKind::Smith)
+                g.kind(),
+                GrindKind::Crooked
+                    | GrindKind::Overcrook
+                    | GrindKind::Willy
+                    | GrindKind::Overwilly
+                    | GrindKind::Feeble
+                    | GrindKind::Smith
+                    | GrindKind::Salad
             ),
-            "{kind:?}"
+            "{:?}",
+            g.graph_name()
+        );
+    }
+
+    /// A board over the rail at x = 0 (along +Z, 0.5 m up): its deck `deck_up` over the rail, its nose
+    /// along `fwd`, its middle at `at` along the rail and `side` across it.
+    fn over_rail(fwd: Vec3, along: f32, side: f32, deck_up: f32) -> (Park, Skater) {
+        let park = rail_park(10.0);
+        let mut s = spawn(&park);
+        place(
+            &mut s,
+            v3(side, 0.5 + deck_up - DECK_HEIGHT, 5.0 + along),
+            Vec3::UP,
+            fwd,
+        );
+        s.vel = v3(0.0, -1.0, 2.0);
+        s.mode = Mode::Air { time: 0.5 };
+        (park, s)
+    }
+
+    #[test]
+    fn the_family_is_the_box_the_rail_crosses() {
+        let along = v3(0.0, 0.0, 1.0);
+        let across = v3(1.0, 0.0, 0.0);
+        let family = |fwd: Vec3, at: f32| {
+            let (park, s) = over_rail(fwd, at, 0.0, 0.1);
+            s.investigate(&park, Category::Air, None, 0.0)
+                .map(|c| (c.family, c.front))
+        };
+        // Along the rail, over it: both trucks.
+        assert_eq!(family(along, 0.0), Some((Family::FiftyFifty, false)));
+        // Across it: the deck between the trucks, or a tip past them.
+        assert_eq!(family(across, 0.0).map(|f| f.0), Some(Family::Boardslide));
+        let (park, s) = over_rail(across, 0.0, -0.33, 0.1);
+        let c = s.investigate(&park, Category::Air, None, 0.0).unwrap();
+        assert_eq!((c.family, c.front), (Family::Tipslide, true), "the nose");
+        // Angled 45 degrees with only the back truck over the rail: a 5-0 on it.
+        let diag = v3(0.707, 0.0, 0.707);
+        let (park, s) = over_rail(diag, 0.0, 0.0, 0.1);
+        let mut s = s;
+        s.pos += v3(0.17, 0.0, 0.17);
+        let c = s.investigate(&park, Category::Air, None, 0.0).unwrap();
+        assert_eq!((c.family, c.front), (Family::FiveO, false));
+        // Too far above the rail: nothing.
+        let (park, s) = over_rail(along, 0.0, 0.0, 0.4);
+        assert!(s.investigate(&park, Category::Air, None, 0.0).is_none());
+    }
+
+    #[test]
+    fn the_stick_tips_a_50_50_into_a_nosegrind_or_a_5_0() {
+        for (stick, front, name) in [(1.0, true, "NOSEGRIND"), (-1.0, false, "5-0")] {
+            let park = rail_park(30.0);
+            let (mut s, _) = ollie_at_rail(&park, 0.0);
+            steps(&mut s, &park, &Pad::default(), None, 6);
+            assert_eq!(s.grind.as_ref().map(|g| g.family), Some(Family::FiftyFifty));
+            let pad = Pad {
+                flick: [0.0, stick],
+                ..Pad::default()
+            };
+            steps(&mut s, &park, &pad, None, 30);
+            let g = s.grind.clone().expect("still grinding");
+            assert_eq!((g.family, g.front), (Family::FiveO, front));
+            // Let go: the free end is held up, the name settles and scores.
+            let ev = steps(&mut s, &park, &Pad::default(), None, 20);
+            let g = s.grind.clone().expect("still grinding");
+            assert!(g.display().ends_with(name), "{} {ev:?}", g.display());
+            assert!(!g.graph_name().starts_with("BF_"));
+        }
+    }
+
+    #[test]
+    fn frontside_or_backside_comes_from_where_the_rider_took_off() {
+        // Parallel to the ledge, beside it on its low side, popping straight up onto it: the chest
+        // faces the ledge (frontside) or away from it (backside), by stance.
+        let park = ledge_park();
+        for (stance, fs) in [(Stance::Goofy, true), (Stance::Regular, false)] {
+            let mut s = Skater::spawn_with(&park, Tuning::BUILT_IN, stance);
+            s.since_spawn = FAKIE_GRACE;
+            place(&mut s, v3(-0.25, 0.0, -9.0), Vec3::UP, v3(0.0, 0.0, 1.0));
+            s.speed = 4.0;
+            let chest_to_ledge = s.chest().x > 0.0;
+            let pad = Pad {
+                stick: [0.0, 0.0],
+                ..Pad::default()
+            };
+            let mut ev = steps(&mut s, &park, &pad, Some(Flick::OLLIE), 1);
+            // Drift over the ledge's edge on the way up.
+            for _ in 0..40 {
+                if s.is_airborne() {
+                    s.pos.x = (s.pos.x + 0.012).min(0.0);
+                }
+                ev.extend(steps(&mut s, &park, &pad, None, 1));
+                if s.mode == Mode::Grind {
+                    break;
+                }
+            }
+            let g = s.grind.clone().unwrap_or_else(|| panic!("{ev:?}"));
+            assert_eq!(g.family, Family::FiftyFifty);
+            assert_eq!(chest_to_ledge, fs, "goofy faces +x riding +z");
+            assert_eq!(g.frontside(), fs, "{}", g.graph_name());
+        }
+    }
+
+    #[test]
+    fn a_tip_over_a_ledges_high_side_is_a_blunt() {
+        let park = ledge_park();
+        assert_eq!(
+            park.rails[0].class_at(5.0).0,
+            crate::rails::RailClass::Ledge
+        );
+        let mut s = spawn(&park);
+        // Across the ledge's edge, the board's middle over the top (+x), the tail on the edge.
+        place(
+            &mut s,
+            v3(0.33, 0.4 + 0.1 - DECK_HEIGHT, 0.0),
+            Vec3::UP,
+            v3(1.0, 0.0, 0.0),
+        );
+        s.vel = v3(0.0, -1.0, 3.0);
+        s.mode = Mode::Air { time: 0.5 };
+        let c = s.investigate(&park, Category::Air, None, 0.0).unwrap();
+        assert_eq!((c.family, c.front), (Family::Backslash, false));
+        // The same tip with the board hanging over the low side: a tail slide.
+        place(
+            &mut s,
+            v3(-0.33, 0.4 + 0.1 - DECK_HEIGHT, 0.0),
+            Vec3::UP,
+            v3(-1.0, 0.0, 0.0),
+        );
+        let c = s.investigate(&park, Category::Air, None, 0.0).unwrap();
+        assert_eq!(c.family, Family::Tipslide);
+    }
+
+    #[test]
+    fn friction_follows_the_family_and_the_rail_class() {
+        use crate::rails::RailClass::*;
+        let t = Tuning::BUILT_IN;
+        let f = |fam: Family, class| grind::friction_decel(&t, fam, class, 1.0, 0.0);
+        assert!(f(Family::Backslash, Thin) > f(Family::Boardslide, Thin));
+        assert!(f(Family::Boardslide, Thin) > f(Family::FiftyFifty, Thin));
+        assert!(f(Family::Tipslide, Thin) > f(Family::FiftyFifty, Thin));
+        // Grinds drag less on ledges than on thin rails; slides more.
+        assert!(f(Family::FiftyFifty, Ledge) < f(Family::FiftyFifty, Thin));
+        assert!(f(Family::Boardslide, Ledge) > f(Family::Boardslide, Thin));
+        // About flatground's old 0.8 m/s^2 for a 50-50 on a thin rail; more the longer it lasts.
+        assert!((f(Family::FiftyFifty, Thin) - 0.8).abs() < 0.2);
+        assert!(
+            grind::friction_decel(&t, Family::FiftyFifty, Thin, 1.0, 3.0)
+                > f(Family::FiftyFifty, Thin)
         );
     }
 
     #[test]
-    fn grinds_come_from_how_the_board_meets_the_rail() {
-        use GrindKind::*;
-        let deg = |d: f32| d * PI / 180.0;
-        assert_eq!(
-            GrindKind::from_contact(deg(5.0), 0.0, true, 0.0),
-            FiftyFifty
+    fn a_long_ledge_grind_leans_off_the_low_side() {
+        let park = ledge_park();
+        let mut s = spawn(&park);
+        place(
+            &mut s,
+            v3(0.0, 0.4 + 0.05 - DECK_HEIGHT, -9.0),
+            Vec3::UP,
+            v3(0.0, 0.0, 1.0),
         );
-        assert_eq!(GrindKind::from_contact(deg(5.0), 0.0, true, 0.6), FiveO);
+        s.vel = v3(0.0, -0.5, 4.0);
+        s.mode = Mode::Air { time: 0.5 };
+        let mut ev = steps(&mut s, &park, &Pad::default(), None, 2);
+        assert_eq!(s.mode, Mode::Grind, "{ev:?}");
         assert_eq!(
-            GrindKind::from_contact(deg(5.0), 0.0, true, -0.6),
-            Nosegrind
+            s.grind.as_ref().map(|g| g.class),
+            Some(crate::rails::RailClass::Ledge)
         );
-        assert_eq!(GrindKind::from_contact(deg(40.0), 0.2, true, 0.0), Crooked);
-        assert_eq!(GrindKind::from_contact(deg(40.0), -0.2, true, 0.0), Feeble);
-        assert_eq!(GrindKind::from_contact(deg(40.0), -0.2, false, 0.0), Smith);
-        assert_eq!(
-            GrindKind::from_contact(deg(85.0), 0.0, true, 0.0),
-            Boardslide
+        let mut leaned = 0.0f32;
+        let mut ticks = 0;
+        while s.mode == Mode::Grind && ticks < 400 {
+            ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+            if let Some(g) = &s.grind {
+                leaned = leaned.max(g.lean.angle);
+            }
+            ticks += 1;
+        }
+        // Off after the lean-off's delay (2 s) and its roll (about 1.3 s), before the ledge's end.
+        assert!(s.mode != Mode::Grind && ticks > 150, "{ticks} {ev:?}");
+        // Forced off past 15 degrees: there is ground under the low side.
+        assert!(leaned > 10.0, "{leaned}");
+        assert!(s.vel.x < -0.3, "pushed off the low side: {:?}", s.vel);
+        assert!(s.pos.z < 9.0, "{:?}", s.pos);
+        let ev = steps(&mut s, &park, &Pad::default(), None, 60);
+        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
+    }
+
+    #[test]
+    fn coming_down_on_a_rail_steeper_than_the_deck_allows_bails() {
+        let park = rail_park(10.0);
+        let mut s = spawn(&park);
+        // The nose pitched 70 degrees down along the rail, the deck's middle on it.
+        let fwd = v3(0.0, -0.94, 0.34);
+        let up = v3(0.0, 0.34, 0.94);
+        place(&mut s, v3(0.0, 0.5, 5.0) - up * DECK_HEIGHT, up, fwd);
+        s.vel = v3(0.0, -2.0, 2.0);
+        s.mode = Mode::Air { time: 0.5 };
+        let mut ev = Vec::new();
+        let c = s.investigate(&park, Category::Air, None, 0.0);
+        if let Some(c) = c {
+            assert!(s.engage(&park, c, Category::Air, &mut ev));
+            assert!(ev.contains(&Event::Bailed), "{c:?} {ev:?}");
+        } else {
+            // No box crosses it: no grind either.
+            assert_eq!(s.mode, Mode::Air { time: 0.5 });
+        }
+        // Crossing a thin rail fast: a wipeout.
+        let (park, mut s) = over_rail(v3(0.0, 0.0, 1.0), 0.0, 0.0, 0.1);
+        s.vel = v3(8.0, -1.0, 2.0);
+        let mut ev = Vec::new();
+        let c = s.investigate(&park, Category::Air, None, 0.0).unwrap();
+        assert!(s.engage(&park, c, Category::Air, &mut ev));
+        assert!(ev.contains(&Event::Bailed), "{ev:?}");
+    }
+
+    #[test]
+    fn popping_out_steers_sideways_no_faster_than_the_cap() {
+        let park = rail_park(30.0);
+        let (mut s, _) = ollie_at_rail(&park, 0.0);
+        steps(&mut s, &park, &Pad::default(), None, 10);
+        let along = s.grind.as_ref().unwrap().speed;
+        let pad = Pad {
+            stick: [1.0, 0.0],
+            ..Pad::default()
+        };
+        let ev = steps(&mut s, &park, &pad, Some(Flick::OLLIE), 1);
+        assert!(ev.iter().any(|e| matches!(e, Event::Popped(_))), "{ev:?}");
+        let side = s.vel.x.abs();
+        assert!(side > 0.5 && side <= 1.8 + 1e-3, "{:?}", s.vel);
+        assert!((s.vel.z - along).abs() < 0.3, "{:?} {along}", s.vel);
+        assert!(s.jumper.energy < 0.5);
+        // Popping again straight away is weaker on energy: the pop goes off to a side.
+        assert_eq!(s.jumper.since_jump, 0);
+    }
+
+    #[test]
+    fn no_grind_straight_after_popping_out_of_one_on_any_rail() {
+        // Two parallel rails 0.3 m apart: popping off one, the board can't take the other at once.
+        let mut park = rail_park(30.0);
+        park.rails.push(crate::rails::Rail::new(vec![
+            v3(0.25, 0.5, 0.0),
+            v3(0.25, 0.5, 30.0),
+        ]));
+        let (mut s, _) = ollie_at_rail(&park, 0.0);
+        let first = s.grind.as_ref().unwrap().rail;
+        steps(&mut s, &park, &Pad::default(), None, 10);
+        steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
+        assert!(s.is_airborne());
+        // Straight onto the other rail on the next ticks: too soon.
+        s.pos.x = 0.25;
+        s.vel.y = -1.0;
+        let ev = steps(&mut s, &park, &Pad::default(), None, 4);
+        assert!(s.mode != Mode::Grind, "{ev:?}");
+        // A moment later it can.
+        steps(&mut s, &park, &Pad::default(), None, 8);
+        s.pos = v3(0.25, 0.5 + 0.05 - DECK_HEIGHT, s.pos.z);
+        s.vel = v3(0.0, -1.0, 4.0);
+        s.plan = None;
+        s.mode = Mode::Air { time: 0.5 };
+        let ev = steps(&mut s, &park, &Pad::default(), None, 1);
+        let now = s.grind.as_ref().map(|g| g.rail);
+        assert_eq!(now, Some(1), "{ev:?} (first {first})");
+    }
+
+    #[test]
+    fn rolling_off_a_ledges_top_along_its_edge_is_a_50_50() {
+        let park = ledge_park();
+        let mut s = spawn(&park);
+        // On the ledge's top, rolling along it 8 degrees towards its edge.
+        let a = 8.0 * PI / 180.0;
+        place(
+            &mut s,
+            v3(0.35, 0.4, -8.0),
+            Vec3::UP,
+            v3(-sinf(a), 0.0, cosf(a)),
         );
-        assert_eq!(
-            GrindKind::from_contact(deg(85.0), 0.0, false, 0.0),
-            Lipslide
+        s.speed = 4.0;
+        s.vel = s.ground_velocity();
+        let mut ev = Vec::new();
+        for _ in 0..120 {
+            ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+            if s.mode == Mode::Grind {
+                break;
+            }
+        }
+        let g = s
+            .grind
+            .clone()
+            .unwrap_or_else(|| panic!("{:?} {ev:?}", s.pos));
+        assert!(
+            matches!(g.family, Family::FiftyFifty | Family::FiveO),
+            "{:?}",
+            g.family
         );
-        assert_eq!(
-            GrindKind::from_contact(deg(85.0), 0.3, true, 0.0),
-            Noseslide
-        );
-        assert_eq!(
-            GrindKind::from_contact(deg(85.0), -0.3, true, 0.0),
-            Tailslide
-        );
+        assert_eq!(g.entry, Entry::RideFromAbove);
+        assert!(!ev.contains(&Event::Bailed));
+    }
+
+    /// The quarter pipe with its coping (the deck's edge at z = 3, 4 m up) a rail.
+    fn coping_pipe() -> crate::collision::TriMesh {
+        let mut m = quarter_pipe();
+        let rail = crate::rails::Rail::new(vec![v3(-5.0, 4.0, 3.0), v3(5.0, 4.0, 3.0)]);
+        let rail = rail.classified(&m);
+        m.rails = vec![rail];
+        m
+    }
+
+    #[test]
+    fn riding_up_into_the_coping_rocks_on_it_and_comes_back_in() {
+        let park = coping_pipe();
+        let (class, high) = park.rails[0].class_at(5.0);
+        assert_eq!(class, crate::rails::RailClass::Ledge);
+        assert!(high.z > 0.9, "the deck is the high side: {high:?}");
+        let mut rocked = None;
+        for k in 0..30 {
+            let speed = 7.0 + k as f32 * 0.1;
+            let mut s = spawn(&park);
+            place(&mut s, v3(0.0, 0.0, -3.0), Vec3::UP, v3(0.0, 0.0, 1.0));
+            s.speed = speed;
+            let mut ev = Vec::new();
+            for _ in 0..300 {
+                ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+                if s.mode == Mode::Grind && rocked.is_none() {
+                    rocked = s.grind.clone();
+                }
+            }
+
+            if let Some(g) = &rocked {
+                assert!(
+                    matches!(g.entry, Entry::RideIntoCoping | Entry::RideFromBelow),
+                    "{:?}",
+                    g.entry
+                );
+                assert!(!ev.contains(&Event::Bailed), "{ev:?}");
+                // Back in the pipe, rolling down it.
+                assert!(
+                    s.mode == Mode::Rolling && s.pos.y < 3.5,
+                    "{:?} {:?}",
+                    s.mode,
+                    s.pos
+                );
+                return;
+            }
+        }
+        panic!("no speed rocked onto the coping");
+    }
+
+    #[test]
+    fn the_air_assist_reaches_the_rail_a_little_at_a_time() {
+        let park = rail_park(10.0);
+        let mut s = spawn(&park);
+        // Coming down 0.12 m to the side of the rail, along it.
+        place(&mut s, v3(0.12, 0.9, 3.0), Vec3::UP, v3(0.0, 0.0, 1.0));
+        s.vel = v3(0.0, -2.0, 4.0);
+        s.mode = Mode::Air { time: 0.5 };
+        let target = GrindTarget {
+            rail: 0,
+            seg: 0,
+            point: v3(0.0, 0.5, 4.0),
+            dir: v3(0.0, 0.0, 1.0),
+        };
+        let t = s.tuning.grind;
+        let mut total = 0.0;
+        for _ in 0..8 {
+            s.grind_air_assist(&park, target, DT);
+            let a = s.air_assist.unwrap();
+            assert!(a.moved <= t.max_offset_step + 1e-5, "{a:?}");
+            assert!(a.offset.length() <= t.max_offset + 1e-5);
+            total += a.moved;
+            s.pos += s.vel * DT + a.offset * 0.0;
+            s.vel.y -= 9.8 * DT;
+        }
+        let a = s.air_assist.unwrap();
+        assert_eq!(a.kind, Some(4), "a 50-50: {a:?}");
+        assert!(total > 0.05 && a.offset.x < 0.0, "towards the rail: {a:?}");
+        // Out of reach (0.5 m to the side): no lock-on kind, nothing moved.
+        let mut s = spawn(&park);
+        place(&mut s, v3(0.5, 0.9, 3.0), Vec3::UP, v3(0.0, 0.0, 1.0));
+        s.vel = v3(0.0, -2.0, 4.0);
+        s.mode = Mode::Air { time: 0.5 };
+        s.grind_air_assist(&park, target, DT);
+        assert_eq!(s.air_assist.and_then(|a| a.kind), None);
     }
 
     #[test]

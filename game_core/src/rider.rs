@@ -148,8 +148,8 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                 return idle;
             };
             // This grind on this side, else the other side, else a 50-50.
-            let [want, other] = grind_roles(g.kind, g.frontside);
-            let fallback = grind_roles(GrindKind::FiftyFifty, g.frontside)[0];
+            let [want, other] = grind_roles(g.kind(), g.frontside());
+            let fallback = grind_roles(GrindKind::FiftyFifty, g.frontside())[0];
             match [want, other, fallback].into_iter().find(|r| has(r)) {
                 Some(role) => Pick { role, time: g.time },
                 None => idle,
@@ -343,16 +343,17 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
 pub fn grind_roles(kind: GrindKind, frontside: bool) -> [&'static str; 2] {
     let [fs, bs] = match kind {
         GrindKind::FiftyFifty => ["grind/5050_fs", "grind/5050_bs"],
-        GrindKind::FiveO => ["grind/50_fs", "grind/50_bs"],
+        // The built-in roles have no salad, overcrook, overwilly, blunts or darkslide: the nearest.
+        GrindKind::FiveO | GrindKind::Salad => ["grind/50_fs", "grind/50_bs"],
         GrindKind::Nosegrind => ["grind/ngrind_fs", "grind/ngrind_bs"],
-        GrindKind::Crooked => ["grind/crooks_fs", "grind/crooks_bs"],
-        GrindKind::Willy => ["grind/willy_fs", "grind/willy_bs"],
+        GrindKind::Crooked | GrindKind::Overcrook => ["grind/crooks_fs", "grind/crooks_bs"],
+        GrindKind::Willy | GrindKind::Overwilly => ["grind/willy_fs", "grind/willy_bs"],
         GrindKind::Feeble => ["grind/feeble_fs", "grind/feeble_bs"],
         GrindKind::Smith => ["grind/smith_fs", "grind/smith_bs"],
-        GrindKind::Boardslide => ["grind/bslide_fs", "grind/bslide_bs"],
+        GrindKind::Boardslide | GrindKind::Darkslide => ["grind/bslide_fs", "grind/bslide_bs"],
         GrindKind::Lipslide => ["grind/lipslide_fs", "grind/lipslide_bs"],
-        GrindKind::Noseslide => ["grind/nslide_fs", "grind/nslide_bs"],
-        GrindKind::Tailslide => ["grind/tslide_fs", "grind/tslide_bs"],
+        GrindKind::Noseslide | GrindKind::Noseblunt => ["grind/nslide_fs", "grind/nslide_bs"],
+        GrindKind::Tailslide | GrindKind::Bluntslide => ["grind/tslide_fs", "grind/tslide_bs"],
     };
     if frontside { [fs, bs] } else { [bs, fs] }
 }

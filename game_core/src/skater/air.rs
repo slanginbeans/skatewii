@@ -12,9 +12,16 @@
 //!
 //! Flights are followed with chord rays a few ticks long, a bounded number per tick (Skate 3 queries
 //! them asynchronously too), so a long drop takes some ticks to resolve while short airs resolve at once.
+//!
+//! Grind targeting (SK8 `air/trajectory/grind{,/admission,/candidate}.rs`, `scoring.rs`): the launch's
+//! own flight looks for a rail it comes down onto within the lock distance (a ledge's by where the flight
+//! and the body are against its high side), not too fast across or down onto it and not turned more than
+//! `GrindAdjustMaxAngle`; it is steered onto the rail (within `MaxTrajectoryAdjust`) and scores
+//! `ScoreGrind`. Other flights landing near a rail are penalised by `GrindPenaltyVsDistToGrind`.
 
-use crate::math::{PI, Vec3, atan2f, clamp, cosf, sinf, sqrtf};
+use crate::math::{PI, Vec3, atan2f, clamp, cosf, sinf, sqrtf, v3};
 use crate::park::{Terrain, surface_category};
+use crate::rails::{RailClass, upright};
 use crate::tuning::Tuning;
 
 /// The wind-up history (ticks).
@@ -213,9 +220,20 @@ pub struct Contact {
     pub surface: u16,
 }
 
+/// A rail the planned flight comes down onto (a grind is coming).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GrindTarget {
+    pub rail: usize,
+    pub seg: usize,
+    /// Where on the rail, and its direction.
+    pub point: Vec3,
+    pub dir: Vec3,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Candidate {
     flight: Flight,
+    grind: Option<GrindTarget>,
     /// How far it has been followed (s), and whether it is done.
     followed: f32,
     done: bool,
@@ -244,8 +262,8 @@ pub struct Plan {
     /// Which candidate won (0: the launch velocity itself) and which pass.
     pub index: usize,
     pub pass: u8,
-    /// The flight comes down within reach of a rail first (a grind is coming).
-    pub rail: bool,
+    /// The flight was steered onto a rail (Skate 3's grind targeting).
+    pub grind: Option<GrindTarget>,
 }
 
 impl Plan {
@@ -282,6 +300,8 @@ pub struct Selector {
     lean: f32,
     heading: Vec3,
     max_time: f32,
+    /// Grind targeting is allowed (not just after a weak pop out of a grind).
+    grind: bool,
     /// Ticks until the next query while no landing is known.
     pub countdown: u32,
     /// The last result's normal when it was too short to be a known landing.
@@ -301,6 +321,8 @@ pub struct Launch {
     /// The pop was re-aimed up a vert face; the stick's forward lean (0..1) for the transition score.
     pub on_vert: bool,
     pub lean: f32,
+    /// Grind targeting is allowed.
+    pub grind: bool,
 }
 
 impl Selector {
@@ -316,6 +338,7 @@ impl Selector {
         self.ground = l.ground;
         self.on_vert = l.on_vert;
         self.lean = l.lean;
+        self.grind = l.grind;
         let h = l.vel.horizontal();
         self.heading = h.normalize_or(Vec3::ZERO);
         self.max_time = max_time(l.vel, t);
@@ -333,6 +356,7 @@ impl Selector {
                     vel,
                     gravity: t.gravity,
                 },
+                grind: None,
                 followed: 0.0,
                 done: false,
                 contact: None,
@@ -431,32 +455,57 @@ impl Selector {
             heading,
             index,
             pass: self.pass,
-            rail: false,
+            grind: best.grind,
         };
-        // A narrower second pass round the winner when it lands on something other than the ground left.
+        // A narrower second pass round the winner when it lands on something other than the ground left
+        // (not when it was steered onto a rail).
         let turned = libm::acosf(best.normal.dot(self.ground).clamp(-1.0, 1.0));
-        if self.pass == 1 && self.count >= 2 && turned >= t.traj_second_pass_delta {
+        if self.pass == 1
+            && self.count >= 2
+            && turned >= t.traj_second_pass_delta
+            && best.grind.is_none()
+        {
             self.pass = 2;
             self.fill(t, best.flight.vel, t.traj_cone_x2, t.traj_cone_z2);
         }
         Some(plan)
     }
 
-    /// Scores every candidate (SK8 scoring.rs, without grinds: flatground's rails are Phase 6).
+    /// Scores every candidate (SK8 scoring.rs): the launch's own flight may be steered onto a rail
+    /// (`ScoreGrind`); others landing near a rail are penalised.
     fn score(&mut self, t: &Tuning, park: &dyn Terrain) {
         let mut highest = -1_000_000.0f32;
         let pass = self.pass;
-        let (on_vert, lean, ground, heading, origin) = (
+        let (on_vert, lean, ground, heading, origin, grind_ok) = (
             self.on_vert,
             self.lean,
             self.ground,
             self.heading,
             self.origin,
+            self.grind,
         );
         for (i, slot) in self.cands.iter_mut().take(self.count).enumerate() {
             let Some(c) = slot else { continue };
             c.score = 0.0;
             c.wall_score = 0.0;
+            c.grind = None;
+            let Some(natural) = c.contact else { continue };
+            // Grinds: the middle flight of the first pass is steered onto a rail it comes down near.
+            let mut grind_score = 0.0;
+            if grind_ok {
+                if i == 0
+                    && pass == 1
+                    && let Some((flight, target, contact)) =
+                        grind_target(&c.flight, &natural, origin, t, park)
+                {
+                    c.flight = flight;
+                    c.contact = Some(contact);
+                    c.grind = Some(target);
+                    grind_score = t.grind.score;
+                } else if let Some(d) = rail_distance(natural.point, park) {
+                    grind_score = t.grind.penalty.eval(d);
+                }
+            }
             let Some(hit) = c.contact else { continue };
             let middle = if i == 0 && pass == 1 && !on_vert {
                 t.traj_score_middle
@@ -471,13 +520,18 @@ impl Selector {
             let force = force_dot * t.traj_score_force * k;
             let direction = sideways * t.traj_score_direction * k;
             // Walls: a wallride when there is a floor well below, else a penalty.
-            if hit.normal.y.abs() < 0.5 {
+            if grind_score <= 0.0 && hit.normal.y.abs() < 0.5 {
                 c.wall_score = wall_score(c, &hit, origin, t, park, &mut highest);
                 if c.wall_score < 0.0 {
                     c.normal = Vec3::UP;
                 }
             }
-            let surface = match surface_category(hit.surface) {
+            let category = if grind_score <= 1.0 {
+                surface_category(hit.surface)
+            } else {
+                0
+            };
+            let surface = match category {
                 6 => {
                     c.normal = Vec3::UP;
                     t.traj_score_unrideable
@@ -506,6 +560,7 @@ impl Selector {
                 + 1.0
                 + force
                 + middle
+                + grind_score
                 + transition
                 + surface;
         }
@@ -564,6 +619,211 @@ fn wall_score(
         c.flight.vel += dv;
     }
     height * t.traj_wall_score
+}
+
+/// The distance from `p` to the nearest rail within reach (SK8 scoring's `penalty_input`, without the
+/// lock-distance stretch), if one is near.
+fn rail_distance(p: Vec3, park: &dyn Terrain) -> Option<f32> {
+    park.rails()
+        .iter()
+        .filter(|r| r.near(p, 2.0))
+        .filter_map(|r| r.nearest_3d(p).map(|n| n.2))
+        .fold(None, |a: Option<f32>, d| Some(a.map_or(d, |a| a.min(d))))
+}
+
+/// A rail segment a flight comes down onto (SK8 `consider_grind_primitive`).
+#[derive(Clone, Copy, Debug)]
+struct RailCandidate {
+    rail: usize,
+    seg: usize,
+    /// The flight's point when it crosses the rail's plane, the rail's point nearest it, the rail's
+    /// direction, the distance between them, the time, the approach's angle to the rail (0..pi/2).
+    at: Vec3,
+    point: Vec3,
+    dir: Vec3,
+    distance: f32,
+    time: f32,
+    angle: f32,
+}
+
+/// Steers a flight onto a rail it comes down near (SK8 grind.rs `evaluate`, admission.rs): the flight,
+/// the target and the contact it now makes, or `None`.
+fn grind_target(
+    flight: &Flight,
+    natural: &Contact,
+    body: Vec3,
+    t: &Tuning,
+    park: &dyn Terrain,
+) -> Option<(Flight, GrindTarget, Contact)> {
+    let g = &t.grind;
+    let near = natural.point;
+    let (lo, hi) = (near - v3(2.0, 0.5, 2.0), near + v3(2.0, 4.0, 2.0));
+    let mut cands: alloc::vec::Vec<RailCandidate> = alloc::vec::Vec::new();
+    for (ri, r) in park.rails().iter().enumerate() {
+        if r.max.x < lo.x
+            || r.min.x > hi.x
+            || r.max.y < lo.y
+            || r.min.y > hi.y
+            || r.max.z < lo.z
+            || r.min.z > hi.z
+        {
+            continue;
+        }
+        for (si, w) in r.points.windows(2).enumerate() {
+            let (a, b) = (w[0], w[1]);
+            let delta = b - a;
+            let dir = delta.normalize_or(Vec3::UP);
+            let n = upright(dir);
+            // The later time the flight crosses the rail's plane (a quadratic in time).
+            let qa = -0.5 * flight.gravity * n.y;
+            let qb = n.dot(flight.vel);
+            let qc = n.dot(flight.pos - a);
+            let time = if qa.abs() < 1e-6 {
+                if qb.abs() < 1e-6 {
+                    continue;
+                }
+                -qc / qb
+            } else {
+                let disc = qb * qb - 4.0 * qa * qc;
+                if disc < 0.0 {
+                    continue;
+                }
+                let r = sqrtf(disc);
+                ((-qb + r) / (2.0 * qa)).max((-qb - r) / (2.0 * qa))
+            };
+            if time <= 0.0 || time > t.traj_max_time {
+                continue;
+            }
+            let at = flight.at(time);
+            let point = a + dir * dir.dot(at - a);
+            let ext = delta * 0.1;
+            if (point - (a - ext)).dot(point - (b + ext)) >= 0.0 {
+                continue;
+            }
+            let distance = (at - a).cross(dir).length();
+            let mut h = point - flight.pos;
+            h.y = 0.0;
+            let angle = if h.length() > 1e-3 {
+                libm::acosf(h.normalize_or(dir).dot(dir).abs().min(1.0))
+            } else {
+                0.0
+            };
+            cands.push(RailCandidate {
+                rail: ri,
+                seg: si,
+                at,
+                point,
+                dir,
+                distance,
+                time,
+                angle,
+            });
+        }
+    }
+    // Within the lock distance, the squarest approach first (SK8 `take_best_grind`, without its height
+    // preference).
+    cands.retain(|c| c.distance < g.lock_dist);
+    cands.sort_by(|a, b| a.angle.total_cmp(&b.angle));
+    for c in cands {
+        let rail = &park.rails()[c.rail];
+        if c.point.y - natural.point.y < -0.4 || c.dir.y > 0.9 {
+            continue;
+        }
+        let v = flight.vel_at(c.time);
+        let across = v - c.dir * c.dir.dot(v);
+        if (across.y * (1.0 - c.dir.y.abs())).abs() > g.max_speed_down {
+            continue;
+        }
+        let s = rail.segment_start(c.seg) + (c.point - rail.points[c.seg]).length();
+        let (class, high) = rail.class_at(s);
+        if class == RailClass::Blocked {
+            continue;
+        }
+        let mut h = across;
+        h.y = 0.0;
+        let max = if class.is_ledge() {
+            g.max_speed_sq_ledge
+        } else {
+            g.max_speed_sq_rail
+        };
+        if h.dot(h) > max {
+            continue;
+        }
+        let lock = if class.is_ledge() {
+            let incoming = (c.at - c.point).dot(high) > 0.0;
+            let on_high = (body - rail.points[c.seg]).dot(high) > 0.0;
+            let k = if incoming { 0 } else { 2 } + if on_high { 0 } else { 1 };
+            g.lock_dist * g.lock_ledge[k]
+        } else {
+            g.lock_dist
+        }
+        .max(0.1);
+        if c.distance >= lock {
+            continue;
+        }
+        let mut correction = c.point - c.at;
+        let d = correction.length();
+        if d >= g.lock_dist && d > 0.0 {
+            let half = 0.5 * g.deck_mid_length + 0.5 * g.deck_end_size;
+            correction = correction * ((d - g.tip_scalar * half) / d);
+        }
+        let adjusted = flight.vel + correction * (1.0 / c.time);
+        let cosang = flight
+            .vel
+            .normalize_or(Vec3::UP)
+            .dot(adjusted.normalize_or(Vec3::UP));
+        if libm::acosf(cosang.clamp(-1.0, 1.0)) > g.adjust_max_angle * PI / 180.0 {
+            continue;
+        }
+        // Steer the flight onto the rail, no more than the most a flight is nudged.
+        let mut dv = correction * (1.0 / c.time);
+        if dv.length() > t.traj_max_adjust {
+            dv = dv * (t.traj_max_adjust / dv.length());
+        }
+        let steered = Flight {
+            vel: flight.vel + dv,
+            ..*flight
+        };
+        let normal = landing_normal(c.dir, steered.vel_at(c.time), t);
+        return Some((
+            steered,
+            GrindTarget {
+                rail: c.rail,
+                seg: c.seg,
+                point: c.point,
+                dir: c.dir,
+            },
+            Contact {
+                time: c.time,
+                point: steered.at(c.time),
+                normal,
+                surface: 0,
+            },
+        ));
+    }
+    None
+}
+
+/// The board's up landing on a rail (SK8 admission.rs `landing_normal`): up, leaned against the
+/// cross-rail velocity, at most `GrindLandingMaxAngle` off the rail's up, with no part along the rail.
+fn landing_normal(dir: Vec3, v: Vec3, t: &Tuning) -> Vec3 {
+    let support = upright(dir);
+    let across = v - dir * dir.dot(v);
+    let target = (Vec3::UP - across * t.grind.landing_vel_scalar).normalize_or(Vec3::UP);
+    let max = t.grind.landing_max_angle * PI / 180.0;
+    let angle = libm::acosf(target.dot(support).clamp(-1.0, 1.0));
+    let limited = if angle > max {
+        tilt_towards(support, target, 1.0, max)
+    } else {
+        target
+    };
+    let along = limited.dot(dir);
+    let n = if along > 0.0 {
+        limited - dir * along
+    } else {
+        limited
+    };
+    n.normalize_or(Vec3::UP)
 }
 
 /// How long a flight is followed: until it has dropped `traj_max_drop` or `traj_max_time` passed.
