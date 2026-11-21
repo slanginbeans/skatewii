@@ -2257,6 +2257,7 @@ impl Skater {
                         on_vert: self.takeoff.on_vert,
                         lean: self.takeoff.lean,
                         grind: self.jumper.cooldown == 0,
+                        lift: self.air_com.map_or(0.0, |c0| (c0 - t.air_com_min).max(0.0)),
                     },
                 );
                 self.selector.countdown = air::QUERY_EVERY;
@@ -2407,9 +2408,10 @@ impl Skater {
         let delta = self.vel * dt;
         let len = delta.length();
         let mut moved = false;
-        // The legs reaching for the landing hold the board under the flight's path: it touches down
-        // when the board does (SK8: the deck under the flying centre of mass).
-        let sink = Vec3::UP * self.air_lift.min(0.0);
+        // The board is where the legs hold it off the flight's path (tucked over it, reaching under
+        // it for the landing): it meets the ground where it is (SK8: the deck under the flying centre
+        // of mass).
+        let sink = Vec3::UP * self.air_lift;
         if len > 1e-6 {
             let dir = delta * (1.0 / len);
             if let Some(h) = park.raycast(from + sink, dir, len + 0.01)
