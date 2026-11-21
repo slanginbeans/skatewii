@@ -678,6 +678,11 @@ pub struct Skater {
     push_steer: f32,
     /// Smoothed turn input, -1..1 (drawn: the rider leans into turns).
     pub steer: f32,
+    /// The stick's turn this tick as Skate 3 reads it (-1..1, positive to the left like `steer`;
+    /// unsmoothed), and the kick-turn or spin input: the camera's steering takes the larger when they
+    /// agree with `steer` (SK8 manager_subject.rs `steering_for_turn`).
+    pub turn_input: f32,
+    pub kick_input: f32,
     /// The deck's tilt that turns the trucks (rad), and seconds since the wheels came down (the trucks'
     /// turn ramps back in).
     pub deck_tilt: f32,
@@ -791,6 +796,9 @@ pub struct GraphControl {
     /// The stick's spin as the graph hands it to the physics (`PhysBodySpin`; Skate 3's body spin
     /// controller reads it on the ground and in the air).
     pub body_spin: f32,
+    /// The playing clips carry `Anticipating` (the ollie wind-up): Skate 3's camera reads it as
+    /// `IsPreparingToJump`.
+    pub anticipating: bool,
 }
 
 /// A trick the state graph is animating in the air.
@@ -916,6 +924,8 @@ impl Skater {
             push_press: None,
             push_steer: 1.0,
             steer: 0.0,
+            turn_input: 0.0,
+            kick_input: 0.0,
             deck_tilt: 0.0,
             truck_ramp: 1.0,
             yaw_rate: 0.0,
@@ -1172,6 +1182,12 @@ impl Skater {
         };
         self.crouch += (crouch - self.crouch) * smooth(18.0, dt);
         self.grind_pitch_input = pad.flick[1];
+        self.turn_input = steering(pad.stick).turn;
+        self.kick_input = if self.kickturn.is_some() {
+            self.turn_input
+        } else {
+            0.0
+        };
         self.grind_sticks_x = clamp(pad.stick[0] + pad.flick[0], -1.0, 1.0);
         self.jumper.tick();
         if self.mode != Mode::Grind {
@@ -1463,6 +1479,9 @@ impl Skater {
                 events.push(Event::Popped(f));
                 return;
             }
+            // The tick's roll still happens (the board doesn't stand still for the pop's tick, which
+            // the camera's anchor would read as a stop).
+            self.pos += self.ground_velocity() * dt;
             self.pop(f, strength, pad.stick, events);
             return;
         }
@@ -4624,6 +4643,25 @@ mod tests {
         s.speed = 3.0;
         s.step(&park, &Pad::default(), &flicked(Flick::OLLIE), DT, &mut ev);
         assert!(s.vel.y > 2.0 && (s.vel.z - 3.0).abs() < 0.2, "{:?}", s.vel);
+    }
+
+    #[test]
+    fn the_board_keeps_rolling_on_the_pops_tick() {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.pos = v3(0.0, 0.0, -10.0);
+        s.speed = 4.0;
+        let z = s.pos.z;
+        let mut ev = Vec::new();
+        s.step(&park, &Pad::default(), &flicked(Flick::OLLIE), DT, &mut ev);
+        assert!(s.is_airborne(), "{ev:?}");
+        // A tick's roll along the travel (the camera's anchor would read a stop otherwise).
+        assert!(
+            (s.pos.z - z - 4.0 * DT).abs() < 0.01,
+            "{} -> {}",
+            z,
+            s.pos.z
+        );
     }
 
     #[test]

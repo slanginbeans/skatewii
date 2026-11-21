@@ -477,3 +477,27 @@ fn the_camera_steps_the_same_at_any_frame_rate_of_the_game() {
     ride(&mut s2, &mut c2, &FLAT, 200, 7.0, |t| 0.4 * sinf(t));
     assert_eq!(c1.camera().eye, c2.camera().eye);
 }
+
+#[test]
+fn turning_reads_the_stick_when_it_agrees_and_is_larger() {
+    use subject::steering_for_turn;
+    // The stick hard over before the smoothed turn has caught up: the stick.
+    assert_eq!(steering_for_turn(0.4, 1.0, 0.0), 1.0);
+    // A kick turn's input when it is the larger.
+    assert_eq!(steering_for_turn(0.2, 0.3, 0.9), 0.9);
+    // Disagreeing in sign, or smaller: the physics' turn.
+    assert_eq!(steering_for_turn(0.5, -1.0, 0.0), 0.5);
+    assert_eq!(steering_for_turn(0.8, 0.3, 0.0), 0.8);
+}
+
+#[test]
+fn the_turning_clock_restarts_on_a_stick_held_over() {
+    let (mut s, mut c) = setup(&FLAT);
+    ride(&mut s, &mut c, &FLAT, 60, 5.0, |_| 0.0);
+    assert!(c.state.centred_time > 0.5);
+    // The smoothed turn is still small; the stick is hard over (past the dead zone).
+    s.steer = 0.3;
+    s.turn_input = 1.0;
+    ride(&mut s, &mut c, &FLAT, 1, 5.0, |_| 0.0);
+    assert_eq!(c.state.centred_time, 0.0);
+}

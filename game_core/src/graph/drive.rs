@@ -265,6 +265,9 @@ impl Driver {
                 end - r.s.player.time() > DANGER_GRACE
             });
         c.dark = r.s.dark;
+        // The wind-up states' `IsAnticipating` (Skate 3's anticipating flag, which its camera reads as
+        // `IsPreparingToJump`).
+        c.anticipating = r.flag(super::ops::Flag::Anticipating);
         // The graph went to its wipeout state on its own (the physics' own wipeouts take it there too,
         // once the physics is already off the board).
         c.wipeout = path.starts_with("WipeOut")

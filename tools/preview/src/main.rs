@@ -574,6 +574,11 @@ fn main() {
         raster.save(&path);
         println!("        wrote {}", path.display());
     }
+    // --rails: how the park's rails were classified, and what the probes beside each segment meet.
+    if args.iter().any(|a| a == "--rails") {
+        rails_report(&game);
+        return;
+    }
     // --grind-test: drop the skater onto the park's longest fairly level rail, moving along it.
     if args.iter().any(|a| a == "--grind-test") {
         let rails = game.terrain().rails();
@@ -603,6 +608,14 @@ fn main() {
     }
     // --tour: the whole move set (carves, manual, grab, bail) after the kicker run.
     let tour = args.iter().any(|a| a == "--tour");
+    // --carve-ollie <ticks>: the camera check (a carve, <ticks> straight, an ollie), the camera's angle
+    // off behind the skater each tick.
+    let mut carve_ollie = args
+        .iter()
+        .position(|a| a == "--carve-ollie")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|n| n.parse::<u32>().ok())
+        .map(game_core::autoplay::CarveOllie::new);
     // --autoplay: the hands-off tour the Wii runs (grinds and the bail included), in any park.
     let autoplay = args.iter().any(|a| a == "--autoplay");
     let mut auto = game_core::autoplay::Autoplay::new();
@@ -617,7 +630,13 @@ fn main() {
     let mut took_air = false;
     let mut took_land = false;
     let grind_test = args.iter().any(|a| a == "--grind-test");
-    let frames = if grind_test {
+    if carve_ollie.is_some() {
+        let (p, h) = game_core::autoplay::CarveOllie::START;
+        game.place_rider(p, h, 0.0);
+    }
+    let frames = if carve_ollie.is_some() {
+        60 * 10
+    } else if grind_test {
         60 * 6
     } else if autoplay {
         60 * 150
@@ -629,7 +648,25 @@ fn main() {
         60 * 7
     };
     for frame in 0..frames {
-        let pad = if autoplay {
+        let pad = if let Some(co) = &mut carve_ollie {
+            let pad = co.next(&game);
+            let s = &game.skater;
+            let to = (s.pos - game.camera().camera().eye).horizontal();
+            let off = (to.x.atan2(to.z) - s.travel_yaw()).to_degrees();
+            let off = (off + 540.0).rem_euclid(360.0) - 180.0;
+            println!(
+                "carve {frame} {} {:?} pos {:.1} {:.1} yaw {:.0} speed {:.2} off {:.1} shot {}",
+                co.phase(),
+                s.mode,
+                s.pos.x,
+                s.pos.z,
+                s.travel_yaw().to_degrees(),
+                s.speed,
+                off,
+                game.camera().shot_name
+            );
+            pad
+        } else if autoplay {
             let (pad, line) = auto.next(&game);
             if let Some(l) = line {
                 println!("{:>5.2}s  {l}", frame as f32 * dt);
@@ -679,8 +716,17 @@ fn main() {
             let c = game.camera();
             let r = &c.rig;
             println!(
-                "cam {frame} {} sp {:.2} gi {:.1} mv {:.0} trav {:.0} mir {:.2} arm {:.0} d {:.2}/{:.2} avail {:.2} hit {} el {:.1}+{:.1}+{:.1} tgt {:.1} hd {:.1}->{:.1} w {:.2} anchor {:.2} ref {:.2} eye {:?}",
+                "cam {frame} {} an {} rv {:.2} prep {} st {:.2} ct {:.2} cur {:.0} prev {:.0} k {:.2}/{:.2} sp {:.2} gi {:.1} mv {:.0} trav {:.0} mir {:.2} arm {:.0} d {:.2}/{:.2} avail {:.2} hit {} el {:.1}+{:.1}+{:.1} tgt {:.1} hd {:.1}->{:.1} w {:.2} anchor {:.2} ref {:.2} eye {:?}",
                 c.shot_name,
+                c.state.selected_anchor,
+                c.rig.velocity.length(),
+                c.conditions.preparing,
+                game.skater.steer,
+                c.conditions.centred_time,
+                c.shots.current_shot().arm_heading.to_degrees(),
+                c.shots.previous.arm_heading.to_degrees(),
+                c.shots.elapsed,
+                c.shots.duration(),
                 c.conditions.speed,
                 c.conditions.grind_incline,
                 c.compass.movement.to_degrees(),
@@ -759,4 +805,56 @@ fn main() {
         }
     }
     println!("score: {}", game.score);
+}
+
+/// The rails' classes, with each segment's probes (the importer's classification, `rails::classify`),
+/// the drop under its middle and the segment's length, for checking the classes against the park.
+fn rails_report(game: &Game) {
+    use game_core::rails::{RailClass, side_of, upright};
+    let t = game.terrain();
+    let mut counts = std::collections::BTreeMap::new();
+    for (i, r) in t.rails().iter().enumerate() {
+        for (k, w) in r.points.windows(2).enumerate() {
+            let (a, b) = (w[0], w[1]);
+            let class = r.classes.get(k).map_or(RailClass::Thin, |c| c.class);
+            let dir = (b - a).normalize_or(v3(0.0, 0.0, 1.0));
+            let up = upright(dir);
+            let c = a.lerp(b, 0.5);
+            let side = up.cross(dir).normalize_or(side_of(dir));
+            let probe = |top: Vec3, bottom: Vec3| {
+                let d = bottom - top;
+                let len = d.length().max(1e-6);
+                t.raycast(top, d * (1.0 / len), len)
+                    .map(|h| (h.t / len, h.normal))
+            };
+            let line = |at: Vec3, half: Vec3| probe(at + half, at - half);
+            let fmt = |h: Option<(f32, Vec3)>| match h {
+                Some((f, n)) => format!("{f:.2}/n{:.2},{:.2},{:.2}", n.x, n.y, n.z),
+                None => "-".into(),
+            };
+            let h0 = line(c + side * 0.09, up * 0.04);
+            let h1 = line(c - side * 0.09, up * 0.04);
+            let h2 = line(c + side * 0.243, up * 0.258);
+            let h3 = line(c - side * 0.243, up * 0.258);
+            let h4 = line(c, up * 0.04);
+            let drop = t
+                .raycast(c - Vec3::UP * 0.3, -Vec3::UP, 10.0)
+                .map_or(10.0, |h| h.t + 0.3);
+            let kind = if drop > 0.5 { "high" } else { "low" };
+            *counts.entry((format!("{class:?}"), kind)).or_insert(0usize) += 1;
+            println!(
+                "rail {i} seg {k} {class:?} len {:.2} drop {drop:.2} slope {:.2} h0 {} h1 {} h2 {} h3 {} h4 {}",
+                (b - a).length(),
+                dir.y,
+                fmt(h0),
+                fmt(h1),
+                fmt(h2),
+                fmt(h3),
+                fmt(h4)
+            );
+        }
+    }
+    for ((c, k), n) in counts {
+        println!("summary {c} {k} {n}");
+    }
 }

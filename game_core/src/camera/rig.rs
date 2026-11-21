@@ -156,7 +156,7 @@ impl State {
         } else {
             self.steering_time + STEP
         };
-        self.centred_time = if s.steering.abs() >= t.centred_deadzone {
+        self.centred_time = if s.steering_for_turn.abs() >= t.centred_deadzone {
             0.0
         } else {
             self.centred_time + STEP

@@ -52,6 +52,9 @@ pub struct Subject {
     pub grind_dir: Vec3,
     /// Steering, + left (the rider's own sense).
     pub steering: f32,
+    /// The steering the turning clocks read (SK8 `steering_for_turn`): the physics' turn, or the
+    /// stick's own turn or kick-turn input when it agrees in sign and is larger.
+    pub steering_for_turn: f32,
     /// The rider's stance is mirrored against the shots' (switch, regular, rolling fakie).
     pub mirrored: bool,
     pub manual: bool,
@@ -264,14 +267,38 @@ impl SubjectHistory {
             },
             grind_dir: self.grind_dir,
             steering: s.steer,
+            steering_for_turn: steering_for_turn(s.steer, s.turn_input, s.kick_input),
             mirrored: s.mirrored() != s.fakie,
             manual: s.manual.is_some(),
-            preparing: s.mode == Mode::Rolling && s.crouch > 0.35,
+            // Skate 3: the playing clips' `Anticipating` attribute (the ollie wind-up); without the
+            // graphs, a crouch.
+            preparing: s.mode == Mode::Rolling
+                && s.graph.map_or(s.crouch > 0.35, |g| g.anticipating),
             onboard_air: airborne && !s.hippie_air(),
             hippy: s.hippie_air(),
             ledge_left,
             ledge_right,
             reset,
         }
+    }
+}
+
+/// SK8 manager_subject.rs `steering_for_turn`: the larger of the stick's turn and kick-turn inputs,
+/// taken over the physics' turn when it has the same sign and is larger.
+pub fn steering_for_turn(primary: f32, turn: f32, kick: f32) -> f32 {
+    let selected = if kick.abs() > turn.abs() { kick } else { turn };
+    let sign = |v: f32| {
+        if v > 0.0 {
+            1
+        } else if v < 0.0 {
+            -1
+        } else {
+            0
+        }
+    };
+    if sign(selected) != sign(primary) || selected.abs() < primary.abs() {
+        primary
+    } else {
+        selected
     }
 }

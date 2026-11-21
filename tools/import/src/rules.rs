@@ -80,6 +80,21 @@ pub fn parse_pat(text: &str) -> Res<Vec<Shape>> {
     Ok(out)
 }
 
+/// The disc's tuning database (AttribSys `skaterschema` and `skatercollections`).
+pub fn database<R: Read + Seek>(disc: &mut Disc<R>) -> Res<Database> {
+    let file = |disc: &mut Disc<R>, name: &str| read_asset(disc, &format!("{DB}{name}"));
+    Database::parse(
+        (
+            file(disc, "skaterschema.vlt")?,
+            file(disc, "skaterschema.bin")?,
+        ),
+        (
+            file(disc, "skatercollections.vlt")?,
+            file(disc, "skatercollections.bin")?,
+        ),
+    )
+}
+
 pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let mut out = PathBuf::from("imported");
     let mut it = args.iter();
@@ -89,17 +104,7 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
             _ => return Err(format!("unknown option {a}\n{USAGE}").into()),
         }
     }
-    let file = |disc: &mut Disc<R>, name: &str| read_asset(disc, &format!("{DB}{name}"));
-    let db = Database::parse(
-        (
-            file(disc, "skaterschema.vlt")?,
-            file(disc, "skaterschema.bin")?,
-        ),
-        (
-            file(disc, "skatercollections.vlt")?,
-            file(disc, "skatercollections.bin")?,
-        ),
-    )?;
+    let db = database(disc)?;
     let mut values = Vec::new();
     let mut missing = Vec::new();
     for path in game_core::tuning::all_paths() {

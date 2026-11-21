@@ -121,7 +121,7 @@ impl GrindTuning {
         ]),
         exit_assist: Curve::new(&[(0.0, 0.0), (11.0, 0.0), (56.0, 1.0), (90.0, 1.0)]),
         truck_to_wheel: 0.1,
-        deck_to_truck: 0.243,
+        deck_to_truck: 0.24,
         test_above: 0.03,
         test_below: 0.2,
         angle_50: 15.0,

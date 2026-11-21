@@ -68,6 +68,104 @@ impl KickerRun {
     }
 }
 
+/// A camera check: push up to riding speed, carve a quarter turn at full lock, ride straight on for
+/// `straight` ticks, wind up and ollie, ride on. The preview's `--carve-ollie` and the camera's
+/// regression test run it; [`CarveOllie::phase`] says where it is.
+pub struct CarveOllie {
+    /// Ticks so far, and ticks of straight riding between the carve and the wind-up.
+    pub t: u32,
+    pub straight: u32,
+    /// When the carve started and ended, the wind-up started, the flick went (0: not yet).
+    pub carve_at: u32,
+    pub carved_at: u32,
+    pub wind_at: u32,
+    pub flick_at: u32,
+    start_yaw: Option<f32>,
+}
+
+impl CarveOllie {
+    pub fn new(straight: u32) -> Self {
+        CarveOllie {
+            t: 0,
+            straight,
+            carve_at: 0,
+            carved_at: 0,
+            wind_at: 0,
+            flick_at: 0,
+            start_yaw: None,
+        }
+    }
+
+    /// `push`, `carve`, `straight`, `wind`, `flick` or `ride`.
+    pub fn phase(&self) -> &'static str {
+        if self.carve_at == 0 {
+            "push"
+        } else if self.carved_at == 0 {
+            "carve"
+        } else if self.wind_at == 0 {
+            "straight"
+        } else if self.flick_at == 0 {
+            "wind"
+        } else if self.t < self.flick_at + 8 {
+            "flick"
+        } else {
+            "ride"
+        }
+    }
+
+    /// Where to put the rider first on the demo park (the caller does: `Game::place_rider`): the clear
+    /// lane by the bank, heading +z, so the carve goes off to -x across open ground.
+    pub const START: (Vec3, f32) = (v3(12.0, 0.0, -19.0), 0.0);
+
+    pub fn next(&mut self, game: &Game) -> PadRaw {
+        let s = &game.skater;
+        let mut pad = PadRaw {
+            flags: flag::CONNECTED,
+            ..Default::default()
+        };
+        self.t += 1;
+        let rolling = s.mode == Mode::Rolling;
+        match self.phase() {
+            "push" => {
+                if rolling && s.speed < 4.5 && self.t % 30 < 10 {
+                    pad.buttons |= btn::A;
+                }
+                if self.t > 100 && s.push.is_none() {
+                    self.carve_at = self.t;
+                    self.start_yaw = Some(s.travel_yaw());
+                }
+            }
+            "carve" => {
+                pad.stick_x = 100;
+                let turned = self
+                    .start_yaw
+                    .is_some_and(|y| wrap_angle(s.travel_yaw() - y).abs() > PI / 2.0);
+                if turned || self.t > self.carve_at + 120 {
+                    self.carved_at = self.t;
+                }
+            }
+            "straight" => {
+                if self.t >= self.carved_at + self.straight {
+                    self.wind_at = self.t;
+                }
+            }
+            "wind" => {
+                (pad.cstick_x, pad.cstick_y) = BACK;
+                let ready = match game.graph.as_ref().map(|g| g.runner.motion_state()) {
+                    Some(st) => st.contains("AnticCyc") || self.t > self.wind_at + 60,
+                    None => self.t >= self.wind_at + 10,
+                };
+                if ready {
+                    self.flick_at = self.t;
+                }
+            }
+            "flick" => (pad.cstick_x, pad.cstick_y) = UP,
+            _ => {}
+        }
+        pad
+    }
+}
+
 /// The kicker run, then the rest of the move set: carve both ways (the rider leans), a U-turn, a
 /// manual held for 3 s, a kick turn, an ollie with an indy grab, a revert, a 360 flip, a 180 to fakie,
 /// riding fakie until the rider turns round to switch (with Skate 3's state graphs on their own after
@@ -460,11 +558,14 @@ impl TrickTour {
     }
 
     /// Heading where the tour steers (clear ground ahead), give or take a little: time to pop.
+    /// (Not mid-turn either: a wind-up started at full lock flies with the camera wherever the turn left
+    /// it, as Skate 3's small-air shot keeps the shot it took over.)
     fn lined_up(&self, s: &crate::skater::Skater) -> bool {
         self.wind > 0
-            || self
-                .steer_to
-                .is_none_or(|h| wrap_angle(h - s.travel_yaw()).abs() < 0.12)
+            || (s.steer.abs() < 0.3
+                && self
+                    .steer_to
+                    .is_none_or(|h| wrap_angle(h - s.travel_yaw()).abs() < 0.12))
     }
 
     /// In the air: on to `air` if it was the flick's pop; launched off a lip before the flick, the

@@ -166,7 +166,7 @@ impl Rail {
 
     /// The same rail with its segments classified against the park ([`classify`]).
     pub fn classified(mut self, park: &dyn Terrain) -> Rail {
-        self.classes = classify(&self.points, park);
+        self.classes = classify(&self.points, park, FAR_SIDE);
         self
     }
 
@@ -344,8 +344,8 @@ pub fn parse(data: &[u8]) -> Option<Vec<Rail>> {
 /// top within 0.65 of its length (from the top) makes a ledge.
 const NEAR_SIDE: f32 = 0.09;
 const NEAR_REACH: f32 = 0.04;
-const FAR_SIDE: f32 = 0.243;
-const FAR_REACH: f32 = FAR_SIDE * 1.06;
+/// The far probes' reach out without the disc's deck-centre-to-truck distance (flatground's).
+pub const FAR_SIDE: f32 = 0.24;
 const LEDGE_FRACTION: f32 = 0.65;
 
 /// Classifies each segment of a rail by probing the park beside its middle (SK8
@@ -354,16 +354,19 @@ const LEDGE_FRACTION: f32 = 0.65;
 /// a top high enough; nothing beside it is a thin rail. A ledge whose top is level with the rail and
 /// whose other side drops 0.20 to 0.24 m onto a flat top is a curb. The high side is the side with
 /// something beside it.
-pub fn classify(points: &[Vec3], park: &dyn Terrain) -> Vec<SegmentClass> {
+///
+/// `far` is how far out the far probes reach: the board's deck-centre-to-truck distance
+/// (`physics_grinds/default/DeckCenterToTruck` from the player's disc at import, else [`FAR_SIDE`]).
+pub fn classify(points: &[Vec3], park: &dyn Terrain, far: f32) -> Vec<SegmentClass> {
     points
         .windows(2)
-        .map(|w| classify_segment(w[0], w[1], park))
+        .map(|w| classify_segment(w[0], w[1], park, far))
         .collect()
 }
 
 type ProbeHit = Option<(f32, Vec3, Vec3)>;
 
-fn classify_segment(a: Vec3, b: Vec3, park: &dyn Terrain) -> SegmentClass {
+fn classify_segment(a: Vec3, b: Vec3, park: &dyn Terrain, far: f32) -> SegmentClass {
     let dir = (b - a).normalize_or(v3(0.0, 0.0, 1.0));
     let up = upright(dir);
     let centre = a.lerp(b, 0.5);
@@ -378,8 +381,8 @@ fn classify_segment(a: Vec3, b: Vec3, park: &dyn Terrain) -> SegmentClass {
     let line = |at: Vec3, half: Vec3| probe(at + half, at - half);
     let h0 = line(centre + side * NEAR_SIDE, up * NEAR_REACH);
     let h1 = line(centre - side * NEAR_SIDE, up * NEAR_REACH);
-    let h2 = line(centre + side * FAR_SIDE, up * FAR_REACH);
-    let h3 = line(centre - side * FAR_SIDE, up * FAR_REACH);
+    let h2 = line(centre + side * far, up * (far * 1.06));
+    let h3 = line(centre - side * far, up * (far * 1.06));
     let raised = centre + up * NEAR_SIDE;
     let h5 = probe(raised + side * NEAR_SIDE, raised - side * NEAR_SIDE);
     let blocked = (h0.is_some() && h1.is_some()) || h5.is_some();

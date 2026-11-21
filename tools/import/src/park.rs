@@ -183,6 +183,7 @@ pub fn spawn(tris: &[Triangle]) -> Option<[f32; 4]> {
 pub fn classify_rails(
     collision: &[u8],
     rails: &[RailPoints],
+    far: f32,
 ) -> Res<Vec<game_core::rails::RailData>> {
     use game_core::math::v3;
     use game_core::rails::RailClass;
@@ -193,7 +194,7 @@ pub fn classify_rails(
         .iter()
         .map(|r| {
             let pts: Vec<_> = r.iter().map(|p| v3(p[0], p[1], p[2])).collect();
-            let classes = game_core::rails::classify(&pts, &mesh);
+            let classes = game_core::rails::classify(&pts, &mesh, far);
             for c in &classes {
                 counts[c.class.to_u8() as usize] += 1;
             }
@@ -209,6 +210,14 @@ pub fn classify_rails(
         counts[RailClass::Blocked.to_u8() as usize],
     );
     Ok(out)
+}
+
+/// `physics_grinds/default/DeckCenterToTruck` from the disc's tuning database.
+fn deck_to_truck<R: Read + Seek>(disc: &mut Disc<R>) -> Option<f32> {
+    let db = crate::rules::database(disc).ok()?;
+    db.values("physics_grinds/default/DeckCenterToTruck")?
+        .first()
+        .copied()
 }
 
 pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
@@ -231,7 +240,9 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         .map(|t| (t.v, t.surface, t.flags as u16))
         .collect();
     let collision = game_core::collision::encode(&encoded);
-    let classified = classify_rails(&collision, &rails)?;
+    // The far probes reach out by the board's deck-centre-to-truck distance (the disc's).
+    let far = deck_to_truck(disc).unwrap_or(game_core::rails::FAR_SIDE);
+    let classified = classify_rails(&collision, &rails, far)?;
     let mut items = vec![
         pack::Item {
             name: "park/collision".into(),
