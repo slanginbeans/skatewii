@@ -606,6 +606,64 @@ field of view).
   avoidance's swept paths (straight rays), `TransitionTimeUnits` 2 uses the distance to the new shot's arm.
   Fat lines are rays with the radius taken off the hit distance.
 
+## Measured against SK8
+
+SK8's own simulation (skate-game's production frame: graphs, rigid board, rider, camera) runs headless
+on this PC from a scratch harness outside the repository: the skate-game modules the frame needs are
+compiled as a library with the renderer, audio, SDL and mod host left out, on the stock data its setup
+extracts from the player's disc (only the "core" export: miscload, miscboot, db). The same scripted
+pad drives SK8 and flatground on SK8's test course (flatground rebuilt it as a park pack, quad for
+quad) and both log a row a tick. Scenarios: pushing (taps, held), coasting, carves at 3 to 8.5 m/s with
+half and full stick, kick turns standing and rolling, ollies and kickflips (quick and wound up), held
+and let-go 180s, manuals and the tail brake, the foot brake, powerslides, a drop-in into the half pipe,
+a thin-rail run, and the camera while riding and carving.
+
+Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_sk8.rs`):
+
+- **Brake contact**: `BRAKE_CONTACT` is a value (0 in the brake's `INTO` clip, 1 in `CYC`); its presence
+  was read as contact, so the foot dragged from the first tick. Now 0.23 s after the press, as SK8, at
+  SK8's 4.08 m/s^2 (`brake_scale` calibrated; it was 3.0).
+- **Speed model**: Skate 3 holds the speed to a target only the slope and rolling resistance move
+  (`UpdateSpeedModel`); carving cost 1 to 2 m/s at 6 to 8 m/s here. Now the target pulls the speed back
+  (`GeneralAmount` of the gap a tick, within `Friction_MaxSpeedChange`), off while a foot pushes or
+  brakes and in a slide; the target restarts from the speed after anything outside the ride sets it.
+- **Steering**: the tilt was missing the trucks' tightness factor (`SteeringScalar_TightTrucks`, SK8's
+  default tightness 0.7). The board follows 0.88 of the trucks' curve, turns at most 1.5 + 0.04 x speed
+  rad/s and builds its yaw over 0.1 s (ours, measured): full stick 1.8 rad/s at 6.5 to 8.5 m/s, half a
+  stick within 7% of SK8 (it was 1.1 to 1.25 rad/s grip-capped at speed, and half a stick 40% sharp).
+- **Kick turns**: SK8's rate against speed (3.2 rad/s standing, 2.0 at 3.4 m/s), building up and
+  running down by 0.7 a tick when let go (was a fixed 2.25 rad/s, instant).
+- **Powerslide**: the slide's side force now brings the travel round (about 1 g, after 0.25 s): SK8's
+  slide turns the travel about 150 degrees; ours went straight on.
+- **Let-go spin before a pop**: a turn let go just before take-off no longer spins the board on while
+  our landing prediction resolves (SK8 -7 degrees, ours was 46).
+
+Matching within about 5%: tapped pushes (2.15, 1.9, 1.9, 1.9 m/s a push, 8.5 m/s top, 4.9 s to 8 m/s),
+manual pitch (14 and 28 degrees braking) and its speed loss, the take-off tick of an ollie, the low
+camera's distance (1.84 m).
+
+Left, as SK8's rigid board and rider do it and flatground approximates (sizes measured):
+
+- **Held pushes** are 40% stronger here (first held push 4.5 against 3.2 m/s; 1.7 against 2.6 s to 8 m/s):
+  SK8 chases the posed push clips' trajectory speed at the contact, we chase the push sets' end speed.
+- **Ollies**: SK8's legs lift the board (peak deck 0.50 m quick, 1.16 m wound up; ours 0.40 and 0.78),
+  and its takeoff clip starts lifting the board 5 ticks before the jump; its body pops from the animated
+  centre of mass (about 1.08 m up), ours from `AbsoluteMinHeight`, so our flights are about 0.08 s longer
+  wound up (held 180s turn 10% further).
+- **Transitions**: SK8's rider is compressed by a transition and springs back, which its pump controller
+  pays out with no input: about +2 m/s a pass (9.1 against 7.0 m/s at the bottom after a 2.5 m drop).
+- **Sideways landings** keep more speed here (4.1 against 0.8 m/s after landing 70 degrees round).
+- **Tail brake**: matches at 6.5 m/s (4.8 m/s^2); SK8's rises to 6.2 below 4 m/s, so ours stops 0.5 s
+  later.
+- **Carves**: our turn builds faster at half a stick (0.17 against 0.35 to 0.43 s), settles slower when
+  let go (0.3 against 0.2 s) and slips less (3 against 8 degrees).
+- **Camera**: in a carve ours trails the board about 13 degrees further.
+- **Grinds**: no scripted grind entered on both (SK8's board drifts sideways on a long run-up). Ours
+  catches the coping as a lip slide at 0 m/s when rolling slowly off a deck (SK8 drops in): our contact
+  boxes are looser than Skate 3's depth windows.
+- **Coasting**: Skate 3's no-input friction is kept here (after 3 s); SK8 never sets the flag that runs
+  its timer, so its board rolls on. Its rolling resistance on smooth concrete is 0 under 8 m/s, as ours.
+
 ## Numbers (Dolphin, US/EU disc)
 
 | | |
