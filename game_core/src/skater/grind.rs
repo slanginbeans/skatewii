@@ -1316,6 +1316,7 @@ impl Skater {
         self.brake = None;
         self.revert = None;
         self.kickturn = None;
+        self.kick_rate = 0.0;
         self.wallride = None;
         self.landing = None;
         self.plan = None;

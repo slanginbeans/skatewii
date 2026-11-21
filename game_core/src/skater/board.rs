@@ -51,6 +51,14 @@ pub const HANGER_DROP: f32 = 0.064;
 /// The deck's underside under its centre (m, ours: half a 10 mm deck): what rests on the rail in a slide.
 pub const DECK_UNDERSIDE: f32 = 0.005;
 const WHEELBASE: f32 = 2.0 * AXLE;
+/// The share of the trucks' geometric curve the board follows, the most it turns (rad/s, at a standstill
+/// and per m/s of speed) and how long its yaw rate takes to build (s). Ours, measured against SK8's
+/// simulation of the same deck tilt: half a stick at 6.65 m/s turns 0.42 rad/s, a full one 1.75 rad/s at
+/// 6.5 m/s and 1.83 at 8.3; the turn builds in about 0.1 s at full stick and 0.35 s at half.
+const TRUCK_FOLLOW: f32 = 0.88;
+const TRUCK_YAW_MAX: f32 = 1.5;
+const TRUCK_YAW_MAX_PER_SPEED: f32 = 0.04;
+const TRUCK_YAW_LAG: f32 = 0.1;
 /// sin(31 deg): the trucks' kingpin angle turns a deck tilt into a truck turn.
 const KINGPIN: f32 = 0.515_038;
 /// The trucks look for the surface from this far above the board, and this far below it.
@@ -65,15 +73,22 @@ const WALL_COS: f32 = 0.64;
 /// After landing each truck's turn comes back in over this long (s).
 const TRUCK_RAMP: f32 = 0.165;
 /// Wheel grip sideways (share of the load) and how quickly side friction damps sideways speed per unit
-/// of `side_friction` (1/s). Ours.
-const SIDE_GRIP: f32 = 0.85;
+/// of `side_friction` (1/s). Ours: SK8's board holds a full carve at 8.3 m/s (about 1.55 g) with 8
+/// degrees of slip.
+const SIDE_GRIP: f32 = 1.6;
 const SIDE_DAMP: f32 = 0.4;
 /// The trucks may turn the board a little faster than grip lets the travel turn (a drift), up to a
 /// sideways angle of `MAX_SLIP` (rad). Ours.
 const GRIP_OVER: f32 = 1.1;
 const MAX_SLIP: f32 = 0.35;
-/// Powerslide: wheel friction sliding sideways (share of g at 90 degrees). Ours.
-const SLIDE_GRIP: f32 = 0.5;
+/// Powerslide: wheel friction sliding sideways (share of g at 90 degrees). Ours: SK8's slide slows the
+/// board about 5.5 m/s^2 through its middle.
+const SLIDE_GRIP: f32 = 0.6;
+/// Powerslide: how hard the sliding wheels pull the travel round (m/s^2) and how long that takes to
+/// build (s). Ours, measured against SK8's simulation: a slide from 6.65 m/s turns the travel about 150
+/// degrees in its second, at about 1 g sideways, after a slow first 0.2 s.
+const SLIDE_SIDE_ACCEL: f32 = 9.8;
+const SLIDE_SIDE_BUILD: f32 = 0.25;
 /// Full crouch lowers the rider's centre of mass this much (m, ours): the pumping extension.
 const CROUCH_DEPTH: f32 = 0.25;
 /// Wallrides: how far down the floor is looked for, and the least height above it (m).
@@ -103,6 +118,8 @@ pub struct Drive {
     pub manual: bool,
     /// Powerslide: the board's angle from travel (rad); the path keeps following the trucks.
     pub slide: Option<f32>,
+    /// Seconds into the powerslide.
+    pub slide_time: f32,
     /// A move turns the board itself (kick turn, revert): no truck or heading turn.
     pub pivot: bool,
     /// The wheels don't scrub sideways speed (a revert: Skate 3 drops the board's drag while it turns).
@@ -145,6 +162,17 @@ impl Skater {
         let t = self.tuning;
         let ticks = dt * 60.0;
         let n = self.contact_n;
+        // The speed model's target stays within `friction_max_change` of the speed (SK8 speed_model.rs).
+        let bound = t.friction_max_change.max(0.0);
+        let start = self.speed.abs();
+        if (start - self.model_speed).abs() > 1e-4 {
+            // Set from outside the ride (a landing, put down, a revert): the model starts from it, as
+            // Skate 3's does on entering the ground.
+            self.target_speed = start;
+        }
+        self.target_speed = self
+            .target_speed
+            .clamp((start - bound).max(0.0), start + bound);
 
         // Steering: deck tilt eased in, trucks ramped in after landing, then the trucks' curve.
         let push_contact = d.push_target.is_some();
@@ -162,7 +190,14 @@ impl Skater {
         let curvature = 2.0 * libm::tanf(KINGPIN * tilt) / WHEELBASE;
         let vel = self.ground_velocity();
         let v = vel.length();
-        let mut yaw = -self.speed * curvature;
+        // The board follows its trucks' curve less than fully and never turns faster than
+        // `TRUCK_YAW_MAX` (+ `TRUCK_YAW_MAX_PER_SPEED` x speed), and its yaw rate builds up over
+        // `TRUCK_YAW_LAG` (the rider leaning the deck over, its wheels' slip): what SK8's rigid board
+        // does with the same deck tilt (ours, measured against SK8's simulation).
+        let cap = TRUCK_YAW_MAX + TRUCK_YAW_MAX_PER_SPEED * v;
+        let truck = clamp(-self.speed * curvature * TRUCK_FOLLOW, -cap, cap);
+        self.truck_yaw += (truck - self.truck_yaw) * (1.0 - libm::expf(-dt / TRUCK_YAW_LAG));
+        let mut yaw = self.truck_yaw;
         let grip = self.grip();
         if v > 0.5 {
             // The board can't turn much faster than grip lets its travel turn.
@@ -247,6 +282,7 @@ impl Skater {
         let side = n.cross(f);
         let along = clamp(gravity.dot(f), -t.max_slope_accel, t.max_slope_accel);
         let foot_down = push_contact || d.brake > 0.0;
+        let before_model = self.speed.abs();
         let mut friction = 0.0;
         if !foot_down && d.slide.is_none() {
             let sp = self.speed.abs();
@@ -270,6 +306,8 @@ impl Skater {
             self.speed += along * dt;
             self.speed = approach(self.speed, 0.0, friction * dt);
         }
+        // The target follows the slope and the rolling resistance, nothing else.
+        self.target_speed = (self.target_speed + self.speed.abs() - before_model).max(0.0);
         self.slip += gravity.dot(side) * dt;
         if let Some(target) = d.push_target
             && self.speed < target
@@ -288,6 +326,15 @@ impl Skater {
             // Sideways wheels scrub speed, more the further round the board is.
             let decel = SLIDE_GRIP * g * libm::sinf(angle).abs();
             self.speed = approach(self.speed, 0.0, decel * dt);
+            // The sliding wheels' side force (SK8 slide_state/forces.rs `sliding_force`, its
+            // `force_vs_angle` part) curves the travel the way the slide turns: the board comes round
+            // with it rather than skidding straight on.
+            let v = self.speed.abs();
+            if v > 0.5 {
+                let build = (d.slide_time / SLIDE_SIDE_BUILD).clamp(0.0, 1.0);
+                let rate = -angle.signum() * SLIDE_SIDE_ACCEL * build / v;
+                self.fwd = rotate(self.fwd, n, rate * dt);
+            }
         }
         // Side friction: sideways speed damped, no faster than grip allows.
         if !d.keep_velocity {
@@ -295,8 +342,20 @@ impl Skater {
             let removal = clamp(self.slip * (1.0 - keep), -grip * dt, grip * dt);
             self.slip -= removal;
         }
+        // Speed conservation (SK8 speed_model.rs `update`, Skate 3's UpdateSpeedModel): a force pulls the
+        // speed towards the model's target by `speed_general_amount` of the difference a tick, so turning
+        // and scrubbing sideways cost no speed; off while a foot pushes or brakes and in a powerslide.
+        if foot_down || d.slide.is_some() {
+            // The feet and the slide set the speed; the model starts again from it (Skate 3 resets
+            // the target to the speed, SK8's `flags_1360` reset).
+            self.target_speed = self.speed.abs();
+        } else if self.speed.abs() > 0.01 {
+            let error = clamp(self.target_speed - self.speed.abs(), -bound, bound);
+            self.speed += self.speed.signum() * t.speed_general_amount * error * ticks;
+        }
 
         self.move_on_ground(park, d, dt, events);
+        self.model_speed = self.speed.abs();
     }
 
     /// Moves along the ground: walls, curbs, the trucks finding the surface, and leaving it.

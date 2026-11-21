@@ -126,7 +126,9 @@ pub struct Tuning {
     /// Foot brake and tail brake strength (deceleration = force * `brake_scale` * `braking_scalar`).
     pub foot_brake: f32,
     pub tail_brake: f32,
-    /// flatground's own calibration from Skate 3's brake forces to a deceleration (m/s^2 per unit).
+    /// flatground's own calibration from Skate 3's brake forces to a deceleration (m/s^2 per unit),
+    /// measured against SK8's simulation: its foot brake (force 50 on smooth ground) slows the board
+    /// 4.08 m/s^2 once the foot drags.
     pub brake_scale: f32,
     /// The surface's braking factor (smooth concrete).
     pub braking_scalar: f32,
@@ -147,6 +149,11 @@ pub struct Tuning {
     pub steer_vs_speed: Curve,
     pub steer_speed_range: f32,
     pub hard_turn_boost: f32,
+    /// The trucks' tightness (0 loose .. 1 tight; Skate 3's equipment setting, SK8's default 0.7) and how
+    /// much tight trucks steer (`SteeringScalar_TightTrucks`): the tilt is scaled by
+    /// `tight_trucks_scalar * truck_tightness + 1 - truck_tightness`.
+    pub truck_tightness: f32,
+    pub tight_trucks_scalar: f32,
     /// Steering is weaker while pushing: falls by `push_steer_drop` per tick while a push is on, recovers
     /// by `push_steer_rise`, never below `push_steer_min`.
     pub push_steer_drop: f32,
@@ -744,6 +751,7 @@ pub const PATHS: &[&str] = &[
     "physics_heading/default/TurnTorqueVsSpeed",
     "physics_heading/default/TurnTorqueVsNegAngVel",
     "physics_steering/default/SteeringTiltBlending",
+    "physics_steering/default/SteeringScalar_TightTrucks",
     "physics_manual/default/Tilt_TiltScalar",
     "physics_manual/default/BrakeTiltAngle",
     "physics_manual/default/MaxTiltAngle",
@@ -981,27 +989,67 @@ impl Tuning {
         push_blend_acc_frames: Curve::constant(6.0),
         push_teleport_window: 0.5,
         push_slope_limit: 40.0,
-        friction: Curve::new(&[(0.0, 0.0), (8.0, 0.05), (30.0, 1.0)]),
-        friction_no_input: Curve::new(&[(0.0, 0.1), (8.0, 0.45)]),
-        no_input_time: 2.5,
+        // Skate 3's smooth concrete (`physics_surfaces/smooth/FrictionVsSpeedNew`): no rolling resistance
+        // below about 8 m/s.
+        friction: Curve::new(&[
+            (0.0, 0.0),
+            (8.120_522, 0.0),
+            (10.421_34, 0.03),
+            (12.045_44, 0.162_857),
+            (12.857_49, 0.6),
+            (14.332_25, 0.904_054),
+            (18.403_91, 1.05),
+            (26.978_18, 1.2),
+        ]),
+        friction_no_input: Curve::new(&[
+            (0.0, 0.128_571),
+            (1.145_145, 0.151_786),
+            (2.282_282, 0.207_143),
+            (3.331_331, 0.292_857),
+            (4.196_196, 0.385_714),
+            (5.157_157, 0.441_071),
+            (6.526_526, 0.480_357),
+            (8.0, 0.5),
+        ]),
+        no_input_time: 3.0,
         friction_manual: Curve::new(&[(0.0, 0.1), (8.0, 0.45)]),
-        foot_brake: 45.0,
+        foot_brake: 50.0,
         tail_brake: 32.0,
-        brake_scale: 0.06,
+        brake_scale: 0.0816,
         braking_scalar: 1.0,
         brake_slow_speed: 0.02,
-        friction_max_change: 0.4,
-        speed_general_amount: 0.2,
-        steer_follow: 0.75,
+        friction_max_change: 0.3,
+        speed_general_amount: 0.25,
+        steer_follow: 0.7,
         steer_scalar: 0.6,
-        steer_vs_input: Curve::new(&[(0.0, 0.0), (0.2, 0.02), (1.0, 0.8)]),
-        steer_vs_speed: Curve::new(&[(0.0, 1.0), (0.1, 0.9), (0.5, 0.35), (1.0, 0.3)]),
-        steer_speed_range: 45.0,
+        steer_vs_input: Curve::new(&[
+            (0.0, 0.0),
+            (0.058_594, 0.0),
+            (0.25, 0.033_784),
+            (0.375, 0.077_703),
+            (0.508_789, 0.172_297),
+            (0.690_43, 0.334_46),
+            (0.857_715, 0.564_189),
+            (1.0, 0.834_459),
+        ]),
+        steer_vs_speed: Curve::new(&[
+            (0.056_955, 1.0),
+            (0.123_768, 0.969_595),
+            (0.173_056, 0.847_973),
+            (0.219_058, 0.608_108),
+            (0.297_919, 0.395_27),
+            (0.4, 0.3),
+            (0.5, 0.28),
+            (1.0, 0.27),
+        ]),
+        steer_speed_range: 50.0,
         hard_turn_boost: 1.0,
+        truck_tightness: 0.7,
+        tight_trucks_scalar: 0.7,
         push_steer_drop: 0.02,
         push_steer_rise: 0.05,
         push_steer_min: 0.5,
-        steer_tilt_blend: 0.25,
+        steer_tilt_blend: 0.2,
         manual_tilt: 0.5,
         manual_brake_tilt: 25.0,
         manual_max_tilt: 20.0,
@@ -1358,6 +1406,9 @@ impl Tuning {
             "physics_steering/default/SteeringVsSpeed" => curve!(self.steer_vs_speed),
             "physics_steering/default/SteeringVsSpeedMaxSpeed" => scalar!(self.steer_speed_range),
             "physics_steering/default/HardTurnIncrease" => scalar!(self.hard_turn_boost),
+            "physics_steering/default/SteeringScalar_TightTrucks" => {
+                scalar!(self.tight_trucks_scalar)
+            }
             "physics_steering/default/PushScalarDecriment" => scalar!(self.push_steer_drop),
             "physics_steering/default/PushScalarIncriment" => scalar!(self.push_steer_rise),
             "physics_steering/default/PushScalarMin" => scalar!(self.push_steer_min),
@@ -1515,8 +1566,12 @@ impl Tuning {
             .steer_vs_speed
             .eval((speed.abs() / self.steer_speed_range).clamp(0.0, 1.0));
         // Skate 3 multiplies by the signed turn value itself (not just its sign): half a stick tilts the
-        // deck far less than half of a full one.
+        // deck far less than half of a full one. Tighter trucks tilt less (SK8 steering.rs
+        // `calculate_tilt`, its `tightness` factor).
+        let tightness =
+            self.tight_trucks_scalar * self.truck_tightness + 1.0 - self.truck_tightness;
         self.steer_scalar
+            * tightness
             * self.steer_vs_input.eval(input.abs())
             * speed_k
             * push_scalar

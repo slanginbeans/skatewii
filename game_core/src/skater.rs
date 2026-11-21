@@ -56,7 +56,14 @@ use crate::tuning::Tuning;
 pub const STEP: f32 = 0.12;
 /// Below this speed a hard sideways stick kick-turns on the spot.
 const KICKTURN_SPEED: f32 = 1.0;
-const KICKTURN_RATE: f32 = 4.5;
+/// Kick turns (ours, measured against SK8's simulation of Skate 3's `KickTurnSteering` at its stock
+/// spin scale 0.5): the yaw rate the turn builds to against the board's speed (rad/s: 3.2 standing,
+/// 2.7 at 1.8 m/s, 2.0 at 3.4 m/s), the share of the gap it closes a tick, and what is left of it a tick
+/// after the stick is let go.
+const KICKTURN_RATES: [(f32, f32); 4] = [(0.0, 3.2), (1.8, 2.72), (3.4, 2.0), (5.0, 1.6)];
+const KICKTURN_BUILD: f32 = 0.09;
+const KICKTURN_RELEASE: f32 = 0.7;
+const KICKTURN_SPIN_SCALE: f32 = 0.5;
 const KICKTURN_STICK: f32 = 0.75;
 /// Rolling tail first faster than this is fakie at once; above `FAKIE_SLOW` after `FAKIE_TIME`; never
 /// within `FAKIE_GRACE` of a spawn (Skate 3's riding-fakie rules).
@@ -124,6 +131,21 @@ pub enum Stance {
 /// How long the built-in board's flick trick animation takes (s). Without the state graphs this is the
 /// one clock the drawn board and the landing check share (landing before it ends is landing with the
 /// board not caught); with them the clips' own `DANGERZONE` decides.
+/// The yaw rate a kick turn builds to at `speed` (rad/s, [`KICKTURN_RATES`]).
+pub fn kickturn_rate(speed: f32) -> f32 {
+    let r = KICKTURN_RATES;
+    if speed <= r[0].0 {
+        return r[0].1;
+    }
+    for w in r.windows(2) {
+        let ((a, ra), (b, rb)) = (w[0], w[1]);
+        if speed <= b {
+            return ra + (rb - ra) * (speed - a) / (b - a);
+        }
+    }
+    r[r.len() - 1].1
+}
+
 pub fn trick_duration(t: Trick) -> f32 {
     let (flip, shove) = t.motion();
     match (flip != 0.0, shove.abs()) {
@@ -706,6 +728,8 @@ pub struct Skater {
     truck_ramp: f32,
     /// The board's yaw rate last tick (rad/s).
     pub yaw_rate: f32,
+    /// The trucks' part of it, building up towards what the deck tilt asks (rad/s).
+    truck_yaw: f32,
     /// A wall hit turning the board along the wall: yaw rate (rad/s) and seconds left.
     collide: Option<(f32, f32)>,
     /// Seconds since the last wall hit.
@@ -719,6 +743,12 @@ pub struct Skater {
     pub pump: Pump,
     /// Seconds since the player last touched anything (rolling resistance rises after a while).
     idle: f32,
+    /// The speed the speed model holds the board to (m/s, Skate 3's `UpdateSpeedModel` target): only
+    /// the slope and rolling resistance move it, so the speed the wheels lose turning or scrubbing
+    /// sideways is put back (within `friction_max_change`).
+    target_speed: f32,
+    /// The speed the last ride ended with (a different one at the next is a change from outside).
+    model_speed: f32,
     /// 0..1, how far the skater is crouched (drawn).
     pub crouch: f32,
     /// The crouch is for a nollie (stick held forward).
@@ -750,6 +780,8 @@ pub struct Skater {
     pub revert: Option<Revert>,
     /// Kick-turning on the spot: direction (+1 left), seconds.
     pub kickturn: Option<(f32, f32)>,
+    /// The kick turn's yaw rate (rad/s, + left), running down after the stick is let go.
+    kick_rate: f32,
     /// Winding up a hippie jump: seconds held.
     pub hippy: Option<f32>,
     /// When each push button last went down (seconds ago), for the hippie jump chord.
@@ -958,6 +990,7 @@ impl Skater {
             deck_tilt: 0.0,
             truck_ramp: 1.0,
             yaw_rate: 0.0,
+            truck_yaw: 0.0,
             collide: None,
             wall_clock: f32::INFINITY,
             vn: 0.0,
@@ -965,6 +998,8 @@ impl Skater {
             lead_rise: 0.0,
             pump: Pump::default(),
             idle: 0.0,
+            target_speed: 0.0,
+            model_speed: 0.0,
             crouch: 0.0,
             crouch_nose: false,
             landing: None,
@@ -984,6 +1019,7 @@ impl Skater {
             last_slide: (0.0, 0.0),
             revert: None,
             kickturn: None,
+            kick_rate: 0.0,
             hippy: None,
             since_a: f32::INFINITY,
             since_b: f32::INFINITY,
@@ -1457,14 +1493,25 @@ impl Skater {
                     && self.push.is_none_or(|p| p.stage().0 == 2)
             }
         };
+        // The kick turn's yaw rate builds up towards its speed's rate and, let go, runs down (SK8's rider
+        // turning the board through its feet).
         if kick {
             let dir = -pad.stick[0].signum();
             let time = self.kickturn.map_or(0.0, |k| k.1) + dt;
             self.kickturn = Some((dir, time));
-            let rate = KICKTURN_RATE * graph_kick.map_or(1.0, |k| k.clamp(0.25, 2.0));
-            self.fwd = rotate(self.fwd, self.contact_n, dir * rate * dt);
+            let scale = graph_kick.map_or(1.0, |k| k.clamp(0.25, 2.0) / KICKTURN_SPIN_SCALE);
+            let target = dir * kickturn_rate(self.speed.abs()) * scale;
+            self.kick_rate +=
+                (target - self.kick_rate) * (1.0 - libm::powf(1.0 - KICKTURN_BUILD, ticks));
         } else {
             self.kickturn = None;
+            self.kick_rate *= libm::powf(KICKTURN_RELEASE, ticks);
+            if self.kick_rate.abs() < 0.05 || self.slide.is_some() || self.revert.is_some() {
+                self.kick_rate = 0.0;
+            }
+        }
+        if self.kick_rate != 0.0 {
+            self.fwd = rotate(self.fwd, self.contact_n, self.kick_rate * dt);
         }
 
         // Steering: Skate 3's reading of the stick, eased in. A powerslide's trucks hold a steady turn.
@@ -1560,6 +1607,7 @@ impl Skater {
                 .as_ref()
                 .filter(|s| !s.releasing)
                 .map(|s| s.angle),
+            slide_time: self.slide.as_ref().map_or(0.0, |s| s.time),
             pivot: kick || self.revert.is_some(),
             keep_velocity: self.revert.is_some(),
             intentional_pump: flick.crouch > 0.0 || self.crouch > 0.05,
@@ -2082,6 +2130,7 @@ impl Skater {
         self.slide = None;
         self.revert = None;
         self.kickturn = None;
+        self.kick_rate = 0.0;
         self.hippy = None;
         self.wallride = None;
         self.collide = None;
@@ -2401,6 +2450,7 @@ impl Skater {
         self.slide = None;
         self.revert = None;
         self.kickturn = None;
+        self.kick_rate = 0.0;
         self.hippy = None;
         self.collide = None;
         self.plan = None;
@@ -2424,6 +2474,7 @@ impl Skater {
         self.slide = None;
         self.revert = None;
         self.kickturn = None;
+        self.kick_rate = 0.0;
         self.hippy = None;
         self.collide = None;
         events.push(Event::RanOut);
@@ -3093,6 +3144,126 @@ mod tests {
         s.speed = 0.8;
         steps(&mut s, &park, &stick_back(30.0), None, 5);
         assert!(s.slide.is_none(), "too slow to slide");
+    }
+
+    // ---- Pinned to SK8's simulation (SK8-ENGINE/skate-3-rust-engine run headless with the stock tuning,
+    // the same scripted pad on both; see docs/graph-runner.md, "Measured against SK8") ----
+
+    /// The travel's turn rate (rad/s, + left) over the last half second of 1.5 s with the main stick at
+    /// `x`, from `speed`, and the speed at the end.
+    fn carve(speed: f32, x: f32) -> (f32, f32) {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.put_at(
+            &park,
+            v3(-40.0, 0.0, -40.0),
+            core::f32::consts::FRAC_PI_4,
+            speed,
+        );
+        steps(&mut s, &park, &Pad::default(), None, 5);
+        let pad = Pad {
+            stick: [x, 0.0],
+            ..Pad::default()
+        };
+        steps(&mut s, &park, &pad, None, 60);
+        let y0 = s.travel_yaw();
+        steps(&mut s, &park, &pad, None, 30);
+        (wrap_angle(s.travel_yaw() - y0) / 0.5, s.speed)
+    }
+
+    #[test]
+    fn carves_turn_as_fast_as_sk8_and_cost_no_speed() {
+        // SK8: full stick 1.75 rad/s at 6.5 m/s and 1.83 at 8.3 m/s; half a stick 0.42 at 6.65 m/s and
+        // 0.48 at 8.46 m/s (a 16 m and a 17.5 m radius). The speed model keeps the speed through them.
+        for (speed, x, want) in [
+            (6.5, -1.0, 1.75),
+            (8.3, -1.0, 1.83),
+            (6.65, -0.5, 0.42),
+            (8.46, -0.5, 0.48),
+        ] {
+            let (rate, end) = carve(speed, x);
+            assert!(
+                (rate - want).abs() < 0.08 * want,
+                "{speed} m/s, stick {x}: {rate} rad/s, SK8 {want}"
+            );
+            assert!(end > speed * 0.98, "{speed} m/s carving ends at {end}");
+        }
+        // Mirrored.
+        let (rate, _) = carve(6.5, 1.0);
+        assert!((rate + 1.75).abs() < 0.14, "{rate}");
+    }
+
+    #[test]
+    fn kick_turns_build_up_and_run_down_as_sk8s() {
+        // SK8 standing: the yaw rate builds to 3.2 rad/s and turns about 148 degrees in the second the
+        // stick is held; let go, it runs down by 0.7 a tick.
+        let park = flat();
+        let mut s = spawn(&park);
+        let yaw = |s: &Skater| atan2f(s.fwd.x, s.fwd.z);
+        let y0 = yaw(&s);
+        let pad = Pad {
+            stick: [-1.0, 0.0],
+            ..Pad::default()
+        };
+        let mut peak: f32 = 0.0;
+        for _ in 0..60 {
+            let before = yaw(&s);
+            steps(&mut s, &park, &pad, None, 1);
+            peak = peak.max(wrap_angle(yaw(&s) - before).abs() * 60.0);
+        }
+        let turned = wrap_angle(yaw(&s) - y0).abs().to_degrees();
+        assert!((135.0..160.0).contains(&turned), "{turned} degrees");
+        assert!((peak - 3.2).abs() < 0.15, "peak {peak} rad/s");
+        let before = yaw(&s);
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        let after = wrap_angle(yaw(&s) - before).abs() * 60.0;
+        assert!((after - 0.7 * peak).abs() < 0.3, "let go: {after} rad/s");
+        // Rolling slows it: about 2.0 rad/s at 3.4 m/s.
+        assert!((kickturn_rate(3.4) - 2.0).abs() < 1e-3 && kickturn_rate(1.8) < 2.8);
+    }
+
+    #[test]
+    fn the_foot_brake_slows_as_sk8s() {
+        // SK8: once the foot drags, 4.08 m/s^2 (its force 50 on smooth concrete).
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 6.65;
+        steps(&mut s, &park, &hold(btn::X), None, 20);
+        let v0 = s.speed;
+        steps(&mut s, &park, &hold(btn::X), None, 30);
+        let decel = (v0 - s.speed) * 2.0;
+        assert!((decel - 4.08).abs() < 0.2, "{decel} m/s^2");
+    }
+
+    #[test]
+    fn a_powerslide_brings_the_travel_round_as_sk8s() {
+        // SK8 from 6.65 m/s, the stick back and to the side: the travel turns about 150 degrees and the
+        // speed falls to about 2 m/s in the slide's second.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.put_at(&park, v3(-30.0, 0.0, -30.0), 0.0, 6.65);
+        steps(&mut s, &park, &Pad::default(), None, 2);
+        let y0 = atan2f(s.ground_velocity().x, s.ground_velocity().z);
+        let mut turned: f32 = 0.0;
+        let mut last = y0;
+        let mut ticks = 0;
+        for _ in 0..90 {
+            steps(&mut s, &park, &stick_back(-35.0), None, 1);
+            let v = s.ground_velocity();
+            let y = atan2f(v.x, v.z);
+            turned += wrap_angle(y - last);
+            last = y;
+            ticks += 1;
+            if s.slide.is_none_or(|sl| sl.releasing) {
+                break;
+            }
+        }
+        let turned = turned.abs().to_degrees();
+        assert!(
+            (110.0..200.0).contains(&turned),
+            "{turned} degrees in {ticks} ticks"
+        );
+        assert!(s.speed.abs() < 3.0, "{}", s.speed);
     }
 
     #[test]

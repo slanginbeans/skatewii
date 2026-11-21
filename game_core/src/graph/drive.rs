@@ -246,7 +246,13 @@ impl Driver {
         let mut c = GraphControl {
             push_contact,
             push_target: push_contact.then_some(r.s.push_speed),
-            brake_contact: has(self.clips.brake_contact),
+            // `BRAKE_CONTACT` is a value: 0 while the foot comes down (the brake's `INTO` clip), 1 once it
+            // drags (`CYC`). Skate 3 brakes only on a contact of strength 1 (SK8 contact_events.rs).
+            brake_contact: self
+                .clips
+                .brake_contact
+                .and_then(|n| r.attribute(db, n))
+                .is_some_and(|a| a.value() >= 0.5),
             kickturn: r.s.kickturn,
             ..GraphControl::default()
         };
