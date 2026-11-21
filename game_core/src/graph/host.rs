@@ -566,6 +566,44 @@ impl<'a> Runner<'a> {
         }
     }
 
+    /// Starts both graphs over (the rider was put back on the board): every behaviour ends, the next
+    /// update resolves from the roots.
+    pub fn reset(&mut self, db: Option<&MotionDb>) {
+        for motion in [true, false] {
+            let (g, ops, inst, ctl) = if motion {
+                (
+                    &self.pack.graphs[self.motion],
+                    &self.mg_ops,
+                    &mut self.mg_inst,
+                    &mut self.mg_ctl,
+                )
+            } else {
+                (
+                    &self.pack.graphs[self.action],
+                    &self.ag_ops,
+                    &mut self.ag_inst,
+                    &mut self.ag_ctl,
+                )
+            };
+            let mut h = Host {
+                p: &self.pack,
+                g,
+                ops,
+                inst,
+                s: &mut self.s,
+                n: &self.names,
+                db,
+                gestures: &self.gestures,
+                motion,
+            };
+            ctl.end_all(&mut h);
+            *ctl = Controller::new(g);
+        }
+        self.s.mg.clear();
+        self.s.filtered.clear();
+        self.s.flags = [0; 7];
+    }
+
     /// The clips to pose this tick (weights sum to 1); commits the clips' event windows.
     pub fn leaves(&mut self, out: &mut Vec<Leaf>) {
         out.clear();
@@ -595,6 +633,19 @@ impl<'a> Runner<'a> {
     pub fn motion_state(&self) -> String {
         self.pack
             .state_path(self.motion_graph(), self.mg_ctl.frame.current)
+    }
+
+    /// The name of the motion graph's top-level state the rider is in (`OnBoard`, `WipeOut` ...).
+    pub fn mg_state_root(&self) -> Option<&'a str> {
+        let g = self.motion_graph();
+        let mut s = self.mg_ctl.frame.current?;
+        while let Some(p) = g.parent(s) {
+            if p == g.root {
+                break;
+            }
+            s = p;
+        }
+        Some(self.pack.state_name(g, s))
     }
 
     pub fn action_state(&self) -> String {
@@ -762,6 +813,7 @@ impl Host<'_, '_> {
             Cond::DistToEdge(n) => n.matches(w.dist_to_edge),
             Cond::AngleAdjustLess => true,
             Cond::BodyFlipping => false,
+            Cond::DoneWipingOut => w.phys != phys::WIPEOUT,
             Cond::Fixed(v) => v,
             Cond::Unsupported(n) => {
                 self.s.unsupported(n);

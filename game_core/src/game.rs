@@ -443,7 +443,7 @@ impl Game {
                 let h = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
                 rider::time_to_land(s.pos.y - h, s.vel.y, s.tuning.gravity)
             });
-            let world = crate::graph::drive::Driver::world(s, land_in, g.input.idle());
+            let world = g.world(s, land_in, g.input.idle());
             let gates = crate::graph::input::Gates {
                 late_flips_blocked: s.trick.is_some_and(|t| t.progress() < 1.0),
                 finger_flips_blocked: s.grab.is_none(),

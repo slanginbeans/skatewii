@@ -13,7 +13,7 @@ use crate::gesture::Shape;
 use crate::input::Pad;
 use crate::motion::MotionDb;
 use crate::motion::NameId;
-use crate::skater::{GraphControl, Mode, Skater, Stance};
+use crate::skater::{GraphControl, GrindKind, Mode, Skater, Stance};
 use crate::tuning::Tuning;
 
 /// Motion-library names the driver reads from the playing clips.
@@ -41,7 +41,24 @@ pub struct Driver {
     jumping: bool,
     /// The motion state's path last tick (for edges).
     last_path: String,
+    /// The graph's grind names (`FS_50_50` ...) by [`GrindKind`] and side (backside, frontside).
+    grinds: [[Str; 2]; 11],
 }
+
+/// The graph's name for each of the physics' grinds (Skate 3's `IsGrinding` grindName values).
+const GRIND_NAMES: [(GrindKind, &str); 11] = [
+    (GrindKind::FiftyFifty, "50_50"),
+    (GrindKind::FiveO, "5_O"),
+    (GrindKind::Nosegrind, "NOSEGRIND"),
+    (GrindKind::Crooked, "CROOK"),
+    (GrindKind::Willy, "WILLY"),
+    (GrindKind::Feeble, "FEEBLE"),
+    (GrindKind::Smith, "SMITH"),
+    (GrindKind::Boardslide, "BOARD"),
+    (GrindKind::Lipslide, "LIP"),
+    (GrindKind::Noseslide, "NOSESLIDE"),
+    (GrindKind::Tailslide, "TAILSLIDE"),
+];
 
 impl Driver {
     /// `entry`: the `motion/graph` pack entry. `sets`: gesture files by name (`skater`, `skaterls`, ...).
@@ -53,6 +70,12 @@ impl Driver {
         let pack = Pack::parse(entry)?;
         let memory = pack.graphs.iter().map(|g| g.memory()).sum();
         let input = Intentions::new(&pack, sets);
+        let grinds = GRIND_NAMES.map(|(_, n)| {
+            ["BS_", "FS_"].map(|side| {
+                pack.find(&alloc::format!("{side}{n}"))
+                    .unwrap_or(super::NONE)
+            })
+        });
         let runner = Runner::new(pack, Some(db)).ok_or(Error::Bad)?;
         Ok(Driver {
             runner,
@@ -70,6 +93,7 @@ impl Driver {
             },
             jumping: false,
             last_path: String::new(),
+            grinds,
         })
     }
 
@@ -78,7 +102,7 @@ impl Driver {
     }
 
     /// What the graphs read of the skater.
-    pub fn world(s: &Skater, time_to_land: Option<f32>, idle: f32) -> World {
+    pub fn world(&self, s: &Skater, time_to_land: Option<f32>, idle: f32) -> World {
         let phys = match s.mode {
             Mode::Rolling => phys::GROUND,
             Mode::Air { .. } => phys::AIR,
@@ -106,6 +130,10 @@ impl Driver {
             com_vel: [s.slip, s.vel.y, s.speed],
             wants_runout: matches!(s.mode, Mode::Runout { .. }),
             wants_wipeout: matches!(s.mode, Mode::Bailed { .. }),
+            grind: s.grind.as_ref().map_or(super::NONE, |g| {
+                let k = GRIND_NAMES.iter().position(|n| n.0 == g.kind).unwrap_or(0);
+                self.grinds[k][usize::from(g.frontside)]
+            }),
             slide: s
                 .slide
                 .as_ref()
@@ -129,6 +157,13 @@ impl Driver {
         let r = &mut self.runner;
         self.input
             .produce(&r.pack, pad, gates, dt, &mut r.s.ag, &mut self.recognised);
+        // Back on the board after a wipeout or runout (flatground's physics decides when): start the
+        // graphs over, as Skate 3 does after a teleport.
+        let off = matches!(world.phys, phys::GROUND | phys::AIR)
+            && matches!(r.mg_state_root(), Some("WipeOut" | "Dismount" | "Default"));
+        if off {
+            r.reset(Some(db));
+        }
         r.s.world = world;
         r.update(Some(db), dt);
         self.cost_us = clock.map_or(0, |f| f()).wrapping_sub(t0);

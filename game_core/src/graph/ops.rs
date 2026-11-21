@@ -171,6 +171,8 @@ pub enum Cond {
     DistToEdge(Num),
     AngleAdjustLess,
     BodyFlipping,
+    /// The physics has finished the wipeout (the rider is back on the board).
+    DoneWipingOut,
     /// Conditions of systems flatground doesn't have, with the value they take here.
     Fixed(bool),
     Unsupported(Str),
@@ -481,7 +483,6 @@ const FIXED_FALSE: &[&str] = &[
     "ShouldPlayHandPlantAnim",
     "ShouldPrepareOneFootAirForFootplant",
     "IsArmChannelPlaying",
-    "IsDoneWipingOut",
     "LocoState",
     "OBTimeToLand",
     "OBTrajTime",
@@ -596,6 +597,7 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
         "DistToEdge" => Cond::DistToEdge(n()),
         "AngleAdjustByAnimationEndLessThan" => Cond::AngleAdjustLess,
         "IsBodyFlipping" => Cond::BodyFlipping,
+        "IsDoneWipingOut" => Cond::DoneWipingOut,
         "IsTimeToLand" => Cond::TimeToLand(n()),
         _ if FIXED_FALSE.contains(&name) => Cond::Fixed(false),
         _ if FIXED_TRUE.contains(&name) => Cond::Fixed(true),

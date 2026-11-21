@@ -21,8 +21,13 @@ const UP: (i8, i8) = (0, 92);
 
 /// The C-stick at `deg` degrees clockwise from straight forward, fully over.
 fn rim(deg: f32) -> (i8, i8) {
+    rim_at(deg, 80.0)
+}
+
+/// The C-stick at `deg` degrees, `r` raw units out (92: fully over, a Skate 3 wind-up).
+fn rim_at(deg: f32, r: f32) -> (i8, i8) {
     let a = deg * PI / 180.0;
-    ((sinf(a) * 92.0) as i8, (cosf(a) * 92.0) as i8)
+    ((sinf(a) * r) as i8, (cosf(a) * r) as i8)
 }
 
 impl KickerRun {
@@ -105,7 +110,13 @@ impl TrickTour {
     /// A wind-up then a flick: holds `hold` until the rider is wound up (with Skate 3's state graphs,
     /// until its motion graph is in the anticipation cycle; else for 10 ticks), then plays `flick` one
     /// position per tick and holds the last.
-    fn wind_and_flick(&mut self, game: &Game, hold: (i8, i8), flick: &[(i8, i8)]) -> (i8, i8) {
+    fn wind_and_flick(
+        &mut self,
+        game: &Game,
+        hold: (i8, i8),
+        ticks: u32,
+        flick: &[(i8, i8)],
+    ) -> (i8, i8) {
         if self.flick_at == 0 {
             self.wind += 1;
             let ready = match &game.graph {
@@ -113,7 +124,7 @@ impl TrickTour {
                     let st = g.runner.motion_state();
                     st.contains("AnticCyc") || (self.wind > 120 && st.contains("Anticipation"))
                 }
-                None => self.wind >= 10,
+                None => self.wind >= ticks,
             };
             if !ready {
                 return hold;
@@ -149,7 +160,12 @@ impl TrickTour {
             self.phase,
             Tour::Kicker | Tour::Carve | Tour::HalfCabAir | Tour::Powerslide | Tour::BailAir
         );
-        if rolling && s.speed > 4.5 && !matches!(self.phase, Tour::Kicker | Tour::Powerslide) {
+        // (Not in the manual: a foot brake would take the rider out of it.)
+        if rolling
+            && s.speed > 4.5
+            && !matches!(self.phase, Tour::Kicker | Tour::Powerslide)
+            && !(self.phase == Tour::Manual && self.t >= 40)
+        {
             pad.buttons |= btn::X;
         }
         if rolling && !busy_stick && (s.pos.x.abs() > 6.0 || s.pos.z.abs() > 9.0) {
@@ -189,23 +205,27 @@ impl TrickTour {
                 }
             }
             Tour::Manual => {
-                // Hold the C-stick lightly back and keep the balance marker centred.
-                let b = s.manual.map_or(0.0, |m| m.balance);
-                let push = (0.35 - 1.2 * b).clamp(0.02, 0.98);
-                let gesture_y = 0.1 + push * 0.8;
-                // Undo the stick conditioning: 0.25 dead zone, full at 0.95 of the C-stick's range.
-                pad.cstick_y = -((gesture_y * 0.7 + 0.25) * crate::input::C_RANGE) as i8;
-                if s.speed < 3.0 && s.manual.is_none() {
-                    pad.buttons |= btn::A;
+                // Push up first, then hold the C-stick lightly back (below full: a full stick is a
+                // wind-up) and keep the balance marker centred.
+                if self.t < 40 {
+                    if s.speed < 3.0 && s.manual.is_none() {
+                        pad.buttons |= btn::A;
+                    }
+                } else {
+                    let b = s.manual.map_or(0.0, |m| m.balance);
+                    let push = (0.35 - 1.2 * b).clamp(0.02, 0.98);
+                    let gesture_y = 0.1 + push * 0.8;
+                    // Undo the stick conditioning: 0.25 dead zone, full at 0.95 of the C-stick's range.
+                    pad.cstick_y = -((gesture_y * 0.7 + 0.25) * crate::input::C_RANGE) as i8;
                 }
-                if self.t > 110 {
+                if self.t > 150 {
                     next(self, Tour::GrabOllie);
                 }
             }
             Tour::GrabOllie => {
                 // Load, then flick straight up.
                 if self.t > 8 {
-                    (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, &[UP]);
+                    (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, 10, &[UP]);
                 }
                 if !rolling {
                     next(self, Tour::GrabAir);
@@ -228,7 +248,8 @@ impl TrickTour {
                 if self.t > 50 {
                     (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(
                         game,
-                        rim(260.0),
+                        rim_at(260.0, 92.0),
+                        4,
                         &[rim(215.0), rim(165.0), (39, -19), rim(65.0)],
                     );
                 }
@@ -246,7 +267,7 @@ impl TrickTour {
                     pad.buttons |= btn::A;
                 }
                 if self.t > 50 {
-                    (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, &[UP]);
+                    (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, 10, &[UP]);
                 }
                 if !rolling {
                     next(self, Tour::HalfCabAir);
@@ -302,7 +323,7 @@ impl TrickTour {
                     pad.buttons |= btn::A;
                 }
                 if self.t > 50 {
-                    (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, &[UP]);
+                    (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, 10, &[UP]);
                 }
                 if !rolling {
                     next(self, Tour::BailAir);
