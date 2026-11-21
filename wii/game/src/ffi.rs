@@ -63,6 +63,8 @@ unsafe extern "C" {
     pub fn fg_aspect() -> f32;
     pub fn fg_time_us() -> u32;
     pub fn fg_load_file(path: *const c_char, size: *mut u32) -> *mut u8;
+    pub fn fg_free_file(data: *mut u8);
+    pub fn fg_save_file(path: *const c_char, data: *const u8, size: u32) -> i32;
     pub fn fg_panic(msg: *const u8, len: u32) -> !;
     pub fn fg_log(line: *const u8, len: u32, important: i32);
     pub fn fg_frame_stats(out: *mut FgFrameStats);

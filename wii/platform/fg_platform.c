@@ -330,6 +330,23 @@ void *fg_load_file(const char *path, uint32_t *size) {
     return buf;
 }
 
+void fg_free_file(void *data) {
+    free(data);
+}
+
+int32_t fg_save_file(const char *path, const void *data, uint32_t size) {
+    if (!mount()) {
+        return -1;
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    int ok = fwrite(data, 1, size, f) == size;
+    ok = (fclose(f) == 0) && ok;
+    return ok ? 0 : -1;
+}
+
 void fg_draw_2d(const FgVertex *verts, uint32_t count) {
     if (!in_2d) {
         Mtx44 ortho;

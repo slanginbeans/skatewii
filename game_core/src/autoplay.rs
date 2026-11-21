@@ -1396,6 +1396,15 @@ impl Autoplay {
         core::mem::take(&mut self.restart)
     }
 
+    /// The rider was moved to another location: the tour starts over there (from its spawn) after a short
+    /// rest.
+    pub fn new_location(&mut self) {
+        self.tour = TrickTour::new();
+        self.shown = "";
+        self.restart = false;
+        self.rest = 60;
+    }
+
     /// Where the tour wants the rider put (the caller does it: `Game::place_rider`).
     pub fn take_place(&mut self) -> Option<Placement> {
         self.tour.take_place()

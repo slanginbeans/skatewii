@@ -24,6 +24,7 @@ pub mod graph;
 pub mod hud;
 pub mod input;
 pub mod math;
+pub mod menu;
 pub mod model;
 pub mod motion;
 pub mod pack;
