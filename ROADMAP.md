@@ -77,7 +77,16 @@ content second.
   (late/finger/under flips, dark catches, multi-flips up to 4, landings from the clips' danger zone);
   operations typed at import (graph load 217 ms -> 13 ms on the Wii); simultaneous gestures in SK8's
   hash-bucket order; the trick tour does all of it in Dolphin
-- [ ] Graph runner, next: CalcLandingQuality and landing types from the landing behaviours, the push speed
+- [x] Graph runner, riding animation: SK8's SetTurning on the physics' animation turn conditioner (carve
+  lean, direction, quickness, holding, speed tuck), body tilt (`TILT_X`), Crouching and the centre-of-mass
+  height (`DISTTOCOG`, trigger crouch, auto pump), landing data, manual angle, all with disc tuning through
+  the rules pack; the rider stands upright riding straight and leans into carves (it sat in the full carve
+  lean, its blend parameters never set); trees played with unset parameters are logged and placed at the
+  neutral point; the no-op operations audited (docs/graph-runner.md); a GameCube trigger dead zone;
+  `TrucksOrDeckInContact` from the physics (grabs no longer wiped out the graph while the physics landed)
+- [ ] Graph runner, next: the pose parameters still unset (pump channel, air leg extension `EXTEND`, late
+  shove-it deck pitch/yaw, push out distance, powerslide spin/decel, grab tweaks, wipeout lean/twist, grind
+  crouch/twist, bumps), CalcLandingQuality and landing types from the landing behaviours, the push speed
   from the posed clips' trajectory, SK8's manual PID (PhysicsWantsManualExit), character gestures (d-pad)
   and shoves, grind trick-outs by grind type (needs the grind physics of phase 6), camera shots from the
   graph (phase 7)
