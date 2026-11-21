@@ -75,6 +75,11 @@ const FAKIE_GRACE: f32 = 1.0;
 const SWITCH_TURN_TIME: f32 = 0.15;
 /// A push press is remembered this long while the button is held (Skate 3's new-push window).
 const PUSH_MEMORY: f32 = 0.3;
+/// How fast the board follows the animated centre of mass in the air: the share of the gap closed a
+/// tick (SK8's rider body is physical and follows its animation; fit to its ollies' COM over the deck).
+const AIR_LEGS_FOLLOW: f32 = 0.15;
+/// The posed board lifted this far (m) means the pop's tail strike has started.
+const POP_LIFT_MIN: f32 = 0.002;
 /// A repeated push puts the foot down this long after the re-push point (s, ours).
 const PUSH_REPEAT_DOWN: f32 = 0.1;
 /// Powerslides: the board angle eases at this rate (rad/s, ours); a held slide relaxes after this long
@@ -810,6 +815,13 @@ pub struct Skater {
     flipped: Option<(bool, u32)>,
     /// A graph-driven push in contact: the speed it started at, the speed it chases, seconds left.
     graph_push: Option<(f32, f32, f32)>,
+    /// With the imported rider: the rider's centre-of-mass height over the board (m). It is the
+    /// animation's while riding; from the pop's tail strike and in the air the body follows its
+    /// animation only so fast (SK8's rider is physical). And in the air, its height at take-off.
+    body_com: Option<f32>,
+    air_com: Option<f32>,
+    /// How far the legs have lifted the board over the flight's path (m, world up).
+    pub air_lift: f32,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -823,6 +835,13 @@ pub struct GraphControl {
     /// `push_target` is the posed trajectory's speed (Skate 3's): it holds this tick only, as SK8's
     /// push contact does; else the push sets' end speed, held for the contact's length.
     pub push_posed: bool,
+    /// The animated centre of mass's height over the posed board (m, the rider's last pose; SK8
+    /// `com_to_deck`): what a jump pops from and, in the air, how far the legs have tucked the board
+    /// up. `None` without the imported rider.
+    pub pose_com: Option<f32>,
+    /// How far the posed board's centre is lifted off its riding height (m): the pop's tail strike
+    /// pitches it up about its back wheels before the jump.
+    pub pose_lift: f32,
     /// A brake clip's foot is down (`BRAKE_CONTACT`): only then does the foot brake slow the board.
     pub brake_contact: bool,
     /// The takeoff clip reached its jump: pop now, as this trick, at this strength (0..1).
@@ -1032,6 +1051,9 @@ impl Skater {
             body_flip: None,
             flipped: None,
             graph_push: None,
+            body_com: None,
+            air_com: None,
+            air_lift: 0.0,
             wallride: None,
             checkpoints: Checkpoints::default(),
             riding_ticks: 0,
@@ -1113,6 +1135,12 @@ impl Skater {
 
     pub fn is_airborne(&self) -> bool {
         matches!(self.mode, Mode::Air { .. })
+    }
+
+    /// The deck's centre: over the board's contact point, lifted in the air as far as the legs have
+    /// tucked the board up.
+    pub fn deck(&self) -> Vec3 {
+        self.pos + self.normal * DECK_HEIGHT + Vec3::UP * self.air_lift
     }
 
     /// The board's frame in the world: right, up (the surface normal or the board's own up in the air),
@@ -1301,7 +1329,19 @@ impl Skater {
         };
         if !self.is_airborne() {
             self.body.ground(self.spin_input(pad));
+            self.air_com = None;
+            self.air_lift = 0.0;
         }
+        // The rider's body over the board: the animation's while riding; following it only so fast
+        // once the pop's tail strike starts (SK8's GroundAnimation) and in the air.
+        self.body_com = match (self.graph.and_then(|g| g.pose_com), self.body_com) {
+            (Some(c), Some(d))
+                if self.is_airborne() || self.graph.is_some_and(|g| g.pose_lift > POP_LIFT_MIN) =>
+            {
+                Some(d + (c - d) * (AIR_LEGS_FOLLOW * dt * 60.0).min(1.0))
+            }
+            (c, _) => c,
+        };
         if self.graph.is_some_and(|g| g.wipeout)
             && matches!(self.mode, Mode::Rolling | Mode::Air { .. })
         {
@@ -2116,9 +2156,24 @@ impl Skater {
     fn pop(&mut self, f: Flick, strength: f32, stick: [f32; 2], events: &mut Vec<Event>) {
         self.end_manual(events);
         let h = self.tuning.jump_height(strength, self.speed);
-        self.vel = self.pop_velocity(self.pop_speed(h), stick);
+        // Skate 3 pops the centre of mass from where the animation has it at the jump (SK8
+        // ground_jump `animation_com_position`): over the deck, which the tail strike has already
+        // pitched up off its riding height. Without the imported rider, from `AbsoluteMinHeight`.
+        let posed = self
+            .graph
+            .and_then(|g| Some((self.body_com.or(g.pose_com)?, g.pose_lift)));
+        let speed = match posed {
+            Some((com, lift)) => {
+                let now = DECK_HEIGHT - WHEEL_RADIUS + lift + com;
+                sqrtf((2.0 * self.tuning.gravity * (h - now)).max(0.0))
+            }
+            None => self.pop_speed(h),
+        };
+        self.vel = self.pop_velocity(speed, stick);
         let on_vert = self.contact_n.y < self.tuning.vert_align_max_ny;
-        self.pos += self.contact_n * 0.02;
+        // The flight starts from the lifted deck.
+        let lift = posed.map_or(0.0, |p| p.1);
+        self.pos += self.contact_n * (0.02 + lift);
         self.take_off(Some(f));
         self.takeoff.on_vert = on_vert;
         self.takeoff.lean = stick[1];
@@ -2163,6 +2218,8 @@ impl Skater {
             lean: 0.0,
         };
         self.trick = f.map(ActiveTrick::new);
+        self.air_com = self.body_com;
+        self.air_lift = 0.0;
     }
 
     /// The landing prediction (SK8 PhysicsAir / trajectory selector): while no landing is known, a
@@ -2287,6 +2344,11 @@ impl Skater {
         self.spin_rate = spin;
         self.spin += turn;
         self.fwd = rotate(self.fwd, self.normal, turn);
+        // The legs: the board follows the animated centre of mass's height over it, as fast as the
+        // rider's body follows its animation (SK8's physical rider; measured, 0.15 of the gap a tick).
+        if let (Some(c0), Some(d)) = (self.air_com, self.body_com) {
+            self.air_lift = c0 - d;
+        }
         if let Some(g) = self.graph {
             self.follow_graph_trick(&g);
         } else if let Some(tr) = &mut self.trick {
@@ -2629,6 +2691,8 @@ impl Skater {
     /// surface is kept (gaining on transitions), and the landing is classified as Skate 3 does.
     fn land(&mut self, normal: Vec3, surface: u16, air_time: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
+        self.air_com = None;
+        self.air_lift = 0.0;
         let n = normal.normalize_or(Vec3::UP);
         let vt = self.vel - n * self.vel.dot(n);
         // A body flip ends with the landing: its turn baked into the board, which has to come down on

@@ -171,3 +171,77 @@ fn held_pushes_chase_the_posed_trajectory_speed() {
     let t = to_8.expect("reaches 8 m/s");
     assert!((t - 2.63).abs() < 0.1, "{t} s to 8 m/s (SK8 2.63)");
 }
+
+/// Winds an ollie up for `hold` ticks at 6 m/s and flies it: (peak deck height over the riding deck,
+/// seconds off the ground, the largest drop of the drawn board between two ticks around take-off).
+fn ollie(hold: u32) -> Option<(f32, f32, f32)> {
+    let mut g = imported_game("ollie")?;
+    g.place_rider(v3(-16.0, 0.0, -17.0), 0.0, 6.0);
+    for _ in 0..90 {
+        g.update(&held(0), TICK);
+    }
+    let base = g.skater.deck().y;
+    let (mut peak, mut air, mut drop) = (base, 0u32, 0.0f32);
+    let mut last = g.drawn_board().y;
+    for p in 0..150 {
+        let c = game_core::input::C_RANGE as i8;
+        let cstick_y = if p < hold {
+            -c
+        } else if p < hold + 5 {
+            c
+        } else {
+            0
+        };
+        g.update(
+            &PadRaw {
+                flags: flag::CONNECTED,
+                cstick_y,
+                ..Default::default()
+            },
+            TICK,
+        );
+        if g.skater.is_airborne() {
+            air += 1;
+            peak = peak.max(g.skater.deck().y);
+        }
+        let now = g.drawn_board().y;
+        if (hold..hold + 20).contains(&p) {
+            drop = drop.max(last - now);
+        }
+        last = now;
+    }
+    Some((peak - base, air as f32 * TICK, drop))
+}
+
+#[test]
+fn ollies_pop_the_body_and_the_legs_lift_the_board() {
+    // SK8 at 6 m/s: a quick ollie's deck peaks 0.50 m up after 0.53 s off the ground, a wound-up one
+    // 1.16 m after 0.72 s: the jump pops the animated centre of mass (crouched, over a deck the tail
+    // strike has pitched up) and the board flies under it as far down as the tucked legs hold it.
+    // Popped from `AbsoluteMinHeight` with the board on the body's path it was 0.40 and 0.78 m.
+    let Some((quick, quick_air, quick_drop)) = ollie(4) else {
+        return;
+    };
+    let (high, high_air, high_drop) = ollie(40).unwrap();
+    assert!(
+        (quick - 0.50).abs() < 0.07,
+        "quick ollie deck {quick} m (SK8 0.50)"
+    );
+    assert!(
+        (high - 1.16).abs() < 0.1,
+        "wound-up deck {high} m (SK8 1.16)"
+    );
+    assert!(
+        (quick_air - 0.53).abs() < 0.05,
+        "quick {quick_air} s (SK8 0.53)"
+    );
+    assert!(
+        (high_air - 0.72).abs() < 0.06,
+        "wound up {high_air} s (SK8 0.72)"
+    );
+    // The flight starts from the deck the pop lifted: the drawn board doesn't fall back at take-off.
+    assert!(
+        quick_drop.max(high_drop) < 0.03,
+        "board dropped {quick_drop} / {high_drop} m"
+    );
+}

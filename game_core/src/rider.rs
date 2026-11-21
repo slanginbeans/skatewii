@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use crate::character::{Character, Local};
 use crate::gesture::{Flick, Trick};
 use crate::gfx::SUN;
-use crate::math::{Mat3, PI, sqrtf, v3};
+use crate::math::{Mat3, PI, Vec3, sqrtf, v3};
 use crate::skater::{GrabKind, GrindKind, LandKind, Landing, Mode, Skater};
 
 /// Crossfade time between clips (s).
@@ -408,8 +408,42 @@ pub fn lean(s: &Skater, base: &str, has: &dyn Fn(&str) -> bool) -> Option<(&'sta
     (w > 0.02 && has(role)).then_some((role, w))
 }
 
+/// Skate 3's animated centre of mass (SK8 skeleton_animation_record.rs `update`, the weights of
+/// `SkeletonAnimationMasses::from_bone_data`): each physical part's centre, its bone's pose moved by the
+/// part's frame (along the bone), weighted by the part's share of the rider's bone-box volume. The
+/// stock rider's 23 body parts (the board, part 0, weighs nothing).
+const COM_PARTS: [(&str, f32, f32); 23] = [
+    ("NECK1", 0.0642, 0.1137),
+    ("NECK", 0.0096, 0.0317),
+    ("LEFTHAND", 0.0041, 0.0861),
+    ("LEFTFOREARM", 0.0204, 0.1187),
+    ("LEFTARM", 0.0383, 0.1446),
+    ("LEFTSHOULDER", 0.0181, 0.0852),
+    ("RIGHTHAND", 0.0041, 0.0861),
+    ("RIGHTFOREARM", 0.0204, 0.1154),
+    ("RIGHTARM", 0.0373, 0.1417),
+    ("RIGHTSHOULDER", 0.0181, 0.0852),
+    ("SPINE3", 0.0948, 0.0727),
+    ("SPINE2", 0.0857, 0.0627),
+    ("SPINE1", 0.0713, 0.0552),
+    ("SPINE", 0.0726, 0.0492),
+    ("LEFTTOEBASE", 0.0038, 0.0320),
+    ("LEFTFOOT", 0.0124, 0.0817),
+    ("LEFTLEG", 0.0625, 0.2040),
+    ("LEFTUPLEG", 0.0821, 0.2120),
+    ("RIGHTTOEBASE", 0.0038, 0.0320),
+    ("RIGHTFOOT", 0.0124, 0.0817),
+    ("RIGHTLEG", 0.0625, 0.2040),
+    ("RIGHTUPLEG", 0.0821, 0.2120),
+    ("HIPS", 0.1193, 0.0),
+];
+
 pub struct Rider {
     pub character: Character,
+    /// The animated centre of mass's parts found on this skeleton (bone, weight, offset along the
+    /// bone), and the board's bone.
+    com_parts: Vec<(usize, f32, f32)>,
+    board_bone: Option<usize>,
     cur: Pick,
     /// The clip faded out from, frozen where it was left.
     prev: Option<Pick>,
@@ -459,7 +493,14 @@ impl Rider {
             names.iter().filter_map(|b| character.bone(b)).collect()
         };
         let (head_bones, torso_bones) = (find(&FAKIE_HEAD), find(&FAKIE_TORSO_BONES));
+        let com_parts: Vec<(usize, f32, f32)> = COM_PARTS
+            .iter()
+            .filter_map(|&(name, w, along)| Some((character.bone(name)?, w, along)))
+            .collect();
+        let board_bone = character.bone("SKATEBOARD_ROOT");
         let mut r = Rider {
+            com_parts,
+            board_bone,
             character,
             cur: Pick {
                 role: "idle",
@@ -555,6 +596,41 @@ impl Rider {
             Some([t[2] - b[2], t[1] - b[1]])
         };
         Some([foot("LEFTFOOT")?, foot("RIGHTFOOT")?])
+    }
+
+    /// The posed board's centre (`SKATEBOARD_ROOT`) in the character's space, from the last pose.
+    pub fn board_in_character(&self) -> Option<Vec3> {
+        let b = self.character.world().get(self.board_bone?)?[3];
+        Some(v3(b[0], b[1], b[2]))
+    }
+
+    /// How high the animated centre of mass is over the posed board's centre (m, along the posed
+    /// board's up), from the last pose: SK8's `com_to_deck` (skeleton_animation_record.rs). About 0.98 riding,
+    /// 0.6 crouched to pop, 0.5 with the legs tucked in the air. `None` without the stock skeleton.
+    pub fn com_above_board(&self) -> Option<f32> {
+        if self.com_parts.len() < COM_PARTS.len() {
+            return None;
+        }
+        let w = self.character.world();
+        let board = w.get(self.board_bone?)?;
+        let mut com = [0.0f32; 3];
+        for &(bone, weight, along) in &self.com_parts {
+            let m = w.get(bone)?;
+            for (i, c) in com.iter_mut().enumerate() {
+                *c += (m[3][i] + m[0][i] * along) * weight;
+            }
+        }
+        // Along the posed board's up (SK8's `com_to_deck` is in the board's frame); a flip turns the
+        // posed board over under the rider, and then along the character's up (the physical board's).
+        let rel = [
+            com[0] - board[3][0],
+            com[1] - board[3][1],
+            com[2] - board[3][2],
+        ];
+        let up = board[1];
+        let along_board: f32 = (0..3).map(|i| rel[i] * up[i]).sum();
+        let k = ((up[1] - 0.3) / 0.4).clamp(0.0, 1.0);
+        Some(rel[1] + (along_board - rel[1]) * k)
     }
 
     /// `turned`: the board's frame is turned end for end now (`Skater::frame_turned`); a tree started

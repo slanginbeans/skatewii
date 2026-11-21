@@ -662,6 +662,10 @@ impl Game {
                     control.push_posed = true;
                 }
             }
+            if let Some(r) = &self.rider {
+                control.pose_com = r.com_above_board();
+                control.pose_lift = (r.board_rest_height() - crate::skater::DECK_HEIGHT).max(0.0);
+            }
             self.skater.graph = Some(control);
             self.times.graph_us = g.cost_us;
             if self.log.len() < LOG_CAP {
@@ -733,6 +737,21 @@ impl Game {
             Some(p) => blend_xform(&p.base, &cur, self.alpha),
             None => cur,
         }
+    }
+
+    /// The posed board's centre in the rider's space (the imported rider's last pose).
+    pub fn board_in_character(&self) -> Option<crate::math::Vec3> {
+        self.rider.as_ref().and_then(|r| r.board_in_character())
+    }
+
+    /// Where the drawn board's centre is (the posed `SKATEBOARD_ROOT` placed in the world), with the
+    /// imported rider; else the physics board's deck.
+    pub fn drawn_board(&self) -> crate::math::Vec3 {
+        let x = self.imported_xform();
+        self.rider
+            .as_ref()
+            .and_then(|r| r.board_in_character())
+            .map_or(x.pos, |b| x.point(b))
     }
 
     /// The camera to draw with (blended like the skater).
@@ -845,6 +864,7 @@ impl Game {
         // Riding, the board's lowest wheel on the ground (a manual's pitch lifts the deck).
         let height = match (&self.rider, self.skater.mode) {
             (Some(r), Mode::Rolling) => r.board_rest_height() + self.wheel_lift(&base),
+            (_, Mode::Air { .. }) => crate::skater::DECK_HEIGHT + self.skater.air_lift,
             _ => crate::skater::DECK_HEIGHT,
         };
         base.then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
