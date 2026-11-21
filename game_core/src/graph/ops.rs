@@ -171,6 +171,8 @@ pub enum Cond {
     DistToEdge(Num),
     AngleAdjustLess,
     BodyFlipping,
+    /// IsBumped: the board's acceleration along the ground past the bump size.
+    Bumped,
     /// The physics has finished the wipeout (the rider is back on the board).
     DoneWipingOut,
     /// Conditions of systems flatground doesn't have, with the value they take here.
@@ -350,6 +352,36 @@ pub enum Beh {
         angle: Str,
     },
     BodyFlippingSignal,
+    /// Pumping (SK8 pumping_channel.rs): pump layers (`B_PUMP` on channels) whose weight follows the
+    /// physics' pumping.
+    Pumping,
+    /// PowerSlideSpin: the slide tree's spin (`slidespin`) from the travel along the board, on begin.
+    SlideSpin(Option<NameId>),
+    /// PowerSlideDecel: the slide tree's lean (`decel`) from the speed along the ground, smoothed.
+    SlideDecel(Option<NameId>),
+    /// SetBumpCoefficients: the bump trees' direction and weight from the board's bump (`X`, `Y`).
+    BumpCoefs {
+        x: Option<NameId>,
+        y: Option<NameId>,
+    },
+    /// MatchTwistAndLean: the body's twist and lean as tree parameters (on begin, or every update with
+    /// `update="always"`).
+    TwistLean {
+        always: bool,
+        twist: Option<NameId>,
+        lean: Option<NameId>,
+    },
+    /// Wipeout: the bail trees' lean, twist and the stick's wipeout gesture, rate-limited.
+    Wipeout {
+        lean: Option<NameId>,
+        twist: Option<NameId>,
+        gesture_x: Option<NameId>,
+        gesture_y: Option<NameId>,
+    },
+    /// EnableWipeoutGestures: the stick steers the wipeout gesture while it runs.
+    WipeoutGestures,
+    /// CharacterGesture: the d-pad's gestures on the gesture channels.
+    CharacterGesture,
     /// BodySpin (SK8 motion_spin.rs): the body spin channels (`IA_BODYSPIN_OLLIE_FS/BS`) over the air
     /// animation, their influence from the `BodySpin` intent.
     BodySpin,
@@ -565,7 +597,6 @@ const FIXED_FALSE: &[&str] = &[
     "OBTimeToLand",
     "OBTrajTime",
     "MongoPushFootToFar",
-    "IsBumped",
     "IsProSkater",
     "IsLandingIntoGrind",
     "WipeoutTimeSinceContact",
@@ -675,6 +706,7 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
         "DistToEdge" => Cond::DistToEdge(n()),
         "AngleAdjustByAnimationEndLessThan" => Cond::AngleAdjustLess,
         "IsBodyFlipping" => Cond::BodyFlipping,
+        "IsBumped" => Cond::Bumped,
         "IsDoneWipingOut" => Cond::DoneWipingOut,
         "IsTimeToLand" => Cond::TimeToLand(n()),
         _ if FIXED_FALSE.contains(&name) => Cond::Fixed(false),
@@ -690,17 +722,13 @@ const NOTHING: &[&str] = &[
     "JuiceHook",
     "HandBusy",
     "EndGesture",
-    "CharacterGesture",
     "SetScoreAugmentation",
-    "MatchTwistAndLean",
-    "Pumping",
     "BipedCadence",
     "MatchCadence",
     "MatchAirTime",
     "OffboardBodyTweakBlend",
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
-    "SetBumpCoefficients",
     "UpdateIsWeightOnNose",
     "FootPlantAbsorb",
     "SetHandPlantAnticLength",
@@ -714,16 +742,12 @@ const NOTHING: &[&str] = &[
     "HippyJumpAntic",
     "LandOnBoard",
     "AddRunoutAttribs",
-    "Wipeout",
-    "EnableWipeoutGestures",
     "ToggleBoard",
     "ResetSkaterAnimation",
     "ResetToGivenStance",
     "EndShimmy",
     "FingerFlipOut",
-    "PowerSlideDecel",
     "PowerSlideManualAtt",
-    "PowerSlideSpin",
     "SetDeckPitch",
 ];
 /// Off-board and NPC behaviours flatground doesn't run (logged once as unsupported when reached).
@@ -945,6 +969,26 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
             angle: a.str("MGIntentAngle"),
         },
         "BodyFlippingSignal" => Beh::BodyFlippingSignal,
+        "Pumping" => Beh::Pumping,
+        "PowerSlideSpin" => Beh::SlideSpin(lib("slidespin")),
+        "PowerSlideDecel" => Beh::SlideDecel(lib("decel")),
+        "SetBumpCoefficients" => Beh::BumpCoefs {
+            x: lib(a.text("X").unwrap_or("BumpX")),
+            y: lib(a.text("Y").unwrap_or("BumpY")),
+        },
+        "MatchTwistAndLean" => Beh::TwistLean {
+            always: a.text("update") == Some("always"),
+            twist: lib("Twist"),
+            lean: lib("Lean"),
+        },
+        "Wipeout" => Beh::Wipeout {
+            lean: lib("Lean"),
+            twist: lib("Twist"),
+            gesture_x: lib("WipeoutGestureX"),
+            gesture_y: lib("WipeoutGestureY"),
+        },
+        "EnableWipeoutGestures" => Beh::WipeoutGestures,
+        "CharacterGesture" => Beh::CharacterGesture,
         "FakieHeadChannel" => Beh::FakieHead,
         "BodySpin" => Beh::BodySpin,
         "ControlAirLegExtension" => Beh::AirLegExtension(lib("EXTEND").or_else(|| lib("extend"))),
@@ -1030,4 +1074,25 @@ pub fn coverage<'a>(p: &Pack<'a>, ops: &[Op]) -> (usize, usize, Vec<&'a str>) {
         })
         .count();
     (ops.len() - unsupported - fixed, fixed, names)
+}
+
+/// The pump layer's tree.
+pub const PUMP_TREE: &str = "B_PUMP";
+/// The d-pad's gestures (left, right, up, down; flatground's choice from Skate 3's gesture catalogue,
+/// SK8 motion_character_gesture.rs) and their clips' stages: `<name>_BOTH_<INTO|CYC|OUT>`.
+pub const GESTURES: [&str; 4] = [
+    "B_GSTR_SHRUG",
+    "B_GSTR_PEACE",
+    "B_GSTR_SHAKA",
+    "B_GSTR_SURFSUP",
+];
+pub const GESTURE_STAGES: [&str; 3] = ["INTO", "CYC", "OUT"];
+
+/// A d-pad gesture's clip name for a stage.
+pub fn gesture_clip(direction: usize, stage: usize) -> alloc::string::String {
+    alloc::format!(
+        "{}_BOTH_{}",
+        GESTURES[direction.min(3)],
+        GESTURE_STAGES[stage.min(2)]
+    )
 }

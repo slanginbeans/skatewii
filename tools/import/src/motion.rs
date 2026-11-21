@@ -227,10 +227,22 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     }
     // Trees the runner plays by name rather than from a graph attribute: the fakie head and torso
     // channel (SK8 FakieHeadChannel).
-    for (name, ar) in [(FAKIE_CHANNEL, 0usize)] {
+    // The pump layer (Pumping) and the d-pad gestures' clips (CharacterGesture), last.
+    let mut named: Vec<(String, usize)> = vec![
+        (FAKIE_CHANNEL.to_string(), 0usize),
+        (game_core::graph::host::PUMP_TREE.to_string(), 0),
+    ];
+    for d in 0..4 {
+        for stage in 0..3 {
+            named.push((game_core::graph::host::gesture_clip(d, stage), AREAS.len()));
+        }
+    }
+    for (name, ar) in &named {
         if m.contains(name) {
-            let e = roots.entry(name.to_ascii_uppercase()).or_insert(ar);
-            *e = (*e).min(ar);
+            let e = roots.entry(name.to_ascii_uppercase()).or_insert(*ar);
+            *e = (*e).min(*ar);
+        } else if o.list {
+            println!("  (no {name} in the bank)");
         }
     }
     // Per area: the clips it needs that no earlier area brought in.

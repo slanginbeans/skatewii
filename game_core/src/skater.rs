@@ -22,6 +22,7 @@
 
 mod air;
 mod board;
+pub mod flip;
 mod grind;
 mod landing;
 mod respawn;
@@ -99,6 +100,8 @@ const MANUAL_POINTS_PER_S: f32 = 120.0;
 /// trigger at rest, so the physics and the graphs agree on when the rider grabs.
 const GRAB_TRIGGER: f32 = 0.0;
 const GRAB_POINTS: u32 = 200;
+/// Points per whole body flip turn (ours).
+const BODY_FLIP_POINTS: u32 = 600;
 const GRAB_POINTS_PER_S: f32 = 150.0;
 /// Both push buttons pressed within this of each other wind up a hippie jump.
 const HIPPY_CHORD: f32 = 0.08;
@@ -683,6 +686,9 @@ pub struct Skater {
     /// agree with `steer` (SK8 manager_subject.rs `steering_for_turn`).
     pub turn_input: f32,
     pub kick_input: f32,
+    /// The velocity's change over the last tick (m/s^2; bumps), and the velocity it was taken from.
+    pub accel: Vec3,
+    prev_vel: Vec3,
     /// The deck's tilt that turns the trucks (rad), and seconds since the wheels came down (the trucks'
     /// turn ramps back in).
     pub deck_tilt: f32,
@@ -755,6 +761,10 @@ pub struct Skater {
     /// What Skate 3's state graphs decided this tick, when they run (`crate::graph`); `None` rides on
     /// flatground's own rules.
     pub graph: Option<GraphControl>,
+    /// A body flip in the air (`skater::flip`), and the last one landed (front, whole turns) for the
+    /// landing's name.
+    pub body_flip: Option<flip::BodyFlip>,
+    flipped: Option<(bool, u32)>,
     /// A graph-driven push in contact: the speed it started at, the speed it chases, seconds left.
     graph_push: Option<(f32, f32, f32)>,
 }
@@ -799,6 +809,10 @@ pub struct GraphControl {
     /// The playing clips carry `Anticipating` (the ollie wind-up): Skate 3's camera reads it as
     /// `IsPreparingToJump`.
     pub anticipating: bool,
+    /// A body flip the graphs ask for (`FrontFlip`: true, `BackFlip`: false) and a grab held
+    /// (`Grabbing`, `WantsLeftAirGrab`, `WantsRightAirGrab`).
+    pub body_flip: Option<bool>,
+    pub grabbing: bool,
 }
 
 /// A trick the state graph is animating in the air.
@@ -926,6 +940,8 @@ impl Skater {
             steer: 0.0,
             turn_input: 0.0,
             kick_input: 0.0,
+            accel: Vec3::ZERO,
+            prev_vel: Vec3::ZERO,
             deck_tilt: 0.0,
             truck_ramp: 1.0,
             yaw_rate: 0.0,
@@ -961,6 +977,8 @@ impl Skater {
             bail_reason: None,
             last_landing: None,
             graph: None,
+            body_flip: None,
+            flipped: None,
             graph_push: None,
             wallride: None,
             checkpoints: Checkpoints::default(),
@@ -1182,6 +1200,10 @@ impl Skater {
         };
         self.crouch += (crouch - self.crouch) * smooth(18.0, dt);
         self.grind_pitch_input = pad.flick[1];
+        if dt > 0.0 {
+            self.accel = (self.vel - self.prev_vel) * (1.0 / dt);
+        }
+        self.prev_vel = self.vel;
         self.turn_input = steering(pad.stick).turn;
         self.kick_input = if self.kickturn.is_some() {
             self.turn_input
@@ -2034,6 +2056,7 @@ impl Skater {
         self.spin = 0.0;
         self.spin_rate = 0.0;
         self.plan = None;
+        self.body_flip = None;
         self.selector = air::Selector::default();
         self.takeoff = Takeoff {
             fakie: self.fakie,
@@ -2120,6 +2143,16 @@ impl Skater {
             None => air::physics_air_spin(&t, stick, now),
         };
         let spin = self.body.air(&t, stick, auto);
+        // A body flip: started, turned, and off when falling upside down without the grab.
+        if self.update_body_flip(now, dt) {
+            self.bail("fell upside down", events);
+            return;
+        }
+        let spin = if self.body_flip.is_some() {
+            spin * t.moves.flip_spin_scale
+        } else {
+            spin
+        };
 
         // The board's up towards the landing surface: arriving a few ticks before touchdown on a known
         // landing, else a share of the angle a tick (none past a limit).
@@ -2221,6 +2254,44 @@ impl Skater {
         }
     }
 
+    /// The side the rider faces (the toes): for a goofy rider riding normally the board's left
+    /// (up x nose), the other way when mirrored.
+    pub fn toe_side(&self) -> Vec3 {
+        let side = self.normal.cross(self.fwd).normalize_or(v3(1.0, 0.0, 0.0));
+        if self.mirrored() { -side } else { side }
+    }
+
+    /// The body flip's tick (SK8 KnownAir `CalculateBodyFlipSpeed`, Reckoning `UpdateBodyFlip`,
+    /// `CheckUpsideDownFallingWipeout`): starts with a flip asked for and a grab held once the known
+    /// flight is long enough, turns while the grab is held (or early on), slows let go. Returns whether
+    /// the rider is falling upside down without the grab (a bail).
+    fn update_body_flip(&mut self, now: f32, dt: f32) -> bool {
+        let m = self.tuning.moves;
+        let g = self.graph.unwrap_or_default();
+        let grabbing = g.grabbing || self.grab.is_some();
+        if self.body_flip.is_none()
+            && let (Some(front), true, Some(p)) = (g.body_flip, grabbing, &self.plan)
+            && p.contact.time > m.flip_start_time.eval(p.normal.y)
+        {
+            self.body_flip = Some(flip::BodyFlip::begin(self.normal, self.toe_side(), front));
+        }
+        let Some(mut f) = self.body_flip else {
+            return false;
+        };
+        let target = self.plan.as_ref().map_or(f.speed, |p| {
+            flip::BodyFlip::target_speed(&m, p.contact.time)
+        });
+        let requested = if grabbing || now < m.flip_min_grab_time {
+            target
+        } else {
+            0.0
+        };
+        f.update(&m, requested, dt);
+        self.body_flip = Some(f);
+        let landing_up = self.plan.as_ref().map_or(Vec3::UP, |p| p.normal);
+        !grabbing && flip::falling_upside_down(&m, f.apply(self.normal), landing_up)
+    }
+
     /// The name and points of the jump so far (without spin and grab), for grinds and landings.
     fn trick_label(&self) -> Option<(String, u32)> {
         if let Some(tr) = &self.trick {
@@ -2273,6 +2344,7 @@ impl Skater {
     }
 
     fn bail(&mut self, reason: &'static str, events: &mut Vec<Event>) {
+        self.body_flip = None;
         self.bail_reason = Some(reason);
         if self.mode == Mode::Grind || self.grind.is_some() {
             self.grind_exit = Some("wiped out");
@@ -2448,6 +2520,22 @@ impl Skater {
         let t = self.tuning;
         let n = normal.normalize_or(Vec3::UP);
         let vt = self.vel - n * self.vel.dot(n);
+        // A body flip ends with the landing: its turn baked into the board, which has to come down on
+        // its wheels (SK8 ResetBodyFlip).
+        self.flipped = None;
+        if let Some(f) = self.body_flip.take() {
+            if f.apply(self.normal).dot(n) < flip::LAND_MIN_DOT {
+                self.normal = n;
+                self.vel = vt;
+                self.bail("landed off the body flip", events);
+                return;
+            }
+            let (whole, rest) = f.turns();
+            let turns = whole + u32::from(rest > PI);
+            if turns > 0 {
+                self.flipped = Some((f.front, turns));
+            }
+        }
         let speed = vt.length();
         let impact = -self.vel.dot(n);
         let axis = tangent(self.fwd, n);
@@ -2546,7 +2634,18 @@ impl Skater {
         // Half-turns spun with the body, named frontside or backside for the rider's stance.
         let halves = libm::roundf(self.spin / PI) as i32;
         let grab = self.grabbed.take();
-        let label = self.trick_label();
+        let mut label = self.trick_label();
+        if let Some((front, turns)) = self.flipped.take() {
+            let flip = match (front, turns) {
+                (true, 1) => String::from("FRONTFLIP"),
+                (false, 1) => String::from("BACKFLIP"),
+                (true, n) => format!("{n}X FRONTFLIP"),
+                (false, n) => format!("{n}X BACKFLIP"),
+            };
+            let (name, points) =
+                label.map_or((flip.clone(), 0), |(l, p)| (format!("{flip} {l}"), p));
+            label = Some((name, points + BODY_FLIP_POINTS * turns));
+        }
         let fs = (halves as f32) * self.frontside_sign(self.takeoff.fakie) > 0.0;
         if let Some(name) = landed_name(
             self.stance_prefix(),
@@ -4797,6 +4896,64 @@ mod tests {
             k += 1;
         }
         (s, ev)
+    }
+
+    /// A long flight off flat ground with the graphs asking for a body flip; `grab(k)`: the grab held
+    /// on air tick `k`.
+    fn body_flip_air(front: bool, grab: impl Fn(u32) -> bool) -> (Skater, Vec<Event>, f32) {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 3.0;
+        s.pos.y = 0.05;
+        s.vel = v3(0.0, 6.5, 3.0);
+        s.mode = Mode::Air { time: 0.0 };
+        let mut ev = Vec::new();
+        let mut k = 0;
+        let mut most = 0.0f32;
+        while matches!(s.mode, Mode::Air { .. }) && k < 300 {
+            s.graph = Some(GraphControl {
+                body_flip: (k < 20).then_some(front),
+                grabbing: grab(k),
+                ..GraphControl::default()
+            });
+            ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+            if let Some(f) = &s.body_flip {
+                most = most.max(f.angle.abs());
+            }
+            k += 1;
+        }
+        (s, ev, most)
+    }
+
+    #[test]
+    fn a_held_back_flip_goes_round_and_lands() {
+        let (s, ev, most) = body_flip_air(false, |_| true);
+        assert!(most > 5.5, "turned {most} rad");
+        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
+        assert_eq!(s.mode, Mode::Rolling);
+        assert!(landed(&ev).iter().any(|n| n.contains("BACKFLIP")), "{ev:?}");
+        // The graphs see it (IsBodyFlipping) only while it turns.
+        assert!(s.body_flip.is_none());
+    }
+
+    #[test]
+    fn letting_go_of_a_flip_upside_down_bails() {
+        // The grab let go a third of the way round: it slows and the rider falls upside down.
+        let (_, ev, most) = body_flip_air(true, |k| k < 25);
+        assert!(most > 1.5 && most < 5.0, "{most}");
+        assert!(ev.contains(&Event::Bailed), "{ev:?}");
+        // Without a flip asked for, a grab alone doesn't flip.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.vel = v3(0.0, 6.5, 3.0);
+        s.pos.y = 0.05;
+        s.mode = Mode::Air { time: 0.0 };
+        s.graph = Some(GraphControl {
+            grabbing: true,
+            ..GraphControl::default()
+        });
+        steps(&mut s, &park, &Pad::default(), None, 30);
+        assert!(s.body_flip.is_none());
     }
 
     #[test]

@@ -396,6 +396,20 @@ impl Game {
 
     /// Puts the rider on the board at `pos` (on the ground there), heading `heading` (yaw), rolling at
     /// `speed`: for scripted runs (`autoplay`).
+    /// Puts the rider where a scripted run asks: on the ground ([`Game::place_rider`]), or in the air
+    /// moving along its heading and up at its lift.
+    pub fn place(&mut self, p: &crate::autoplay::Placement) {
+        if p.lift <= 0.0 {
+            self.place_rider(p.pos, p.heading, p.speed);
+            return;
+        }
+        self.place_rider(p.pos, p.heading, 0.0);
+        let s = &mut self.skater;
+        s.pos = p.pos;
+        s.vel = crate::math::yaw_dir(p.heading) * p.speed + crate::math::Vec3::UP * p.lift;
+        s.mode = Mode::Air { time: 0.0 };
+    }
+
     pub fn place_rider(&mut self, pos: crate::math::Vec3, heading: f32, speed: f32) {
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
         self.skater.put_at(ground, pos, heading, speed);
@@ -510,13 +524,20 @@ impl Game {
             let s = &self.skater;
             // The known landing's time (the trajectory selector), else straight down.
             let land_in = matches!(s.mode, Mode::Air { .. }).then(|| s.time_to_land(ground));
-            let world = g.world(s, land_in, g.input.idle());
+            let mut world = g.world(s, land_in, g.input.idle());
+            if let Some(f) = self.rider.as_ref().and_then(|r| r.feet()) {
+                world.feet = f;
+            }
+            if matches!(s.mode, Mode::Bailed { .. }) {
+                world.wipe_stick = Some(pad.stick);
+            }
             let gates = crate::graph::input::Gates {
                 late_flips_blocked: s.trick.is_some_and(|t| t.progress() < 1.0),
                 finger_flips_blocked: s.grab.is_none(),
                 reverts_blocked: false,
                 grinding: s.mode == Mode::Grind,
-                ..Default::default()
+                grabbing: pad.trig_l > 0.0 || pad.trig_r > 0.0,
+                pushing: pad.held & (crate::input::btn::A | crate::input::btn::B) != 0,
             };
             g.tick(&lib.db, &pad, world, gates, dt, self.timer);
             self.skater.graph = Some(g.control(&lib.db, &self.tuning));
@@ -654,6 +675,13 @@ impl Game {
         let frame = s.board_frame();
         let up = frame.cols[1];
         let nose = crate::skater::rotate(frame.cols[2], up, extra);
+        // A body flip turns board and rider about the centre of mass.
+        if let Some(f) = &s.body_flip {
+            let pivot = s.pos + up * crate::skater::flip::PIVOT;
+            let (up, nose) = (f.apply(up), f.apply(nose));
+            let pos = pivot + f.apply(s.pos - pivot);
+            return Xform::new(Mat3::from_cols(up.cross(nose), up, nose), pos);
+        }
         Xform::new(Mat3::from_cols(up.cross(nose), up, nose), s.pos)
     }
 

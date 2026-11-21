@@ -344,6 +344,12 @@ impl Park {
                 max: v3(-2.5, 0.18, 9.5),
                 rgba: CONCRETE
             },
+            // A flat bar (a thin rail on posts), by the funbox.
+            Shape::Block {
+                min: v3(3.97, 0.0, 10.0),
+                max: v3(4.03, 0.35, 16.0),
+                rgba: STEEL
+            },
             // Bank against the east wall.
             Shape::Ramp {
                 min: v3(14.0, 0.0, -10.0),
@@ -364,7 +370,9 @@ impl Park {
         };
         // Along the long ledge's edge facing the park (a ledge: its top is the high side).
         let rail = Rail::new(alloc::vec![v3(-9.4, 0.4, -6.0), v3(-9.4, 0.4, 6.0)]);
-        park.rails = alloc::vec![rail.classified(&park)];
+        // Along the flat bar's top (a thin rail).
+        let bar = Rail::new(alloc::vec![v3(4.0, 0.35, 10.0), v3(4.0, 0.35, 16.0)]);
+        park.rails = alloc::vec![rail.classified(&park), bar.classified(&park)];
         park
     }
 

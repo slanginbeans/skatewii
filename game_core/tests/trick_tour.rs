@@ -18,7 +18,7 @@ fn trick_tour_does_every_move() {
     for _ in 0..(60 * 60) {
         let pad = script.next(&game);
         if let Some(p) = script.take_place() {
-            game.place_rider(p.pos, p.heading, p.speed);
+            game.place(&p);
         }
         game.update(&pad, 1.0 / 60.0);
         seen.extend(game.events.iter().cloned());
@@ -87,5 +87,8 @@ fn trick_tour_does_every_move() {
         script.seen
     );
     assert!(has(" 5-0"), "{names:?}");
+    // The demo park's flat bar (a thin rail): ground to its end, not leaned off.
+    assert!(script.seen.handrail, "{:?} {names:?}", script.seen);
+    assert!(has("50-50") || has("5-0"), "{names:?}");
     assert_eq!(seen.last(), Some(&Event::Bailed), "{seen:?}");
 }

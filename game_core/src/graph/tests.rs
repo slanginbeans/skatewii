@@ -437,6 +437,78 @@ mod runner {
         assert!(r.coverage().2.is_empty());
     }
 
+    /// An action graph running BodyFlippingSignal and a motion graph with a state held by
+    /// `IsBodyFlipping`, and the flip intents attached for the physics.
+    fn flip_graphs() -> Vec<u8> {
+        let action = st(
+            "Action",
+            &[],
+            vec![Element::of(
+                "behaviour",
+                &[("name", "BodyFlippingSignal")],
+                vec![],
+            )],
+        );
+        let flipping = Element::of(
+            "condition",
+            &[("name", "IsBodyFlipping"), ("mask", "always")],
+            vec![],
+        );
+        let attach = |n: &'static str| {
+            Element::of(
+                "behaviour",
+                &[("name", "AttachIntent"), ("intent", n), ("attr", n)],
+                vec![],
+            )
+        };
+        let motion = st(
+            "Motion",
+            &[],
+            vec![
+                attach("FrontFlip"),
+                attach("BackFlip"),
+                st("Flipping", &[], vec![when(vec![flipping])]),
+                st("Idle", &[], vec![]),
+            ],
+        );
+        compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn a_flip_gesture_just_after_take_off_asks_the_physics_for_a_flip() {
+        use crate::graph::ops::phys;
+        let bytes = flip_graphs();
+        let mut r = Runner::new(Pack::parse(&bytes).unwrap(), None).unwrap();
+        let dt = 1.0 / 60.0;
+        let back = r.pack.find("BackFlip").unwrap();
+        // On the ground the gesture does nothing.
+        r.s.ag.set(back, 1.0);
+        r.update(None, dt);
+        assert_eq!(r.packet_named("BackFlip"), None);
+        // In the air, early: the motion intent, attached for the physics.
+        r.s.world.phys = phys::AIR;
+        r.update(None, dt);
+        assert_eq!(r.packet_named("BackFlip"), Some(1.0));
+        assert_eq!(r.packet_named("FrontFlip"), None);
+        // The gesture let go: it still counts a moment, then not.
+        r.s.ag.clear();
+        r.update(None, dt);
+        assert_eq!(r.packet_named("BackFlip"), Some(1.0));
+        for _ in 0..30 {
+            r.update(None, dt);
+        }
+        assert_eq!(r.packet_named("BackFlip"), None);
+        // The physics flipping holds the state that reads it.
+        assert_eq!(r.motion_state(), "Idle");
+        r.s.world.body_flipping = true;
+        r.update(None, dt);
+        assert_eq!(r.motion_state(), "Flipping");
+    }
+
     #[test]
     fn pad_intents_from_the_sticks_and_buttons() {
         use crate::graph::input::{Gates, Intentions};
@@ -473,6 +545,71 @@ mod runner {
             &mut rec,
         );
         assert!(!r.s.ag.has(r.pack.find("RightPush").unwrap()));
+    }
+
+    #[test]
+    fn the_d_pad_asks_for_gestures() {
+        use crate::graph::input::{Gates, Intentions};
+        use crate::graph::write::Element;
+        use crate::input::{Pad, btn};
+        let action = st(
+            "Action",
+            &[],
+            vec![
+                Element::of(
+                    "behaviour",
+                    &[
+                        ("name", "CreateMGIntentFromAGIntent"),
+                        ("MGIntent", "GestureUpStart"),
+                        ("AGIntent", "GestureUpStart"),
+                    ],
+                    vec![],
+                ),
+                Element::of(
+                    "behaviour",
+                    &[
+                        ("name", "CreateMGIntentFromAGIntent"),
+                        ("MGIntent", "GestureUpHeld"),
+                        ("AGIntent", "GestureUpHeld"),
+                    ],
+                    vec![],
+                ),
+            ],
+        );
+        let motion = st("Motion", &[], vec![st("Idle", &[], vec![])]);
+        let bytes = compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap();
+        let pack = Pack::parse(&bytes).unwrap();
+        let mut input = Intentions::new(&pack, Vec::new());
+        let mut r = Runner::new(Pack::parse(&bytes).unwrap(), None).unwrap();
+        let mut rec = Vec::new();
+        let start = r.pack.find("GestureUpStart").unwrap();
+        let held = r.pack.find("GestureUpHeld").unwrap();
+        let mut press = |r: &mut Runner, buttons: u32| {
+            let pad = Pad {
+                held: buttons,
+                ..Pad::default()
+            };
+            input.produce(
+                &r.pack,
+                &pad,
+                Gates::default(),
+                1.0 / 60.0,
+                &mut r.s.ag,
+                &mut rec,
+            );
+            r.update(None, 1.0 / 60.0);
+        };
+        press(&mut r, btn::DPAD_UP);
+        assert!(r.s.mg.has(start) && r.s.mg.has(held));
+        // Held: no new start.
+        press(&mut r, btn::DPAD_UP);
+        assert!(!r.s.mg.has(start) && r.s.mg.has(held));
+        press(&mut r, 0);
+        assert!(!r.s.mg.has(held));
     }
 }
 

@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 pub mod camera;
 pub mod grind;
+pub mod moves;
 pub use camera::CamTuning;
 pub use grind::GrindTuning;
 
@@ -433,6 +434,9 @@ pub struct Tuning {
 
     // The camera's trackers, collision and predictors (`tuning::camera`; the shots are their own entry).
     pub cam: CamTuning,
+
+    // Body flips, the pump channel, bumps, the powerslide's and the wipeout's pose (`tuning::moves`).
+    pub moves: moves::MoveTuning,
 }
 
 /// What the state graphs' riding behaviours (`graph::riding`, ports of SK8's SetTurning, the physics'
@@ -698,6 +702,7 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .iter()
         .chain(grind::PATHS.iter())
         .chain(camera::PATHS.iter())
+        .chain(moves::PATHS.iter())
         .copied()
 }
 
@@ -1176,6 +1181,7 @@ impl Tuning {
         anim: AnimTuning::BUILT_IN,
         grind: GrindTuning::BUILT_IN,
         cam: CamTuning::BUILT_IN,
+        moves: moves::MoveTuning::BUILT_IN,
     };
 
     /// Takes over every value a `rules/tuning` entry carries. Unknown names and malformed values are
@@ -1498,6 +1504,7 @@ impl Tuning {
                 self.grind.set(name, f, c())
                     || self.anim.set(name, f, c(), v)
                     || self.cam.set(name, f, c())
+                    || self.moves.set(name, f, c())
             }
         }
     }

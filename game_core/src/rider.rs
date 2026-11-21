@@ -522,6 +522,19 @@ impl Rider {
     /// summing to 1), each sampled and mirrored for the stance its tree started in before blending, so a
     /// stance change crossfades instead of popping. False (nothing drawn new) when the clips can't be
     /// posed on this skeleton.
+    /// The feet against the board from the last pose: along its nose and up (m), left then right (SK8
+    /// PushFootFrame `out_distance`; the imported character's space is the board's).
+    pub fn feet(&self) -> Option<[[f32; 2]; 2]> {
+        let c = &self.character;
+        let w = c.world();
+        let b = w.get(c.bone("SKATEBOARD_ROOT")?)?[3];
+        let foot = |name: &str| -> Option<[f32; 2]> {
+            let t = w.get(c.bone(name)?)?[3];
+            Some([t[2] - b[2], t[1] - b[1]])
+        };
+        Some([foot("LEFTFOOT")?, foot("RIGHTFOOT")?])
+    }
+
     pub fn update_graph(
         &mut self,
         lib: &crate::motion::Library,

@@ -11,6 +11,7 @@ use super::{Error, Pack, Str};
 use crate::gesture::Flick;
 use crate::gesture::Shape;
 use crate::input::Pad;
+use crate::math::Vec3;
 use crate::motion::MotionDb;
 use crate::motion::NameId;
 use crate::skater::{AirTrick, Family, GRAPH_NAMES, GraphControl, Mode, Skater, Stance};
@@ -167,6 +168,36 @@ impl Driver {
             landing_spin: s.landing.map_or(0.0, |l| l.quality.magnitude),
             // Skate 3's landing classifier (0 straight, 1 sketchy, 2 spin, 3 slightly off).
             landing_type: s.landing.map_or(0, |l| l.quality.kind),
+            body_flipping: s.body_flip.is_some(),
+            pump_acc: s.pump.dv,
+            slide_dir: {
+                let v = s.vel.normalize_or(Vec3::ZERO);
+                if v == Vec3::ZERO { 1.0 } else { v.dot(s.fwd) }
+            },
+            ground_acc: {
+                // SK8 ground_acceleration.rs: the deck's up taken out, then the ground's, in the
+                // board's frame.
+                let a = s.accel - s.normal * s.accel.dot(s.normal);
+                let a = a - s.contact_n * a.dot(s.contact_n);
+                let side = s.contact_n.cross(s.fwd).normalize_or(Vec3::ZERO);
+                [a.dot(side), a.dot(s.fwd)]
+            },
+            hips: match s.mode {
+                // flatground's bail tips the body over sideways (as drawn) and keeps its heading
+                // against the travel.
+                Mode::Bailed { time } | Mode::Runout { time } => {
+                    let lean = -(time * 5.0).min(1.0) * crate::math::PI * 0.48;
+                    let v = s.vel.horizontal();
+                    let twist = if v.length() > 0.3 {
+                        let f = s.fwd.horizontal();
+                        libm::atan2f(f.cross(v).y, f.dot(v))
+                    } else {
+                        0.0
+                    };
+                    [lean, twist]
+                }
+                _ => [0.0; 2],
+            },
             ..World::default()
         }
     }
@@ -268,6 +299,18 @@ impl Driver {
         // The wind-up states' `IsAnticipating` (Skate 3's anticipating flag, which its camera reads as
         // `IsPreparingToJump`).
         c.anticipating = r.flag(super::ops::Flag::Anticipating);
+        // A body flip the motion graph hands the physics (`AttachIntent FrontFlip` / `BackFlip`) and
+        // the grab it reads with it.
+        c.body_flip = if r.packet_named("FrontFlip").is_some_and(|v| v != 0.0) {
+            Some(true)
+        } else if r.packet_named("BackFlip").is_some_and(|v| v != 0.0) {
+            Some(false)
+        } else {
+            None
+        };
+        c.grabbing = ["Grabbing", "WantsLeftAirGrab", "WantsRightAirGrab"]
+            .iter()
+            .any(|n| r.packet_named(n).is_some());
         // The graph went to its wipeout state on its own (the physics' own wipeouts take it there too,
         // once the physics is already off the board).
         c.wipeout = path.starts_with("WipeOut")

@@ -104,6 +104,8 @@ pub struct Pump {
     pub effect: f32,
     pub time: f32,
     pub turn_rate: f32,
+    /// The speed the pump added this tick (m/s; Skate 3's pumping acceleration the pump layers read).
+    pub dv: f32,
     pub(super) last_height: f32,
     pub(super) prev_n: Option<Vec3>,
 }
@@ -548,12 +550,14 @@ impl Skater {
         p.prev_n = Some(n);
         p.turn_rate = measured * t.pump_ang_damping + (1.0 - t.pump_ang_damping) * p.turn_rate;
         let pumping = p.turn_rate * t.pump_vs_vel.eval(v);
+        p.dv = 0.0;
         if pumping > 0.0 && effect > 0.0 && d.slide.is_none() {
             let mut dv = (pumping * t.pump_factor * effect).min(t.pump_max_accel * dt);
             if !d.intentional_pump {
                 dv *= t.pump_unintentional;
             }
             self.speed += if self.speed < 0.0 { -dv } else { dv };
+            self.pump.dv = dv;
         }
     }
 

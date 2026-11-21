@@ -685,6 +685,22 @@ impl Player {
         }
     }
 
+    /// Seconds left of the channel's tree (0 without the channel).
+    pub fn channel_remaining(&self, name: u16) -> f32 {
+        self.channels
+            .iter()
+            .find(|c| c.name == name)
+            .map_or(0.0, |c| c.node.length() - c.node.time())
+    }
+
+    /// The channel is crossfading between two trees.
+    pub fn channel_in_transition(&self, name: u16) -> bool {
+        self.channels
+            .iter()
+            .find(|c| c.name == name)
+            .is_some_and(|c| c.node.in_transition())
+    }
+
     pub fn end_channel(&mut self, name: u16) {
         if let Some(c) = self.channels.iter_mut().find(|c| c.name == name) {
             c.fade.end();

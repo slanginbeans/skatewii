@@ -675,7 +675,7 @@ fn main() {
                 game.restart_at_spawn();
             }
             if let Some(p) = auto.take_place() {
-                game.place_rider(p.pos, p.heading, p.speed);
+                game.place(&p);
             }
             // Let the bail play out after the tour.
             if auto.rounds >= 1 && frame > *done_at.get_or_insert(frame) + 240 {

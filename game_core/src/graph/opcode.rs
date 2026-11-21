@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 struct W(Vec<u8>);
 
@@ -262,7 +262,7 @@ fn read_op(r: &mut R) -> Option<Op> {
 }
 
 /// Conditions without fields, by tag.
-const PLAIN_CONDS: [Cond; 27] = [
+const PLAIN_CONDS: [Cond; 28] = [
     Cond::Mirrored,
     Cond::RidingFakie,
     Cond::RidingGoofy,
@@ -290,6 +290,7 @@ const PLAIN_CONDS: [Cond; 27] = [
     Cond::DoneWipingOut,
     Cond::Fixed(false),
     Cond::Fixed(true),
+    Cond::Bumped,
 ];
 
 fn cond(w: &mut W, c: &Cond) {
@@ -430,7 +431,7 @@ fn cond(w: &mut W, c: &Cond) {
 
 fn read_cond(r: &mut R) -> Option<Cond> {
     let tag = r.u8()?;
-    if (100..127).contains(&tag) {
+    if (100..100 + PLAIN_CONDS.len() as u8).contains(&tag) {
         return Some(PLAIN_CONDS[(tag - 100) as usize]);
     }
     Some(match tag {
@@ -480,7 +481,7 @@ fn read_cond(r: &mut R) -> Option<Cond> {
 }
 
 /// Behaviours without fields, by tag.
-const PLAIN_BEHS: [Beh; 16] = [
+const PLAIN_BEHS: [Beh; 19] = [
     Beh::JumpInto,
     Beh::ClearTrickAttr,
     Beh::SetDark,
@@ -497,6 +498,9 @@ const PLAIN_BEHS: [Beh; 16] = [
     Beh::SetLandingData,
     Beh::StoreLandingData,
     Beh::SetManualAngle,
+    Beh::Pumping,
+    Beh::WipeoutGestures,
+    Beh::CharacterGesture,
 ];
 
 fn beh(w: &mut W, b: &Beh) {
@@ -755,6 +759,41 @@ fn beh(w: &mut W, b: &Beh) {
             w.o16(*n);
         }
         Beh::GrindAttributes => w.u8(32),
+        Beh::SlideSpin(n) => {
+            w.u8(33);
+            w.o16(*n);
+        }
+        Beh::SlideDecel(n) => {
+            w.u8(34);
+            w.o16(*n);
+        }
+        Beh::BumpCoefs { x, y } => {
+            w.u8(35);
+            w.o16(*x);
+            w.o16(*y);
+        }
+        Beh::TwistLean {
+            always,
+            twist,
+            lean,
+        } => {
+            w.u8(36);
+            w.b(*always);
+            w.o16(*twist);
+            w.o16(*lean);
+        }
+        Beh::Wipeout {
+            lean,
+            twist,
+            gesture_x,
+            gesture_y,
+        } => {
+            w.u8(37);
+            w.o16(*lean);
+            w.o16(*twist);
+            w.o16(*gesture_x);
+            w.o16(*gesture_y);
+        }
         // Every field-less behaviour was written above.
         _ => w.u8(255),
     }
@@ -909,6 +948,23 @@ fn read_beh(r: &mut R) -> Option<Beh> {
         },
         31 => Beh::GrindCrouch(r.o16()?),
         32 => Beh::GrindAttributes,
+        33 => Beh::SlideSpin(r.o16()?),
+        34 => Beh::SlideDecel(r.o16()?),
+        35 => Beh::BumpCoefs {
+            x: r.o16()?,
+            y: r.o16()?,
+        },
+        36 => Beh::TwistLean {
+            always: r.b()?,
+            twist: r.o16()?,
+            lean: r.o16()?,
+        },
+        37 => Beh::Wipeout {
+            lean: r.o16()?,
+            twist: r.o16()?,
+            gesture_x: r.o16()?,
+            gesture_y: r.o16()?,
+        },
         _ => return None,
     })
 }
