@@ -39,6 +39,16 @@ X, Y). The default stance is goofy, as in Skate 3.
 | Come down onto a rail | The grind or slide comes from how the board meets it: along it a 50-50 (C-stick held back: 5-0, forward: nosegrind), angled a crooked, willy, feeble or smith, across it a boardslide, lipslide, noseslide or tailslide. Flick to pop off |
 | C-stick held back on a transition, then let go | Pump (gain speed) |
 | Rolling tail first (fakie), push | The rider turns round and pushes switch |
+| Y | Get off the board (on the ground), and back on it |
+
+Off the board (Y), with the board in hand:
+
+| Input | Action |
+|---|---|
+| Control stick | Walk and run where the stick points, seen from the camera (pushed fully: run). Pulled back: turn round |
+| A (hold) | Sprint: a burst that fades while held |
+| B | Jump |
+| Y | Back on the board, rolling the way the rider faces at his speed |
 | START | Pause menu (see Menus) |
 | HOME (Wii Remote) or START + Z | Quit to the Homebrew Channel at once |
 

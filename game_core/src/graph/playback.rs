@@ -799,6 +799,13 @@ impl Player {
         self.current.as_ref().map_or(0.0, Node::time)
     }
 
+    /// Seeks the top tree (seconds).
+    pub fn set_time(&mut self, time: f32) {
+        if let Some(c) = &mut self.current {
+            c.set_time(time);
+        }
+    }
+
     pub fn length(&self) -> f32 {
         self.current.as_ref().map_or(0.0, Node::length)
     }

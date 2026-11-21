@@ -120,6 +120,8 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
     };
     let has = |r: &str| duration(r) > 0.0;
     match s.mode {
+        // The skater pack has no walking clips: standing.
+        Mode::Walk => idle,
         // A runout reuses the bail clips for now.
         Mode::Bailed { time } | Mode::Runout { time } => {
             // The fall, then getting up (holding its last frame until the respawn).

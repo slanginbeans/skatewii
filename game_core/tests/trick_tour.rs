@@ -89,6 +89,12 @@ fn trick_tour_does_every_move() {
     assert!(has(" 5-0"), "{names:?}");
     // The demo park's flat bar (a thin rail): ground to its end, not leaned off.
     assert!(script.seen.handrail, "{:?} {names:?}", script.seen);
+    // Off the board: Y, a walk and a jump, Y back on.
+    assert!(script.seen.walked, "{:?} {names:?}", script.seen);
+    assert!(
+        seen.contains(&Event::SteppedOff) && seen.contains(&Event::SteppedOn),
+        "{seen:?}"
+    );
     assert!(has("50-50") || has("5-0"), "{names:?}");
     assert_eq!(seen.last(), Some(&Event::Bailed), "{seen:?}");
 }

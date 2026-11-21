@@ -27,6 +27,8 @@ pub const GRAPH: &str = "Camera";
 pub struct Conditions {
     pub wiping_out: bool,
     pub off_board: bool,
+    /// Off the board in the air (Skate 3's `IsAirOffboard`: physics state 501, the walker's jump).
+    pub air_off_board: bool,
     pub onboard_air: bool,
     pub preparing: bool,
     pub manual: bool,
@@ -65,6 +67,7 @@ pub struct Conditions {
 enum Flag {
     WipingOut,
     Offboard,
+    AirOffboard,
     OnboardAir,
     Preparing,
     Manual,
@@ -190,6 +193,7 @@ impl CamGraph {
                         let flag = match name {
                             "IsWipingOut" => Some(Flag::WipingOut),
                             "IsOffboard" => Some(Flag::Offboard),
+                            "IsAirOffboard" => Some(Flag::AirOffboard),
                             "IsInOnBoardAir" => Some(Flag::OnboardAir),
                             "IsPreparingToJump" => Some(Flag::Preparing),
                             "IsInManual" => Some(Flag::Manual),
@@ -202,7 +206,6 @@ impl CamGraph {
                             "IsGrindLedgeRight" => Some(Flag::LedgeRight),
                             "IsInObserverMode"
                             | "IsBrokenBoneSlowMo"
-                            | "IsAirOffboard"
                             | "IsFixedInAir"
                             | "SkaterIsDroppingIn"
                             | "SkaterIsMovingObject"
@@ -351,6 +354,7 @@ impl Host for CamHost<'_> {
             Op::Flag(f) => match f {
                 Flag::WipingOut => c.wiping_out,
                 Flag::Offboard => c.off_board,
+                Flag::AirOffboard => c.air_off_board,
                 Flag::OnboardAir => c.onboard_air,
                 Flag::Preparing => c.preparing,
                 Flag::Manual => c.manual,

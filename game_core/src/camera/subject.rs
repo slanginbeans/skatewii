@@ -46,6 +46,8 @@ pub struct Subject {
     pub ground: bool,
     pub wiping_out: bool,
     pub off_board: bool,
+    /// Off the board in the air (the walker's jump or a fall).
+    pub air_off_board: bool,
     pub pushing: bool,
     pub at_pushable_speed: bool,
     pub pumping: f32,
@@ -257,7 +259,8 @@ impl SubjectHistory {
             grinding: s.mode == Mode::Grind,
             ground: s.mode == Mode::Rolling,
             wiping_out: matches!(s.mode, Mode::Bailed { .. }),
-            off_board: matches!(s.mode, Mode::Runout { .. }) || s.hippie_air(),
+            off_board: matches!(s.mode, Mode::Runout { .. } | Mode::Walk) || s.hippie_air(),
+            air_off_board: s.mode == Mode::Walk && s.biped.air.is_some(),
             pushing: s.push.is_some(),
             at_pushable_speed: s.speed.abs() < s.tuning.push_max_speed,
             pumping: if s.pump.time > 0.0 && s.pump.turn_rate > 0.0 {

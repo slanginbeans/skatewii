@@ -405,6 +405,7 @@ impl CameraMan {
         Conditions {
             wiping_out: s.wiping_out,
             off_board: s.off_board,
+            air_off_board: s.air_off_board,
             onboard_air: s.onboard_air,
             preparing: s.preparing,
             manual: s.manual,

@@ -77,6 +77,20 @@ impl Intents {
 pub struct World {
     /// [`phys`] category.
     pub phys: u8,
+    /// Off the board: Skate 3's locomotion state (0 stand, 1 walk, 2 run, 3 sprint), the board in hand,
+    /// in the air and about to land on ground, and the slope class walked on (`ops::slope`).
+    pub loco: u8,
+    pub holding_board: bool,
+    pub biped_air: bool,
+    pub can_biped_land: bool,
+    pub biped_slope: u8,
+    /// Off the board in the air: the flight's time left and whole time (s), and its travel in the
+    /// rider's frame (m: right, up, ahead) — MatchAirTime's inputs.
+    pub air_remaining: f32,
+    pub air_duration: f32,
+    pub air_travel: [f32; 3],
+    /// Y is getting the rider off or on the board (`Skater::board_toggle`).
+    pub toggling_board: bool,
     /// Speed (m/s) and speed along the board (negative: rolling tail first).
     pub speed: f32,
     pub forward_speed: f32,
@@ -162,6 +176,15 @@ impl Default for World {
     fn default() -> Self {
         World {
             phys: phys::GROUND,
+            loco: 0,
+            holding_board: false,
+            biped_air: false,
+            can_biped_land: false,
+            biped_slope: 0,
+            air_remaining: 0.0,
+            air_duration: 0.0,
+            air_travel: [0.0; 3],
+            toggling_board: false,
             speed: 0.0,
             forward_speed: 0.0,
             speed_and_slope: 0.0,
@@ -305,6 +328,8 @@ pub struct Names {
     spin: Option<NameId>,
     avg_vel_y: Option<NameId>,
     manual_angle: Option<NameId>,
+    /// MatchAirTime's parameters: `CadenceStartPercent`, `AnimTime`, `AnimTransX/Y/Z`.
+    air_match: [Option<NameId>; 5],
     /// Graph strings: the intents the riding behaviours read and the packet values they emit.
     fakie_turn: Str,
     left_slide: Str,
@@ -693,6 +718,14 @@ impl<'a> Runner<'a> {
             spin: lib("Spin"),
             avg_vel_y: lib("AvgVelY"),
             manual_angle: lib("manual_angle"),
+            air_match: [
+                "CADENCESTARTPERCENT",
+                "ANIMTIME",
+                "ANIMTRANSX",
+                "ANIMTRANSY",
+                "ANIMTRANSZ",
+            ]
+            .map(lib),
             fakie_turn: id("FakieTurn"),
             left_slide: id("LeftSlide"),
             right_slide: id("RightSlide"),
@@ -1125,6 +1158,9 @@ impl Host<'_, '_> {
             }
             Cond::SurfaceSlope(n) => n.matches(w.surface_slope),
             Cond::SkateSlope(n) => n.matches(w.skate_slope),
+            Cond::GroundSlopeType(t) if matches!(w.phys, phys::OFFBOARD | phys::OFFBOARD_AIR) => {
+                t == 3 || t == w.biped_slope
+            }
             Cond::GroundSlopeType(t) => {
                 let k = if w.skate_slope.abs() < 5.0 {
                     0
@@ -1170,6 +1206,10 @@ impl Host<'_, '_> {
                 libm::sqrtf(x * x + z * z) > m.bump_min
             }
             Cond::DoneWipingOut => w.phys != phys::WIPEOUT,
+            Cond::LocoState(l) => matches!(w.phys, phys::OFFBOARD) && w.loco == l,
+            Cond::HoldingBoard => w.holding_board,
+            Cond::BipedAir => w.biped_air,
+            Cond::CanBipedLand => w.can_biped_land,
             Cond::Fixed(v) => v,
             Cond::Unsupported(n) => {
                 self.s.unsupported(n);
@@ -1894,6 +1934,42 @@ impl Host<'_, '_> {
                 }
             }
             Beh::CharacterGesture => self.character_gesture(phase),
+            Beh::MatchAirTime => match phase {
+                // Begin: the first update only publishes (SK8 skips its seek).
+                0 => self.set_riding(op, RidingInst::Value(1.0)),
+                1 => {
+                    let w = self.s.world;
+                    let first =
+                        matches!(self.get_riding(op), Some(RidingInst::Value(v)) if v > 0.0);
+                    let (remaining, duration) = (w.air_remaining, w.air_duration);
+                    if !first && duration > 0.0 {
+                        let progress = (1.0 - remaining / duration).clamp(0.0, 1.0);
+                        let length = self.s.player.length();
+                        self.s.player.set_time(progress * length);
+                    }
+                    // The travel, at most 2 m long.
+                    let t = w.air_travel;
+                    let len = libm::sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
+                    let t = if len > 0.01 {
+                        let k = len.min(2.0) / len;
+                        [t[0] * k, t[1] * k, t[2] * k]
+                    } else {
+                        t
+                    };
+                    for (n, v) in self
+                        .n
+                        .air_match
+                        .into_iter()
+                        .zip([0.0, duration, t[0], t[1], t[2]])
+                    {
+                        if let Some(n) = n {
+                            self.s.player.set_param(n, v, false);
+                        }
+                    }
+                    self.set_riding(op, RidingInst::Value(0.0));
+                }
+                _ => {}
+            },
             Beh::Nothing => {}
             Beh::Unsupported(n) => self.s.unsupported(*n),
         }

@@ -71,6 +71,10 @@ names! {
     gesture_up_start = "GestureUpStart", gesture_down_start = "GestureDownStart",
     gesture_left_held = "GestureLeftHeld", gesture_right_held = "GestureRightHeld",
     gesture_up_held = "GestureUpHeld", gesture_down_held = "GestureDownHeld",
+    toggle_off_board = "ToggleOffBoardState", new_toggle_off_board = "NewToggleOffBoardState",
+    ob_jump = "OB_Jump", ob_sprint = "OB_Sprint", ob_mag = "OB_Mag", ob_steer = "OB_Steer",
+    ob_world_x = "OB_BipedWorldX", ob_world_z = "OB_BipedWorldZ", ob_stick_mag = "OB_BipedStickMag",
+    ob_look_x = "OB_LookAtX", ob_look_y = "OB_LookAtY",
 }
 
 /// Gates from the game (SK8's actor flags): what the rider may do right now.
@@ -87,6 +91,12 @@ pub struct Gates {
     /// A grab trigger is in, a push button down (body flips need the one and not the other).
     pub grabbing: bool,
     pub pushing: bool,
+    /// Off the board: the walker's reading of the stick (`skater::biped::read_stick`): move amount,
+    /// turn and the stick in the world.
+    pub off_board: bool,
+    pub ob_mag: f32,
+    pub ob_steer: f32,
+    pub ob_world: [f32; 2],
 }
 
 struct Set {
@@ -196,6 +206,20 @@ impl Intentions {
         if held & btn::X != 0 {
             put(id.brake, 1.0);
         }
+        // Off the board (SK8 offboard_intentions.rs, by position on the pad): Y gets off and on, B
+        // (Skate 3's X) jumps, A without X (Skate 3's A without B) sprints.
+        if held & btn::Y != 0 {
+            put(id.toggle_off_board, 1.0);
+        }
+        if new & btn::Y != 0 {
+            put(id.new_toggle_off_board, 1.0);
+        }
+        if new & btn::B != 0 {
+            put(id.ob_jump, 1.0);
+        }
+        if held & btn::A != 0 && held & btn::X == 0 {
+            put(id.ob_sprint, 1.0);
+        }
         // The d-pad: character gestures (Skate 3's on the Xbox pad's d-pad, the same place).
         for (b, start, hold) in [
             (btn::DPAD_LEFT, id.gesture_left_start, id.gesture_left_held),
@@ -226,6 +250,29 @@ impl Intentions {
             put(id.pushing, 1.0);
         }
         let [lx, ly] = pad.stick;
+        {
+            let len = sqrtf(lx * lx + ly * ly).min(1.0);
+            let (world, mag, steer) = if gates.off_board {
+                (gates.ob_world, gates.ob_mag, gates.ob_steer)
+            } else {
+                ([lx, ly], len, lx)
+            };
+            if world != [0.0, 0.0] {
+                put(id.ob_world_x, world[0]);
+                put(id.ob_world_z, world[1]);
+                put(id.ob_stick_mag, len);
+            }
+            if mag != 0.0 {
+                put(id.ob_mag, mag);
+            }
+            if steer != 0.0 {
+                put(id.ob_steer, steer);
+            }
+        }
+        if pad.flick != [0.0, 0.0] {
+            put(id.ob_look_x, pad.flick[0]);
+            put(id.ob_look_y, pad.flick[1]);
+        }
         if lx != 0.0 {
             put(id.body_spin, lx);
             put(id.phys_body_spin, lx);

@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 struct W(Vec<u8>);
 
@@ -262,7 +262,7 @@ fn read_op(r: &mut R) -> Option<Op> {
 }
 
 /// Conditions without fields, by tag.
-const PLAIN_CONDS: [Cond; 28] = [
+const PLAIN_CONDS: [Cond; 31] = [
     Cond::Mirrored,
     Cond::RidingFakie,
     Cond::RidingGoofy,
@@ -291,6 +291,9 @@ const PLAIN_CONDS: [Cond; 28] = [
     Cond::Fixed(false),
     Cond::Fixed(true),
     Cond::Bumped,
+    Cond::HoldingBoard,
+    Cond::BipedAir,
+    Cond::CanBipedLand,
 ];
 
 fn cond(w: &mut W, c: &Cond) {
@@ -420,6 +423,10 @@ fn cond(w: &mut W, c: &Cond) {
             w.u8(27);
             w.num(n);
         }
+        Cond::LocoState(l) => {
+            w.u8(29);
+            w.u8(l);
+        }
         Cond::Unsupported(s) => {
             w.u8(28);
             w.u16(s);
@@ -476,12 +483,13 @@ fn read_cond(r: &mut R) -> Option<Cond> {
         26 => Cond::GrindTrickOutAllowed(r.u16()?),
         27 => Cond::DistToEdge(r.num()?),
         28 => Cond::Unsupported(r.u16()?),
+        29 => Cond::LocoState(r.u8()?),
         _ => return None,
     })
 }
 
 /// Behaviours without fields, by tag.
-const PLAIN_BEHS: [Beh; 19] = [
+const PLAIN_BEHS: [Beh; 20] = [
     Beh::JumpInto,
     Beh::ClearTrickAttr,
     Beh::SetDark,
@@ -501,6 +509,7 @@ const PLAIN_BEHS: [Beh; 19] = [
     Beh::Pumping,
     Beh::WipeoutGestures,
     Beh::CharacterGesture,
+    Beh::MatchAirTime,
 ];
 
 fn beh(w: &mut W, b: &Beh) {

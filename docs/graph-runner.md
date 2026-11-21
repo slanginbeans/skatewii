@@ -414,12 +414,59 @@ family strengths, the launch and energy figures, the 17/24/60-degree windows) ar
   trajectory candidates' height preference (`RequiredAngleVsHeight`).
 
 
+## Off the board (physics: `skater/biped.rs`; `skater.rs` `toggle_board`)
+
+Skate 3 has no separate off-board graph: the `OffBoard`, `Dismount` and `Mount` states are part of
+`ActionGraph_OnBoard` and `MotionGraph_OnBoard`, and their clips (`BR_*` with the board in hand, `NB_*`
+without) are in `OffBoard.abin`, which the importer merges into the motion library.
+
+- **Getting off.** Y on the ground (not on ground whose up is below 0.64: SK8's `DisableDismount`) sends
+  `NewToggleOffBoardState`; the action graph goes to `TransToOffBoard` and the motion graph to
+  `Dismount/Ground/UserDismount` (into a stand under 1 m/s, a run under 8, a fast run under 15, else a
+  runout: `ComVelCompare`). The board keeps rolling until the dismount clip's `OB_TRAJ` window starts
+  (SK8: `OB_Traj` sets the physics' go-to-biped flag), then the walker (`Mode::Walk`) takes over, facing the
+  board's travel at its speed. The motion graph then goes to `OffBoard/OBGround/Locomotion`.
+- **Walking** (Skate 3's biped, as SK8 ports it: `ground_input.rs`, `movement_intent.rs`,
+  `movement_velocity.rs`, `cadence.rs`; the curves are `physics_biped` and `physics_state_offboard`, with
+  Skate 3's values built in). The stick, turned into the world by the camera's yaw, is read against the
+  facing: its angle from straight back (0..1 of pi) gives the move amount (`Hash_DF759B46440F16E9`) and
+  turn (`TurnVsStickAngle`), times how far it is pushed. Speed is `SpeedVsInput` of the move amount (6 m/s
+  at full), blended towards the sprint's 10 m/s by `Hash_6B93C51256A30FB4` of the time sprinting (a burst
+  that fades by about 3.8 s; a release keeps counting 0.3 s), scaled by the slope (`Hash_31309236050A8F09`).
+  The rider always moves along his facing: the velocity changes by at most 0.2 m/s a tick and slows by at
+  most 2 m/s^2 while still walking; the turn rate chases `TurnVsSpeed` x turn by at most
+  `TurnDeltaVsSpeed` a tick. `LocoState` is stand / walk / run / sprint by the speed against the halfway
+  points between the walk, run and sprint cycles' own speeds (1.68, 5.37, 9.10 m/s from their
+  `ANIMTRANSZ`): 3.53 and 7.24 m/s. The ground is flatground's own: the highest surface no more than
+  0.45 m above the feet, a wall above that, a fall below a 0.35 m drop.
+- **Jumping**: B (`OB_Jump`). Up at sqrt(2 g `JumpHeight`) (0.9 m), ahead at the ground speed's forward part
+  x `JumpSpeedScalar` (0.8). In the air the motion graph plays its jump selection (`OBAir/InAir/FromRun`,
+  `FromStand`), and `MatchAirTime` seeks the clip to the flight's progress (1 - time left / whole time) and
+  sets its `AnimTime` and `AnimTrans*` (the travel, at most 2 m), so the clip ends on landing and the
+  landing states pick their clip from it. flatground predicts the landing as a fall straight down to the
+  ground under the feet.
+- **Getting on**: Y on foot. The motion graph's `Mount` states play a mount clip from the stand, walk, run or
+  sprint; when its `OB_TRAJ` window ends the rider is on the board, its nose the way he faced, rolling at
+  his forward speed, and the graph goes on to `OnBoard`. Without the state graphs Y gets off and on at once.
+- **What the graphs read** (`drive::walking`): `PhysFilteredState` offboard / offboardair, `LocoState`,
+  `IsHoldingSkateboard` (always: flatground's rider never drops or throws the board), `IsInBipedAir`,
+  `CanBipedLand` (in the air), `CanLandOnBoard` (never on foot), `GroundSlopeType`'s ramp classes (5 and
+  25 degrees; flatground doesn't tell stairs apart yet), `ComVelCompare` in the facing's frame.
+- **Drawn**: the off-board clips' origin is the ground under the feet (the riding clips' is the deck's
+  centre); the drawing moves between the two over 0.2 s while getting off or on.
+- **Not done**: dropping, throwing and picking up the board (`OB_DropBoard`, `OB_ThrowBoard`,
+  `OB_RetrieveBoard`, L / R in Skate 3), moving objects, standing on cars, hippie hurdles, stairs' own clips,
+  jumping onto the board from the air (`Mount/Air`), the obstacle steering of `movement_intent.rs`, foot IK.
+- **Camera**: walking is `IsOffboard` and the walker's air `IsAirOffboard` (both read by Skate 3's camera
+  graph).
+
 ## Controls (GameCube pad)
 
 Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB to Z, LT/RT to L/R.
 
 | GC | Intents | Does |
 |---|---|---|
+| Y | `ToggleOffBoardState` (held), `NewToggleOffBoardState` (pressed) | off the board and back on (below) |
 | A | `RightPush`, `Pushing`, `NewPush` | push (a press is remembered for 0.3 s); after a bail, back on the board once settled (Skate 3's `WipeOutRecover`) |
 | B | `LeftPush`, `Pushing`, `NewPush` | mongo push; after a bail, as A |
 | A and B | neither push | hippie jump (flatground's physics) |
@@ -429,6 +476,7 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 | L / R | `LeftAirGrab` / `RightAirGrab`, fully in `Left/RightGroundGrab`, `Crouch` | grabs, crouch; with the left stick's flip shape just after take-off, body flips. A GameCube trigger at rest reads 1..7 of 255 and SK8 counts any trigger above 0, so the pad has a dead zone (`input::TRIGGER_DEAD_ZONE`, 0.1 of full, then rescaled); the physics grabs on the same reading |
 | main stick | `Turn`, `HardTurn`, `HardTurnCrouch`, `KickTurn`, `BodySpin`, `Left/RightSlide`, `Left/RightSlideStart` | steering, kick turns, powerslides, spins |
 | C-stick | `AnticMag`, `AnticAngle`, `Manual`, `ManualBrake`, `TweakX/Y`, `BoardAdjustAngle/Mag` | wind-up (past 0.9), manuals (held below full for 0.2 s), grab variants (past half way) and tweaks; on a rail its y tips a 50-50 into a nosegrind (up) or a 5-0 (down) and its x (with the main stick's) turns a 5-0 across the rail (Skate 3's `PhysGrindUpDown`, `PhysGrindTranslation`) |
+| off the board | `OB_Jump` (B pressed: Skate 3's X), `OB_Sprint` (A without X), `OB_Mag`, `OB_Steer` (the walker's move amount and turn), `OB_BipedWorldX/Z`, `OB_BipedStickMag` (the stick; on the board the raw stick, which the dismount reads), `OB_LookAtX/Y` (C-stick) | walking, below |
 | gestures | `Trick`, the gesture's name, `GestureSpeed`, `HoldPattern` | right stick: `skater`, `skater90`, `skaterN90`, `skater_air`, `skater_fingerflip`; left stick: `skaterls` (SlideFs180/SlideBs180 reverts), `skaterstep`; all recognised in parallel at 60 Hz |
 
 Gesture groups come from the graphs (`HasGestureIntent`, `CreateTrickIntentFromGesture`): Square takes

@@ -164,6 +164,47 @@ impl Meta {
     pub fn contains(&self, name: &str) -> bool {
         self.names.contains_key(&name.to_ascii_uppercase())
     }
+
+    /// Adds `other`'s animations under the names this one doesn't have (this one wins a clash), and
+    /// returns those names (upper case), in record order.
+    pub fn merge(&mut self, other: Meta) -> Vec<String> {
+        let mut added = Vec::new();
+        let Meta {
+            clips,
+            trees,
+            unsupported,
+            names,
+        } = other;
+        let mut clips: Vec<Option<ClipMeta>> = clips.into_iter().map(Some).collect();
+        let mut trees: Vec<Option<(String, Tree)>> = trees.into_iter().map(Some).collect();
+        // Only the record each name resolves to in `other` (its last), so a name keeps its kind.
+        for (n, (what, i)) in names {
+            if self.names.contains_key(&n) {
+                continue;
+            }
+            let at = match what {
+                0 => {
+                    self.clips
+                        .push(clips[i].take().expect("one name per record"));
+                    self.clips.len() - 1
+                }
+                1 => {
+                    self.trees
+                        .push(trees[i].take().expect("one name per record"));
+                    self.trees.len() - 1
+                }
+                _ => {
+                    self.unsupported.push(unsupported[i].clone());
+                    self.unsupported.len() - 1
+                }
+            };
+            self.names.insert(n.clone(), (what, at));
+            if what < 2 {
+                added.push(n);
+            }
+        }
+        added
+    }
 }
 
 fn read_clip(r: Reader<'_>, h: &RecordHeader, clip: &Clip) -> Result<ClipMeta> {
