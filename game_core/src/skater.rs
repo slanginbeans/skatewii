@@ -3545,7 +3545,8 @@ mod tests {
         let (s, _) = touch_down(-25.0, 5.0, 2.0, 3.0);
         assert_eq!(s.landing.map(|l| l.kind), Some(LandKind::Spin));
         assert!(s.collide.is_some_and(|(rate, _)| rate > 0.0));
-        // A sketchy landing scores half; speed along the ground is kept (no scrub on a clean one).
+        // A sketchy landing scores half; a clean one keeps its speed along the ground, a crooked one
+        // loses some of the sideways part to the wheels on the impact (2 m/s into the ground).
         let (s, ev) = touch_down(25.0, 5.0, 2.0, 0.0);
         let (c, ev2) = touch_down(0.0, 5.0, 2.0, 0.0);
         let points = |ev: &[Event]| {
@@ -3559,7 +3560,14 @@ mod tests {
         assert_eq!(landed(&ev), ["SKETCHY OLLIE"]);
         assert_eq!(points(&ev), points(&ev2) / 2);
         assert!((c.ground_velocity().length() - 5.0).abs() < 1e-3);
-        assert!((s.ground_velocity().length() - 5.0).abs() < 1e-3);
+        let a = 25.0f32.to_radians();
+        let side = 5.0 * sinf(a) - LAND_SIDE_FRICTION * 2.0;
+        let kept = sqrtf((5.0 * cosf(a)).powi(2) + side * side);
+        assert!(
+            (s.ground_velocity().length() - kept).abs() < 0.05,
+            "{} vs {kept}",
+            s.ground_velocity().length()
+        );
     }
 
     #[test]
