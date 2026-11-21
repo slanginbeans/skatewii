@@ -61,7 +61,7 @@ impl Builder {
             name,
             Shot {
                 distance: l.distance,
-                lens: 14.0,
+                lens: 12.0,
                 smoothing,
                 weights,
                 board_offset: l.offset,
@@ -259,7 +259,7 @@ impl ShotSet {
         s.weights = [0.0; REFS];
         s.weights[REF_COM] = 1.0;
         // Bigger airs: further back and higher the longer the flight.
-        let air = [0.85, 0.9, 0.85, 0.65];
+        let air = [0.9, 0.95, 0.9, 0.65];
         let small = b.shot(
             "air_small",
             leaf(2.1, 6.0, -157.0, 0.0, 0.0, -12.0, 0.0),
