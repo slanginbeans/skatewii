@@ -629,7 +629,7 @@ Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_
   brakes and in a slide; the target restarts from the speed after anything outside the ride sets it.
 - **Steering**: the tilt was missing the trucks' tightness factor (`SteeringScalar_TightTrucks`, SK8's
   default tightness 0.7). The board follows 0.88 of the trucks' curve, turns at most 1.5 + 0.04 x speed
-  rad/s and builds its yaw over 0.1 s (ours, measured): full stick 1.8 rad/s at 6.5 to 8.5 m/s, half a
+  rad/s and builds its yaw over 0.05 s (ours, measured): full stick 1.8 rad/s at 6.5 to 8.5 m/s, half a
   stick within 7% of SK8 (it was 1.1 to 1.25 rad/s grip-capped at speed, and half a stick 40% sharp).
 - **Kick turns**: SK8's rate against speed (3.2 rad/s standing, 2.0 at 3.4 m/s), building up and
   running down by 0.7 a tick when let go (was a fixed 2.25 rad/s, instant).
@@ -637,30 +637,58 @@ Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_
   slide turns the travel about 150 degrees; ours went straight on.
 - **Let-go spin before a pop**: a turn let go just before take-off no longer spins the board on while
   our landing prediction resolves (SK8 -7 degrees, ours was 46).
+- **Pushes**: while a push clip's foot is down the board chases the posed push's trajectory speed (the
+  blended clips' root motion this tick, SK8 contact_events.rs `push_speed`), within the tick's change,
+  of which the board keeps 0.96 as SK8's rigid board and rider do. Held: 3.24, 6.05, 8.04 m/s pushes and
+  2.63 s to 8 m/s (SK8 3.22, 6.09, 8.07, 2.63; was 4.5 m/s and 1.67 s). Tapped pushes stay within 1%.
+- **Ollies**: the jump pops the animated centre of mass (the rider's pose, Skate 3's part weights) from
+  over the deck the tail strike has pitched up, and the flight starts from that lifted deck; in the air
+  the deck hangs under the flying body by the animated COM-to-deck distance, so the tucked legs lift it.
+  The body follows its animation at SK8's measured rate from the tail strike to the top (SK8's rider is
+  physical). `ControlAirLegExtension` now drives `disttocog` (down to `min_inair_disttocog`, out again
+  at `preland_disttocom_vel` near the landing), and the board meets the ground and rails where it is
+  (grind targeting aims the deck, the flight lifted by the tuck it expects). Peak deck 0.53
+  and 1.15 m, 0.52 and 0.73 s off the ground (SK8 0.50 and 1.16, 0.53 and 0.72; was 0.40 and 0.78, 0.57
+  and 0.80); a held 180 turns 125 degrees (SK8 122, was 135).
+- **Pumping**: the height the pump watches is the animated COM over the board; the ground's angle
+  reports its compression and least crouch to the crouch (`CompressionVsGroundAngle` x
+  `CompressionGroundScalar`, `MinCrouchVsGroundAngle`), with the board's absorption and the pumping as
+  its potential; the pumping and compression tuning is the disc's.
+- **Drop-ins**: Skate 3's drop-in depth windows (a tip 0.06 m, a 5-0 0.13 m from the deck's centre), and
+  while a board rolled off an edge is still tipping over it, rails are ridden onto, not landed on: a slow
+  roll off a half pipe's deck goes into the transition (it was a 0 m/s nose blunt or lipslide).
+- **Crooked landings**: the wheels' friction on the touchdown takes 0.41 m/s of sideways speed per m/s
+  into the ground (the deck's): landing 70 degrees round at 6 m/s keeps 1.9 m/s (SK8 0.75, was 4.1).
+- **Carves**: the steering holds `PushScalarMin` through a push's whole animation (its contact events,
+  SK8's processed bit 27), not only while the foot drives, and the board's yaw follows its trucks over
+  0.05 s: half a stick builds in 0.33 to 0.43 s (SK8 0.35 to 0.43, was 0.17), full in 0.08 to 0.12 s
+  (SK8 0.10 to 0.12), and let go it settles in 0.18 to 0.27 s (SK8 0.18 to 0.25, was 0.27 to 0.35).
+- **Grinds**: on a comparable line (SK8's board put down 0.031 rad the other way, as it settles that
+  much off) both ollie onto the thin rail as a 50-50 at 6.9 to 7.0 m/s, the same tick after the pop,
+  and lose 0.9 to 1.0 m/s^2 along it.
 
-Matching within about 5%: tapped pushes (2.15, 1.9, 1.9, 1.9 m/s a push, 8.5 m/s top, 4.9 s to 8 m/s),
-manual pitch (14 and 28 degrees braking) and its speed loss, the take-off tick of an ollie, the low
-camera's distance (1.84 m).
+Matching within about 5%: tapped and held pushes, manual pitch (14 and 28 degrees braking) and its speed
+loss, the take-off tick of an ollie, the foot brake, kick turns, carve rates, the low camera's distance.
 
 Left, as SK8's rigid board and rider do it and flatground approximates (sizes measured):
 
-- **Held pushes** are 40% stronger here (first held push 4.5 against 3.2 m/s; 1.7 against 2.6 s to 8 m/s):
-  SK8 chases the posed push clips' trajectory speed at the contact, we chase the push sets' end speed.
-- **Ollies**: SK8's legs lift the board (peak deck 0.50 m quick, 1.16 m wound up; ours 0.40 and 0.78),
-  and its takeoff clip starts lifting the board 5 ticks before the jump; its body pops from the animated
-  centre of mass (about 1.08 m up), ours from `AbsoluteMinHeight`, so our flights are about 0.08 s longer
-  wound up (held 180s turn 10% further).
-- **Transitions**: SK8's rider is compressed by a transition and springs back, which its pump controller
-  pays out with no input: about +2 m/s a pass (9.1 against 7.0 m/s at the bottom after a 2.5 m drop).
-- **Sideways landings** keep more speed here (4.1 against 0.8 m/s after landing 70 degrees round).
-- **Tail brake**: matches at 6.5 m/s (4.8 m/s^2); SK8's rises to 6.2 below 4 m/s, so ours stops 0.5 s
+- **Transitions**: 2.5 m drop-in, bottom speed 6.2 m/s against 9.2 (7.0 before, after a 0.4 s stop on
+  the coping and a fall from rest; that extra had been a spurious pump on the landing's first sample,
+  removed). The pump itself matches
+  (0.117 m/s a tick while it pays, as SK8), but SK8's board pivots over the coping on its back wheels
+  and rolls the transition from the top, landing on it already compressed, so it springs back up the
+  whole way down; ours rolls off level and falls 1.9 m before meeting it lower down. Porting that needs
+  the board's pivot over an edge (its trucks as separate contacts).
+- **Ollies**: wound-up flights are 0.02 s longer, the deck 0.01 to 0.05 m lower: SK8's rider body lags
+  its animation through the pop (it is physical), ours follows it at a measured rate.
+- **Crooked landings** keep more speed after the impact (1.9 against 0.75 m/s at 70 degrees): SK8's deck
+  comes down at 6 m/s (its legs reach for the landing), ours at about 4, and its wheels keep scrubbing.
+- **Tail brake**: matches at 6.5 m/s (2.9 m/s^2); under 4.1 m/s SK8's rises by 29% (a processed flag,
+  bit 16, comes on there whose producer is outside SK8's ported attribute tables), so ours stops 0.4 s
   later.
-- **Carves**: our turn builds faster at half a stick (0.17 against 0.35 to 0.43 s), settles slower when
-  let go (0.3 against 0.2 s) and slips less (3 against 8 degrees).
-- **Camera**: in a carve ours trails the board about 13 degrees further.
-- **Grinds**: no scripted grind entered on both (SK8's board drifts sideways on a long run-up). Ours
-  catches the coping as a lip slide at 0 m/s when rolling slowly off a deck (SK8 drops in): our contact
-  boxes are looser than Skate 3's depth windows.
+- **Carve slip**: 3 degrees against SK8's 7 to 8 at full stick (its wheels' lateral slip).
+- **Camera**: in a carve's first second ours trails the travel up to 13 degrees further (63 against 53
+  degrees at 6.5 m/s); steady carves match within 2 degrees.
 - **Coasting**: Skate 3's no-input friction is kept here (after 3 s); SK8 never sets the flag that runs
   its timer, so its board rolls on. Its rolling resistance on smooth concrete is 0 under 8 m/s, as ours.
 

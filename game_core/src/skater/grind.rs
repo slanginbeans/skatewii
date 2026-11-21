@@ -779,7 +779,8 @@ impl Skater {
             right: up.cross(fwd),
             up,
             fwd,
-            deck: self.pos + up * DECK_HEIGHT,
+            // In the air the legs hold the deck up off the flight's path.
+            deck: self.pos + up * DECK_HEIGHT + Vec3::UP * self.air_lift,
         }
     }
 

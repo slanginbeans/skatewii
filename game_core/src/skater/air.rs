@@ -310,6 +310,8 @@ pub struct Selector {
     max_time: f32,
     /// Grind targeting is allowed (not just after a weak pop out of a grind).
     grind: bool,
+    /// How far the legs are expected to hold the deck over the flight's path (m) when it meets a rail.
+    lift: f32,
     /// Ticks until the next query while no landing is known.
     pub countdown: u32,
     /// The last result's normal when it was too short to be a known landing.
@@ -331,6 +333,9 @@ pub struct Launch {
     pub lean: f32,
     /// Grind targeting is allowed.
     pub grind: bool,
+    /// How far the legs are expected to hold the deck over the flight's path (m): rails are targeted
+    /// for the deck, which flies that much higher (the tucked legs; 0 without the imported rider).
+    pub lift: f32,
 }
 
 impl Selector {
@@ -347,6 +352,7 @@ impl Selector {
         self.on_vert = l.on_vert;
         self.lean = l.lean;
         self.grind = l.grind;
+        self.lift = l.lift;
         let h = l.vel.horizontal();
         self.heading = h.normalize_or(Vec3::ZERO);
         self.max_time = max_time(l.vel, t);
@@ -484,6 +490,7 @@ impl Selector {
     fn score(&mut self, t: &Tuning, park: &dyn Terrain) {
         let mut highest = -1_000_000.0f32;
         let pass = self.pass;
+        let lift = self.lift;
         let (on_vert, lean, ground, heading, origin, grind_ok) = (
             self.on_vert,
             self.lean,
@@ -504,7 +511,7 @@ impl Selector {
                 if i == 0
                     && pass == 1
                     && let Some((flight, target, contact)) =
-                        grind_target(&c.flight, &natural, origin, t, park)
+                        grind_target(&c.flight, &natural, origin, lift, t, park)
                 {
                     c.flight = flight;
                     c.contact = Some(contact);
@@ -657,13 +664,19 @@ struct RailCandidate {
 /// Steers a flight onto a rail it comes down near (SK8 grind.rs `evaluate`, admission.rs): the flight,
 /// the target and the contact it now makes, or `None`.
 fn grind_target(
-    flight: &Flight,
+    path: &Flight,
     natural: &Contact,
     body: Vec3,
+    lift: f32,
     t: &Tuning,
     park: &dyn Terrain,
 ) -> Option<(Flight, GrindTarget, Contact)> {
     let g = &t.grind;
+    // The deck's flight: the board's, lifted by the legs (its result is moved back down).
+    let flight = &Flight {
+        pos: path.pos + Vec3::UP * lift,
+        ..*path
+    };
     let near = natural.point;
     let (lo, hi) = (near - v3(2.0, 0.5, 2.0), near + v3(2.0, 4.0, 2.0));
     let mut cands: alloc::vec::Vec<RailCandidate> = alloc::vec::Vec::new();
@@ -790,7 +803,7 @@ fn grind_target(
         }
         let steered = Flight {
             vel: flight.vel + dv,
-            ..*flight
+            ..*path
         };
         let normal = landing_normal(c.dir, steered.vel_at(c.time), t);
         return Some((
