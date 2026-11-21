@@ -91,6 +91,8 @@ pub struct Drive {
     pub slide: Option<f32>,
     /// A move turns the board itself (kick turn, revert): no truck or heading turn.
     pub pivot: bool,
+    /// The wheels don't scrub sideways speed (a revert: Skate 3 drops the board's drag while it turns).
+    pub keep_velocity: bool,
     /// The rider is pumping on purpose (crouching and standing from the stick).
     pub intentional_pump: bool,
 }
@@ -272,9 +274,11 @@ impl Skater {
             self.speed = approach(self.speed, 0.0, decel * dt);
         }
         // Side friction: sideways speed damped, no faster than grip allows.
-        let keep = libm::expf(-t.side_friction * SIDE_DAMP * dt);
-        let removal = clamp(self.slip * (1.0 - keep), -grip * dt, grip * dt);
-        self.slip -= removal;
+        if !d.keep_velocity {
+            let keep = libm::expf(-t.side_friction * SIDE_DAMP * dt);
+            let removal = clamp(self.slip * (1.0 - keep), -grip * dt, grip * dt);
+            self.slip -= removal;
+        }
 
         self.move_on_ground(park, d, dt, events);
     }
@@ -643,8 +647,10 @@ impl Skater {
         // Left stick: sideways (right +) and forwards.
         let fh = self.fwd.horizontal().normalize_or(yaw_dir(self.heading));
         let fh = if self.speed < 0.0 { -fh } else { fh };
-        let right = Vec3::UP.cross(fh).normalize_or(Vec3::ZERO);
-        vel += right * (stick[0] * t.jump_adjust_x * along)
+        // Up x travel points to the rider's left (+X when travelling +Z): the stick to the right takes
+        // the pop the other way (SK8 ground_jump: `side * -x`).
+        let left = Vec3::UP.cross(fh).normalize_or(Vec3::ZERO);
+        vel += left * (-stick[0] * t.jump_adjust_x * along)
             + fh * (stick[1] * t.jump_adjust_z * along);
         if n.y < t.vert_align_max_ny {
             // The face's horizontal out direction: the launch's up-and-out part gets re-aimed.

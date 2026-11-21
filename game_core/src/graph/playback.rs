@@ -623,6 +623,13 @@ impl Player {
         }
     }
 
+    /// Scales a channel's weight (SK8 `influence`).
+    pub fn set_channel_influence(&mut self, name: u16, influence: f32) {
+        if let Some(c) = self.channels.iter_mut().find(|c| c.name == name) {
+            c.fade.influence = influence.clamp(0.0, 1.0);
+        }
+    }
+
     pub fn has_channel(&self, name: u16) -> bool {
         self.channels.iter().any(|c| c.name == name)
     }

@@ -178,6 +178,17 @@ pub enum Cond {
     Unsupported(Str),
 }
 
+/// ScoringGrabs settings: the scored names and the intents that pick between them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GrabScore {
+    pub base: Str,
+    pub dirs: [Str; 4],
+    pub x: Str,
+    pub y: Str,
+    pub invert_y: bool,
+    pub polar: bool,
+}
+
 /// FilterMotionGraphIntent settings (SK8 intent_filter::Settings).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FilterDef {
@@ -274,7 +285,15 @@ pub enum Beh {
     ResetTimeSinceKickturn,
     UpdateTimeSinceKickturn,
     SetGrabType(Str),
-    ScoringGrabs,
+    /// ScoringGrabs (SK8 82BBEF60): the grab's scored name, its variants up, left, down and right (`NONE`
+    /// when absent), picked by two filtered intents (x and y, or angle and magnitude when `polar`).
+    ScoringGrabs(GrabScore),
+    /// TweakProject: the filtered `TweakX`/`TweakY` intents (scaled into the diamond |x| + |y| <= 1) as
+    /// the trees' `tweak_x`/`tweak_y` parameters.
+    TweakProject {
+        x: Option<NameId>,
+        y: Option<NameId>,
+    },
     Push(PushOp),
     CreateSlide {
         right: bool,
@@ -331,6 +350,16 @@ pub enum Beh {
         angle: Str,
     },
     BodyFlippingSignal,
+    /// BodySpin (SK8 motion_spin.rs): the body spin channels (`IA_BODYSPIN_OLLIE_FS/BS`) over the air
+    /// animation, their influence from the `BodySpin` intent.
+    BodySpin,
+    /// ControlAirLegExtension: the arms' reach in the air (`EXTEND`) against seconds coming down.
+    AirLegExtension(Option<NameId>),
+    /// SetDeckPitchAndYaw: the posed deck's yaw and pitch against the body as tree parameters on begin.
+    DeckPitchAndYaw {
+        yaw: Option<NameId>,
+        pitch: Option<NameId>,
+    },
     /// FakieHeadChannel: the fakie head and torso channel.
     FakieHead,
     /// Behaviours with nothing to do in flatground (hand services, debug text, off-board helpers).
@@ -652,7 +681,6 @@ const NOTHING: &[&str] = &[
     "EndGesture",
     "CharacterGesture",
     "SetScoreAugmentation",
-    "ControlAirLegExtension",
     "MatchTwistAndLean",
     "Pumping",
     "BipedCadence",
@@ -664,14 +692,11 @@ const NOTHING: &[&str] = &[
     "GrindControlFade",
     "ControlGrindCrouch",
     "CreateGrindAttributes",
-    "SetDeckPitchAndYaw",
     "SetBumpCoefficients",
-    "TweakProject",
     "UpdateIsWeightOnNose",
     "FootPlantAbsorb",
     "SetHandPlantAnticLength",
     "ScoringHandPlants",
-    "BodySpin",
     "AirDismounting",
     "InitMovingObjects",
     "MovingObject",
@@ -813,7 +838,26 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         "ResetTimeSinceKickturn" => Beh::ResetTimeSinceKickturn,
         "UpdateTimeSinceKickturn" => Beh::UpdateTimeSinceKickturn,
         "SetGrabType" => Beh::SetGrabType(a.str("grab")),
-        "ScoringGrabs" => Beh::ScoringGrabs,
+        "ScoringGrabs" => Beh::ScoringGrabs(GrabScore {
+            base: a.str("grabName"),
+            dirs: [a.str("up"), a.str("left"), a.str("down"), a.str("right")],
+            x: if a.get("intentX").is_some() {
+                a.str("intentX")
+            } else {
+                a.str("angle")
+            },
+            y: if a.get("intentY").is_some() {
+                a.str("intentY")
+            } else {
+                a.str("magnitude")
+            },
+            invert_y: a.b("invertY", false),
+            polar: a.get("intentX").is_none(),
+        }),
+        "TweakProject" => Beh::TweakProject {
+            x: lib("tweak_x"),
+            y: lib("tweak_y"),
+        },
         "InitPush" => Beh::Push(PushOp::Init),
         "PushCycle" => Beh::Push(PushOp::Cycle {
             foot: match a.get("newPushName") {
@@ -894,6 +938,12 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         },
         "BodyFlippingSignal" => Beh::BodyFlippingSignal,
         "FakieHeadChannel" => Beh::FakieHead,
+        "BodySpin" => Beh::BodySpin,
+        "ControlAirLegExtension" => Beh::AirLegExtension(lib("EXTEND").or_else(|| lib("extend"))),
+        "SetDeckPitchAndYaw" => Beh::DeckPitchAndYaw {
+            yaw: a.text("yaw").and_then(lib),
+            pitch: a.text("pitch").and_then(lib),
+        },
         _ if NOTHING.contains(&name) => Beh::Nothing,
         _ if UNSUPPORTED.contains(&name) => Beh::Unsupported(NONE),
         _ => Beh::Unsupported(NONE),

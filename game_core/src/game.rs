@@ -17,8 +17,8 @@ use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
 use crate::model::Models;
 use crate::pack::Pack;
 use crate::park::{Park, Terrain};
-use crate::rider::{self, Rider};
-use crate::skater::{ClipTiming, Event, Mode, STEP, Skater, Stance};
+use crate::rider::Rider;
+use crate::skater::{ClipTiming, Event, Mode, Skater, Stance};
 use crate::tuning::Tuning;
 use crate::world::ImportedPark;
 
@@ -119,6 +119,10 @@ pub struct SectionTimes {
     pub park_verts: u32,
     /// Skate 3's state graphs (input intents, both graphs, animation advance), part of `physics_us`.
     pub graph_us: u32,
+    /// The skater's step on the last tick spent in the air (the landing prediction, spin, flight), part
+    /// of `physics_us`, and the most one took since the platform last cleared `air_peak_us`.
+    pub air_us: u32,
+    pub air_peak_us: u32,
 }
 
 struct Popup {
@@ -357,6 +361,13 @@ impl Game {
     }
 
     /// What the skater rides on: the imported park if there is one, else the demo park.
+    /// Puts the rider back at the park's spawn, a fresh start (scripted runs between tours).
+    pub fn restart_at_spawn(&mut self) {
+        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        self.skater.reset_to_spawn(ground);
+        self.flick.reset();
+    }
+
     pub fn terrain(&self) -> &dyn Terrain {
         terrain(&self.imported_park, &self.park)
     }
@@ -381,8 +392,7 @@ impl Game {
             let rot = self.imported_xform().rot;
             let s = &self.skater;
             let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
-            let ground = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
-            let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, s.tuning.gravity);
+            let land_in = s.time_to_land(ground);
             let mut posed = false;
             if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
             {
@@ -450,10 +460,8 @@ impl Game {
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
         if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
             let s = &self.skater;
-            let land_in = matches!(s.mode, Mode::Air { .. }).then(|| {
-                let h = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
-                rider::time_to_land(s.pos.y - h, s.vel.y, s.tuning.gravity)
-            });
+            // The known landing's time (the trajectory selector), else straight down.
+            let land_in = matches!(s.mode, Mode::Air { .. }).then(|| s.time_to_land(ground));
             let world = g.world(s, land_in, g.input.idle());
             let gates = crate::graph::input::Gates {
                 late_flips_blocked: s.trick.is_some_and(|t| t.progress() < 1.0),
@@ -479,7 +487,14 @@ impl Game {
             }
         }
         let mut events = Vec::new();
+        let air = self.skater.is_airborne();
+        let t_step = now(self.timer);
         self.skater.step(ground, &pad, &flick, dt, &mut events);
+        if air {
+            let us = now(self.timer).wrapping_sub(t_step);
+            self.times.air_us = us;
+            self.times.air_peak_us = self.times.air_peak_us.max(us);
+        }
         if events.contains(&Event::Respawned) {
             self.flick.reset();
         }

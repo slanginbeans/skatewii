@@ -15,8 +15,8 @@ use alloc::vec::Vec;
 use crate::character::{Character, Local};
 use crate::gesture::{Flick, Trick};
 use crate::gfx::SUN;
-use crate::math::{Mat3, sqrtf, v3};
-use crate::skater::{GrabKind, GrindKind, LandKind, Mode, Skater};
+use crate::math::{Mat3, PI, sqrtf, v3};
+use crate::skater::{GrabKind, GrindKind, LandKind, Landing, Mode, Skater};
 
 /// Crossfade time between clips (s).
 const FADE: f32 = 0.12;
@@ -238,7 +238,7 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                     // The whole 180 slide over the revert.
                     return Pick {
                         role,
-                        time: duration(role) * (r.time / 0.3).min(1.0),
+                        time: duration(role) * (r.turned / PI).min(1.0),
                     };
                 }
             }
@@ -319,7 +319,7 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                     return Pick { role, time };
                 }
             }
-            let landing = s.landing.map(|l| (land_role(l.kind), l.time));
+            let landing = s.landing.map(|l| (land_role(&l), l.time));
             let crouch = if s.crouch_nollie() && has("crouch_nollie") {
                 "crouch_nollie"
             } else {
@@ -364,14 +364,18 @@ pub fn grab_role(k: GrabKind) -> &'static str {
     match k {
         GrabKind::Indy => "grab/fs",
         GrabKind::Melon => "grab/bs",
-        GrabKind::Mute => "grab/mute",
+        // The two-handed grab clip (the clip set's role keeps its old name).
+        GrabKind::Double => "grab/mute",
     }
 }
 
-pub fn land_role(k: LandKind) -> &'static str {
-    match k {
-        LandKind::Clean => "land/clean",
-        LandKind::Heavy => "land/heavy",
+/// A hard landing's clip for the built-in rider (cosmetic only: Skate 3 has no heavy landing type).
+const HEAVY_LOOK: f32 = 7.0;
+
+pub fn land_role(l: &Landing) -> &'static str {
+    match l.kind {
+        LandKind::Clean | LandKind::Spin if l.impact > HEAVY_LOOK => "land/heavy",
+        LandKind::Clean | LandKind::Spin => "land/clean",
         LandKind::Sketchy { frontside: true } => "land/sketchy_fs",
         LandKind::Sketchy { frontside: false } => "land/sketchy_bs",
     }
@@ -832,6 +836,7 @@ mod tests {
             time: 0.4,
             crooked: 0.3,
             impact: 2.0,
+            quality: Default::default(),
         });
         assert_eq!(
             pick(&s, 0.0, 0.0, &dur),
@@ -845,6 +850,7 @@ mod tests {
             time: 0.7,
             crooked: 0.0,
             impact: 2.0,
+            quality: Default::default(),
         });
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
         s.landing = None;
@@ -853,6 +859,9 @@ mod tests {
         s.grab = Some(Grab {
             kind: GrabKind::Indy,
             time: 0.3,
+            name: "INDY",
+            base: "INDY",
+            tweak: 0.0,
         });
         assert_eq!(pick(&s, 0.0, 0.2, &dur).role, "grab/fs");
         s.grab = None;

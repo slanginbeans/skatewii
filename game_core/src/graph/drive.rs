@@ -164,7 +164,10 @@ impl Driver {
             vel_y: s.vel.y,
             vel_up: s.vel.dot(up),
             pump_potential: s.pump.effect.abs().min(1.0),
-            landing_spin: s.yaw_rate,
+            // The landing classifier's signed magnitude (SK8 SetLandingData's spin).
+            landing_spin: s.landing.map_or(0.0, |l| l.quality.magnitude),
+            // Skate 3's landing classifier (0 straight, 1 sketchy, 2 spin, 3 slightly off).
+            landing_type: s.landing.map_or(0, |l| l.quality.kind),
             ..World::default()
         }
     }
@@ -261,6 +264,18 @@ impl Driver {
                 end - r.s.player.time() > DANGER_GRACE
             });
         c.dark = r.s.dark;
+        // The graph went to its wipeout state on its own (the physics' own wipeouts take it there too,
+        // once the physics is already off the board).
+        c.wipeout = path.starts_with("WipeOut")
+            && !self.last_path.starts_with("WipeOut")
+            && matches!(r.s.world.phys, phys::GROUND | phys::AIR);
+        if r.s.grab_score != super::NONE {
+            c.grab_name = Some(r.pack.str(r.s.grab_score));
+        }
+        let tx = r.s.filtered.get(r.names.tweak_x).unwrap_or(0.0);
+        let ty = r.s.filtered.get(r.names.tweak_y).unwrap_or(0.0);
+        c.tweak = libm::sqrtf(tx * tx + ty * ty);
+        c.body_spin = r.packet(r.names.phys_body_spin).unwrap_or(0.0);
         if r.s.world.phys == phys::AIR && air_trick_state(&path) {
             let name = r.str(r.s.trick);
             let (flick, flips) = air_flick(name);

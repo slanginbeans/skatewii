@@ -7,14 +7,15 @@
 use alloc::vec::Vec;
 
 use super::ops::{
-    Beh, Cmp, Cond, FilterDef, Flag, Group, Hook, Num, Op, ParamDef, PlayDef, PushOp, TransitionDef,
+    Beh, Cmp, Cond, FilterDef, Flag, GrabScore, Group, Hook, Num, Op, ParamDef, PlayDef, PushOp,
+    TransitionDef,
 };
 use crate::motion::Node;
 
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 struct W(Vec<u8>);
 
@@ -488,8 +489,8 @@ const PLAIN_BEHS: [Beh; 16] = [
     Beh::UpdateRidingFakie,
     Beh::ResetTimeSinceKickturn,
     Beh::UpdateTimeSinceKickturn,
-    Beh::ScoringGrabs,
     Beh::BodyFlippingSignal,
+    Beh::BodySpin,
     Beh::FakieHead,
     Beh::Nothing,
     Beh::ApplyingBodyTilt,
@@ -714,6 +715,31 @@ fn beh(w: &mut W, b: &Beh) {
             w.b(*manually);
             w.b(*adjust);
         }
+        Beh::ScoringGrabs(g) => {
+            w.u8(26);
+            w.u16(g.base);
+            for d in g.dirs {
+                w.u16(d);
+            }
+            w.u16(g.x);
+            w.u16(g.y);
+            w.b(g.invert_y);
+            w.b(g.polar);
+        }
+        Beh::TweakProject { x, y } => {
+            w.u8(27);
+            w.o16(*x);
+            w.o16(*y);
+        }
+        Beh::AirLegExtension(n) => {
+            w.u8(28);
+            w.o16(*n);
+        }
+        Beh::DeckPitchAndYaw { yaw, pitch } => {
+            w.u8(29);
+            w.o16(*yaw);
+            w.o16(*pitch);
+        }
         // Every field-less behaviour was written above.
         _ => w.u8(255),
     }
@@ -843,6 +869,23 @@ fn read_beh(r: &mut R) -> Option<Beh> {
             attr: r.o16()?,
             manually: r.b()?,
             adjust: r.b()?,
+        },
+        26 => Beh::ScoringGrabs(GrabScore {
+            base: r.u16()?,
+            dirs: [r.u16()?, r.u16()?, r.u16()?, r.u16()?],
+            x: r.u16()?,
+            y: r.u16()?,
+            invert_y: r.b()?,
+            polar: r.b()?,
+        }),
+        27 => Beh::TweakProject {
+            x: r.o16()?,
+            y: r.o16()?,
+        },
+        28 => Beh::AirLegExtension(r.o16()?),
+        29 => Beh::DeckPitchAndYaw {
+            yaw: r.o16()?,
+            pitch: r.o16()?,
         },
         _ => return None,
     })

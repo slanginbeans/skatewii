@@ -150,7 +150,15 @@ impl DevLog {
                     });
                     out.push(format!("BAIL: {why}{numbers}"));
                 }
-                Event::Respawned => out.push(String::from("respawned")),
+                Event::Respawned => out.push(format!(
+                    "respawned at ({:.1}, {:.1}, {:.1}) heading {:.0} deg{} ({} checkpoints left)",
+                    s.pos.x,
+                    s.pos.y,
+                    s.pos.z,
+                    deg(s.heading),
+                    if s.switch { ", switch" } else { "" },
+                    s.checkpoints.len()
+                )),
                 Event::RanOut => out.push(format!(
                     "RUNOUT: {} (stepped off, back on where it stops)",
                     s.bail_reason.unwrap_or("?")

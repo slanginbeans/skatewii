@@ -296,12 +296,125 @@ pub struct Tuning {
     pub spin_windup: Curve,
     /// Spin speed without any wind-up, as a share of the full speed.
     pub spin_no_windup: f32,
+    /// Most the spin speed may change per tick while the landing assist turns the body (rad/s, against
+    /// time in the air).
+    pub spin_auto_change: Curve,
+    /// Without a known landing: the stick's spin (`max_spin_speed` deg/s per unit) scaled by this against
+    /// twice the time in the air.
+    pub spin_input_filter: Curve,
+    pub max_spin_speed: f32,
+    /// The landing assist's spin: never faster than `max_auto_spin` (rad/s), halved under
+    /// `min_auto_spin`; turned the other way round (land fakie or switch) past `heading_adjust_vs_up`
+    /// degrees from the landing direction (against the body's up y); only with a landing direction
+    /// faster than `min_heading_vel` (m/s).
+    pub max_auto_spin: f32,
+    pub min_auto_spin: f32,
+    pub heading_adjust_vs_up: Curve,
+    pub min_heading_vel: f32,
+
+    // Attitude in the air.
+    /// Most the board's up may turn per tick (rad) towards the landing surface, against the centre of
+    /// mass's distance to the deck (m).
+    pub air_up_max_delta: Curve,
+    /// Without a known landing: the share of the angle to the surface below turned per tick, and the
+    /// angle (rad) past which the board doesn't turn to it at all.
+    pub phys_air_align: f32,
+    pub phys_air_dont_align: f32,
+
+    // Landing prediction and flight assist (the trajectory selector).
+    /// The candidate cone around the launch velocity: sideways and along-travel angles (degrees, the
+    /// latter scaled by `traj_cone_z_vs_speed` against speed / 20 m/s), the second pass's angles, and
+    /// the cone's speed range (m/s).
+    pub traj_cone_x: f32,
+    pub traj_cone_z: f32,
+    pub traj_cone_z_vs_speed: Curve,
+    pub traj_cone_x2: f32,
+    pub traj_cone_z2: f32,
+    pub traj_speed_min: f32,
+    pub traj_speed_max: f32,
+    /// How far ahead a flight is followed: seconds and metres of drop.
+    pub traj_max_time: f32,
+    pub traj_max_drop: f32,
+    /// Scores: a bonus against flight time, the landing force and direction terms (scaled by
+    /// `traj_force_scalar` against the speed into the surface), the middle candidate's bonus, the
+    /// transition term on vert, unrideable and don't-align surfaces.
+    pub traj_time_bonus: Curve,
+    pub traj_force_scalar: Curve,
+    pub traj_score_force: f32,
+    pub traj_score_direction: f32,
+    pub traj_score_middle: f32,
+    pub traj_score_transition: f32,
+    pub traj_score_unrideable: f32,
+    pub traj_score_dont_align: f32,
+    /// A landing sooner than this (s) isn't a known landing; within `traj_min_after_apex` of the apex
+    /// a vert landing is penalised; a second, narrower pass runs when the landing surface is more than
+    /// `traj_second_pass_delta` rad off the ground left.
+    pub traj_min_valid_time: f32,
+    pub traj_min_after_apex: f32,
+    pub traj_second_pass_delta: f32,
+    /// Most a candidate is nudged (m/s), and how long (s) the start error takes to blend away.
+    pub traj_max_adjust: f32,
+    pub traj_error_blend: f32,
+    /// Wallride candidates: probe distance off the wall, least height over the floor, score per metre,
+    /// the slope from launch to wall that still counts, and the upward nudge against height.
+    pub traj_wall_test_dist: f32,
+    pub traj_wall_min_height: f32,
+    pub traj_wall_score: f32,
+    pub traj_wall_land_angle: f32,
+    pub traj_wall_boost: Curve,
 
     // Landing.
     /// Largest board-to-travel angle (rad) that still lands, against speed.
     pub land_angle: Curve,
-    /// Hitting the ground faster than this (m/s, downwards) is a bail.
+    /// Hitting the ground faster than this (m/s, downwards) is a bail; onto stairs, onto a rail.
     pub land_max_impact: f32,
+    pub land_max_stairs: f32,
+    pub land_max_grind: f32,
+    /// Landing while the clips say the board isn't caught: a bail past this speed into the ground
+    /// (m/s), once the air is older than `danger_ignore_ticks` ticks.
+    pub danger_max_impact: f32,
+    pub danger_ignore_ticks: f32,
+    /// The tangential speed kept on landing, against the surface's normal y (transitions gain).
+    pub landing_speed_vs_ny: Curve,
+    /// Landing quality magnitudes: against the side speed and the spin speed (both remapped to 0..1).
+    pub land_sketchy_side: Curve,
+    pub land_sketchy_twist: Curve,
+
+    // After a bail.
+    /// Automatic reset: after `reset_min_time` s with the body settled (under `settled_speed` m/s, after
+    /// `settled_min_time` s) for `reset_settled` s, or after `reset_max_time` s; the screen fades for
+    /// `reset_fade` s first.
+    pub reset_min_time: f32,
+    pub reset_settled: f32,
+    pub reset_max_time: f32,
+    pub reset_fade: f32,
+    pub settled_speed: f32,
+    pub settled_min_time: f32,
+    /// Checkpoints: the ground under one no further than `respawn_drop` m down and facing up at least
+    /// `respawn_normal_y`, with `respawn_height` m clear over a `respawn_radius` m capsule.
+    pub respawn_height: f32,
+    pub respawn_radius: f32,
+    pub respawn_drop: f32,
+    pub respawn_normal_y: f32,
+
+    // Reverts (a servo on the board's yaw).
+    /// Target yaw rate (rad/s) against the angle left (rad), the gain per tick, the angle (degrees,
+    /// against the surface normal's y) that counts as done, and the longest a revert lasts (s).
+    pub revert_speed: Curve,
+    pub revert_gain: f32,
+    pub revert_tolerance: Curve,
+    pub revert_duration: f32,
+
+    // Air animation (the state graphs' air behaviours).
+    /// The arms' reach in the air (`EXTEND`) against seconds coming down.
+    pub air_arm_extend: Curve,
+    /// The body spin channels: influence against the spin intent, its blend in and out per update, and
+    /// its rate and acceleration limits.
+    pub spin_map: Curve,
+    pub spin_blend_in: f32,
+    pub spin_blend_out: f32,
+    pub spin_max_delta: f32,
+    pub spin_max_acc: f32,
 
     // Flick input.
     /// Samples a flick may stray from its shape before it is dropped.
@@ -728,9 +841,75 @@ pub const PATHS: &[&str] = &[
     "physics_bodyspin/default/MaxDeltaOppositeDirection",
     "physics_bodyspin/default/DerivativeBodySpinVsTime",
     "physics_bodyspin/default/MinDerivativeScalar",
+    "physics_bodyspin/default/MaxDeltaForAutoVsTime",
+    "physics_airstates/default/BodySpinInputFilter",
+    "physics_airstates/default/MaxSpinSpeed",
+    "physics_mode/normal/MaxAutoBodySpinSpeed",
+    "physics_airstates/default/MinAutoBodySpeed",
+    "physics_airstates/default/MaxHeadingAdjustVsUpY",
+    "physics_airstates/default/MinTargetHeadingVel",
+    "physics_reckoning/default/Air_MaxUpVectAngleDelta",
+    "physics_airstates/default/SpeedToAlignToGround_PhysAir",
+    "physics_airstates/default/DontAlignAnglePhysicsAir",
+    "physics_trajectory/default/ConeAngleX",
+    "physics_trajectory/default/ConeAngleZ",
+    "physics_trajectory/default/ConeAngleZVsSpeed",
+    "physics_trajectory/default/ConeAngleXSecondPass",
+    "physics_trajectory/default/ConeAngleZSecondPass",
+    "physics_trajectory/default/SpeedFactorMin",
+    "physics_trajectory/default/SpeedFactorMax",
+    "physics_trajectory/default/TrajectoryMaxTime",
+    "physics_trajectory/default/TrajectoryMaxDrop",
+    "physics_trajectory/default/LandingTimeBonus",
+    "physics_trajectory/default/LandingForceScalarVsDPVelNorm",
+    "physics_trajectory/default/ScoreLandingForce",
+    "physics_trajectory/default/ScoreLandingDirection",
+    "physics_trajectory/default/ScoreMiddleBonus",
+    "physics_trajectory/default/ScoreTransition",
+    "physics_trajectory/default/ScoreSurface_Unrideable",
+    "physics_trajectory/default/ScoreSurface_DontAlign",
+    "physics_trajectory/default/MinTimeForTrajectoryToBeValid",
+    "physics_trajectory/default/MinTimeAfterApexForTransition",
+    "physics_trajectory/default/MinNormalDeltaForSecondPass",
+    "physics_trajectory/default/MaxTrajectoryAdjust",
+    "physics_airstates/default/TrajErrorBlendAwayTime",
+    "physics_trajectory/default/WallRideTestDist",
+    "physics_trajectory/default/WallRideMinHeightFromGround",
+    "physics_trajectory/default/ScoreWallrideHeight",
+    "physics_trajectory/default/WallRideAngleToAllowLanding",
+    "physics_trajectory/default/WallRideBoost",
     // Landing angle limit against speed (the database has no name for this field).
     "physics_wipeout/default/Hash_4F08D9BAE6831524",
     "physics_wipeout/default/Wipeout_AirMaxSpeedIntoGround",
+    "physics_wipeout/default/Wipeout_AirMaxSpeedIntoStairs",
+    "physics_wipeout/default/Wipeout_AirMaxSpeedIntoCollisionNearGrind",
+    "physics_wipeout/default/Wipeout_AirYTrick",
+    "physics_wipeout/default/FramesAtStartOfAirToIgnoreDangerZone",
+    "physics_airstates/default/LandingSpeedScalarVsGroundNormalY",
+    "physics_animation/default/LandingSketchySideSpeed",
+    "physics_animation/default/LandingSketchyTwistSpin",
+    "physics_wipeout/default/TeleportMinTimeForAutoReset",
+    "physics_wipeout/default/TeleportMinTimeAfterSettlingForAutoReset",
+    "physics_wipeout/default/TeleportMaxTime",
+    "physics_wipeout/default/TeleportAutoResetFadeOutTime",
+    "physics_wipeout/default/WipeoutOverSpeed",
+    "physics_wipeout/default/WipeoutOverMinTime",
+    // The checkpoint manager's ground and clearance checks (no names in the database).
+    "Hash_12B64C0E804B0853/default/Hash_C0526C883AF0ECCA",
+    "Hash_12B64C0E804B0853/default/Hash_CEB092E418A5B001",
+    "Hash_12B64C0E804B0853/default/Hash_8ABE098D3806D273",
+    "Hash_12B64C0E804B0853/default/Hash_ADD032CACF6A1C15",
+    // The revert servo: speed against angle left, gain, tolerance against normal y, longest time.
+    "Hash_018E8A2E5028AB3F/default/Hash_DAA990E803A782A1",
+    "Hash_018E8A2E5028AB3F/default/Hash_0E5B939FD4ECDBAA",
+    "Hash_018E8A2E5028AB3F/default/Hash_3387562E9BEA0AF6",
+    "Hash_018E8A2E5028AB3F/default/Hash_035D9805EB9E2EE2",
+    "anim_motion/inair_disttocog/lo_air_arm_extend",
+    "anim_motion/body_spin/spin_map",
+    "anim_motion/body_spin/spin_influence_blendin",
+    "anim_motion/body_spin/spin_influence_blendout",
+    "anim_motion/body_spin/spin_clamp_influence_delta",
+    "anim_motion/body_spin/spin_clamp_influence_deltadelta",
     "recognizer/right_stick/NumTicksPatternNotInRangeBeforeCulling",
     "camera_shots/chase_flat_slow/PositionDistance",
     "camera_shots/chase_flat_slow/PositionElevation",
@@ -959,8 +1138,72 @@ impl Tuning {
         spin_reverse_change: 0.2,
         spin_windup: Curve::new(&[(-0.5, 0.0), (-0.3, 1.0), (0.1, 1.0), (0.5, 0.3)]),
         spin_no_windup: 0.45,
-        land_angle: Curve::new(&[(0.0, 1.5), (10.0, 1.4), (28.0, 0.3)]),
+        spin_auto_change: Curve::new(&[(0.0, 0.8), (0.3, 0.55), (1.0, 0.4)]),
+        spin_input_filter: Curve::new(&[(0.0, 0.0), (0.05, 1.0), (0.3, 0.8), (1.0, 0.45)]),
+        max_spin_speed: 540.0,
+        max_auto_spin: 7.0,
+        min_auto_spin: 0.12,
+        heading_adjust_vs_up: Curve::new(&[(0.0, 130.0), (0.8, 125.0), (0.92, 95.0), (1.0, 90.0)]),
+        min_heading_vel: 0.8,
+        air_up_max_delta: Curve::new(&[(0.5, 0.15), (0.75, 0.1), (1.0, 0.07)]),
+        phys_air_align: 0.12,
+        phys_air_dont_align: 1.5,
+        traj_cone_x: 12.0,
+        traj_cone_z: 35.0,
+        traj_cone_z_vs_speed: Curve::new(&[(0.0, 0.35), (0.5, 0.45), (1.0, 0.55)]),
+        traj_cone_x2: 6.0,
+        traj_cone_z2: 12.0,
+        traj_speed_min: 2.0,
+        traj_speed_max: 3.5,
+        traj_max_time: 3.5,
+        traj_max_drop: 35.0,
+        traj_time_bonus: Curve::new(&[(0.0, 0.0), (0.1, 0.0), (0.25, 500.0), (0.45, 1000.0)]),
+        traj_force_scalar: Curve::new(&[(0.0, 0.0), (0.1, 0.3), (0.3, 1.0)]),
+        traj_score_force: 25.0,
+        traj_score_direction: 150.0,
+        traj_score_middle: 50.0,
+        traj_score_transition: 400.0,
+        traj_score_unrideable: -150_000.0,
+        traj_score_dont_align: -80_000.0,
+        traj_min_valid_time: 0.22,
+        traj_min_after_apex: 0.12,
+        traj_second_pass_delta: 0.12,
+        traj_max_adjust: 1.2,
+        traj_error_blend: 0.25,
+        traj_wall_test_dist: 0.06,
+        traj_wall_min_height: 0.5,
+        traj_wall_score: 400.0,
+        traj_wall_land_angle: 0.0,
+        traj_wall_boost: Curve::new(&[(0.5, 0.4), (1.5, 0.0)]),
+        land_angle: Curve::new(&[(0.0, 1.7), (10.0, 1.5), (20.0, 0.6), (28.0, 0.3)]),
         land_max_impact: 11.0,
+        land_max_stairs: 5.5,
+        land_max_grind: 7.5,
+        danger_max_impact: 0.8,
+        danger_ignore_ticks: 5.0,
+        landing_speed_vs_ny: Curve::new(&[(0.4, 1.0), (0.55, 1.12), (0.7, 1.0)]),
+        land_sketchy_side: Curve::new(&[(0.0, 0.0), (0.3, 0.3), (0.6, 0.8), (0.9, 1.0)]),
+        land_sketchy_twist: Curve::new(&[(0.0, 0.0), (0.3, 0.5), (0.6, 0.85), (1.0, 1.0)]),
+        reset_min_time: 3.0,
+        reset_settled: 2.0,
+        reset_max_time: 18.0,
+        reset_fade: 0.4,
+        settled_speed: 0.6,
+        settled_min_time: 0.4,
+        respawn_height: 0.5,
+        respawn_radius: 0.4,
+        respawn_drop: 1.2,
+        respawn_normal_y: 0.8,
+        revert_speed: Curve::new(&[(0.0, 4.0), (0.3, 7.0), (1.2, 9.0), (2.6, 9.0), (3.1, 8.0)]),
+        revert_gain: 0.2,
+        revert_tolerance: Curve::new(&[(0.0, 35.0), (0.7, 8.0), (1.0, 8.0)]),
+        revert_duration: 1.1,
+        air_arm_extend: Curve::new(&[(0.0, 0.0), (0.3, 0.6), (0.6, 1.0)]),
+        spin_map: Curve::new(&[(0.0, 0.0), (0.3, 0.2), (1.0, 1.0)]),
+        spin_blend_in: 0.2,
+        spin_blend_out: 0.1,
+        spin_max_delta: 0.08,
+        spin_max_acc: 0.02,
         flick_misses: 8,
         anim: AnimTuning::BUILT_IN,
         cam_slow: CamShot {
@@ -1201,6 +1444,119 @@ impl Tuning {
             "physics_wipeout/default/Wipeout_AirMaxSpeedIntoGround" => {
                 scalar!(self.land_max_impact)
             }
+            "physics_bodyspin/default/MaxDeltaForAutoVsTime" => curve!(self.spin_auto_change),
+            "physics_airstates/default/BodySpinInputFilter" => curve!(self.spin_input_filter),
+            "physics_airstates/default/MaxSpinSpeed" => scalar!(self.max_spin_speed),
+            "physics_mode/normal/MaxAutoBodySpinSpeed" => scalar!(self.max_auto_spin),
+            "physics_airstates/default/MinAutoBodySpeed" => scalar!(self.min_auto_spin),
+            "physics_airstates/default/MaxHeadingAdjustVsUpY" => curve!(self.heading_adjust_vs_up),
+            "physics_airstates/default/MinTargetHeadingVel" => scalar!(self.min_heading_vel),
+            "physics_reckoning/default/Air_MaxUpVectAngleDelta" => curve!(self.air_up_max_delta),
+            "physics_airstates/default/SpeedToAlignToGround_PhysAir" => {
+                scalar!(self.phys_air_align)
+            }
+            "physics_airstates/default/DontAlignAnglePhysicsAir" => {
+                scalar!(self.phys_air_dont_align)
+            }
+            "physics_trajectory/default/ConeAngleX" => scalar!(self.traj_cone_x),
+            "physics_trajectory/default/ConeAngleZ" => scalar!(self.traj_cone_z),
+            "physics_trajectory/default/ConeAngleZVsSpeed" => curve!(self.traj_cone_z_vs_speed),
+            "physics_trajectory/default/ConeAngleXSecondPass" => scalar!(self.traj_cone_x2),
+            "physics_trajectory/default/ConeAngleZSecondPass" => scalar!(self.traj_cone_z2),
+            "physics_trajectory/default/SpeedFactorMin" => scalar!(self.traj_speed_min),
+            "physics_trajectory/default/SpeedFactorMax" => scalar!(self.traj_speed_max),
+            "physics_trajectory/default/TrajectoryMaxTime" => scalar!(self.traj_max_time),
+            "physics_trajectory/default/TrajectoryMaxDrop" => scalar!(self.traj_max_drop),
+            "physics_trajectory/default/LandingTimeBonus" => curve!(self.traj_time_bonus),
+            "physics_trajectory/default/LandingForceScalarVsDPVelNorm" => {
+                curve!(self.traj_force_scalar)
+            }
+            "physics_trajectory/default/ScoreLandingForce" => scalar!(self.traj_score_force),
+            "physics_trajectory/default/ScoreLandingDirection" => {
+                scalar!(self.traj_score_direction)
+            }
+            "physics_trajectory/default/ScoreMiddleBonus" => scalar!(self.traj_score_middle),
+            "physics_trajectory/default/ScoreTransition" => scalar!(self.traj_score_transition),
+            "physics_trajectory/default/ScoreSurface_Unrideable" => {
+                scalar!(self.traj_score_unrideable)
+            }
+            "physics_trajectory/default/ScoreSurface_DontAlign" => {
+                scalar!(self.traj_score_dont_align)
+            }
+            "physics_trajectory/default/MinTimeForTrajectoryToBeValid" => {
+                scalar!(self.traj_min_valid_time)
+            }
+            "physics_trajectory/default/MinTimeAfterApexForTransition" => {
+                scalar!(self.traj_min_after_apex)
+            }
+            "physics_trajectory/default/MinNormalDeltaForSecondPass" => {
+                scalar!(self.traj_second_pass_delta)
+            }
+            "physics_trajectory/default/MaxTrajectoryAdjust" => scalar!(self.traj_max_adjust),
+            "physics_airstates/default/TrajErrorBlendAwayTime" => scalar!(self.traj_error_blend),
+            "physics_trajectory/default/WallRideTestDist" => scalar!(self.traj_wall_test_dist),
+            "physics_trajectory/default/WallRideMinHeightFromGround" => {
+                scalar!(self.traj_wall_min_height)
+            }
+            "physics_trajectory/default/ScoreWallrideHeight" => scalar!(self.traj_wall_score),
+            "physics_trajectory/default/WallRideAngleToAllowLanding" => {
+                scalar!(self.traj_wall_land_angle)
+            }
+            "physics_trajectory/default/WallRideBoost" => curve!(self.traj_wall_boost),
+            "physics_wipeout/default/Wipeout_AirMaxSpeedIntoStairs" => {
+                scalar!(self.land_max_stairs)
+            }
+            "physics_wipeout/default/Wipeout_AirMaxSpeedIntoCollisionNearGrind" => {
+                scalar!(self.land_max_grind)
+            }
+            "physics_wipeout/default/Wipeout_AirYTrick" => scalar!(self.danger_max_impact),
+            // An integer in the database: a 4-byte one arrives as its bits read as a float.
+            "physics_wipeout/default/FramesAtStartOfAirToIgnoreDangerZone" => match f {
+                Some(f) if f.to_bits() < 0x0080_0000 => {
+                    self.danger_ignore_ticks = f.to_bits() as f32;
+                    true
+                }
+                Some(f) if (0.0..=600.0).contains(&f) => {
+                    self.danger_ignore_ticks = f;
+                    true
+                }
+                _ => false,
+            },
+            "physics_airstates/default/LandingSpeedScalarVsGroundNormalY" => {
+                curve!(self.landing_speed_vs_ny)
+            }
+            "physics_animation/default/LandingSketchySideSpeed" => curve!(self.land_sketchy_side),
+            "physics_animation/default/LandingSketchyTwistSpin" => {
+                curve!(self.land_sketchy_twist)
+            }
+            "physics_wipeout/default/TeleportMinTimeForAutoReset" => scalar!(self.reset_min_time),
+            "physics_wipeout/default/TeleportMinTimeAfterSettlingForAutoReset" => {
+                scalar!(self.reset_settled)
+            }
+            "physics_wipeout/default/TeleportMaxTime" => scalar!(self.reset_max_time),
+            "physics_wipeout/default/TeleportAutoResetFadeOutTime" => scalar!(self.reset_fade),
+            "physics_wipeout/default/WipeoutOverSpeed" => scalar!(self.settled_speed),
+            "physics_wipeout/default/WipeoutOverMinTime" => scalar!(self.settled_min_time),
+            "Hash_12B64C0E804B0853/default/Hash_C0526C883AF0ECCA" => scalar!(self.respawn_height),
+            "Hash_12B64C0E804B0853/default/Hash_CEB092E418A5B001" => scalar!(self.respawn_radius),
+            "Hash_12B64C0E804B0853/default/Hash_8ABE098D3806D273" => scalar!(self.respawn_drop),
+            "Hash_12B64C0E804B0853/default/Hash_ADD032CACF6A1C15" => {
+                scalar!(self.respawn_normal_y)
+            }
+            "Hash_018E8A2E5028AB3F/default/Hash_DAA990E803A782A1" => curve!(self.revert_speed),
+            "Hash_018E8A2E5028AB3F/default/Hash_0E5B939FD4ECDBAA" => scalar!(self.revert_gain),
+            "Hash_018E8A2E5028AB3F/default/Hash_3387562E9BEA0AF6" => {
+                curve!(self.revert_tolerance)
+            }
+            "Hash_018E8A2E5028AB3F/default/Hash_035D9805EB9E2EE2" => {
+                scalar!(self.revert_duration)
+            }
+            "anim_motion/inair_disttocog/lo_air_arm_extend" => curve!(self.air_arm_extend),
+            "anim_motion/body_spin/spin_map" => curve!(self.spin_map),
+            "anim_motion/body_spin/spin_influence_blendin" => scalar!(self.spin_blend_in),
+            "anim_motion/body_spin/spin_influence_blendout" => scalar!(self.spin_blend_out),
+            "anim_motion/body_spin/spin_clamp_influence_delta" => scalar!(self.spin_max_delta),
+            "anim_motion/body_spin/spin_clamp_influence_deltadelta" => scalar!(self.spin_max_acc),
             "recognizer/right_stick/NumTicksPatternNotInRangeBeforeCulling" => match f {
                 Some(f) if (0.0..=63.0).contains(&f) => {
                     self.flick_misses = f as u8;

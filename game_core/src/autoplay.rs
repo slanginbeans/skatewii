@@ -18,6 +18,10 @@ pub struct KickerRun {
 const BACK: (i8, i8) = (0, -92);
 const UP_RIGHT: (i8, i8) = (50, 62);
 const UP: (i8, i8) = (0, 92);
+/// The C-stick pushed most of the way to the side and held: a grab's tweak.
+const TWEAK: (i8, i8) = (80, 20);
+/// The C-stick held down during a grab: its variant.
+const GRAB_DOWN: (i8, i8) = (0, -85);
 
 /// The C-stick at `deg` degrees clockwise from straight forward, fully over.
 fn rim(deg: f32) -> (i8, i8) {
@@ -89,6 +93,8 @@ pub struct TrickTour {
     pub seen: Seen,
     /// The heading (yaw) it steers for: clear, flat ground ahead.
     steer_to: Option<f32>,
+    /// The grab's scored name when it was first held.
+    grab_name: Option<&'static str>,
 }
 
 /// Moves the tour saw the game do.
@@ -103,7 +109,13 @@ pub struct Seen {
     /// Most flips of a held kickflip.
     pub flips: u8,
     pub late_flip: bool,
+    /// The C-stick picked a grab's variant (its scored name changed while the grab was held).
+    pub grab_variant: bool,
 }
+
+/// How far short of half a turn the 180's let-go spin may carry it (rad): the landing assist does the
+/// rest.
+const RELEASE_HALF_CAB: f32 = 0.25;
 
 /// How long the tour holds its manual (ticks): over 3 s.
 pub const MANUAL_TICKS: u32 = 190;
@@ -462,9 +474,22 @@ impl TrickTour {
                 }
             }
             Tour::GrabAir => {
-                // Grab from just after the pop until falling, then let go to land.
-                if self.t > 4 && s.vel.y > -2.0 {
+                // Grab from just after the pop until falling, then let go to land; a moment into the
+                // grab the C-stick goes down to pick the grab's variant (and back before letting go).
+                let grabbing = self.t > 4 && s.vel.y > -2.0;
+                if grabbing {
                     pad.trig_r = 255;
+                }
+                if let Some(g) = &s.grab {
+                    match self.grab_name {
+                        None => self.grab_name = Some(g.name),
+                        Some(n) if n != g.name => self.seen.grab_variant = true,
+                        _ => {}
+                    }
+                    // (Back to the middle by the top: still tweaking it on landing would wipe out.)
+                    if grabbing && g.time > 0.08 && s.vel.y > 0.5 {
+                        (pad.cstick_x, pad.cstick_y) = GRAB_DOWN;
+                    }
                 }
                 if rolling {
                     next(self, Tour::Revert, sw);
@@ -538,8 +563,11 @@ impl TrickTour {
                 }
             }
             Tour::HalfCabAir => {
-                // Spin left to about half a turn, then let the stick go.
-                if s.spin.abs() < PI - 1.0 {
+                // Spin left, letting the stick go once the let-go spin will carry it about half round
+                // (it slows by the opposite-direction limit a tick); the landing assist finishes it.
+                let slow = (s.tuning.spin_reverse_change * 60.0).max(1.0);
+                let carry = s.spin_rate * s.spin_rate / (2.0 * slow);
+                if s.spin.abs() + carry < PI - RELEASE_HALF_CAB {
                     pad.stick_x = -100;
                 }
                 if rolling {
@@ -663,9 +691,13 @@ impl TrickTour {
                 }
             }
             Tour::BailAir => {
-                // Grab and never let go: still holding the board when the wheels touch down.
+                // Grab, tweak it with the C-stick and never let go: still tweaking the grab when the
+                // wheels touch down wipes out.
                 if self.t > 4 {
                     pad.trig_l = 255;
+                }
+                if self.t > 8 {
+                    (pad.cstick_x, pad.cstick_y) = TWEAK;
                 }
                 if matches!(s.mode, Mode::Bailed { .. }) {
                     next(self, Tour::Done, sw);
@@ -693,11 +725,25 @@ pub struct Autoplay {
     rest: u32,
     /// The phase last logged.
     shown: &'static str,
+    /// A tour just ended and the rider is back on the board: start the next one from the park's spawn
+    /// (the tour is laid out from there), see [`Autoplay::take_restart`].
+    restart: bool,
 }
 
 impl Autoplay {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// True once when the next tour should start from the park's spawn (the caller puts the rider there:
+    /// `Game::restart_at_spawn`).
+    pub fn take_restart(&mut self) -> bool {
+        core::mem::take(&mut self.restart)
+    }
+
+    /// The tour phase it is in (for the log).
+    pub fn phase(&self) -> &'static str {
+        self.tour.phase_name()
     }
 
     /// The next pad state. Returns the line to log when a tour phase starts or the tour finishes.
@@ -709,8 +755,12 @@ impl Autoplay {
         if self.rest > 0 {
             self.rest -= 1;
             // Wait until the rider is up again before starting over.
-            if self.rest == 0 && !matches!(game.skater.mode, Mode::Rolling) {
-                self.rest = 30;
+            if self.rest == 0 {
+                if matches!(game.skater.mode, Mode::Rolling) {
+                    self.restart = true;
+                } else {
+                    self.rest = 30;
+                }
             }
             return (idle, None);
         }
@@ -725,14 +775,15 @@ impl Autoplay {
                 idle,
                 Some(alloc::format!(
                     "autoplay: tour {} done (manual {:.1} s, kick turn {}, revert {}, auto switch {}, \
-                     {} flips held, late flip {})",
+                     {} flips held, late flip {}, grab variant {})",
                     self.rounds,
                     seen.manual as f32 / 60.0,
                     seen.kick_turn,
                     seen.revert,
                     seen.auto_switch,
                     seen.flips,
-                    seen.late_flip
+                    seen.late_flip,
+                    seen.grab_variant
                 )),
             );
         }
@@ -757,6 +808,9 @@ mod tests {
         for _ in 0..(60 * 120) {
             let (pad, line) = auto.next(&game);
             lines += line.is_some_and(|l| l.contains(" done")) as u32;
+            if auto.take_restart() {
+                game.restart_at_spawn();
+            }
             game.update(&pad, 1.0 / 60.0);
             if auto.rounds >= 2 {
                 break;

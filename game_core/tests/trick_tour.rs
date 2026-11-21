@@ -48,13 +48,32 @@ fn trick_tour_does_every_move() {
     assert!(has("MANUAL"), "{names:?}");
     assert!(script.seen.kick_turn, "{:?}", script.seen);
     assert!(grab_frames > 10, "{grab_frames}");
-    assert!(has("OLLIE INDY"), "{names:?}");
+    // The C-stick down picks the indy's variant (flatground's table: a stalefish).
+    assert!(
+        has("OLLIE STALEFISH") && script.seen.grab_variant,
+        "{names:?}"
+    );
     assert!(has("REVERT") && script.seen.revert, "{names:?}");
     assert!(has("360 FLIP") || has("LASER FLIP"), "{names:?}");
+    // The 180's stick is let go early: the spin carries on and the landing assist finishes it.
     assert!(has("180 OLLIE"), "{names:?}");
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("SKETCHY") && n.contains("180")),
+        "{names:?}"
+    );
     assert!(fakie_frames > 10, "{fakie_frames}");
     assert!(seen.contains(&Event::Switched), "{names:?}");
-    assert!(has("KICKFLIP") && has("HEELFLIP"), "{names:?}");
+    // The held kickflip (a kickflip or, ridden switch, the mirrored flick's heelflip).
+    assert!(
+        names
+            .iter()
+            .filter(|n| n.contains("KICKFLIP") || n.contains("HEELFLIP"))
+            .count()
+            >= 2,
+        "{names:?}"
+    );
     assert!(slide_frames > 10, "{slide_frames}");
     assert!(has("HIPPIE JUMP"), "{names:?}");
     assert_eq!(seen.last(), Some(&Event::Bailed), "{seen:?}");
