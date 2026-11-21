@@ -19,6 +19,7 @@ const SHAPES: &[&str] = &[
     "skater_air",
     "skater_fingerflip",
     "skaterls",
+    "skaterstep",
 ];
 
 /// A flick shape: name, tolerance radius, points.

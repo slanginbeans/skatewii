@@ -117,6 +117,8 @@ pub struct SectionTimes {
     /// Park meshes and vertices drawn last frame.
     pub park_draws: u32,
     pub park_verts: u32,
+    /// Skate 3's state graphs (input intents, both graphs, animation advance), part of `physics_us`.
+    pub graph_us: u32,
 }
 
 struct Popup {
@@ -137,6 +139,11 @@ pub struct Game {
     /// Skate 3's motion library (`fg_import motion`): clip timing, attribute tracks, animation trees and
     /// poses. Loaded but not played yet.
     pub motion: Option<crate::motion::Library<'static>>,
+    /// Skate 3's action and motion graphs from the motion pack (`motion/graph`), run every tick when
+    /// present (see `graph`).
+    pub graph: Option<crate::graph::drive::Driver>,
+    /// Gesture files from the rules pack, by name (for the graph's input).
+    gesture_sets: Vec<(&'static str, Vec<gesture::Shape>)>,
     pub skater: Skater,
     flick: FlickInput,
     /// This frame's flick-stick reading (for the preview and tests).
@@ -218,6 +225,8 @@ impl Game {
             notice: None,
             rider: None,
             motion: None,
+            graph: None,
+            gesture_sets: Vec::new(),
             imported_park: None,
             log: Vec::new(),
             devlog: DevLog::new(),
@@ -247,6 +256,19 @@ impl Game {
     ) -> Result<&crate::motion::Library<'static>, crate::motion::LibraryError> {
         let lib = crate::motion::Library::parse(pack)?;
         self.skater.clips = ClipTiming::from_motion(&lib.db);
+        self.graph = None;
+        if let Ok(p) = Pack::parse(pack)
+            && let Some(e) = p.find("motion/graph")
+        {
+            let t0 = self.timer.map_or(0, |f| f());
+            match crate::graph::drive::Driver::new(e.data, &lib.db, self.gesture_sets()) {
+                Ok(mut d) => {
+                    d.load_us = self.timer.map_or(0, |f| f()).wrapping_sub(t0);
+                    self.graph = Some(d)
+                }
+                Err(e) => self.notice = Some(format!("state graphs unreadable ({e:?})")),
+            }
+        }
         Ok(self.motion.insert(lib))
     }
 
@@ -281,9 +303,33 @@ impl Game {
             shapes = s.len();
             self.flick = FlickInput::with_shapes(s);
         }
+        self.gesture_sets.clear();
+        for name in crate::graph::input::RIGHT_SETS
+            .iter()
+            .chain(&crate::graph::input::LEFT_SETS)
+        {
+            if let Some(e) = pack.find(&format!("rules/gestures/{name}"))
+                && let Some(s) = gesture::parse(e.data)
+            {
+                self.gesture_sets.push((name, s));
+            }
+        }
+        let sets = self.gesture_sets();
+        if let Some(g) = &mut self.graph {
+            g.set_gestures(sets);
+        }
         self.skater.tuning = self.tuning;
         self.cam = ChaseCam::new(&self.skater);
         Ok((values, shapes))
+    }
+
+    /// The gesture files for the graph's input: the disc's, else flatground's own flick shapes.
+    fn gesture_sets(&self) -> Vec<(&'static str, Vec<gesture::Shape>)> {
+        if self.gesture_sets.is_empty() {
+            alloc::vec![("skater", gesture::built_in())]
+        } else {
+            self.gesture_sets.clone()
+        }
     }
 
     /// Sets the rider's natural stance (Skate 3's default is goofy).
@@ -386,6 +432,24 @@ impl Game {
         self.skater.step(ground, &pad, &flick, dt, &mut events);
         if events.contains(&Event::Respawned) {
             self.flick.reset();
+        }
+        if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
+            let s = &self.skater;
+            let land_in = matches!(s.mode, Mode::Air { .. }).then(|| {
+                let h = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
+                rider::time_to_land(s.pos.y - h, s.vel.y, s.tuning.gravity)
+            });
+            let world = crate::graph::drive::Driver::world(s, land_in, g.input.idle());
+            g.tick(&lib.db, &pad, world, Default::default(), dt, self.timer);
+            self.times.graph_us = g.cost_us;
+            if self.log.len() < LOG_CAP {
+                if let Some(state) = g.state_change() {
+                    self.log.push(format!("graph: {state}"));
+                }
+                for n in g.new_unsupported() {
+                    self.log.push(format!("graph: unsupported {n}"));
+                }
+            }
         }
         self.cam.update(&self.skater, ground, dt);
         self.times.physics_us = now(self.timer).wrapping_sub(t0);

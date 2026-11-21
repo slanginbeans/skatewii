@@ -274,6 +274,7 @@ pub extern "C" fn fg_rust_init() {
         },
         None => "DEMO".into(),
     };
+    let motion_start = clock_us();
     let motion: String = match load_first("motion", MOTION_PACKS) {
         Some(pack) => match game.load_motion(pack) {
             Ok(lib) => {
@@ -310,6 +311,31 @@ pub extern "C" fn fg_rust_init() {
         },
         None => "NONE".into(),
     };
+    let motion_us = clock_us().wrapping_sub(motion_start);
+    if let Some(g) = &game.graph {
+        let r = &g.runner;
+        let (done, nothing, unsupported) = r.coverage();
+        let mut st = ffi::FgFrameStats::default();
+        unsafe { ffi::fg_frame_stats(&mut st) };
+        log(
+            false,
+            &format!(
+                "graph: action {} states, motion {} states / {} transitions / {} operations ({} run, {} no-op, unsupported: {}); {} KB parsed in {:.1} ms (motion pack read + parsed in {:.1} ms); MEM1 {} KB free, MEM2 {} KB free",
+                r.action_graph().states.len(),
+                r.motion_graph().states.len(),
+                r.motion_graph().transitions.len(),
+                r.motion_graph().ops.len() + r.action_graph().ops.len(),
+                done,
+                nothing,
+                unsupported.join(" "),
+                g.memory / 1024,
+                g.load_us as f32 / 1000.0,
+                motion_us as f32 / 1000.0,
+                st.mem1_free / 1024,
+                st.mem2_free / 1024
+            ),
+        );
+    }
     let notice = format!("SKATER: {skater}  PARK: {park}  RULES: {rules}  MOTION: {motion}");
     log(true, &format!("ready: {notice}, stance {:?}", game.stance));
     game.notice = Some(notice);
@@ -387,10 +413,11 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
             log(
                 false,
                 &format!(
-                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
+                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
                     c.avg_us / 1000.0,
                     c.peak_us as f32 / 1000.0,
                     t.physics_us as f32 / 1000.0,
+                    t.graph_us as f32 / 1000.0,
                     t.skin_us as f32 / 1000.0,
                     t.render_us as f32 / 1000.0,
                     c.gpu_avg_us / 1000.0,

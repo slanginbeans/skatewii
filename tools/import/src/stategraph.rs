@@ -95,6 +95,55 @@ pub fn attributes(bytes: &[u8]) -> Result<Vec<Attr<'_>>, String> {
     Ok(out)
 }
 
+/// The whole element tree, with each attribute's float word and boolean byte (for the graph compiler,
+/// `game_core::graph::write`).
+pub fn elements(bytes: &[u8]) -> Result<game_core::graph::write::Element, String> {
+    use game_core::graph::write::{AttrIn, Element};
+    fn read(r: &mut Reader, depth: usize) -> Result<Element, String> {
+        if depth > 64 {
+            return Err("elements nested too deeply".into());
+        }
+        let tag = r.string()?.to_string();
+        let count = r.word()?;
+        if count as usize > (r.bytes.len() - r.at) / 7 {
+            return Err("attribute count exceeds the data".into());
+        }
+        let mut attrs = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let name = r.string()?.to_string();
+            let text = r.string()?.to_string();
+            let float = r.word()?;
+            let flag = *r.bytes.get(r.at).ok_or("truncated")?;
+            r.at += 1;
+            attrs.push(AttrIn {
+                name,
+                text,
+                float,
+                flag,
+            });
+        }
+        let n = r.word()?;
+        if n as usize > r.bytes.len().saturating_sub(r.at) / 9 {
+            return Err("child count exceeds the data".into());
+        }
+        let mut children = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            children.push(read(r, depth + 1)?);
+        }
+        Ok(Element {
+            tag,
+            attrs,
+            children,
+        })
+    }
+    let mut r = Reader { bytes, at: 0 };
+    let e = read(&mut r, 0)?;
+    if r.at != bytes.len() {
+        return Err("trailing bytes after the root element".into());
+    }
+    Ok(e)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +178,11 @@ mod tests {
         b.push(0);
         assert!(attributes(&b).is_err(), "trailing bytes");
         assert!(attributes(&b[..10]).is_err(), "truncated");
+        b.pop();
+        let e = elements(&b).unwrap();
+        assert_eq!(e.tag, "state");
+        assert_eq!(e.children.len(), 2);
+        assert_eq!(e.children[0].children[0].tag, "x");
+        assert_eq!(e.children[1].attrs[1].text, "1");
     }
 }

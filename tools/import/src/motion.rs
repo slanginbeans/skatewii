@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 const BANK: &str = "data/big/miscload.big::data/anim/OnBoard.abin";
 const GRAPH: &str = "data/big/miscload.big::data/state/MotionGraph_OnBoard.stategraph";
+const ACTION_GRAPH: &str = "data/big/miscload.big::data/state/ActionGraph_OnBoard.stategraph";
 
 /// Default pose budget (MiB). The Wii has 24 MiB MEM1 + 64 MiB MEM2; the park, skater and the game's own
 /// heap need the rest.
@@ -387,6 +388,44 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         height: 0,
         gx_format: 0,
     }];
+    // Both state graphs, compiled for the game's graph runner (`game_core::graph`).
+    let action = read_asset(disc, ACTION_GRAPH)?;
+    let graphs = game_core::graph::write::compile(&[
+        (
+            game_core::graph::host::ACTION,
+            &stategraph::elements(&action)?,
+        ),
+        (
+            game_core::graph::host::MOTION,
+            &stategraph::elements(&graph)?,
+        ),
+    ])?;
+    let parsed_graphs = game_core::graph::Pack::parse(&graphs)
+        .map_err(|e| format!("compiled graphs don't read back: {e:?}"))?;
+    for g in &parsed_graphs.graphs {
+        println!(
+            "graph {}: {} states, {} transitions, {} expressions, {} operations, {} attributes",
+            parsed_graphs.str(g.name),
+            g.states.len(),
+            g.transitions.len(),
+            g.expressions.len(),
+            g.ops.len(),
+            g.attrs.len()
+        );
+    }
+    println!(
+        "graphs: {} strings, {} KiB in the pack",
+        parsed_graphs.strings(),
+        graphs.len() / 1024
+    );
+    items.push(pack::Item {
+        name: "motion/graph".into(),
+        kind: Kind::StateGraph,
+        data: graphs,
+        width: 0,
+        height: 0,
+        gx_format: 0,
+    });
     let mut pose_bytes = 0usize;
     for (name, data) in poses {
         if chosen.contains(&name) {
@@ -453,7 +492,7 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     std::fs::write(&path, &bytes)?;
     println!(
         "{} clip poses ({} KiB) + database ({} KiB) -> {} ({} KiB){}",
-        items.len() - 1,
+        items.len() - 2,
         pose_bytes / 1024,
         db.len() / 1024,
         path.display(),

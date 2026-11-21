@@ -158,6 +158,7 @@ motion graph (`data/state/MotionGraph_OnBoard.stategraph`, both in `miscload.big
 |---|---|
 | `motion/db` | every clip of the bank (2,672): frames, frame rate, base speed, loop/phase flags, and its attribute records (name, kind, begin/end, payload): untimed values such as `SPEED`, `ANGLE`, `VEL_E`, `ANTICSTRENGTH`, and timed events and windows such as `JUMP`, `PUSHCONTACT`, `PUSH_CONTACT` (a bone), `MANUALINTO`, `EARLYOUT`, `MIDOUT`, `CANTRANSTOUNDERFLIP`, `UNDERFLIPWINDOWEND`. Plus every animation tree (1,108): blend spaces, phase blends, selectors and selection spaces with their parameters and children |
 | `motion/clip/<NAME>` | the poses of every clip the motion graph plays, directly or through its trees, in the clip layout above |
+| `motion/graph` | the on-board action graph (`ActionGraph_OnBoard.stategraph`) and motion graph, compiled for the game's graph runner: states, transitions with priorities and hooks, condition expressions with their masks, and every behaviour, condition and hook with its attributes (about 610 KiB). See [graph-runner.md](graph-runner.md) |
 
 Format and API: `game_core/src/motion/` (`MotionDb` for lookups, attribute values at a time and events in a
 time step; `tree::Playback` builds and plays a tree as SK8 does: clocks in phase, parameters, attribute
@@ -170,8 +171,8 @@ then the rest (skitching, handplants, getting on and off). The converter prints 
 was left out. From the US/EU disc all of it fits: 2,165 clips, about 19 MiB. `--list` prints every graph
 reference with its state path and every attribute name with how many clips carry it.
 
-The game loads it at start-up and logs how many clips, poses, trees and attribute records it holds; it
-doesn't play it yet.
+The game loads it at start-up and logs how many clips, poses, trees and attribute records it holds, and
+runs the two state graphs every tick ([graph-runner.md](graph-runner.md)).
 
 ### A park
 ```bash

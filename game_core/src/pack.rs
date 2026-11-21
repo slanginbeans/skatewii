@@ -35,6 +35,8 @@ pub enum Kind {
     Collision = 6,
     /// `game_core::motion::MotionDb` (`motion/db`)
     MotionDb = 7,
+    /// `game_core::graph` compiled state graphs (`motion/graph`)
+    StateGraph = 8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

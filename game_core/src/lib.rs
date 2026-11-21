@@ -20,6 +20,7 @@ pub mod flick;
 pub mod game;
 pub mod gesture;
 pub mod gfx;
+pub mod graph;
 pub mod hud;
 pub mod input;
 pub mod math;
