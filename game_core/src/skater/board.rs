@@ -58,7 +58,7 @@ const WHEELBASE: f32 = 2.0 * AXLE;
 const TRUCK_FOLLOW: f32 = 0.88;
 const TRUCK_YAW_MAX: f32 = 1.5;
 const TRUCK_YAW_MAX_PER_SPEED: f32 = 0.04;
-const TRUCK_YAW_LAG: f32 = 0.1;
+const TRUCK_YAW_LAG: f32 = 0.05;
 /// sin(31 deg): the trucks' kingpin angle turns a deck tilt into a truck turn.
 const KINGPIN: f32 = 0.515_038;
 /// The trucks look for the surface from this far above the board, and this far below it.
@@ -116,6 +116,9 @@ pub struct Drive {
     pub raw_turn: f32,
     /// The pushing foot is on the ground: chase this speed (m/s along the nose).
     pub push_target: Option<f32>,
+    /// A push is under way (its clips' push contact events, the foot down or coming back): Skate 3's
+    /// steering weakens to `PushScalarMin` meanwhile (SK8 steering.rs reads processed bit 27).
+    pub pushing: bool,
     /// A braking foot or tail is on the ground: slow down at this (m/s^2).
     pub brake: f32,
     /// On two wheels.
@@ -187,8 +190,7 @@ impl Skater {
             .clamp((start - bound).max(0.0), start + bound);
 
         // Steering: deck tilt eased in, trucks ramped in after landing, then the trucks' curve.
-        let push_contact = d.push_target.is_some();
-        self.push_steer = if push_contact {
+        self.push_steer = if d.pushing {
             (self.push_steer - t.push_steer_drop * ticks).max(t.push_steer_min)
         } else {
             (self.push_steer + t.push_steer_rise * ticks).min(1.0)
@@ -293,7 +295,7 @@ impl Skater {
         let f = tangent(self.fwd, n);
         let side = n.cross(f);
         let along = clamp(gravity.dot(f), -t.max_slope_accel, t.max_slope_accel);
-        let foot_down = push_contact || d.brake > 0.0;
+        let foot_down = d.push_target.is_some() || d.brake > 0.0;
         let before_model = self.speed.abs();
         let mut friction = 0.0;
         if !foot_down && d.slide.is_none() {

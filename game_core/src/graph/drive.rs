@@ -252,8 +252,14 @@ impl Driver {
         let has = |n: Option<NameId>| n.is_some_and(|n| r.attribute(db, n).is_some());
         let entered = |part: &str| path.contains(part) && !self.last_path.contains(part);
         let push_contact = has(self.clips.push_contact) || path.contains("/PushContact/");
+        // From the push's first contact to its end (SK8's push contact events, down and back up).
+        let pushing = push_contact
+            || ["/PushCycle/", "/PushEnd/"]
+                .iter()
+                .any(|p| path.contains(p));
         let mut c = GraphControl {
             push_contact,
+            pushing,
             push_target: push_contact.then_some(r.s.push_speed),
             // `BRAKE_CONTACT` is a value: 0 while the foot comes down (the brake's `INTO` clip), 1 once it
             // drags (`CYC`). Skate 3 brakes only on a contact of strength 1 (SK8 contact_events.rs).

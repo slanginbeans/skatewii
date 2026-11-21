@@ -839,6 +839,9 @@ pub struct GraphControl {
     /// The speed the push chases while the foot is down: where the push trees' coefficients end
     /// (`graph::push`), or with `push_posed` the posed clips' trajectory speed this tick.
     pub push_target: Option<f32>,
+    /// The push's clips are playing from the foot's first contact to the push's end (Skate 3's push
+    /// contact events, `ProcessedPhysIn` bit 27, which weakens the steering).
+    pub pushing: bool,
     /// `push_target` is the posed trajectory's speed (Skate 3's): it holds this tick only, as SK8's
     /// push contact does; else the push sets' end speed, held for the contact's length.
     pub push_posed: bool,
@@ -1661,6 +1664,10 @@ impl Skater {
                 st.turn
             },
             push_target,
+            pushing: match self.graph {
+                Some(g) => g.pushing,
+                None => push_target.is_some(),
+            },
             brake,
             manual: self.manual.is_some(),
             slide: self
@@ -3308,6 +3315,52 @@ mod tests {
         // Mirrored.
         let (rate, _) = carve(6.5, 1.0);
         assert!((rate + 1.75).abs() < 0.14, "{rate}");
+    }
+
+    #[test]
+    fn carves_weaken_through_a_push_and_settle_as_sk8s() {
+        // SK8 at 6.5 m/s: let go of a full carve, the yaw rate is under a tenth of it after 0.25 s.
+        // Through a push's whole animation (its contact events, the foot down and coming back) the
+        // steering is at `PushScalarMin`, recovering by `PushScalarIncriment` a tick after.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 6.5;
+        let left = Pad {
+            stick: [-1.0, 0.0],
+            ..Pad::default()
+        };
+        steps(&mut s, &park, &left, None, 90);
+        let full = s.yaw_rate.abs();
+        let mut settle = None;
+        for i in 0..60 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            if settle.is_none() && s.yaw_rate.abs() < 0.1 * full {
+                settle = Some((i + 1) as f32 * DT);
+            }
+        }
+        let settle = settle.expect("settles");
+        assert!((0.18..0.3).contains(&settle), "{settle} s (SK8 0.25)");
+        // Pushing: half the tilt.
+        let half = Pad {
+            stick: [-0.5, 0.0],
+            ..Pad::default()
+        };
+        let rate = |pushing: bool| {
+            let mut s = spawn(&park);
+            s.speed = 6.65;
+            s.graph = Some(GraphControl {
+                pushing,
+                ..GraphControl::default()
+            });
+            steps(&mut s, &park, &half, None, 60);
+            s.yaw_rate.abs()
+        };
+        let (free, pushing) = (rate(false), rate(true));
+        let min = s.tuning.push_steer_min;
+        assert!(
+            (pushing / free - min).abs() < 0.1,
+            "{pushing} vs {free} (x{min})"
+        );
     }
 
     #[test]
