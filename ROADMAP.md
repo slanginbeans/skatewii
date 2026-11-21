@@ -42,7 +42,8 @@ content second.
 - [ ] Grinds from riding (into coping, onto curbs and ledges): the lock-on hook is ready (`try_grind`)
 - [x] Scripted Dolphin runs from `game_core::autoplay` (`autoplay.txt`, `tools/dolphin_test.ps1`)
 - [ ] Screenshots from scripted runs in CI-like checks
-- [ ] Late flips, finger flips, dark catches, board-sideways flicks (shapes are already converted)
+- [ ] Late flips, finger flips, dark catches, board-sideways flicks: recognised and selected by the state
+  graphs (Z is the dark catch); their board motion in the physics is still to do
 
 ## Phase 2: Renderer
 - [ ] Display lists for static geometry (built once, `GX_CallDispList`)
@@ -64,8 +65,15 @@ content second.
 - [x] `fg_import motion`: every clip's attribute tracks and events, every animation tree, and the poses of
   every clip the on-board motion graph plays (`motion.fgpak`, loaded at start-up); tree playback in
   `game_core::motion::tree` (SK8's semantics)
-- [ ] Play the motion graph's trees instead of the hand-picked clip roles (`rider.rs`), clip-authored timing
-  (jump frame, push and brake contact, wind-up strength) driving the skating
+- [x] Run Skate 3's on-board action and motion graphs from the player's disc (`motion/graph`,
+  `game_core::graph`, docs/graph-runner.md): SK8's state selection, behaviours, intents, crossfades; the
+  rider plays the graph's trees (mirrored per tree), and the graph decides pushes (push contact), foot
+  brakes (brake contact), pops (the takeoff's jump, SK8 trick height), manuals (no fail, pitch servo),
+  kick turns, reverts, turning round out of fakie; every gesture file recognised in parallel
+- [ ] Graph runner, next: channels (fakie head/torso, arm gestures), physics from the push/landing
+  behaviours (push coefficients, CalcLandingQuality, landing types into the physics), multi-flip holds and
+  late/finger/under flips through to the board's motion, grind trick-outs by grind type (needs the grind
+  physics of phase 6), camera shots from the graph (phase 7), a faster load (214 ms on the Wii)
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
