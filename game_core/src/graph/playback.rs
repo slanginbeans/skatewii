@@ -29,12 +29,17 @@ pub struct Leaf {
     pub loops: u32,
     pub weight: f32,
     pub mirror: bool,
+    /// The board's frame was turned end for end when its tree started (`Tree::turned`).
+    pub turned: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Tree {
     pub play: Playback,
     pub mirror: bool,
+    /// The board's frame was turned end for end (fakie to switch, `Skater::frame_turned`) when it
+    /// started: the rider draws it turned back by half a turn once the frame has turned since.
+    pub turned: bool,
     /// The graph's name for it (string id), for logs.
     pub name: u16,
 }
@@ -222,7 +227,7 @@ impl Node {
                 scratch.clear();
                 let start = out.leaves.len();
                 if t.play.evaluate(0.01, true, update_history, scratch) {
-                    flatten(scratch, t.mirror, &mut out.leaves);
+                    flatten(scratch, t.mirror, t.turned, &mut out.leaves);
                 }
                 let end = out.leaves.len();
                 if end == start {
@@ -314,7 +319,7 @@ impl PoseProgram {
 }
 
 /// Runs a tree's pose commands as weights: each clip's share of the tree's pose.
-fn flatten(commands: &[PoseCommand], mirror: bool, out: &mut Vec<Leaf>) {
+fn flatten(commands: &[PoseCommand], mirror: bool, turned: bool, out: &mut Vec<Leaf>) {
     // Stack of (start index into `out`) for each pushed pose.
     let base = out.len();
     let mut stack: Vec<usize> = Vec::new();
@@ -334,6 +339,7 @@ fn flatten(commands: &[PoseCommand], mirror: bool, out: &mut Vec<Leaf>) {
                     loops,
                     weight: 1.0,
                     mirror,
+                    turned,
                 });
             }
             PoseCommand::Blend { weight } => {
@@ -395,6 +401,7 @@ fn empty() -> Tree {
             },
         },
         mirror: false,
+        turned: false,
         name: super::NONE,
     }
 }

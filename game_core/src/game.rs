@@ -31,6 +31,8 @@ const HINT_TIME: f32 = 12.0;
 /// The simulation's fixed step: Skate 3's tuning is per 1/60 s tick, so the skater, the flick reader and
 /// the camera always step at 60 Hz whatever the TV runs at (PAL50 draws between two ticks).
 pub const TICK: f32 = 1.0 / 60.0;
+/// The drawn board rises at most this much (m) to keep its wheels out of the ground under them.
+const WHEEL_LIFT_MAX: f32 = 0.04;
 /// A drawn skater further than this (m) from where it was a tick ago was teleported: not blended.
 const TELEPORT: f32 = 2.0;
 
@@ -543,8 +545,16 @@ impl Game {
         // A little slack so float error never runs (or skips) a tick at 60 Hz.
         while self.ahead < -1e-4 {
             self.prev_view = Some(self.view());
+            let turned = self.skater.frame_turned;
             self.tick(raw);
             self.ahead += TICK;
+            if self.skater.frame_turned != turned
+                && let Some(p) = &mut self.prev_view
+            {
+                // The board's frame turned end for end (fakie to switch): the frame drawn between the
+                // two ticks turns with it, or PAL50's blend would swing the rider through half a turn.
+                p.base = p.base.then(&Xform::new(Mat3::rot_y(PI), v3(0.0, 0.0, 0.0)));
+            }
         }
         self.alpha = (1.0 - self.ahead / TICK).clamp(0.0, 1.0);
         let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
@@ -558,7 +568,7 @@ impl Game {
             if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
             {
                 g.runner.pose(&mut self.pose);
-                posed = r.update_graph(lib, &self.pose, rot);
+                posed = r.update_graph(lib, &self.pose, rot, self.skater.frame_turned);
             }
             if !posed && let Some(r) = &mut self.rider {
                 r.update(&self.skater, self.clock, land_in, dt, rot);
@@ -801,8 +811,12 @@ impl Game {
         Xform::new(Mat3::from_cols(up.cross(nose), up, nose), s.pos)
     }
 
-    /// Where the imported character is drawn: board space, tipped over on a bail.
-    fn imported_xform(&self) -> Xform {
+    /// Where the imported character is drawn: board space, tipped over on a bail. The clips' board
+    /// (`SKATEBOARD_ROOT`, the character's origin) is the deck's centre, which Skate 3 puts on the
+    /// physical deck: riding, high enough over the board's contact point for its lowest wheel to rest
+    /// on the ground ([`Rider::board_rest_height`], about [`crate::skater::DECK_HEIGHT`]), elsewhere
+    /// the deck's height.
+    pub fn imported_xform(&self) -> Xform {
         // Without bail clips in the pack, show a bail by tipping the rider over.
         let animated = self
             .rider
@@ -814,9 +828,35 @@ impl Game {
             }
             _ => Mat3::IDENTITY,
         };
-        self.drawn_base()
-            .then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
-            .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, 0.0, 0.0)))
+        let base = self.drawn_base();
+        // Riding, the board's lowest wheel on the ground (a manual's pitch lifts the deck).
+        let height = match (&self.rider, self.skater.mode) {
+            (Some(r), Mode::Rolling) => r.board_rest_height() + self.wheel_lift(&base),
+            _ => crate::skater::DECK_HEIGHT,
+        };
+        base.then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
+            .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, height, 0.0)))
+    }
+
+    /// How far (m, along the board's up) the drawn board must rise so none of its wheels is in the
+    /// ground under it. The physics puts the board on its two trucks' contacts along their middle, and
+    /// the drawn board's roll follows the smoothed ground normal: on a transition ridden across, a
+    /// side's wheels would dip into it. The drawing takes that out, at most `WHEEL_LIFT_MAX`.
+    fn wheel_lift(&self, base: &Xform) -> f32 {
+        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        let up = base.rot.cols[1];
+        let mut lift: f32 = 0.0;
+        // Under each wheel: `wheel_x_distance` (SK8 construction/authored_transforms.rs) each side of
+        // each truck.
+        for (x, z) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
+            let p = base.point(v3(x * 0.095, 0.0, z * crate::skater::AXLE));
+            let g = ground.ground(p.x, p.z, p.y + WHEEL_LIFT_MAX);
+            let along = g.normal.dot(up);
+            if g.height > f32::MIN / 2.0 && along > 0.5 {
+                lift = lift.max((g.height - p.y) * g.normal.y / along);
+            }
+        }
+        lift.clamp(0.0, WHEEL_LIFT_MAX)
     }
 
     fn draw_skater(&self, gfx: &mut dyn Gfx) {
@@ -857,7 +897,14 @@ impl Game {
             ),
             _ => (v3(0.0, lift * 0.7, 0.0), Mat3::IDENTITY),
         };
-        let rider = base.then(&Xform::new(rider_rot, rider_pos));
+        // The placeholder stands goofy (facing +X); mirrored (regular, or goofy riding switch) it faces
+        // the other side of the board, as the imported rider's mirrored clips do.
+        let stance = if s.mirrored() {
+            Mat3::rot_y(PI)
+        } else {
+            Mat3::IDENTITY
+        };
+        let rider = base.then(&Xform::new(stance.mul(&rider_rot), rider_pos));
         let tucked = s.crouch > 0.5 || (s.is_airborne() && lift > 0.05);
         let mesh = if tucked {
             &self.models.rider_crouched

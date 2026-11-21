@@ -36,6 +36,20 @@ use super::*;
 
 /// Distance from the board's middle to each truck (m) and the wheelbase.
 pub const AXLE: f32 = 0.243;
+/// Skate 3's board (SK8 physics/board.rs `RETAIL_WHEEL_RADIUS`, `RETAIL_TRUCK_Y_POSITION`): the wheels'
+/// radius and how far the trucks' axles are under the deck's centre (m).
+pub const WHEEL_RADIUS: f32 = 0.031;
+pub const TRUCK_DROP: f32 = 0.0565;
+/// The deck's centre over the board's contact point (`pos`) with the wheels on flat ground: SK8
+/// drive_frames.rs `RETAIL_LEVEL_GROUND_DECK_CENTER_HEIGHT`, the wheel radius plus the truck drop. The
+/// clips' `SKATEBOARD_ROOT` is the deck's centre (Skate 3 puts the animation's board on the physical
+/// deck, SK8 skeleton_root.rs), so the imported rider is drawn this far over `pos`.
+pub const DECK_HEIGHT: f32 = WHEEL_RADIUS + TRUCK_DROP;
+/// The trucks' hangers' underside under the deck's centre (m, ours: the axle plus half the hanger): what
+/// rests on the rail in a 50-50 or a 5-0.
+pub const HANGER_DROP: f32 = 0.064;
+/// The deck's underside under its centre (m, ours: half a 10 mm deck): what rests on the rail in a slide.
+pub const DECK_UNDERSIDE: f32 = 0.005;
 const WHEELBASE: f32 = 2.0 * AXLE;
 /// sin(31 deg): the trucks' kingpin angle turns a deck tilt into a truck turn.
 const KINGPIN: f32 = 0.515_038;
@@ -373,6 +387,9 @@ impl Skater {
             let v3d = vel + n * self.vn;
             self.pos = c;
             self.contact_n = nn;
+            // Drawn along the chord between the trucks' contacts, so both wheels sit on the surface
+            // over a kink too (the physics' nose follows the surfaces' mean normal).
+            self.chord = chord.map(|ch| if ch.dot(self.fwd) < 0.0 { -ch } else { ch });
             if let Some(ch) = chord {
                 self.fwd = tangent(ch, nn);
             } else {

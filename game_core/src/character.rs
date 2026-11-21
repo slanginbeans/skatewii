@@ -361,6 +361,25 @@ impl Character {
         true
     }
 
+    /// Turns a local pose half round about the character's up (y) through its origin: what a tree
+    /// started before the board's frame was turned end for end looks like in the turned frame. The
+    /// trajectory root stays pinned; its children (the hips, the board) turn, so a blend with a pose
+    /// started in the new frame turns only by what the clips differ (no half-turn slerp of the root).
+    pub fn turn_half(&self, local: &mut [Local]) {
+        let pinned = self.skeleton.has_trajectory();
+        for (b, l) in local.iter_mut().enumerate().take(self.bones()) {
+            let p = self.skeleton.parent(b);
+            let top = if pinned { b != 0 && p == 0 } else { p < 0 };
+            if !top {
+                continue;
+            }
+            // q then half a turn about y, as `mul(from_rt(q), from_rt([0, 1, 0, 0]))`.
+            let [x, y, z, w] = l.q;
+            l.q = [z, w, -x, -y];
+            l.t = [-l.t[0], l.t[1], -l.t[2]];
+        }
+    }
+
     /// Bone world matrices from local transforms.
     pub fn pose(&mut self, local: &[Local]) {
         for b in 0..self.world.len() {
@@ -637,5 +656,33 @@ mod tests {
             close(plain, [mirror[0], mirror[1], -mirror[2]]),
             "{plain:?} {mirror:?}"
         );
+    }
+
+    #[test]
+    fn turning_a_pose_half_round_turns_every_bone_about_the_origin() {
+        let mut c = Character::parse(synthetic_pack()).unwrap();
+        let mut local = vec![Local::IDENTITY; c.bones()];
+        let (s, k) = (0.6f32, 0.8f32);
+        local[1] = Local {
+            q: [0.1 * s, s, 0.0, k],
+            t: [0.3, 0.9, -0.2],
+        };
+        let n = libm::sqrtf(local[1].q.iter().map(|v| v * v).sum());
+        local[1].q = local[1].q.map(|v| v / n);
+        c.pose(&local);
+        let before = c.world()[1];
+        c.turn_half(&mut local);
+        assert_eq!(
+            local[0],
+            Local::IDENTITY,
+            "the trajectory root stays pinned"
+        );
+        c.pose(&local);
+        let half = from_rt([0.0, 1.0, 0.0, 0.0], [0.0; 3]);
+        let want = mul(&before, &half);
+        let got = c.world()[1];
+        for r in 0..4 {
+            assert!(close(got[r], want[r]), "{got:?} {want:?}");
+        }
     }
 }

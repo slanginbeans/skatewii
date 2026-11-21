@@ -25,6 +25,11 @@ struct Clips {
     jump: Option<NameId>,
     trick_height: Option<NameId>,
     danger: Option<NameId>,
+    /// The stance events (SK8 skater_animation/state.rs `apply_stance_events`): `MIRRORED` and
+    /// `SWITCH` toggle the rider's mirror and switch flags when a playing clip crosses them (the
+    /// fakie-to-switch clips `R_SWITCH_RIDE_*`, just after they start).
+    mirrored: Option<NameId>,
+    switch: Option<NameId>,
 }
 
 pub struct Driver {
@@ -80,6 +85,8 @@ impl Driver {
                 jump: db.name_id("JUMP"),
                 trick_height: db.name_id("TRICKHEIGHT"),
                 danger: db.name_id("DANGERZONE"),
+                mirrored: db.name_id("MIRRORED"),
+                switch: db.name_id("SWITCH"),
             },
             jumping: false,
             last_path: String::new(),
@@ -113,6 +120,7 @@ impl Driver {
             forward_speed: s.speed,
             speed_and_slope: speed_and_slope(s, up.y),
             mirrored: s.mirrored(),
+            frame_turned: s.frame_turned,
             fakie: s.fakie,
             goofy: (s.stance == Stance::Goofy) != s.switch,
             switch: s.switch,
@@ -254,7 +262,14 @@ impl Driver {
                 path.contains("Manual/Brake") || path.contains("Manual/Out"),
             ));
         }
-        c.turn_round = entered("/Switch/") || entered("/PushFromFakie/");
+        // Turning round from fakie to switch (`Switch`, `PushFromFakie`: both play `B_SWITCH`) happens
+        // when its clip crosses the stance events, as in Skate 3; a library without them turns round
+        // on entering those states.
+        c.turn_round = if self.clips.mirrored.is_some() || self.clips.switch.is_some() {
+            has(self.clips.mirrored) || has(self.clips.switch)
+        } else {
+            entered("/Switch/") || entered("/PushFromFakie/")
+        };
         if entered("/Revert/") {
             c.revert = Some(path.contains("/Revert/Fs"));
         }

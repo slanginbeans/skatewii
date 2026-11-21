@@ -896,6 +896,7 @@ mod riding_parameters {
         let tree = |name: &str| Tree {
             play: Playback::build(&db, name, &[]).unwrap(),
             mirror: false,
+            turned: false,
             name: 7,
         };
         let cut = TransitionDef {
@@ -1055,6 +1056,7 @@ mod phase4 {
         Tree {
             play: Playback::build_node(db, node, &[], &mut Vec::new()).unwrap(),
             mirror: false,
+            turned: false,
             name: NONE,
         }
     }

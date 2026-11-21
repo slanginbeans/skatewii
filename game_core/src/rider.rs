@@ -431,6 +431,28 @@ pub struct Rider {
 }
 
 impl Rider {
+    /// How high over the board's contact point the clips' board (the character's origin, the deck's
+    /// centre) is drawn so its lowest wheel rests on the ground: Skate 3 rests the physical deck on its
+    /// wheels and puts the animation's board on it (SK8 skeleton_root.rs). On level wheels that is the
+    /// deck's height (the imported wheels are a little smaller than Skate 3's physical 31 mm ones, so
+    /// it is measured on them); a pose that pitches or rolls the board (a manual) lifts the deck about
+    /// the wheels left on the ground. Without wheels in the skater pack, the deck's height.
+    pub fn board_rest_height(&self) -> f32 {
+        let lowest = self
+            .character
+            .parts
+            .iter()
+            .filter(|p| p.name == "skatewheel")
+            .flat_map(|p| p.out.iter())
+            .map(|v| v.pos[1])
+            .fold(f32::MAX, f32::min);
+        if lowest < 0.0 && lowest > -0.5 {
+            -lowest
+        } else {
+            crate::skater::DECK_HEIGHT
+        }
+    }
+
     pub fn new(character: Character) -> Rider {
         let n = character.bones();
         let find = |names: &[&str]| -> Vec<usize> {
@@ -535,11 +557,14 @@ impl Rider {
         Some([foot("LEFTFOOT")?, foot("RIGHTFOOT")?])
     }
 
+    /// `turned`: the board's frame is turned end for end now (`Skater::frame_turned`); a tree started
+    /// the other way is turned half round before blending, so it stays where it was in the world.
     pub fn update_graph(
         &mut self,
         lib: &crate::motion::Library,
         prog: &crate::graph::playback::PoseProgram,
         rot: Mat3,
+        turned: bool,
     ) -> bool {
         use crate::graph::playback::PoseOp;
         let n = self.a.len();
@@ -562,6 +587,9 @@ impl Rider {
                             .sample_clip(&clip, l.time, l.mirror, &mut self.b)
                         {
                             return false;
+                        }
+                        if l.turned != turned {
+                            self.character.turn_half(&mut self.b);
                         }
                         self.character
                             .channel_weights(&clip, l.mirror, &mut self.weights);

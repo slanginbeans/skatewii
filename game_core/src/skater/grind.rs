@@ -41,8 +41,6 @@ use crate::rails::{Rail, RailClass, upright};
 /// entry slows by about 0.8 m/s^2 (flatground's grind friction before), with every family and rail class
 /// keeping Skate 3's ratios.
 pub const GRIND_MASS: f32 = 25.0;
-/// The deck's height over the board's contact point (m, ours): wheel radius plus truck height.
-pub const DECK_HEIGHT: f32 = 0.09;
 /// SK8 grind_forces.rs: friction = 0.48 x the rail's up y x strength x `FrictionVsTime` x material.
 const FRICTION_SCALE: f32 = 0.48;
 /// SK8 `material_multiplier`'s default (unflagged concrete and metal).
@@ -1605,10 +1603,12 @@ impl Skater {
             }
             _ => g.along,
         };
-        let sink = if g.family.is_slide() {
-            DECK_HEIGHT
-        } else {
-            0.0
+        // The trucks' hangers (grinds), the deck's underside (slides) or its grip (a darkslide, the deck
+        // upside down) on the rail.
+        let sink = match g.family {
+            Family::FiftyFifty | Family::FiveO => DECK_HEIGHT - HANGER_DROP,
+            Family::Darkslide => DECK_HEIGHT + DECK_UNDERSIDE,
+            _ => DECK_HEIGHT - DECK_UNDERSIDE,
         };
         self.pos = p - fwd * offset - up * sink;
         self.speed = g.speed * if fwd.dot(travel) >= 0.0 { 1.0 } else { -1.0 };

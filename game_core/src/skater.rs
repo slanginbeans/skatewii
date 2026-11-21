@@ -32,10 +32,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub use air::{BodySpin, Contact as AirContact, Flight, GrindTarget, Plan};
-pub use board::{AXLE, Drive, Pump, WALLRIDE_MIN_HEIGHT, WallRide};
+pub use board::{
+    AXLE, DECK_HEIGHT, DECK_UNDERSIDE, Drive, HANGER_DROP, Pump, TRUCK_DROP, WALLRIDE_MIN_HEIGHT,
+    WHEEL_RADIUS, WallRide,
+};
 pub use grind::{
-    Approach, ApproachPose, Assist, Category, Contact, DECK_HEIGHT, Entry, Family, GRAPH_NAMES,
-    GRIND_MASS, Grind, GrindKind, Jumper, Lean, display_name, name_of, segment_box,
+    Approach, ApproachPose, Assist, Category, Contact, Entry, Family, GRAPH_NAMES, GRIND_MASS,
+    Grind, GrindKind, Jumper, Lean, display_name, name_of, segment_box,
 };
 pub use landing::Quality;
 pub use respawn::{Checkpoints, Recovery};
@@ -666,6 +669,11 @@ pub struct Skater {
     pub trick: Option<ActiveTrick>,
     /// Riding with the other foot forward (the drawn rider is mirrored).
     pub switch: bool,
+    /// The board's frame (`fwd`, and the rider's frame drawn on it) has been turned end for end an odd
+    /// number of times (`Skater::flip_board`: fakie to switch). The physical board never turns (Skate 3
+    /// flips only its "effective" frame, SK8 board_motion_output.rs); animation trees started before a
+    /// turn are drawn turned back by half a turn so nothing turns in the world.
+    pub frame_turned: bool,
     /// Rolling tail first (Skate 3's fakie detection: a moment of backwards speed).
     pub fakie: bool,
     /// Riding dark (the board grip down after a dark catch; the state graphs decide).
@@ -689,6 +697,9 @@ pub struct Skater {
     /// The velocity's change over the last tick (m/s^2; bumps), and the velocity it was taken from.
     pub accel: Vec3,
     prev_vel: Vec3,
+    /// Rolling on both trucks: the line from the back truck's contact to the front's (towards the
+    /// nose), which the board is drawn along.
+    pub chord: Option<Vec3>,
     /// The deck's tilt that turns the trucks (rad), and seconds since the wheels came down (the trucks'
     /// turn ramps back in).
     pub deck_tilt: f32,
@@ -929,6 +940,8 @@ impl Skater {
             plan: None,
             trick: None,
             switch: false,
+            frame_turned: false,
+            chord: None,
             fakie: false,
             dark: false,
             fakie_timer: 0.0,
@@ -997,8 +1010,11 @@ impl Skater {
         let clips = self.clips;
         let mut checkpoints = core::mem::take(&mut self.checkpoints);
         let pick = checkpoints.pick(&self.tuning, park, self.pos, self.switch);
+        let turned = self.frame_turned;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+        // Only a drawing parity (animation trees still playing remember it), kept across a teleport.
+        self.frame_turned = turned;
         self.checkpoints = checkpoints;
         if let Some(c) = pick {
             self.pos = c.pos;
@@ -1010,8 +1026,11 @@ impl Skater {
     /// Back to the park's spawn point (a fresh start), keeping the tuning, clip timing and stance.
     pub fn reset_to_spawn(&mut self, park: &dyn Terrain) {
         let clips = self.clips;
+        let turned = self.frame_turned;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+        // Only a drawing parity (animation trees still playing remember it), kept across a teleport.
+        self.frame_turned = turned;
     }
 
     /// Puts the rider back on the board at `pos` on the ground there, heading `yaw`, rolling at `speed`
@@ -1019,8 +1038,11 @@ impl Skater {
     pub fn put_at(&mut self, park: &dyn Terrain, pos: Vec3, yaw: f32, speed: f32) {
         let clips = self.clips;
         let checkpoints = core::mem::take(&mut self.checkpoints);
+        let turned = self.frame_turned;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+        // Only a drawing parity (animation trees still playing remember it), kept across a teleport.
+        self.frame_turned = turned;
         self.checkpoints = checkpoints;
         let g = park.ground(pos.x, pos.z, pos.y + 0.1);
         let n = if g.height > f32::MIN / 2.0 {
@@ -1057,8 +1079,16 @@ impl Skater {
     /// The board's frame in the world: right, up (the surface normal or the board's own up in the air),
     /// nose.
     pub fn board_frame(&self) -> crate::math::Mat3 {
-        let up = self.normal.normalize_or(Vec3::UP);
-        let f = tangent(self.fwd, up);
+        // The nose along `fwd` (rolling on both trucks, along the chord between their contacts, so both
+        // wheels sit on the surface over a kink), the up from the smoothed normal square to it.
+        let f = match (self.mode, self.chord) {
+            (Mode::Rolling, Some(ch)) if ch.dot(self.fwd) > 0.9 => ch,
+            _ => self.fwd,
+        };
+        let f = f.normalize_or(yaw_dir(self.heading));
+        let n = self.normal.normalize_or(Vec3::UP);
+        let up = (n - f * n.dot(f)).normalize_or(n);
+        let f = tangent(f, up);
         crate::math::Mat3::from_cols(up.cross(f), up, f)
     }
 
@@ -1171,6 +1201,8 @@ impl Skater {
         self.fwd = -self.fwd;
         self.speed = -self.speed;
         self.slip = -self.slip;
+        self.chord = self.chord.map(|c| -c);
+        self.frame_turned = !self.frame_turned;
     }
 
     /// Advances one fixed step (1/60 s: Skate 3's tick).
@@ -1436,13 +1468,17 @@ impl Skater {
         }
 
         // Steering: Skate 3's reading of the stick, eased in. A powerslide's trucks hold a steady turn.
+        // Riding fakie the turn is negated (Skate 3's action graph hands the physics `FakieTurn`: `Turn`
+        // with `fakieFilter="negate"`, read as the `Turn` packet by SetTurning, SK8 set_turning.rs): with
+        // the trucks' yaw already reversing rolling tail first, the stick turns the travel its own way.
+        let fakie_turn = if self.fakie { -1.0 } else { 1.0 };
         let follow = 1.0 - libm::powf(1.0 - t.steer_follow.clamp(0.0, 1.0), ticks);
         let turn_in = match &self.slide {
             Some(s) if !s.releasing => s.side * t.slide_turn_value,
             Some(_) => 0.0,
             None if kick => 0.0,
-            None if st.hard != 0.0 => st.turn.signum(),
-            None => st.turn,
+            None if st.hard != 0.0 => st.turn.signum() * fakie_turn,
+            None => st.turn * fakie_turn,
         };
         self.steer += (turn_in - self.steer) * follow;
 
@@ -3748,7 +3784,13 @@ mod tests {
         let g = s.grind.clone().unwrap();
         assert_eq!(g.family, Family::FiftyFifty);
         assert_eq!(g.class, crate::rails::RailClass::Thin);
-        assert!(g.dir > 0.0 && (s.pos.y - 0.5).abs() < 1e-3, "{:?}", s.pos);
+        // The trucks' hangers on the rail: the deck's centre that far over it.
+        let deck = s.pos.y + DECK_HEIGHT;
+        assert!(
+            g.dir > 0.0 && (deck - (0.5 + HANGER_DROP)).abs() < 1e-3,
+            "{:?}",
+            s.pos
+        );
         let ev = steps(&mut s, &park, &Pad::default(), None, 120);
         let names = landed(&ev);
         assert!(
@@ -4683,7 +4725,9 @@ mod tests {
         // Half a stick turns far less than half of a full one (Skate 3's signed tilt).
         let t = Tuning::BUILT_IN;
         assert!(t.steer_tilt(0.5, 3.0, 0.0, 1.0) < 0.5 * t.steer_tilt(1.0, 3.0, 0.0, 1.0));
-        // Rolling backwards the trucks turn the board the other way.
+        // Rolling backwards the trucks turn the board the other way, but riding fakie Skate 3 negates
+        // the turn (`FakieTurn`): the stick still turns the travel its way, so the board yaws as it does
+        // rolling forwards.
         let mut s = spawn(&park);
         let pad = Pad {
             stick: [1.0, 0.0],
@@ -4693,7 +4737,8 @@ mod tests {
             s.speed = -2.0;
             steps(&mut s, &park, &pad, None, 1);
         }
-        assert!(s.heading > 0.05, "{}", s.heading);
+        assert!(s.fakie, "rolling backwards at 2 m/s is fakie");
+        assert!(s.heading < -0.05, "{}", s.heading);
     }
 
     #[test]

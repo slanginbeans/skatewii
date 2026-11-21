@@ -3,6 +3,13 @@
 //!
 //!     cargo run -p fg_preview -- [out_dir] [--wide] [--skater imported/skater.fgpak] [--every N] [--tour]
 //!         [--rules imported/rules.fgpak] [--regular] [--log]
+//!     cargo run -p fg_preview -- out/poses --poses [--skater ..] [--motion ..] [--rules ..]
+//!     cargo run -p fg_preview -- out/switch --switch [push] [--skater ..] [--motion ..] [--rules ..]
+//!
+//! `--poses`: still shots of each stance, a carve each way and a manual, with close-ups from the side,
+//! from behind and of the board at ground level (`pose_*_wheels.png`: are the wheels on the ground?).
+//! `--switch`: riding fakie until the rider turns round to switch (`push`: pushing from fakie), every
+//! third tick and a contact sheet of the close-ups (`switch_sheet.png`).
 //!
 //! `--log` prints the game's development log (what the Wii build writes to the SD card) as it runs.
 //!
@@ -308,17 +315,47 @@ struct CloseUp<'a> {
     inner: &'a mut Raster,
     target: Vec3,
     side: Vec3,
+    /// Looks at this height over `target`, from `distance` away along `side` and `rise` higher.
+    height: f32,
+    distance: f32,
+    rise: f32,
+}
+
+impl<'a> CloseUp<'a> {
+    /// The whole rider, from 3.2 m to the side.
+    fn rider(inner: &'a mut Raster, target: Vec3, side: Vec3) -> Self {
+        CloseUp {
+            inner,
+            target,
+            side,
+            height: 0.9,
+            distance: 3.2,
+            rise: 0.4,
+        }
+    }
+
+    /// The board at ground level, from 1.2 m to the side (are the wheels on the ground?).
+    fn board(inner: &'a mut Raster, target: Vec3, side: Vec3) -> Self {
+        CloseUp {
+            inner,
+            target,
+            side,
+            height: 0.06,
+            distance: 1.2,
+            rise: 0.0,
+        }
+    }
 }
 
 impl Gfx for CloseUp<'_> {
     fn begin_frame(&mut self, _cam: &Camera, clear_rgba: u32) {
-        let target = self.target + v3(0.0, 0.9, 0.0);
+        let target = self.target + v3(0.0, self.height, 0.0);
         let cam = Camera {
-            eye: target + self.side * 3.2 + v3(0.0, 0.4, 0.0),
+            eye: target + self.side * self.distance + v3(0.0, self.rise, 0.0),
             target,
             up: Vec3::UP,
             fov_y_deg: 45.0,
-            near: 0.1,
+            near: 0.05,
             far: 60.0,
         };
         self.inner.begin_frame(&cam, clear_rgba);
@@ -441,13 +478,16 @@ fn main() {
     if args.iter().any(|a| a == "--poses") {
         use game_core::skater::Stance;
         let base = game;
-        for (name, stance, switch, speed, stick_x) in [
-            ("goofy", Stance::Goofy, false, 3.0f32, 0i8),
-            ("fakie", Stance::Goofy, false, -3.0, 0),
-            ("switch", Stance::Goofy, true, 3.0, 0),
-            ("regular", Stance::Regular, false, 3.0, 0),
-            ("carve_left", Stance::Goofy, false, 5.0, -70),
-            ("carve_right", Stance::Goofy, false, 5.0, 70),
+        // A manual: the C-stick held part way back (below full, which is a wind-up).
+        let manual = -((0.38 * 0.7 + 0.25) * game_core::input::C_RANGE) as i8;
+        for (name, stance, switch, speed, stick_x, cstick_y) in [
+            ("goofy", Stance::Goofy, false, 3.0f32, 0i8, 0i8),
+            ("fakie", Stance::Goofy, false, -3.0, 0, 0),
+            ("switch", Stance::Goofy, true, 3.0, 0, 0),
+            ("regular", Stance::Regular, false, 3.0, 0, 0),
+            ("carve_left", Stance::Goofy, false, 5.0, -70, 0),
+            ("carve_right", Stance::Goofy, false, 5.0, 70, 0),
+            ("manual", Stance::Goofy, false, 3.0, 0, manual),
         ] {
             let mut g = Game::new();
             if let Some(path) = value("--rules") {
@@ -472,6 +512,7 @@ fn main() {
                     &PadRaw {
                         flags: game_core::input::flag::CONNECTED,
                         stick_x,
+                        cstick_y,
                         ..Default::default()
                     },
                     1.0 / 60.0,
@@ -480,18 +521,16 @@ fn main() {
             g.render(&mut raster);
             raster.save(&out.join(format!("pose_{name}.png")));
             let side = yaw_dir(g.skater.heading + std::f32::consts::FRAC_PI_2);
-            g.render(&mut CloseUp {
-                inner: &mut raster,
-                target: g.skater.pos,
-                side,
-            });
+            g.render(&mut CloseUp::rider(&mut raster, g.skater.pos, side));
             raster.save(&out.join(format!("pose_{name}_side.png")));
-            g.render(&mut CloseUp {
-                inner: &mut raster,
-                target: g.skater.pos,
-                side: yaw_dir(g.skater.heading + std::f32::consts::PI),
-            });
+            g.render(&mut CloseUp::rider(
+                &mut raster,
+                g.skater.pos,
+                yaw_dir(g.skater.heading + std::f32::consts::PI),
+            ));
             raster.save(&out.join(format!("pose_{name}_back.png")));
+            g.render(&mut CloseUp::board(&mut raster, g.skater.pos, side));
+            raster.save(&out.join(format!("pose_{name}_wheels.png")));
             let fakie = g.rider().map_or(0.0, |r| r.fakie_weight());
             // The riding trees' parameters, as the graph's behaviours set them.
             let params = match (&g.graph, g.motion.as_ref().map(|m| &m.db)) {
@@ -527,6 +566,69 @@ fn main() {
             );
         }
         drop(base);
+        return;
+    }
+    // --switch: ride fakie on the demo park until the rider turns round to switch (the state graphs'
+    // auto switch; `--switch push`: pushing from fakie), drawing the game's view and a close-up from the
+    // side every third tick around it (nothing should turn in the world).
+    if let Some(i) = args.iter().position(|a| a == "--switch") {
+        let push = args.get(i + 1).is_some_and(|a| a == "push");
+        game.place_rider(v3(0.0, 0.0, 8.0), std::f32::consts::PI, -3.5);
+        let mut switched: Option<u32> = None;
+        let mut sheet: Vec<(u32, Vec<[f32; 3]>)> = Vec::new();
+        for frame in 0..400u32 {
+            let pad = PadRaw {
+                flags: game_core::input::flag::CONNECTED,
+                buttons: if push && (20..26).contains(&frame) {
+                    game_core::input::btn::A
+                } else {
+                    0
+                },
+                ..Default::default()
+            };
+            game.update(&pad, 1.0 / 60.0);
+            for l in game.log.drain(..) {
+                if l.starts_with("graph:") || l.starts_with("stance:") {
+                    println!("{frame:4} {l}");
+                }
+            }
+            if game.events.contains(&Event::Switched) {
+                switched.get_or_insert(frame);
+            }
+            let near = switched.map_or(game.skater.fakie && frame >= 12, |s| frame <= s + 60);
+            if near && frame % 3 == 0 {
+                game.render(&mut raster);
+                raster.save(&out.join(format!("switch_{frame:04}.png")));
+                let side = yaw_dir(game.skater.travel_yaw() + std::f32::consts::FRAC_PI_2);
+                game.render(&mut CloseUp::rider(&mut raster, game.skater.pos, side));
+                raster.save(&out.join(format!("switch_close_{frame:04}.png")));
+                if frame % 6 == 0 {
+                    sheet.push((frame, raster.rgb.clone()));
+                }
+            }
+            if switched.is_some_and(|s| frame > s + 60) {
+                break;
+            }
+        }
+        println!("turned round at tick {switched:?}");
+        // Every sixth tick's close-up at half size, five to a row (`switch_sheet.png`).
+        let (w, h) = (raster.w / 2, raster.h / 2);
+        let cols = 5;
+        let rows = sheet.len().div_ceil(cols).max(1);
+        let mut all = Raster::new(w * cols, h * rows);
+        for (k, (_, px)) in sheet.iter().enumerate() {
+            let (ox, oy) = ((k % cols) * w, (k / cols) * h);
+            for y in 0..h {
+                for x in 0..w {
+                    all.rgb[(oy + y) * all.w + ox + x] = px[(2 * y) * raster.w + 2 * x];
+                }
+            }
+        }
+        all.save(&out.join("switch_sheet.png"));
+        println!(
+            "sheet: ticks {:?}",
+            sheet.iter().map(|(f, _)| *f).collect::<Vec<_>>()
+        );
         return;
     }
     // --park: ride an imported park (fg_import park) instead of the demo park.
@@ -793,11 +895,7 @@ fn main() {
             }
             if game.rider().is_some() {
                 let side = yaw_dir(game.skater.heading + std::f32::consts::FRAC_PI_2);
-                game.render(&mut CloseUp {
-                    inner: &mut raster,
-                    target: game.skater.pos,
-                    side,
-                });
+                game.render(&mut CloseUp::rider(&mut raster, game.skater.pos, side));
                 let path = out.join(format!("close_{frame:04}.png"));
                 raster.save(&path);
                 println!("        wrote {} ({label}{clip})", path.display());

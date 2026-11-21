@@ -86,6 +86,8 @@ pub struct World {
     pub grind: Str,
     /// The rider's poses are mirrored (regular stance, or goofy riding switch).
     pub mirrored: bool,
+    /// The board's frame has been turned end for end (`Skater::frame_turned`): trees remember it.
+    pub frame_turned: bool,
     pub fakie: bool,
     pub goofy: bool,
     pub switch: bool,
@@ -156,6 +158,7 @@ impl Default for World {
             speed_and_slope: 0.0,
             grind: NONE,
             mirrored: false,
+            frame_turned: false,
             fakie: false,
             goofy: true,
             switch: false,
@@ -1244,6 +1247,7 @@ impl Host<'_, '_> {
                         Tree {
                             play,
                             mirror: w.mirrored,
+                            turned: w.frame_turned,
                             name: def.anim_name,
                         },
                         def.speed,
@@ -1918,6 +1922,7 @@ impl Host<'_, '_> {
                 let tree = Tree {
                     play,
                     mirror: self.s.world.mirrored,
+                    turned: self.s.world.frame_turned,
                     name: NONE,
                 };
                 let blend = ops::TransitionDef {
@@ -2086,6 +2091,7 @@ impl Host<'_, '_> {
             let tree = Tree {
                 play,
                 mirror: false,
+                turned: s.world.frame_turned,
                 name: NONE,
             };
             s.player
@@ -2388,6 +2394,7 @@ impl Host<'_, '_> {
                             let tree = Tree {
                                 play,
                                 mirror: w.mirrored,
+                                turned: w.frame_turned,
                                 name: NONE,
                             };
                             let blend = ops::TransitionDef {
@@ -2480,6 +2487,7 @@ impl Host<'_, '_> {
                 let tree = Tree {
                     play,
                     mirror: s.world.mirrored,
+                    turned: s.world.frame_turned,
                     name: NONE,
                 };
                 s.player
