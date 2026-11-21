@@ -208,8 +208,8 @@ is drawn instead (flat shaded, coloured by surface).
 Grind rails are the game's spline sections (type `0x00EB0004`) in the same `Sim` assets: chains of cubic
 segments `D + C t + B t² + A t³`, sampled at 4 points per segment (SK8's `retail_grind_splines.py`).
 BlackBoxPark has 120 rails (about 1.35 km); MegaPark has none. Each segment is classified as Skate 3 does
-(SK8 `grind_surface/classify.rs`): probes 0.09 m to each side of its middle (0.04 m up and down), 0.243 m
-out (0.26 m up and down) and just over it find a thin rail (nothing beside it), a fat rail, a ledge (a top
+(SK8 `grind_surface/classify.rs`): probes 0.09 m to each side of its middle (0.04 m up and down), out by the
+disc's `DeckCenterToTruck` (1.06 times that up and down) and just over it find a thin rail (nothing beside it), a fat rail, a ledge (a top
 carrying on to one side: that side is high), a curb (a ledge whose low side is 0.20 to 0.24 m down) or a
 blocked one (something on both sides or over it: never grindable). BlackBoxPark's 2,180 segments: 110 thin,
 8 fat, 1,642 ledge (stair edges among them), 226 curb, 194 blocked (`fg_import park` prints the counts).

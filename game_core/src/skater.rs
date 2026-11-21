@@ -32,7 +32,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub use air::{BodySpin, Contact as AirContact, Flight, GrindTarget, Plan};
-pub use board::{AXLE, Drive, Pump, WALLRIDE_MIN_HEIGHT, WallRide};
+pub use board::{Drive, Pump, WALLRIDE_MIN_HEIGHT, WallRide};
 pub use grind::{
     Approach, ApproachPose, Assist, Category, Contact, DECK_HEIGHT, Entry, Family, GRAPH_NAMES,
     GRIND_MASS, Grind, GrindKind, Jumper, Lean, display_name, name_of, segment_box,
@@ -3174,7 +3174,7 @@ mod tests {
 
     #[test]
     fn a_sideways_landing_at_riding_speed_rides_away() {
-        // Skate 3's landing angle limit is past a right angle below about 9 m/s: no sideways bail.
+        // The landing angle limit is past a right angle at riding speed: no sideways bail.
         let (s, ev) = touch_down(80.0, 5.0, 3.0, 0.0);
         assert!(!ev.contains(&Event::Bailed), "{ev:?}");
         assert_eq!(s.mode, Mode::Rolling);

@@ -345,7 +345,7 @@ pub fn parse(data: &[u8]) -> Option<Vec<Rail>> {
 const NEAR_SIDE: f32 = 0.09;
 const NEAR_REACH: f32 = 0.04;
 /// The far probes' reach out without the disc's deck-centre-to-truck distance (flatground's).
-pub const FAR_SIDE: f32 = 0.24;
+pub const FAR_SIDE: f32 = 0.3;
 const LEDGE_FRACTION: f32 = 0.65;
 
 /// Classifies each segment of a rail by probing the park beside its middle (SK8

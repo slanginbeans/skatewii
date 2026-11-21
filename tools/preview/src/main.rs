@@ -812,6 +812,8 @@ fn main() {
 fn rails_report(game: &Game) {
     use game_core::rails::{RailClass, side_of, upright};
     let t = game.terrain();
+    // The far probes reach out by the deck-centre-to-truck distance (the rules pack's, else ours).
+    let far = game.skater.tuning.grind.deck_to_truck;
     let mut counts = std::collections::BTreeMap::new();
     for (i, r) in t.rails().iter().enumerate() {
         for (k, w) in r.points.windows(2).enumerate() {
@@ -834,8 +836,8 @@ fn rails_report(game: &Game) {
             };
             let h0 = line(c + side * 0.09, up * 0.04);
             let h1 = line(c - side * 0.09, up * 0.04);
-            let h2 = line(c + side * 0.243, up * 0.258);
-            let h3 = line(c - side * 0.243, up * 0.258);
+            let h2 = line(c + side * far, up * (far * 1.06));
+            let h3 = line(c - side * far, up * (far * 1.06));
             let h4 = line(c, up * 0.04);
             let drop = t
                 .raycast(c - Vec3::UP * 0.3, -Vec3::UP, 10.0)

@@ -34,9 +34,6 @@
 
 use super::*;
 
-/// Distance from the board's middle to each truck (m) and the wheelbase.
-pub const AXLE: f32 = 0.243;
-const WHEELBASE: f32 = 2.0 * AXLE;
 /// sin(31 deg): the trucks' kingpin angle turns a deck tilt into a truck turn.
 const KINGPIN: f32 = 0.515_038;
 /// The trucks look for the surface from this far above the board, and this far below it.
@@ -145,7 +142,7 @@ impl Skater {
         self.deck_tilt += (want - self.deck_tilt) * blend;
         self.truck_ramp = (self.truck_ramp + dt).min(TRUCK_RAMP);
         let tilt = self.deck_tilt * (self.truck_ramp / TRUCK_RAMP);
-        let curvature = 2.0 * libm::tanf(KINGPIN * tilt) / WHEELBASE;
+        let curvature = 2.0 * libm::tanf(KINGPIN * tilt) / (2.0 * t.grind.deck_to_truck);
         let vel = self.ground_velocity();
         let v = vel.length();
         let mut yaw = -self.speed * curvature;
@@ -288,6 +285,8 @@ impl Skater {
     /// Moves along the ground: walls, curbs, the trucks finding the surface, and leaving it.
     fn move_on_ground(&mut self, park: &dyn Terrain, d: &Drive, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
+        // Distance from the board's middle to each truck (the disc's `DeckCenterToTruck`, else ours).
+        let axle = t.grind.deck_to_truck;
         let n = self.contact_n;
         let f = tangent(self.fwd, n);
         let mut vel = self.ground_velocity();
@@ -298,7 +297,7 @@ impl Skater {
         let len = motion.length();
         if len > 1e-6 {
             let dir = motion * (1.0 / len);
-            let lead = (dir.dot(f).abs() * AXLE).max(0.1);
+            let lead = (dir.dot(f).abs() * axle).max(0.1);
             if let Some(h) = park.raycast(self.pos + n * WALL_RAY, dir, len + lead)
                 && h.normal.dot(n) < WALL_COS
                 && h.normal.dot(dir) < -0.2
@@ -319,8 +318,8 @@ impl Skater {
         let g = t.gravity;
         let p = self.pos + vel * dt + n * (self.vn * dt - 0.5 * g * n.y * dt * dt);
         let ahead = if self.speed >= 0.0 { 1.0 } else { -1.0 };
-        let front = Self::probe(park, p + f * AXLE, n);
-        let back = Self::probe(park, p - f * AXLE, n);
+        let front = Self::probe(park, p + f * axle, n);
+        let back = Self::probe(park, p - f * axle, n);
         let (lead, trail) = if ahead > 0.0 {
             (front, back)
         } else {
@@ -328,7 +327,7 @@ impl Skater {
         };
         // Curb: the leading truck would climb more than a wheel's height at once.
         if let Some(h) = lead {
-            let rise = (h.point - (p + f * (AXLE * ahead))).dot(n);
+            let rise = (h.point - (p + f * (axle * ahead))).dot(n);
             let jump = rise - self.lead_rise;
             self.lead_rise = rise.max(0.0);
             // A step up onto a surface parallel to this one (not the start of a ramp).
@@ -355,7 +354,7 @@ impl Skater {
                     Some(h) => (h, ahead),
                     None => (trail.expect("one truck has a surface"), -ahead),
                 };
-                let c = h.point - f * (AXLE * side);
+                let c = h.point - f * (axle * side);
                 Some((p + n * (c - p).dot(n), n, None))
             }
         };

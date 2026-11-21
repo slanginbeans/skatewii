@@ -74,7 +74,7 @@ With `motion/graph` loaded (`Game::graph`), each tick:
      come from the disc through the rules pack) and raised to the `JumpHeightOverride` packet value
      (flick strength x 0.2; 0.27 out of a manual, 1.0 out of a grind);
    - manuals engage and end where the graph's Manual states are (`ManualEngageTime` over 0.2 s, brake,
-     out) and never tip over: a held stick holds a manual as long as it is held; the deck pitch servoes to
+     out) and never tip over: a held stick holds a manual as long as it is held; the deck pitch servoes (SK8's PID) to
      (0.25 + 0.75 lean) of the most tilt, or to the brake angle (`PhysicsWantsManualExit` stays false:
      the servo has no opposing motion to report);
    - in the air the board does what the clips do: a late flip, finger flip, under flip or dark catch
@@ -479,8 +479,9 @@ ragdoll to tweak).
 
 Approximations to revisit: the push speed is where the push coefficients' blended clips end, not the
 trajectory bone's speed sampled from the posed clips; how long the push foot stays down still comes
-from the push sets' contact time; the manual servo is a kinematic stand-in for SK8's PID on the rigid
-board (so `PhysicsWantsManualExit` never fires); a landing in the danger zone is judged on the speed
+from the push sets' contact time; the manual's deck pitch runs SK8's PID servo (with the rules pack's
+`physics_manual` gains), but on flatground's kinematic board, and `PhysicsWantsManualExit` never fires
+(held manuals don't tip out); a landing in the danger zone is judged on the speed
 into the ground only (Skate 3's closing-velocity check also has a sideways part); shoves don't run;
 the wipeout's lean and twist come from the drawn bail, not a ragdoll's hips; the d-pad's gestures are
 a fixed set (Skate 3's are the player's pick). The

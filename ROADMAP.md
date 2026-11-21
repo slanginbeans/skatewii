@@ -105,7 +105,8 @@ content second.
   body flips (`BodyFlippingSignal`, `IsBodyFlipping`); no tree in the trick tour plays with an unset
   parameter
 - [ ] Graph runner, next: the air leg's centre-of-mass height, the push speed from the posed clips'
-  trajectory, SK8's manual PID (PhysicsWantsManualExit), shoves (nobody to shove), a board posed apart
+  trajectory, `PhysicsWantsManualExit` (the manual balances on SK8's PID servo, but held manuals never
+  tip out), shoves (nobody to shove), a board posed apart
   from the body (`SetDeckPitchAndYaw`), the wipeout's body from a ragdoll, the player's own gesture picks
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
