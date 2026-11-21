@@ -82,8 +82,10 @@ float fg_frame_dt(void);
 void fg_read_pad(FgPadRaw *out);
 
 // ---- Called from Rust ----
-void fg_begin_frame(const float eye[3], const float target[3], float fov_y_deg, float near_z, float far_z,
-                    uint32_t clear_rgba);
+void fg_begin_frame(const float eye[3], const float target[3], const float up[3], float fov_y_deg, float near_z,
+                    float far_z, uint32_t clear_rgba);
+// The TV's aspect (width over height: 4/3, or 16/9 when the Wii is set to widescreen).
+float fg_aspect(void);
 // Triangle list (count is a multiple of 3, at most 65535) placed by a row-major 3x4 model matrix.
 void fg_draw_tris(const FgVertex *verts, uint32_t count, const float model[3][4]);
 // Screen-space triangle list in a 640x480 virtual screen, origin top-left, drawn over the scene.

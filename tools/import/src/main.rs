@@ -9,6 +9,7 @@ mod assets;
 mod attrib;
 mod big;
 mod cac;
+mod camera;
 mod gx;
 mod mesh;
 mod motion;

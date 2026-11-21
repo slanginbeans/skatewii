@@ -215,7 +215,7 @@ impl Gfx for Raster {
         self.depth.fill(f32::INFINITY);
         self.eye = cam.eye;
         self.fwd = (cam.target - cam.eye).normalize_or(v3(0.0, 0.0, 1.0));
-        self.right = self.fwd.cross(Vec3::UP).normalize_or(v3(1.0, 0.0, 0.0));
+        self.right = self.fwd.cross(cam.up).normalize_or(v3(1.0, 0.0, 0.0));
         self.up = self.right.cross(self.fwd);
         self.focal = (self.h as f32 / 2.0) / (cam.fov_y_deg.to_radians() / 2.0).tan();
         self.near = cam.near;
@@ -316,6 +316,7 @@ impl Gfx for CloseUp<'_> {
         let cam = Camera {
             eye: target + self.side * 3.2 + v3(0.0, 0.4, 0.0),
             target,
+            up: Vec3::UP,
             fov_y_deg: 45.0,
             near: 0.1,
             far: 60.0,
@@ -405,6 +406,7 @@ fn main() {
         Raster::new(640, 480)
     };
     let mut game = Game::new();
+    game.set_aspect(if wide { 854.0 / 480.0 } else { 4.0 / 3.0 });
     // --rules: Skate 3's tuning and flick shapes (fg_import rules); --regular: left foot forward.
     if let Some(path) = value("--rules") {
         let bytes = fs::read(path).expect("read rules pack");
@@ -547,6 +549,7 @@ fn main() {
         let cam = Camera {
             eye: v3(mid.x, max.y + span * 0.9, mid.z - span * 0.45),
             target: v3(mid.x, min.y, mid.z),
+            up: Vec3::UP,
             fov_y_deg: 60.0,
             near: 1.0,
             far: span * 4.0,
@@ -651,6 +654,32 @@ fn main() {
             }
         }
         game.update(&pad, dt);
+        if std::env::var_os("FG_CAMDBG").is_some() {
+            let c = game.camera();
+            let r = &c.rig;
+            println!(
+                "cam {frame} {} mv {:.0} trav {:.0} mir {:.2} arm {:.0} d {:.2}/{:.2} avail {:.2} hit {} el {:.1}+{:.1}+{:.1} tgt {:.1} hd {:.1}->{:.1} w {:.2} anchor {:.2} ref {:.2} eye {:?}",
+                c.shot_name,
+                c.compass.movement.to_degrees(),
+                game.skater.travel_yaw().to_degrees(),
+                c.state.heading_mirror.pos,
+                c.shown().arm_heading.to_degrees(),
+                r.positioner.distance.pos,
+                r.distance,
+                r.positioner.available,
+                r.positioner.hit,
+                r.elevation.pos().to_degrees(),
+                r.elevation_offset.to_degrees(),
+                r.additional_elevation.to_degrees(),
+                r.elevation_target.to_degrees(),
+                r.heading.pos().to_degrees(),
+                r.heading_target.to_degrees(),
+                r.heading_weight,
+                r.anchor.y,
+                r.reference_height,
+                c.camera().eye
+            );
+        }
         if print_log {
             for line in game.log.drain(..) {
                 println!("  log  {line}");
@@ -682,11 +711,16 @@ fn main() {
                 .rider()
                 .map(|r| format!(", clip {} @ {:.2}s", r.current().role, r.current().time))
                 .unwrap_or_default();
-            if label != "every" || park.is_some() {
+            if label != "every" || park.is_some() || tour {
                 game.render(&mut raster);
                 let path = out.join(format!("frame_{frame:04}.png"));
                 raster.save(&path);
-                println!("        wrote {} ({label}{clip})", path.display());
+                println!(
+                    "        wrote {} ({label}{clip}, {:?}, camera {})",
+                    path.display(),
+                    game.skater.mode,
+                    game.camera().shot_name
+                );
             }
             if game.rider().is_some() {
                 let side = yaw_dir(game.skater.heading + std::f32::consts::FRAC_PI_2);

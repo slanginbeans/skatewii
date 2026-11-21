@@ -30,7 +30,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub use air::{BodySpin, GrindTarget, Plan};
+pub use air::{BodySpin, Contact as AirContact, Flight, GrindTarget, Plan};
 pub use board::{AXLE, Drive, Pump, WALLRIDE_MIN_HEIGHT, WallRide};
 pub use grind::{
     Approach, ApproachPose, Assist, Category, Contact, DECK_HEIGHT, Entry, Family, GRAPH_NAMES,

@@ -243,8 +243,13 @@ impl Database {
 
     /// The raw value of `class/collection/field`, looked up through the collection's parents.
     pub fn raw(&self, class: &str, collection: &str, field: &str) -> Option<&[u8]> {
+        self.raw_key(class, name_hash(collection), field)
+    }
+
+    /// The raw value of `field` in collection `key` (its name hash) of `class`, through its parents.
+    pub fn raw_key(&self, class: &str, key: u64, field: &str) -> Option<&[u8]> {
         let (class, field) = (name_hash(class), name_hash(field));
-        let mut key = name_hash(collection);
+        let mut key = key;
         for _ in 0..16 {
             let c = self.collections.get(&(class, key))?;
             if let Some(v) = c.fields.get(&field) {

@@ -119,6 +119,42 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         height: 0,
         gx_format: 0,
     }];
+    // The camera: Skate 3's camera graph and every shot it can choose.
+    let compiled = crate::camera::graph(&read_asset(disc, crate::camera::GRAPH)?)?;
+    let roots = crate::camera::shots_named(&compiled)?;
+    let field = |key: u64, name: &str| {
+        db.raw_key(crate::camera::CLASS, key, name)
+            .map(<[u8]>::to_vec)
+    };
+    let shots = crate::camera::shots(&roots, &field)?;
+    let missing_shots: Vec<&String> = roots.iter().filter(|n| shots.find(n).is_none()).collect();
+    println!(
+        "camera: graph {} KiB, {} shots ({} named by the graph{})",
+        compiled.len() / 1024,
+        shots.defs.len(),
+        roots.len(),
+        if missing_shots.is_empty() {
+            String::new()
+        } else {
+            format!(", not in the database: {missing_shots:?}")
+        }
+    );
+    items.push(pack::Item {
+        name: game_core::camera::select::ENTRY.into(),
+        kind: Kind::StateGraph,
+        data: compiled,
+        width: 0,
+        height: 0,
+        gx_format: 0,
+    });
+    items.push(pack::Item {
+        name: game_core::camera::shot::ENTRY.into(),
+        kind: Kind::Data,
+        data: shots.encode(),
+        width: 0,
+        height: 0,
+        gx_format: 0,
+    });
     let mut shape_count = 0;
     for name in SHAPES {
         let text = read_asset(disc, &format!("{JOYSTICK}{name}.pat"))?;

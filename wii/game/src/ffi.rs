@@ -43,6 +43,7 @@ unsafe extern "C" {
     pub fn fg_begin_frame(
         eye: *const f32,
         target: *const f32,
+        up: *const f32,
         fov_y_deg: f32,
         near: f32,
         far: f32,
@@ -59,6 +60,7 @@ unsafe extern "C" {
     );
     pub fn fg_draw_2d(verts: *const Vertex, count: u32);
     pub fn fg_end_frame();
+    pub fn fg_aspect() -> f32;
     pub fn fg_time_us() -> u32;
     pub fn fg_load_file(path: *const c_char, size: *mut u32) -> *mut u8;
     pub fn fg_panic(msg: *const u8, len: u32) -> !;

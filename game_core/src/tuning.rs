@@ -10,7 +10,9 @@
 
 use alloc::vec::Vec;
 
+pub mod camera;
 pub mod grind;
+pub use camera::CamTuning;
 pub use grind::GrindTuning;
 
 /// Most points a curve can hold (Skate 3's largest point graphs have 16).
@@ -429,13 +431,8 @@ pub struct Tuning {
     // Grinds (`tuning::grind`).
     pub grind: GrindTuning,
 
-    // Camera (riding slow, riding fast, grinding): distance (m), elevation (deg), heading (deg, 180 =
-    // straight behind), framing pitch (deg), look-at height above the board (m).
-    pub cam_slow: CamShot,
-    pub cam_fast: CamShot,
-    pub cam_grind: CamShot,
-    /// Riding speed (m/s) at which the camera has fully changed from the slow shot to the fast one.
-    pub cam_fast_speed: f32,
+    // The camera's trackers, collision and predictors (`tuning::camera`; the shots are their own entry).
+    pub cam: CamTuning,
 }
 
 /// What the state graphs' riding behaviours (`graph::riding`, ports of SK8's SetTurning, the physics'
@@ -688,35 +685,6 @@ impl AnimTuning {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CamShot {
-    pub distance: f32,
-    pub elevation: f32,
-    pub heading: f32,
-    pub pitch: f32,
-    pub board_offset: f32,
-}
-
-impl CamShot {
-    pub fn lerp(&self, o: &CamShot, k: f32) -> CamShot {
-        let l = |a: f32, b: f32| a + (b - a) * k;
-        // Headings take the short way round (-160 to 180 is 20 degrees, not 340).
-        let mut dh = (o.heading - self.heading) % 360.0;
-        if dh > 180.0 {
-            dh -= 360.0;
-        } else if dh < -180.0 {
-            dh += 360.0;
-        }
-        CamShot {
-            distance: l(self.distance, o.distance),
-            elevation: l(self.elevation, o.elevation),
-            heading: self.heading + dh * k,
-            pitch: l(self.pitch, o.pitch),
-            board_offset: l(self.board_offset, o.board_offset),
-        }
-    }
-}
-
 impl Default for Tuning {
     fn default() -> Self {
         Self::BUILT_IN
@@ -726,7 +694,11 @@ impl Default for Tuning {
 /// Every path the tuning reads: [`PATHS`] and the grinds' ([`grind::PATHS`]). `fg_import rules` exports
 /// exactly these.
 pub fn all_paths() -> impl Iterator<Item = &'static str> {
-    PATHS.iter().chain(grind::PATHS.iter()).copied()
+    PATHS
+        .iter()
+        .chain(grind::PATHS.iter())
+        .chain(camera::PATHS.iter())
+        .copied()
 }
 
 /// Where each value lives in Skate 3's tuning database (`class/key/field`).
@@ -922,21 +894,6 @@ pub const PATHS: &[&str] = &[
     "anim_motion/body_spin/spin_clamp_influence_delta",
     "anim_motion/body_spin/spin_clamp_influence_deltadelta",
     "recognizer/right_stick/NumTicksPatternNotInRangeBeforeCulling",
-    "camera_shots/chase_flat_slow/PositionDistance",
-    "camera_shots/chase_flat_slow/PositionElevation",
-    "camera_shots/chase_flat_slow/PositionHeading",
-    "camera_shots/chase_flat_slow/FramingPitch",
-    "camera_shots/chase_flat_slow/ReferenceBoardOffset",
-    "camera_shots/chase_flat_fast/PositionDistance",
-    "camera_shots/chase_flat_fast/PositionElevation",
-    "camera_shots/chase_flat_fast/PositionHeading",
-    "camera_shots/chase_flat_fast/FramingPitch",
-    "camera_shots/chase_flat_fast/ReferenceBoardOffset",
-    "camera_shots/grind_flat_slow/PositionDistance",
-    "camera_shots/grind_flat_slow/PositionElevation",
-    "camera_shots/grind_flat_slow/PositionHeading",
-    "camera_shots/grind_flat_slow/FramingPitch",
-    "camera_shots/grind_flat_slow/ReferenceBoardOffset",
     "anim_carving/default/quickMagMap",
     "anim_carving/default/quickAngleMap",
     "anim_carving/default/quickAngleOffset",
@@ -1218,28 +1175,7 @@ impl Tuning {
         flick_misses: 8,
         anim: AnimTuning::BUILT_IN,
         grind: GrindTuning::BUILT_IN,
-        cam_slow: CamShot {
-            distance: 2.0,
-            elevation: 8.0,
-            heading: -165.0,
-            pitch: -4.0,
-            board_offset: 0.85,
-        },
-        cam_fast: CamShot {
-            distance: 2.6,
-            elevation: 6.0,
-            heading: -165.0,
-            pitch: -2.0,
-            board_offset: 0.85,
-        },
-        cam_grind: CamShot {
-            distance: 1.7,
-            elevation: 8.0,
-            heading: -165.0,
-            pitch: -8.0,
-            board_offset: 0.65,
-        },
-        cam_fast_speed: 8.0,
+        cam: CamTuning::BUILT_IN,
     };
 
     /// Takes over every value a `rules/tuning` entry carries. Unknown names and malformed values are
@@ -1278,24 +1214,6 @@ impl Tuning {
                     }
                     None => false,
                 }
-            };
-        }
-        let field = name.rsplit('/').next().unwrap_or("");
-        let shot = name.split('/').nth(1).unwrap_or("");
-        if name.starts_with("camera_shots/") {
-            let s = match shot {
-                "chase_flat_slow" => &mut self.cam_slow,
-                "chase_flat_fast" => &mut self.cam_fast,
-                "grind_flat_slow" => &mut self.cam_grind,
-                _ => return false,
-            };
-            return match field {
-                "PositionDistance" => scalar!(s.distance),
-                "PositionElevation" => scalar!(s.elevation),
-                "PositionHeading" => scalar!(s.heading),
-                "FramingPitch" => scalar!(s.pitch),
-                "ReferenceBoardOffset" => scalar!(s.board_offset),
-                _ => false,
             };
         }
         match name {
@@ -1576,7 +1494,11 @@ impl Tuning {
                 }
                 _ => false,
             },
-            _ => self.grind.set(name, f, c()) || self.anim.set(name, f, c(), v),
+            _ => {
+                self.grind.set(name, f, c())
+                    || self.anim.set(name, f, c(), v)
+                    || self.cam.set(name, f, c())
+            }
         }
     }
 
@@ -1684,7 +1606,7 @@ mod tests {
                 "anim_motion/pushing/button_time_to_dv",
                 vec![0.0, 1.0, 2.0, 5.0],
             ),
-            ("camera_shots/chase_flat_fast/PositionDistance", vec![3.25]),
+            ("camera_tracker/distance/SpeedClamp", vec![3.25]),
             (
                 "recognizer/right_stick/NumTicksPatternNotInRangeBeforeCulling",
                 vec![4.0],
@@ -1699,7 +1621,7 @@ mod tests {
         assert_eq!(t.apply(&data), 4);
         assert_eq!(t.push_max_speed, 9.5);
         assert_eq!(t.push_dv.eval(0.5), 3.5);
-        assert_eq!(t.cam_fast.distance, 3.25);
+        assert_eq!(t.cam.distance_speed, 3.25);
         assert_eq!(t.flick_misses, 4);
         assert_eq!(t.steer_vs_input, Tuning::BUILT_IN.steer_vs_input);
         assert!(parse(&data[..data.len() - 1]).is_none(), "truncated");
@@ -1736,19 +1658,6 @@ mod tests {
         assert_eq!(t.anim.cond[11], 12.0);
         assert_eq!(t.anim.auto_pump[2], 0.5);
         assert!((t.anim.crouch_max_height.eval(10.0) - 0.8).abs() < 1e-6);
-    }
-
-    #[test]
-    fn camera_headings_blend_the_short_way() {
-        let a = CamShot {
-            heading: -160.0,
-            ..Tuning::BUILT_IN.cam_slow
-        };
-        let b = CamShot {
-            heading: 180.0,
-            ..a
-        };
-        assert!((a.lerp(&b, 0.5).heading + 170.0).abs() < 1e-4);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::camera::ChaseCam;
+use crate::camera::{CamData, CameraMan};
 use crate::character::{self, Character};
 use crate::collision;
 use crate::devlog::DevLog;
@@ -157,7 +157,7 @@ pub struct Game {
     /// Riding numbers: built in, or Skate 3's from a rules pack.
     pub tuning: Tuning,
     pub stance: Stance,
-    cam: ChaseCam,
+    cam: CameraMan,
     pub score: u32,
     popup: Option<Popup>,
     prev_held: u32,
@@ -214,7 +214,7 @@ impl Game {
         Game {
             park_mesh: park.build_mesh(),
             models: Models::build(),
-            cam: ChaseCam::new(&skater),
+            cam: CameraMan::new(&skater, &park, CamData::default(), Tuning::BUILT_IN.cam),
             park,
             skater,
             flick: FlickInput::new(),
@@ -291,7 +291,7 @@ impl Game {
         let clips = self.skater.clips;
         self.skater = Skater::spawn_with(&p.mesh, self.tuning, self.stance);
         self.skater.clips = clips;
-        self.cam = ChaseCam::new(&self.skater);
+        self.cam.request_reset();
         self.imported_park = Some(p);
         Ok(())
     }
@@ -329,7 +329,28 @@ impl Game {
             g.set_tuning(&self.tuning);
         }
         self.skater.tuning = self.tuning;
-        self.cam = ChaseCam::new(&self.skater);
+        // The disc's camera shots and graph (`fg_import rules`), else the built-in ones.
+        let mut data = CamData::default();
+        if let Some(e) = pack.find(crate::camera::shot::ENTRY) {
+            match crate::camera::shot::ShotSet::parse(e.data) {
+                Ok(set) => data.shots = set,
+                Err(e) => self.log.push(format!("camera: shots unreadable ({e:?})")),
+            }
+        }
+        if data.shots.imported
+            && let Some(e) = pack.find(crate::camera::select::ENTRY)
+        {
+            match crate::camera::select::CamGraph::load(e.data) {
+                Ok(g) => {
+                    for n in &g.unsupported {
+                        self.log.push(format!("camera graph: unsupported {n}"));
+                    }
+                    data.graph = Some(g);
+                }
+                Err(e) => self.log.push(format!("camera: graph unreadable ({e:?})")),
+            }
+        }
+        self.cam.set_data(data, self.tuning.cam);
         Ok((values, shapes))
     }
 
@@ -366,6 +387,7 @@ impl Game {
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
         self.skater.reset_to_spawn(ground);
         self.flick.reset();
+        self.cam.request_reset();
     }
 
     /// Puts the rider on the board at `pos` (on the ground there), heading `heading` (yaw), rolling at
@@ -374,6 +396,20 @@ impl Game {
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
         self.skater.put_at(ground, pos, heading, speed);
         self.flick.reset();
+        self.cam.request_reset();
+    }
+
+    /// The screen's width over its height (the platform's TV setting): the camera's field of view
+    /// follows it.
+    pub fn set_aspect(&mut self, aspect: f32) {
+        if aspect.is_finite() && aspect > 0.5 {
+            self.cam.aspect = aspect;
+        }
+    }
+
+    /// The camera (shots, rig, what chose the shot).
+    pub fn camera(&self) -> &CameraMan {
+        &self.cam
     }
 
     pub fn terrain(&self) -> &dyn Terrain {
@@ -505,11 +541,14 @@ impl Game {
         }
         if events.contains(&Event::Respawned) {
             self.flick.reset();
+            self.cam.request_reset();
         }
         self.cam.update(&self.skater, ground, dt);
         self.times.physics_us = now(self.timer).wrapping_sub(t0);
         // Development log: what happened this tick, and a status line now and then.
+        let cam_lines = self.cam.take_log();
         if self.log.len() < LOG_CAP {
+            self.log.extend(cam_lines);
             let cam = self.cam.distance();
             self.devlog.observe(
                 &self.skater,
@@ -553,6 +592,8 @@ impl Game {
                 crate::gfx::Camera {
                     eye: p.cam.eye.lerp(cur.eye, self.alpha),
                     target: p.cam.target.lerp(cur.target, self.alpha),
+                    up: p.cam.up.lerp(cur.up, self.alpha).normalize_or(cur.up),
+                    fov_y_deg: p.cam.fov_y_deg + (cur.fov_y_deg - p.cam.fov_y_deg) * self.alpha,
                     ..cur
                 }
             }
