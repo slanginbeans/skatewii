@@ -603,6 +603,9 @@ fn main() {
     }
     // --tour: the whole move set (carves, manual, grab, bail) after the kicker run.
     let tour = args.iter().any(|a| a == "--tour");
+    // --autoplay: the hands-off tour the Wii runs (grinds and the bail included), in any park.
+    let autoplay = args.iter().any(|a| a == "--autoplay");
+    let mut auto = game_core::autoplay::Autoplay::new();
     let print_log = args.iter().any(|a| a == "--log");
     game.timer = Some(host_us);
     let mut kicker = KickerRun::new();
@@ -616,15 +619,33 @@ fn main() {
     let grind_test = args.iter().any(|a| a == "--grind-test");
     let frames = if grind_test {
         60 * 6
+    } else if autoplay {
+        60 * 150
     } else if park.is_some() {
         60 * 30
     } else if tour {
-        60 * 20
+        60 * 32
     } else {
         60 * 7
     };
     for frame in 0..frames {
-        let pad = if park.is_some() {
+        let pad = if autoplay {
+            let (pad, line) = auto.next(&game);
+            if let Some(l) = line {
+                println!("{:>5.2}s  {l}", frame as f32 * dt);
+            }
+            if auto.take_restart() {
+                game.restart_at_spawn();
+            }
+            if let Some(p) = auto.take_place() {
+                game.place_rider(p.pos, p.heading, p.speed);
+            }
+            // Let the bail play out after the tour.
+            if auto.rounds >= 1 && frame > *done_at.get_or_insert(frame) + 240 {
+                break;
+            }
+            pad
+        } else if park.is_some() {
             // Push up to a cruise and weave gently: enough to see the park and its collision.
             let s = &game.skater;
             PadRaw {
@@ -658,8 +679,10 @@ fn main() {
             let c = game.camera();
             let r = &c.rig;
             println!(
-                "cam {frame} {} mv {:.0} trav {:.0} mir {:.2} arm {:.0} d {:.2}/{:.2} avail {:.2} hit {} el {:.1}+{:.1}+{:.1} tgt {:.1} hd {:.1}->{:.1} w {:.2} anchor {:.2} ref {:.2} eye {:?}",
+                "cam {frame} {} sp {:.2} gi {:.1} mv {:.0} trav {:.0} mir {:.2} arm {:.0} d {:.2}/{:.2} avail {:.2} hit {} el {:.1}+{:.1}+{:.1} tgt {:.1} hd {:.1}->{:.1} w {:.2} anchor {:.2} ref {:.2} eye {:?}",
                 c.shot_name,
+                c.conditions.speed,
+                c.conditions.grind_incline,
                 c.compass.movement.to_degrees(),
                 game.skater.travel_yaw().to_degrees(),
                 c.state.heading_mirror.pos,
@@ -711,7 +734,7 @@ fn main() {
                 .rider()
                 .map(|r| format!(", clip {} @ {:.2}s", r.current().role, r.current().time))
                 .unwrap_or_default();
-            if label != "every" || park.is_some() || tour {
+            if label != "every" || park.is_some() || tour || autoplay {
                 game.render(&mut raster);
                 let path = out.join(format!("frame_{frame:04}.png"));
                 raster.save(&path);

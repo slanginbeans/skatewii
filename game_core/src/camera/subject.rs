@@ -227,6 +227,12 @@ impl SubjectHistory {
                 }
             }
         }
+        // On a rail the travel is along the rail (a boardslide's nose points across it).
+        let fwd = if s.mode == Mode::Grind {
+            self.grind_dir
+        } else {
+            fwd
+        };
         let vel = match s.mode {
             Mode::Rolling => s.ground_velocity(),
             _ => s.vel,

@@ -10,7 +10,7 @@ use crate::collision;
 use crate::devlog::DevLog;
 use crate::flick::{FlickInput, FlickOut};
 use crate::gesture;
-use crate::gfx::{Gfx, MeshBuilder, SCREEN_W, Vertex, rgb};
+use crate::gfx::{Gfx, MeshBuilder, SCREEN_H, SCREEN_W, Vertex, rgb};
 use crate::hud;
 use crate::input::{Pad, PadRaw, flag};
 use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
@@ -718,6 +718,11 @@ impl Game {
     fn draw_hud(&self, gfx: &mut dyn Gfx) {
         let mut m = MeshBuilder::new();
         let white = rgb(255, 255, 255);
+        // The fade to black before an automatic reset after a bail.
+        let dark = self.skater.recovery.darkness(&self.tuning);
+        if dark > 0.0 {
+            m.rect_2d(0.0, 0.0, SCREEN_W, SCREEN_H, (dark * 255.0) as u32 & 0xff);
+        }
         hud::text(
             &mut m,
             24.0,
@@ -937,6 +942,52 @@ mod tests {
             pushes += g.skater.push.is_some() as u32;
         }
         assert!(pushes >= 1);
+    }
+
+    /// Keeps the 2D vertices drawn.
+    #[derive(Default)]
+    struct Overlay(Vec<Vertex>);
+    impl Gfx for Overlay {
+        fn begin_frame(&mut self, _cam: &crate::gfx::Camera, _clear: u32) {}
+        fn draw_tris(&mut self, _v: &[Vertex], _m: &crate::math::Mat34) {}
+        fn draw_indexed(
+            &mut self,
+            _v: &[crate::gfx::TexVertex],
+            _i: &[u16],
+            _t: Option<&crate::gfx::Texture>,
+            _m: &crate::math::Mat34,
+        ) {
+        }
+        fn draw_2d(&mut self, v: &[Vertex]) {
+            self.0.extend_from_slice(v);
+        }
+        fn end_frame(&mut self) {}
+    }
+
+    #[test]
+    fn a_reset_fades_the_screen_and_the_camera_draws_between_ticks() {
+        let mut g = Game::new();
+        g.update(&held(0), 1.0 / 60.0);
+        let black = |g: &Game| {
+            let mut o = Overlay::default();
+            g.render(&mut o);
+            o.0.iter()
+                .filter(|v| v.rgba >> 8 == 0 && v.pos[0] == 0.0 && v.pos[1] == 0.0)
+                .map(|v| v.rgba & 0xff)
+                .max()
+        };
+        assert_eq!(black(&g), None);
+        g.skater.recovery.fade = Some(g.tuning.reset_fade * 0.5);
+        let a = black(&g).expect("a fade quad");
+        assert!((100..=155).contains(&a), "{a}");
+        // PAL50: the camera is drawn between the last two ticks.
+        let mut g = Game::new();
+        for _ in 0..30 {
+            g.update(&held(crate::input::btn::A), 1.0 / 50.0);
+        }
+        let (prev, cur) = (g.prev_view.unwrap().cam.eye, g.cam.camera().eye);
+        let k = g.blend();
+        assert!((g.drawn_camera().eye - prev.lerp(cur, k)).length() < 1e-4);
     }
 
     /// Draws nothing.
