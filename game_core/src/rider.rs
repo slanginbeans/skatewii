@@ -416,6 +416,7 @@ pub struct Rider {
     head_bones: Vec<usize>,
     torso_bones: Vec<usize>,
     mirror: bool,
+    graph_posed: bool,
     a: Vec<Local>,
     b: Vec<Local>,
 }
@@ -441,6 +442,7 @@ impl Rider {
             head_bones,
             torso_bones,
             mirror: false,
+            graph_posed: false,
             a: vec![Local::IDENTITY; n],
             b: vec![Local::IDENTITY; n],
         };
@@ -505,7 +507,55 @@ impl Rider {
         self.pose_and_skin(rot);
     }
 
+    /// One step driven by the state graphs: blends the clips the motion graph plays (`leaves`, weights
+    /// summing to 1), each sampled and mirrored for the stance its tree started in before blending, so a
+    /// stance change crossfades instead of popping. False (nothing drawn new) when the clips can't be
+    /// posed on this skeleton.
+    pub fn update_graph(
+        &mut self,
+        lib: &crate::motion::Library,
+        leaves: &[crate::graph::playback::Leaf],
+        rot: Mat3,
+    ) -> bool {
+        let mut total = 0.0;
+        for l in leaves {
+            let Some(clip) = lib.pose(l.clip) else {
+                continue;
+            };
+            if !self
+                .character
+                .sample_clip(&clip, l.time, l.mirror, &mut self.b)
+            {
+                return false;
+            }
+            if total == 0.0 {
+                self.a.copy_from_slice(&self.b);
+            } else {
+                let k = l.weight / (total + l.weight);
+                for (a, b) in self.a.iter_mut().zip(&self.b) {
+                    *a = a.blend(b, k);
+                }
+            }
+            total += l.weight;
+        }
+        if total == 0.0 {
+            return false;
+        }
+        self.graph_posed = true;
+        let ch = &mut self.character;
+        ch.pose(&self.a);
+        let c = &rot.cols;
+        ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), false);
+        true
+    }
+
+    /// The last pose came from the state graphs' clips (mirrored per tree, not at skin time).
+    pub fn graph_posed(&self) -> bool {
+        self.graph_posed
+    }
+
     fn pose_and_skin(&mut self, rot: Mat3) {
+        self.graph_posed = false;
         let ch = &mut self.character;
         if !ch.sample(self.cur.role, self.cur.time, &mut self.a) {
             ch.sample("idle", self.cur.time, &mut self.a);

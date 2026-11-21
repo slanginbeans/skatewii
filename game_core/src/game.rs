@@ -144,6 +144,8 @@ pub struct Game {
     pub graph: Option<crate::graph::drive::Driver>,
     /// Gesture files from the rules pack, by name (for the graph's input).
     gesture_sets: Vec<(&'static str, Vec<gesture::Shape>)>,
+    /// The clips the motion graph plays this frame (reused buffer).
+    leaves: Vec<crate::graph::playback::Leaf>,
     pub skater: Skater,
     flick: FlickInput,
     /// This frame's flick-stick reading (for the preview and tests).
@@ -227,6 +229,7 @@ impl Game {
             motion: None,
             graph: None,
             gesture_sets: Vec::new(),
+            leaves: Vec::new(),
             imported_park: None,
             log: Vec::new(),
             devlog: DevLog::new(),
@@ -369,7 +372,13 @@ impl Game {
             let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
             let ground = ground.ground(s.pos.x, s.pos.z, s.pos.y + STEP).height;
             let land_in = rider::time_to_land(s.pos.y - ground, s.vel.y, s.tuning.gravity);
-            if let Some(r) = &mut self.rider {
+            let mut posed = false;
+            if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
+            {
+                g.runner.leaves(&mut self.leaves);
+                posed = r.update_graph(lib, &self.leaves, rot);
+            }
+            if !posed && let Some(r) = &mut self.rider {
                 r.update(&self.skater, self.clock, land_in, dt, rot);
             }
         }

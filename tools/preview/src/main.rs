@@ -391,7 +391,7 @@ fn main() {
                 && (*i == 0
                     || !matches!(
                         args[i - 1].as_str(),
-                        "--skater" | "--every" | "--park" | "--rules"
+                        "--skater" | "--every" | "--park" | "--rules" | "--motion"
                     ))
         })
         .map(|(_, a)| PathBuf::from(a))
@@ -420,6 +420,19 @@ fn main() {
         game.load_skater(bytes).expect("skater pack");
         println!("using imported skater {path}");
     }
+    // --motion: Skate 3's motion library and state graphs (fg_import motion): the rider plays them.
+    if let Some(path) = value("--motion") {
+        let bytes: &'static [u8] = Vec::leak(fs::read(path).expect("read motion pack"));
+        game.load_motion(bytes).expect("motion pack");
+        println!(
+            "using motion {path}{}",
+            if game.graph.is_some() {
+                " (state graphs on)"
+            } else {
+                ""
+            }
+        );
+    }
     // --poses: still shots of each stance (goofy, fakie, switch, regular) to check facing and mirroring.
     if args.iter().any(|a| a == "--poses") {
         use game_core::skater::Stance;
@@ -438,6 +451,10 @@ fn main() {
             if let Some(path) = skater {
                 let bytes: &'static [u8] = Vec::leak(fs::read(path).expect("read skater pack"));
                 g.load_skater(bytes).expect("skater pack");
+            }
+            if let Some(path) = value("--motion") {
+                let bytes: &'static [u8] = Vec::leak(fs::read(path).expect("read motion pack"));
+                g.load_motion(bytes).expect("motion pack");
             }
             g.set_stance(stance);
             g.skater.switch = switch;

@@ -108,6 +108,9 @@ pub enum Error {
 
 pub struct Character {
     skeleton: Skeleton<'static>,
+    /// The skeleton's parent and mirror-partner tables (for mirroring poses).
+    parents: Vec<i16>,
+    partners: Vec<i16>,
     clips: Vec<(&'static str, Clip<'static>)>,
     pub parts: Vec<Part>,
     world: Vec<Rows>,
@@ -215,8 +218,12 @@ impl Character {
                 }
             }
         }
+        let parents = (0..bones).map(|b| skeleton.parent(b)).collect();
+        let partners = (0..bones).map(|b| skeleton.mirror(b)).collect();
         Ok(Character {
             skeleton,
+            parents,
+            partners,
             clips,
             parts,
             world: alloc::vec![IDENTITY; bones],
@@ -278,6 +285,61 @@ impl Character {
                 },
                 k,
             );
+        }
+        if self.skeleton.has_trajectory()
+            && let Some(root) = out.first_mut()
+        {
+            *root = Local::IDENTITY;
+        }
+        true
+    }
+
+    /// Samples any clip with this skeleton's bones (a motion-library clip) at `time` seconds into `out`,
+    /// mirrored left for right first when `mirror` (a pose of the other stance: Skate 3 mirrors each
+    /// tree's pose before blending). False when the clip has a different bone count.
+    pub fn sample_clip(&self, clip: &Clip, time: f32, mirror: bool, out: &mut [Local]) -> bool {
+        let n = clip.frames();
+        if clip.bones() != self.bones() || n == 0 {
+            return false;
+        }
+        let f = (time.max(0.0) * clip.fps()).max(0.0);
+        let (a, b, k) = if clip.looping() {
+            let f = f % n as f32;
+            let a = f as usize % n;
+            (a, (a + 1) % n, f - f as usize as f32)
+        } else if f >= (n - 1) as f32 {
+            (n - 1, n - 1, 0.0)
+        } else {
+            (f as usize, f as usize + 1, f - f as usize as f32)
+        };
+        let mut pose: Vec<crate::anim::Sample> = Vec::with_capacity(clip.bones());
+        for bone in 0..clip.bones() {
+            let (sa, sb) = (clip.sample(a, bone), clip.sample(b, bone));
+            let l = Local {
+                q: sa.rotation,
+                t: sa.translation,
+            }
+            .blend(
+                &Local {
+                    q: sb.rotation,
+                    t: sb.translation,
+                },
+                k,
+            );
+            pose.push(crate::anim::Sample {
+                rotation: l.q,
+                translation: l.t,
+                scale: [1.0; 3],
+            });
+        }
+        if mirror {
+            crate::anim::mirror_pose(&mut pose, &self.parents, &self.partners, 1);
+        }
+        for (o, p) in out.iter_mut().zip(&pose) {
+            *o = Local {
+                q: p.rotation,
+                t: p.translation,
+            };
         }
         if self.skeleton.has_trajectory()
             && let Some(root) = out.first_mut()
