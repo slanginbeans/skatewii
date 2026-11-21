@@ -219,22 +219,32 @@ How grinds lock on, ride and end is in [graph-runner.md](graph-runner.md) ("Grin
 ```bash
 cargo run --release -p fg_import -- rules path/to/skate3.iso
 ```
-Writes `imported/rules.fgpak` (about 16 KB) with what makes the skating feel like Skate 3:
+Writes `imported/rules.fgpak` (about 80 KB) with what makes the skating feel like Skate 3:
 
 - `rules/tuning`: the riding numbers flatground's skating reads (`game_core::tuning::PATHS`), taken from
   the game's tuning database (`data/big/db.big`: `data/db/skaterschema` and `skatercollections`, EA's
   AttribSys vault format, read by `attrib.rs`). Push strength and top push speed, rolling resistance, foot
   and tail brakes, steering against stick and speed, jump heights, the air spin curves, the landing limits,
-  the flick recogniser's tolerance, the low camera's shots ("normal" difficulty, the game's default) and
-  the grinds' numbers (`game_core::tuning::grind::PATHS`: `physics_grinds`, `physics_grinds_air`, grind
+  the flick recogniser's tolerance, the camera's trackers, collision, avoidance, drop predictor and push lag
+  (`game_core::tuning::camera::PATHS`: `camera_tracker`, `camera/dynamics`, `camera/rotation`,
+  `camera/subject_tracker`, `camera_compass`, `camera_positioner`, `camera_droppredictor`,
+  `camera_lag_profile`) and the grinds' numbers (`game_core::tuning::grind::PATHS`: `physics_grinds`, `physics_grinds_air`, grind
   targeting, grind wipeouts, the board's dimensions, the grind trees' twist and height).
   Values are found by hashing their names, as the game does; inherited values are followed up the parent
   chain.
+- `rules/camera/graph`: Skate 3's camera graph (`data/script/camera/Default_cameragraph.stategraph` in
+  `miscload.big`, the low and high cameras), compiled for the game's graph runner like the motion graphs
+  (`game_core::graph`, one graph named `Camera`).
+- `rules/camera/shots`: every shot that graph chooses and the children of its blend shots (156 on the
+  US/EU disc): the `camera_shots` collections of the tuning database, found by the hash of their names
+  and, for a blend's children, by the name hashes in its `BlendShot` references
+  (`game_core::camera::shot` has the layout). Shots the graph names but the database lacks are listed.
 - `rules/gestures/<file>`: the flick-stick shapes from `data/joystick/*.pat` in `miscload.big`
   (`skater.pat` drives the ground flick tricks; the rest are kept for later: board sideways, late flips,
   finger flips, the left stick).
 
-Without it the game uses its own built-in values and shapes, which only approximate Skate 3's.
+Without it the game uses its own built-in values and shapes, which only approximate Skate 3's, and its own
+camera shots and shot choice (`game_core::camera::builtin`, `select::built_in`).
 
 ### Water and menu tables (from the executable)
 Two tables exist only inside the game's code: the ocean PCA water animation and the front-end menu tables.

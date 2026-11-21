@@ -5,6 +5,9 @@ grinding ...) and what animation plays with two state graphs from its disc: `Act
 (turns controller intents into motion intents) and `MotionGraph_OnBoard` (states, animation trees,
 values for the physics). flatground runs the player's own copies of them.
 
+Skate 3's camera graph (`Default_cameragraph`) runs on the same runner and chooses the camera's shots
+("The camera" below).
+
 Nothing of the graphs is in this repository. `fg_import motion` compiles both from the player's disc into
 the `motion/graph` entry of `motion.fgpak`, and types every operation once (`motion/graph/ops`, names
 already resolved against the graph's strings and the motion library); without them the game uses its own
@@ -313,9 +316,8 @@ family strengths, the launch and energy figures, the 17/24/60-degree windows) ar
   `GrindTrickOutTypeAllowed` a darkslide's way out, `TrucksOrDeckInContact` the grind; the grind trees'
   `GrindControlFade` (twist), `ControlGrindCrouch` (height) and `CreateGrindAttributes` run (above).
   Wipeouts stay with the physics.
-- **What the camera can read** (phase 7): `Skater::grind` holds the rail, the point on it and its
-  direction (`rail.at(s)`, so the incline), the class and high side (a ledge's side), the speed and
-  direction along it, the family and name, the lean-off angle, and `grind_exit` says why it ended.
+- **The camera** (phase 7, "The camera" below) reads the rail's direction and incline, the ledge's
+  high side and the speed along it.
 - Not done: Skate 3's pins and forces on a rigid board (the board is held on the rail; the lateral pins'
   damping and the in-grind deck closing-speed wipeout have nothing to act on), the grind normal's tilt on
   ledges from the far probes (the rail's up is used), grind grabs, the 5-0 hang rule on ledges, the
@@ -424,6 +426,79 @@ turn conditioner reads the physics' smoothed steering and a centripetal lean ins
 processed turn and reckoning lean, with no speed wobble; Crouching has no board or ground absorption
 force (only its restoring force) and no deck-angle crouch; the powerslide's side for SetTurning is the
 physics' slide.
+
+## The camera (`game_core/src/camera`)
+
+After SK8's `crates/skate-core/src/camera` (shot.rs, shot_manager.rs, manager_*.rs, rig*.rs, compass*.rs,
+positioner.rs, avoidance.rs, drop_predictor.rs, frame_composer.rs) and `crates/skate-game/src/camera`
+(graph conditions, shot data, the subject it publishes). Every update runs once per 1/60 s tick (Skate 3's
+smoothing is per update, not per second); PAL50 frames draw between the last two ticks (eye, look-at, up,
+field of view).
+
+- **Shots** (`shot.rs`): distance, elevation and heading round the skater, framing yaw, pitch and roll,
+  look-at point (a weighted mix of head, hips, grind point, centre of mass, board, feet, damped centre of
+  mass, lifted along the body's up by the board offset), lens, smoothing of heading, elevation, pan and
+  tilt, options (follow the board into the air, mirror for the stance, keep the previous shot, drop
+  predictor, avoidance off), anchor (board, hips, air, grind, damped centre of mass) and compass north.
+  Blend shots mix up to three children by a value from the skater: speed along the board (1), the
+  travel's slope (6), the previous shot's distance (7), progress to and past the apex (8), steering
+  (13, + left, negated when the stance is mirrored), predicted air time (16), the rail's or travel's
+  slope (20); the value is filtered `(1 - smoothing)^2` a tick, placed between the blend points and
+  sine-eased. A shot change keeps the shot being shown as the previous one and eases every field over the
+  new shot's transition time (the graph's `transitionIn`, else the last shot's `transitionOut`, else the
+  shot's own) with a sine curve; `UsePreviousShot` shots (small airs, grind exits) take over the previous
+  shot's arm, distance and framing.
+- **Choosing**: Skate 3's camera graph (`Default_cameragraph`, the low camera) runs on the graph runner
+  (`select.rs`). Its conditions read the camera's own state: `IsWipingOut` (a bail), `IsOffboard` (a
+  run-out, a hippie jump), `SkaterIsGrinding` / `SkaterWasGrinding` / `IsPlayerSkateboardOnGround` (the
+  rig's mode: riding, a flight, a grind, and the one before), `PredictedAirTime` (the known landing's
+  flight time), `PredictedMaxHeight`, `PredictedLandingHeight` (over the take-off),
+  `PredictedHeightDistanceRatio` (the top over the camera's distance at take-off), `LaunchInclineAngle`,
+  `LandingInclineAngle`, `IsReentry` (up a wall and back down one), `TransferAngle`, `FrontsideAngle`,
+  `IsInManual`, `IsPreparingToJump` (crouched to pop), `TurningCentredTime` (seconds since the steering
+  was last hard over), `CameraSubjectSpeed`, `GrindInclineAngle`, `IsPreviousShot`, `IsGrindLedgeLeft` /
+  `Right`. Skate 3 marks ledge shots with painted world regions; flatground reads the ledge's high side
+  (`camera::subject::ledge_side`). Conditions about things flatground doesn't have (skitching, plants,
+  bonelesses, moving objects, roads, volumes, security guards, broken-bone slow motion, body-tweak
+  wipeouts) are false; `SlowMotionController` is not run. Without the disc's graph flatground chooses
+  itself (`select::built_in`): wipeout, run-out, grind exit, grind (ledge side), long air or small air,
+  manual, hard turn, riding.
+- **Rig** (`rig.rs`): the shot's heading turns with a compass north: the movement heading moves 90% a
+  tick towards the velocity's direction above 0.5 m/s (no dead zone) and, stopped for 0.05 s, lines up
+  behind the board at 50% a tick; it is frozen through a flight and turns towards the flight's direction
+  when the landing is more than a metre away. The arm's heading tracker smooths `1 - h^2` (h = 1 -
+  `SmoothingDirection`) near the target, letting go to 0.8 at 45 degrees off, with the acceleration clamped
+  harder near the target (`camera_tracker/heading`), so wiggles are ignored and big turns whip round; the
+  elevation tracker likewise. The stance mirror (`mirrored != riding fakie`) eases through two trackers,
+  quick for headings, slow for framing, and only on the ground. The anchor lags while pushing (and half a
+  second after) and while pumping (`camera_lag_profile`), less from 8 m/s and not at all from 12. Through
+  a flight with a shot that doesn't follow the board (a small ollie) the look-at height ramps from the
+  take-off height to the landing's, never above the anchor; shots that follow take the anchor's height.
+- **Collision**: three lines (radius 0.13 m) from the centre of mass, the head and the feet to the camera;
+  only when all three are blocked is the camera pulled in in front of the first hit, and the distance
+  then recovers through its tracker (speed and acceleration clamps, faster below about a metre), never
+  closer than `MinDistance` (`MinDistanceDuringWipeout` in a bail). How much of the shot's distance is
+  clear raises the camera: (distance - clear) / distance times 50 degrees (60 off the board), climbing a
+  fifteenth of that a tick and sinking a hundredth. **Avoidance** (mode 1): when the camera's path a second
+  ahead runs into something before the skater's paths do, the heading and elevation swing towards the
+  skater's breadcrumb trail. **Drop predictor**: five probes ahead along the velocity (spaced over its
+  look-ahead) measure the ground's drop below deck height; a drop steeper than 15 degrees raises the
+  elevation towards it (at most 70 degrees, 0.1 to 1.6 degrees a tick, scaled 0.9 to 1.0 by speed).
+- **Framing** (`frame.rs`): the look direction to the shot's look-at point (at most `MaxPitch` up), turned
+  by the framing yaw (times the framing mirror) and pitch, eased between the previous and current shots;
+  pan and tilt trackers follow it (tilt only with shots that follow the board), and the frame rolls
+  towards the shot's framing roll at `DutchInterpolationSpeed`, mirrored with the stance.
+- **Field of view**: from the shot's lens (12 on every gameplay shot) and the TV's aspect, as Skate 3:
+  `2 atan(35 / 2 lens)` over `sqrt(aspect + 1)` (about 73 degrees vertical on a 4:3 TV, 67 on a 16:9 one).
+  The Wii's aspect comes from its settings (`fg_aspect`); the view's up carries the roll
+  (`fg_begin_frame`).
+- **Log**: `camera: <shot> (<graph state>)` when the shot changes, at most every quarter second;
+  `camera graph: unsupported <name>` for graph names flatground doesn't know.
+- Not done: the free-look stick, camera shake, Skate 3's slow motion on long airs, the high camera
+  (`cameragraph_high`), off-board walking shots beyond the run-out and hippie jumps, special wipeout
+  shots (no body tweaks), moving obstacles in the avoidance (flatground's parks are static), the
+  avoidance's swept paths (straight rays), `TransitionTimeUnits` 2 uses the distance to the new shot's arm.
+  Fat lines are rays with the radius taken off the hit distance.
 
 ## Numbers (Dolphin, US/EU disc)
 

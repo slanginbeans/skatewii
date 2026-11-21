@@ -56,6 +56,9 @@ While playing:
   for the stance and the manual's nose/tail rules).
 - `pop:`, `landed:` (with how crooked and how hard), `BAIL:` (with the reason and the numbers it was judged on),
   `stance:`, `manual:`, `grind:`, `powerslide`, `hippie jump`, `respawned`.
+- `camera:` the camera's shot when it changes (at most every quarter second) and the camera graph's state
+  that chose it (`camera: low_ollie (CameraLow/OnBoard/Air/LowOllie)`, or `built-in` without the disc's
+  graph); `camera graph: unsupported <name>` once for graph names flatground doesn't run.
 
 The on-screen readout (top left) shows the same frame numbers: `CPU avg PEAK worst  GPU wait  DROP missed`.
 

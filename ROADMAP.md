@@ -101,8 +101,7 @@ content second.
 - [ ] Graph runner, next: the pose parameters still unset (pump channel, push out distance, powerslide
   spin/decel, wipeout lean/twist, grind crouch/twist, bumps), the air leg's centre-of-mass height, the push speed
   from the posed clips' trajectory, SK8's manual PID (PhysicsWantsManualExit), character gestures (d-pad)
-  and shoves, grind trick-outs by grind type (needs the grind physics of phase 6), camera shots from the
-  graph (phase 7)
+  and shoves, grind trick-outs by grind type (needs the grind physics of phase 6)
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
@@ -121,6 +120,15 @@ content second.
   grind name the state graphs know (BF_ variants included), the grind trees' twist and height
 - [ ] Grind balance as a rigid board (Skate 3's pins and forces; flatground holds the board on the rail),
   the in-grind deck closing-speed wipeout, grind grabs, a light physics fall for bails (Skate 3's ragdoll)
+- [x] Camera as Skate 3's (phase 7, docs/graph-runner.md "The camera"): the disc's camera graph run on
+  the graph runner choosing the disc's shots (blend trees by speed, slope, steering, air time, grind
+  speed and incline), sine-eased shot transitions, the movement compass, heading/elevation/pan/tilt
+  trackers, stance mirrors (fakie included, frozen in the air), push and pump lag, small airs not chased,
+  three-line collision with the elevation raise, breadcrumb avoidance, the drop predictor, framing yaw
+  and dutch roll, the lens's field of view for the TV's aspect; flatground's own shots and choice without
+  the disc; the reset fade drawn
+- [ ] Camera, next: free look, camera shake, slow motion on long airs, the high camera, off-board shots
+  beyond run-outs and hippie jumps
 - [ ] Body flips and their upside-down bails
 - [ ] Skater animation (skinned, original)
 - [ ] Session goals, combo system, replay
