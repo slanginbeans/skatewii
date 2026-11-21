@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
-use game_core::math::v3;
+use game_core::math::{atan2f, v3, wrap_angle};
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -77,4 +77,53 @@ fn the_foot_brake_drags_once_the_brake_clip_puts_the_foot_down() {
     assert!((0.15..0.3).contains(&first), "foot down after {first} s");
     let decel = (speeds[29] - speeds[59]) * 2.0;
     assert!((decel - 4.08).abs() < 0.25, "{decel} m/s^2");
+}
+
+#[test]
+fn a_turn_let_go_just_before_the_pop_does_not_spin_it() {
+    // SK8 at 6 m/s: the main stick held left while winding up an ollie and let go a tick before the
+    // board leaves the ground. Known air's landing assist owns the spin from take-off, so the body
+    // turns about nothing in the air (-7 degrees); the let-go copy of the stick used to spin it on
+    // (46 degrees) while the take-off's landing was still being looked for.
+    let Some(mut g) = imported_game("let-go spin") else {
+        return;
+    };
+    g.place_rider(v3(-16.0, 0.0, -17.0), 0.0, 6.0);
+    for _ in 0..30 {
+        g.update(&held(0), TICK);
+    }
+    let yaw = |g: &Game| atan2f(g.skater.fwd.x, g.skater.fwd.z);
+    let mut takeoff = None;
+    let mut landed = None;
+    for p in 0..150 {
+        let cstick_y = if p < 40 {
+            -(game_core::input::C_RANGE as i8)
+        } else if p < 45 {
+            game_core::input::C_RANGE as i8
+        } else {
+            0
+        };
+        let stick_x = if (30..52).contains(&p) { -100 } else { 0 };
+        g.update(
+            &PadRaw {
+                flags: flag::CONNECTED,
+                stick_x,
+                cstick_y,
+                ..Default::default()
+            },
+            TICK,
+        );
+        let air = g.skater.is_airborne();
+        if air && takeoff.is_none() {
+            takeoff = Some(yaw(&g));
+        }
+        if takeoff.is_some() && !air && landed.is_none() {
+            landed = Some(yaw(&g));
+        }
+    }
+    let (Some(a), Some(b)) = (takeoff, landed) else {
+        panic!("no ollie: {takeoff:?} {landed:?}");
+    };
+    let turned = wrap_angle(b - a).abs().to_degrees();
+    assert!(turned < 20.0, "{turned} degrees in the air");
 }

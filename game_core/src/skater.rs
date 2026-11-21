@@ -2227,7 +2227,20 @@ impl Skater {
             },
             None => air::physics_air_spin(&t, stick, now),
         };
+        // Let go before the take-off's landing is known (it resolves over a few ticks here; Skate 3's
+        // known air has it from the first) and not spinning yet: no let-go spin starts (SK8: a turn let
+        // go just before an ollie doesn't spin it). A spin already going carries on, as in Skate 3,
+        // whose assist takes over only from no spin or the same way.
+        let waiting = stick == 0.0
+            && self.plan.is_none()
+            && self.selector.pending()
+            && self.body.speed.abs() < 0.02;
         let spin = self.body.air(&t, stick, auto);
+        let spin = if waiting {
+            self.body.hold_still()
+        } else {
+            spin
+        };
         // A body flip: started, turned, and off when falling upside down without the grab.
         if self.update_body_flip(now, dt) {
             self.bail("fell upside down", events);
