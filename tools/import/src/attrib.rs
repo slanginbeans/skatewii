@@ -268,8 +268,8 @@ impl Database {
 
 /// A raw field as floats: a float scalar, a small integer (one byte), a 4-float vector or controller (16
 /// bytes; used as a scalar, its first value counts), or a point graph as its x values then its y values
-/// (8 points: 64 bytes; 16 points: 128 bytes; with a 4-float header: 4 points in 48 bytes, 8 in 80, 16
-/// in 144).
+/// (4 points: 32 bytes; 8 points: 64 bytes; 16 points: 128 bytes; with a 4-float header: 4 points in 48
+/// bytes, 8 in 80, 16 in 144).
 pub fn decode_values(raw: &[u8]) -> Option<Vec<f32>> {
     let floats = |b: &[u8]| -> Vec<f32> {
         b.chunks_exact(4)
@@ -278,7 +278,7 @@ pub fn decode_values(raw: &[u8]) -> Option<Vec<f32>> {
     };
     let v = match raw.len() {
         1 => vec![raw[0] as f32],
-        4 | 16 | 64 | 128 => floats(raw),
+        4 | 16 | 32 | 64 | 128 => floats(raw),
         48 | 80 | 144 => floats(&raw[16..]),
         _ => return None,
     };
@@ -400,6 +400,9 @@ mod tests {
             decode_values(&g).unwrap(),
             vec![0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 8.0]
         );
+        // A 4-point graph without a header.
+        let g = be(&[0.0, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(decode_values(&g).unwrap()[4], 2.0);
         // A 16-point graph after a 4-float header.
         let mut g = be(&[9.0; 4]);
         g.extend(be(&(0..32).map(|i| i as f32).collect::<Vec<_>>()));

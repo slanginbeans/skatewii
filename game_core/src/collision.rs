@@ -290,6 +290,7 @@ impl TriMesh {
             t: k * max,
             point: from + dir * (k * max),
             normal: if n.dot(dir) > 0.0 { -n } else { n },
+            surface: self.tris[i].surface,
         })
     }
 

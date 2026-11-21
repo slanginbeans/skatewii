@@ -103,6 +103,7 @@ pub trait Terrain {
                     t: hi,
                     point: at,
                     normal,
+                    surface: 0,
                 });
             }
             prev = p;
@@ -118,7 +119,18 @@ pub struct Hit {
     pub point: Vec3,
     /// Unit surface normal, facing back along the ray.
     pub normal: Vec3,
+    /// The collision surface id (0: none); its category is bits 7..11 ([`surface_category`]).
+    pub surface: u16,
 }
+
+/// Skate 3's surface category of a collision surface id (bits 7..11, SK8 `packed_surface >> 7 & 31`):
+/// 8 is stairs, 6 unrideable, 7 and 8 surfaces the board doesn't align to.
+pub fn surface_category(surface: u16) -> u32 {
+    (u32::from(surface) >> 7) & 31
+}
+
+/// The stairs category.
+pub const STAIRS: u32 = 8;
 
 impl Terrain for Park {
     fn ground(&self, x: f32, z: f32, _max: f32) -> Surface {
