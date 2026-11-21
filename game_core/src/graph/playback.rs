@@ -29,12 +29,17 @@ pub struct Leaf {
     pub loops: u32,
     pub weight: f32,
     pub mirror: bool,
+    /// The board's frame was turned end for end when its tree started (`Tree::turned`).
+    pub turned: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Tree {
     pub play: Playback,
     pub mirror: bool,
+    /// The board's frame was turned end for end (fakie to switch, `Skater::frame_turned`) when it
+    /// started: the rider draws it turned back by half a turn once the frame has turned since.
+    pub turned: bool,
     /// The graph's name for it (string id), for logs.
     pub name: u16,
 }
@@ -222,7 +227,7 @@ impl Node {
                 scratch.clear();
                 let start = out.leaves.len();
                 if t.play.evaluate(0.01, true, update_history, scratch) {
-                    flatten(scratch, t.mirror, &mut out.leaves);
+                    flatten(scratch, t.mirror, t.turned, &mut out.leaves);
                 }
                 let end = out.leaves.len();
                 if end == start {
@@ -288,6 +293,65 @@ impl PoseProgram {
         self.ops.clear();
     }
 
+    /// The trajectory's speed (m/s) in the pose this step: the blended root motion of the playing clips
+    /// over `dt`, as SK8 measures a push contact's speed off the posed trajectory bone
+    /// (contact_events.rs, `push_speed`). Leaves blend as the rider poses them; a channel layer (upper
+    /// body, arms) doesn't move the trajectory. `turned`: the board's frame now (`Skater::frame_turned`).
+    /// `None` when no playing clip has its pose in the library.
+    pub fn trajectory_speed(
+        &self,
+        lib: &crate::motion::Library,
+        dt: f32,
+        turned: bool,
+    ) -> Option<f32> {
+        let mut stack: Vec<Option<[f32; 3]>> = Vec::new();
+        for op in &self.ops {
+            match *op {
+                PoseOp::Group { start, end } => {
+                    let mut sum = [0.0f32; 3];
+                    let mut total = 0.0;
+                    for l in &self.leaves[start as usize..end as usize] {
+                        let Some(clip) = lib.pose(l.clip) else {
+                            continue;
+                        };
+                        let mut d = clip.trajectory_step(l.previous, l.time, dt);
+                        if l.mirror {
+                            d[0] = -d[0];
+                        }
+                        if l.turned != turned {
+                            d[0] = -d[0];
+                            d[2] = -d[2];
+                        }
+                        for (s, d) in sum.iter_mut().zip(d) {
+                            *s += d * l.weight;
+                        }
+                        total += l.weight;
+                    }
+                    stack.push((total > 0.0).then(|| sum.map(|s| s / total)));
+                }
+                PoseOp::Blend(w) => {
+                    let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
+                        return None;
+                    };
+                    stack.push(match (a, b) {
+                        (Some(a), Some(b)) => {
+                            Some(core::array::from_fn(|i| a[i] + (b[i] - a[i]) * w))
+                        }
+                        (a, b) => a.or(b),
+                    });
+                }
+                PoseOp::Channel { .. } => {
+                    let (Some(_), Some(a)) = (stack.pop(), stack.pop()) else {
+                        return None;
+                    };
+                    stack.push(a);
+                }
+            }
+        }
+        let d = stack.pop().flatten()?;
+        (dt > 0.0).then(|| crate::math::sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) / dt)
+    }
+
     /// Each clip's share of the final pose, ignoring channel weights (for logs and tests).
     pub fn shares(&self) -> Vec<(u16, f32)> {
         let mut stack: Vec<Vec<(u16, f32)>> = Vec::new();
@@ -314,7 +378,7 @@ impl PoseProgram {
 }
 
 /// Runs a tree's pose commands as weights: each clip's share of the tree's pose.
-fn flatten(commands: &[PoseCommand], mirror: bool, out: &mut Vec<Leaf>) {
+fn flatten(commands: &[PoseCommand], mirror: bool, turned: bool, out: &mut Vec<Leaf>) {
     // Stack of (start index into `out`) for each pushed pose.
     let base = out.len();
     let mut stack: Vec<usize> = Vec::new();
@@ -334,6 +398,7 @@ fn flatten(commands: &[PoseCommand], mirror: bool, out: &mut Vec<Leaf>) {
                     loops,
                     weight: 1.0,
                     mirror,
+                    turned,
                 });
             }
             PoseCommand::Blend { weight } => {
@@ -395,6 +460,7 @@ fn empty() -> Tree {
             },
         },
         mirror: false,
+        turned: false,
         name: super::NONE,
     }
 }

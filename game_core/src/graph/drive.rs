@@ -25,6 +25,11 @@ struct Clips {
     jump: Option<NameId>,
     trick_height: Option<NameId>,
     danger: Option<NameId>,
+    /// The stance events (SK8 skater_animation/state.rs `apply_stance_events`): `MIRRORED` and
+    /// `SWITCH` toggle the rider's mirror and switch flags when a playing clip crosses them (the
+    /// fakie-to-switch clips `R_SWITCH_RIDE_*`, just after they start).
+    mirrored: Option<NameId>,
+    switch: Option<NameId>,
 }
 
 pub struct Driver {
@@ -80,6 +85,8 @@ impl Driver {
                 jump: db.name_id("JUMP"),
                 trick_height: db.name_id("TRICKHEIGHT"),
                 danger: db.name_id("DANGERZONE"),
+                mirrored: db.name_id("MIRRORED"),
+                switch: db.name_id("SWITCH"),
             },
             jumping: false,
             last_path: String::new(),
@@ -113,6 +120,7 @@ impl Driver {
             forward_speed: s.speed,
             speed_and_slope: speed_and_slope(s, up.y),
             mirrored: s.mirrored(),
+            frame_turned: s.frame_turned,
             fakie: s.fakie,
             goofy: (s.stance == Stance::Goofy) != s.switch,
             switch: s.switch,
@@ -163,7 +171,16 @@ impl Driver {
             body_spin: s.spin_rate,
             vel_y: s.vel.y,
             vel_up: s.vel.dot(up),
-            pump_potential: s.pump.effect.abs().min(1.0),
+            // SK8 PhysOutAnimation's crouching feedback: the pumping (its potential), the board's
+            // absorption, the ground's compression and the least crouch.
+            pump_potential: s.pump.pumping,
+            crouch_force: s.pump.absorption,
+            crouch_ground_force: s.pump.ground_absorption,
+            crouch_min: s.pump.min_crouch,
+            crouch_deck: s.pump.deck_absorption,
+            // In the air, the rider's body over the board as the physics follows it (what SK8's air
+            // idle reads at take-off: tucked, its legs stay in); riding, the clips' own.
+            com_height: s.body_com.filter(|_| s.is_airborne()),
             // The landing classifier's signed magnitude (SK8 SetLandingData's spin).
             landing_spin: s.landing.map_or(0.0, |l| l.quality.magnitude),
             // Skate 3's landing classifier (0 straight, 1 sketchy, 2 spin, 3 slightly off).
@@ -235,10 +252,22 @@ impl Driver {
         let has = |n: Option<NameId>| n.is_some_and(|n| r.attribute(db, n).is_some());
         let entered = |part: &str| path.contains(part) && !self.last_path.contains(part);
         let push_contact = has(self.clips.push_contact) || path.contains("/PushContact/");
+        // From the push's first contact to its end (SK8's push contact events, down and back up).
+        let pushing = push_contact
+            || ["/PushCycle/", "/PushEnd/"]
+                .iter()
+                .any(|p| path.contains(p));
         let mut c = GraphControl {
             push_contact,
+            pushing,
             push_target: push_contact.then_some(r.s.push_speed),
-            brake_contact: has(self.clips.brake_contact),
+            // `BRAKE_CONTACT` is a value: 0 while the foot comes down (the brake's `INTO` clip), 1 once it
+            // drags (`CYC`). Skate 3 brakes only on a contact of strength 1 (SK8 contact_events.rs).
+            brake_contact: self
+                .clips
+                .brake_contact
+                .and_then(|n| r.attribute(db, n))
+                .is_some_and(|a| a.value() >= 0.5),
             kickturn: r.s.kickturn,
             ..GraphControl::default()
         };
@@ -254,7 +283,14 @@ impl Driver {
                 path.contains("Manual/Brake") || path.contains("Manual/Out"),
             ));
         }
-        c.turn_round = entered("/Switch/") || entered("/PushFromFakie/");
+        // Turning round from fakie to switch (`Switch`, `PushFromFakie`: both play `B_SWITCH`) happens
+        // when its clip crosses the stance events, as in Skate 3; a library without them turns round
+        // on entering those states.
+        c.turn_round = if self.clips.mirrored.is_some() || self.clips.switch.is_some() {
+            has(self.clips.mirrored) || has(self.clips.switch)
+        } else {
+            entered("/Switch/") || entered("/PushFromFakie/")
+        };
         if entered("/Revert/") {
             c.revert = Some(path.contains("/Revert/Fs"));
         }

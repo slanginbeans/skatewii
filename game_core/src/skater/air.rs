@@ -119,6 +119,14 @@ impl BodySpin {
         self.filtered = self.filtered * (1.0 - FOLLOW) + input * FOLLOW;
     }
 
+    /// The let-go spin held at nothing (after [`BodySpin::air`]) while the take-off's landing is still
+    /// being looked for: Skate 3's known-air assist owns the spin from the first tick and starts it from
+    /// no spin.
+    pub fn hold_still(&mut self) -> f32 {
+        self.speed = 0.0;
+        0.0
+    }
+
     /// A tick in the air with the stick at `input` and the landing assist's spin `auto` (rad/s, 0:
     /// none). Returns the spin speed.
     pub fn air(&mut self, t: &Tuning, input: f32, auto: f32) -> f32 {

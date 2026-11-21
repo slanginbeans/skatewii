@@ -32,10 +32,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub use air::{BodySpin, Contact as AirContact, Flight, GrindTarget, Plan};
-pub use board::{AXLE, Drive, Pump, WALLRIDE_MIN_HEIGHT, WallRide};
+pub use board::{
+    AXLE, DECK_HEIGHT, DECK_UNDERSIDE, Drive, HANGER_DROP, Pump, TRUCK_DROP, WALLRIDE_MIN_HEIGHT,
+    WHEEL_RADIUS, WallRide,
+};
 pub use grind::{
-    Approach, ApproachPose, Assist, Category, Contact, DECK_HEIGHT, Entry, Family, GRAPH_NAMES,
-    GRIND_MASS, Grind, GrindKind, Jumper, Lean, display_name, name_of, segment_box,
+    Approach, ApproachPose, Assist, Category, Contact, Entry, Family, GRAPH_NAMES, GRIND_MASS,
+    Grind, GrindKind, Jumper, Lean, display_name, name_of, segment_box,
 };
 pub use landing::Quality;
 pub use respawn::{Checkpoints, Recovery};
@@ -53,7 +56,14 @@ use crate::tuning::Tuning;
 pub const STEP: f32 = 0.12;
 /// Below this speed a hard sideways stick kick-turns on the spot.
 const KICKTURN_SPEED: f32 = 1.0;
-const KICKTURN_RATE: f32 = 4.5;
+/// Kick turns (ours, measured against SK8's simulation of Skate 3's `KickTurnSteering` at its stock
+/// spin scale 0.5): the yaw rate the turn builds to against the board's speed (rad/s: 3.2 standing,
+/// 2.7 at 1.8 m/s, 2.0 at 3.4 m/s), the share of the gap it closes a tick, and what is left of it a tick
+/// after the stick is let go.
+const KICKTURN_RATES: [(f32, f32); 4] = [(0.0, 3.2), (1.8, 2.72), (3.4, 2.0), (5.0, 1.6)];
+const KICKTURN_BUILD: f32 = 0.09;
+const KICKTURN_RELEASE: f32 = 0.7;
+const KICKTURN_SPIN_SCALE: f32 = 0.5;
 const KICKTURN_STICK: f32 = 0.75;
 /// Rolling tail first faster than this is fakie at once; above `FAKIE_SLOW` after `FAKIE_TIME`; never
 /// within `FAKIE_GRACE` of a spawn (Skate 3's riding-fakie rules).
@@ -65,6 +75,16 @@ const FAKIE_GRACE: f32 = 1.0;
 const SWITCH_TURN_TIME: f32 = 0.15;
 /// A push press is remembered this long while the button is held (Skate 3's new-push window).
 const PUSH_MEMORY: f32 = 0.3;
+/// How fast the board follows the animated centre of mass in the air: the share of the gap closed a
+/// tick (SK8's rider body is physical and follows its animation; fit to its ollies' COM over the deck).
+const AIR_LEGS_FOLLOW: f32 = 0.15;
+/// Rolled off an edge without a pop, the board meets rails as if still riding for this long (s, ours:
+/// SK8's board pivots on its back wheels over a coping for about half a second at walking pace).
+const ROLL_OFF_TIME: f32 = 0.3;
+/// The wheels' friction on a landing's impact: sideways speed taken off per m/s into the ground.
+const LAND_SIDE_FRICTION: f32 = 0.41;
+/// The posed board lifted this far (m) means the pop's tail strike has started.
+const POP_LIFT_MIN: f32 = 0.002;
 /// A repeated push puts the foot down this long after the re-push point (s, ours).
 const PUSH_REPEAT_DOWN: f32 = 0.1;
 /// Powerslides: the board angle eases at this rate (rad/s, ours); a held slide relaxes after this long
@@ -121,6 +141,21 @@ pub enum Stance {
 /// How long the built-in board's flick trick animation takes (s). Without the state graphs this is the
 /// one clock the drawn board and the landing check share (landing before it ends is landing with the
 /// board not caught); with them the clips' own `DANGERZONE` decides.
+/// The yaw rate a kick turn builds to at `speed` (rad/s, [`KICKTURN_RATES`]).
+pub fn kickturn_rate(speed: f32) -> f32 {
+    let r = KICKTURN_RATES;
+    if speed <= r[0].0 {
+        return r[0].1;
+    }
+    for w in r.windows(2) {
+        let ((a, ra), (b, rb)) = (w[0], w[1]);
+        if speed <= b {
+            return ra + (rb - ra) * (speed - a) / (b - a);
+        }
+    }
+    r[r.len() - 1].1
+}
+
 pub fn trick_duration(t: Trick) -> f32 {
     let (flip, shove) = t.motion();
     match (flip != 0.0, shove.abs()) {
@@ -666,6 +701,11 @@ pub struct Skater {
     pub trick: Option<ActiveTrick>,
     /// Riding with the other foot forward (the drawn rider is mirrored).
     pub switch: bool,
+    /// The board's frame (`fwd`, and the rider's frame drawn on it) has been turned end for end an odd
+    /// number of times (`Skater::flip_board`: fakie to switch). The physical board never turns (Skate 3
+    /// flips only its "effective" frame, SK8 board_motion_output.rs); animation trees started before a
+    /// turn are drawn turned back by half a turn so nothing turns in the world.
+    pub frame_turned: bool,
     /// Rolling tail first (Skate 3's fakie detection: a moment of backwards speed).
     pub fakie: bool,
     /// Riding dark (the board grip down after a dark catch; the state graphs decide).
@@ -689,12 +729,17 @@ pub struct Skater {
     /// The velocity's change over the last tick (m/s^2; bumps), and the velocity it was taken from.
     pub accel: Vec3,
     prev_vel: Vec3,
+    /// Rolling on both trucks: the line from the back truck's contact to the front's (towards the
+    /// nose), which the board is drawn along.
+    pub chord: Option<Vec3>,
     /// The deck's tilt that turns the trucks (rad), and seconds since the wheels came down (the trucks'
     /// turn ramps back in).
     pub deck_tilt: f32,
     truck_ramp: f32,
     /// The board's yaw rate last tick (rad/s).
     pub yaw_rate: f32,
+    /// The trucks' part of it, building up towards what the deck tilt asks (rad/s).
+    truck_yaw: f32,
     /// A wall hit turning the board along the wall: yaw rate (rad/s) and seconds left.
     collide: Option<(f32, f32)>,
     /// Seconds since the last wall hit.
@@ -708,6 +753,12 @@ pub struct Skater {
     pub pump: Pump,
     /// Seconds since the player last touched anything (rolling resistance rises after a while).
     idle: f32,
+    /// The speed the speed model holds the board to (m/s, Skate 3's `UpdateSpeedModel` target): only
+    /// the slope and rolling resistance move it, so the speed the wheels lose turning or scrubbing
+    /// sideways is put back (within `friction_max_change`).
+    target_speed: f32,
+    /// The speed the last ride ended with (a different one at the next is a change from outside).
+    model_speed: f32,
     /// 0..1, how far the skater is crouched (drawn).
     pub crouch: f32,
     /// The crouch is for a nollie (stick held forward).
@@ -739,6 +790,8 @@ pub struct Skater {
     pub revert: Option<Revert>,
     /// Kick-turning on the spot: direction (+1 left), seconds.
     pub kickturn: Option<(f32, f32)>,
+    /// The kick turn's yaw rate (rad/s, + left), running down after the stick is let go.
+    kick_rate: f32,
     /// Winding up a hippie jump: seconds held.
     pub hippy: Option<f32>,
     /// When each push button last went down (seconds ago), for the hippie jump chord.
@@ -767,6 +820,15 @@ pub struct Skater {
     flipped: Option<(bool, u32)>,
     /// A graph-driven push in contact: the speed it started at, the speed it chases, seconds left.
     graph_push: Option<(f32, f32, f32)>,
+    /// With the imported rider: the rider's centre-of-mass height over the board (m). It is the
+    /// animation's while riding; from the pop's tail strike and in the air the body follows its
+    /// animation only so fast (SK8's rider is physical). And in the air, its height at take-off.
+    pub body_com: Option<f32>,
+    air_com: Option<f32>,
+    /// How far the legs have lifted the board over the flight's path (m, world up), and how fast it
+    /// moved last tick (m/s).
+    pub air_lift: f32,
+    air_lift_rate: f32,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -775,8 +837,21 @@ pub struct GraphControl {
     /// A push clip's foot is on the ground (its `PUSHCONTACT` window): only then does a push drive.
     pub push_contact: bool,
     /// The speed the push chases while the foot is down: where the push trees' coefficients end
-    /// (`graph::push`).
+    /// (`graph::push`), or with `push_posed` the posed clips' trajectory speed this tick.
     pub push_target: Option<f32>,
+    /// The push's clips are playing from the foot's first contact to the push's end (Skate 3's push
+    /// contact events, `ProcessedPhysIn` bit 27, which weakens the steering).
+    pub pushing: bool,
+    /// `push_target` is the posed trajectory's speed (Skate 3's): it holds this tick only, as SK8's
+    /// push contact does; else the push sets' end speed, held for the contact's length.
+    pub push_posed: bool,
+    /// The animated centre of mass's height over the posed board (m, the rider's last pose; SK8
+    /// `com_to_deck`): what a jump pops from and, in the air, how far the legs have tucked the board
+    /// up. `None` without the imported rider.
+    pub pose_com: Option<f32>,
+    /// How far the posed board's centre is lifted off its riding height (m): the pop's tail strike
+    /// pitches it up about its back wheels before the jump.
+    pub pose_lift: f32,
     /// A brake clip's foot is down (`BRAKE_CONTACT`): only then does the foot brake slow the board.
     pub brake_contact: bool,
     /// The takeoff clip reached its jump: pop now, as this trick, at this strength (0..1).
@@ -929,6 +1004,8 @@ impl Skater {
             plan: None,
             trick: None,
             switch: false,
+            frame_turned: false,
+            chord: None,
             fakie: false,
             dark: false,
             fakie_timer: 0.0,
@@ -945,6 +1022,7 @@ impl Skater {
             deck_tilt: 0.0,
             truck_ramp: 1.0,
             yaw_rate: 0.0,
+            truck_yaw: 0.0,
             collide: None,
             wall_clock: f32::INFINITY,
             vn: 0.0,
@@ -952,6 +1030,8 @@ impl Skater {
             lead_rise: 0.0,
             pump: Pump::default(),
             idle: 0.0,
+            target_speed: 0.0,
+            model_speed: 0.0,
             crouch: 0.0,
             crouch_nose: false,
             landing: None,
@@ -971,6 +1051,7 @@ impl Skater {
             last_slide: (0.0, 0.0),
             revert: None,
             kickturn: None,
+            kick_rate: 0.0,
             hippy: None,
             since_a: f32::INFINITY,
             since_b: f32::INFINITY,
@@ -980,6 +1061,10 @@ impl Skater {
             body_flip: None,
             flipped: None,
             graph_push: None,
+            body_com: None,
+            air_com: None,
+            air_lift: 0.0,
+            air_lift_rate: 0.0,
             wallride: None,
             checkpoints: Checkpoints::default(),
             riding_ticks: 0,
@@ -997,8 +1082,11 @@ impl Skater {
         let clips = self.clips;
         let mut checkpoints = core::mem::take(&mut self.checkpoints);
         let pick = checkpoints.pick(&self.tuning, park, self.pos, self.switch);
+        let turned = self.frame_turned;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+        // Only a drawing parity (animation trees still playing remember it), kept across a teleport.
+        self.frame_turned = turned;
         self.checkpoints = checkpoints;
         if let Some(c) = pick {
             self.pos = c.pos;
@@ -1010,8 +1098,11 @@ impl Skater {
     /// Back to the park's spawn point (a fresh start), keeping the tuning, clip timing and stance.
     pub fn reset_to_spawn(&mut self, park: &dyn Terrain) {
         let clips = self.clips;
+        let turned = self.frame_turned;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+        // Only a drawing parity (animation trees still playing remember it), kept across a teleport.
+        self.frame_turned = turned;
     }
 
     /// Puts the rider back on the board at `pos` on the ground there, heading `yaw`, rolling at `speed`
@@ -1019,8 +1110,11 @@ impl Skater {
     pub fn put_at(&mut self, park: &dyn Terrain, pos: Vec3, yaw: f32, speed: f32) {
         let clips = self.clips;
         let checkpoints = core::mem::take(&mut self.checkpoints);
+        let turned = self.frame_turned;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+        // Only a drawing parity (animation trees still playing remember it), kept across a teleport.
+        self.frame_turned = turned;
         self.checkpoints = checkpoints;
         let g = park.ground(pos.x, pos.z, pos.y + 0.1);
         let n = if g.height > f32::MIN / 2.0 {
@@ -1054,11 +1148,25 @@ impl Skater {
         matches!(self.mode, Mode::Air { .. })
     }
 
+    /// The deck's centre: over the board's contact point, lifted in the air as far as the legs have
+    /// tucked the board up.
+    pub fn deck(&self) -> Vec3 {
+        self.pos + self.normal * DECK_HEIGHT + Vec3::UP * self.air_lift
+    }
+
     /// The board's frame in the world: right, up (the surface normal or the board's own up in the air),
     /// nose.
     pub fn board_frame(&self) -> crate::math::Mat3 {
-        let up = self.normal.normalize_or(Vec3::UP);
-        let f = tangent(self.fwd, up);
+        // The nose along `fwd` (rolling on both trucks, along the chord between their contacts, so both
+        // wheels sit on the surface over a kink), the up from the smoothed normal square to it.
+        let f = match (self.mode, self.chord) {
+            (Mode::Rolling, Some(ch)) if ch.dot(self.fwd) > 0.9 => ch,
+            _ => self.fwd,
+        };
+        let f = f.normalize_or(yaw_dir(self.heading));
+        let n = self.normal.normalize_or(Vec3::UP);
+        let up = (n - f * n.dot(f)).normalize_or(n);
+        let f = tangent(f, up);
         crate::math::Mat3::from_cols(up.cross(f), up, f)
     }
 
@@ -1171,6 +1279,8 @@ impl Skater {
         self.fwd = -self.fwd;
         self.speed = -self.speed;
         self.slip = -self.slip;
+        self.chord = self.chord.map(|c| -c);
+        self.frame_turned = !self.frame_turned;
     }
 
     /// Advances one fixed step (1/60 s: Skate 3's tick).
@@ -1230,7 +1340,21 @@ impl Skater {
         };
         if !self.is_airborne() {
             self.body.ground(self.spin_input(pad));
+            self.air_com = None;
+            self.air_lift = 0.0;
         }
+        // The rider's body over the board: the animation's while riding; following it only so fast
+        // from the pop's tail strike (SK8's GroundAnimation) until the jump's top (measured: SK8's
+        // COM over the deck lags its animation there, and follows it again coming down).
+        self.body_com = match (self.graph.and_then(|g| g.pose_com), self.body_com) {
+            (Some(c), Some(d))
+                if (self.is_airborne() && self.vel.y > 0.0)
+                    || self.graph.is_some_and(|g| g.pose_lift > POP_LIFT_MIN) =>
+            {
+                Some(d + (c - d) * (AIR_LEGS_FOLLOW * dt * 60.0).min(1.0))
+            }
+            (c, _) => c,
+        };
         if self.graph.is_some_and(|g| g.wipeout)
             && matches!(self.mode, Mode::Rolling | Mode::Air { .. })
         {
@@ -1425,24 +1549,39 @@ impl Skater {
                     && self.push.is_none_or(|p| p.stage().0 == 2)
             }
         };
+        // The kick turn's yaw rate builds up towards its speed's rate and, let go, runs down (SK8's rider
+        // turning the board through its feet).
         if kick {
             let dir = -pad.stick[0].signum();
             let time = self.kickturn.map_or(0.0, |k| k.1) + dt;
             self.kickturn = Some((dir, time));
-            let rate = KICKTURN_RATE * graph_kick.map_or(1.0, |k| k.clamp(0.25, 2.0));
-            self.fwd = rotate(self.fwd, self.contact_n, dir * rate * dt);
+            let scale = graph_kick.map_or(1.0, |k| k.clamp(0.25, 2.0) / KICKTURN_SPIN_SCALE);
+            let target = dir * kickturn_rate(self.speed.abs()) * scale;
+            self.kick_rate +=
+                (target - self.kick_rate) * (1.0 - libm::powf(1.0 - KICKTURN_BUILD, ticks));
         } else {
             self.kickturn = None;
+            self.kick_rate *= libm::powf(KICKTURN_RELEASE, ticks);
+            if self.kick_rate.abs() < 0.05 || self.slide.is_some() || self.revert.is_some() {
+                self.kick_rate = 0.0;
+            }
+        }
+        if self.kick_rate != 0.0 {
+            self.fwd = rotate(self.fwd, self.contact_n, self.kick_rate * dt);
         }
 
         // Steering: Skate 3's reading of the stick, eased in. A powerslide's trucks hold a steady turn.
+        // Riding fakie the turn is negated (Skate 3's action graph hands the physics `FakieTurn`: `Turn`
+        // with `fakieFilter="negate"`, read as the `Turn` packet by SetTurning, SK8 set_turning.rs): with
+        // the trucks' yaw already reversing rolling tail first, the stick turns the travel its own way.
+        let fakie_turn = if self.fakie { -1.0 } else { 1.0 };
         let follow = 1.0 - libm::powf(1.0 - t.steer_follow.clamp(0.0, 1.0), ticks);
         let turn_in = match &self.slide {
             Some(s) if !s.releasing => s.side * t.slide_turn_value,
             Some(_) => 0.0,
             None if kick => 0.0,
-            None if st.hard != 0.0 => st.turn.signum(),
-            None => st.turn,
+            None if st.hard != 0.0 => st.turn.signum() * fakie_turn,
+            None => st.turn * fakie_turn,
         };
         self.steer += (turn_in - self.steer) * follow;
 
@@ -1454,6 +1593,14 @@ impl Skater {
         // With the state graphs, a push only drives while the push clip's foot is down, and the foot
         // brake only once the brake clip's foot touches.
         let push_target = match self.graph {
+            Some(g) if g.push_posed => {
+                // Skate 3 (SK8 contact_events.rs, push.rs): while the push clip's foot is down the
+                // board chases the posed trajectory's speed, within the push's change a tick.
+                self.graph_push = None;
+                g.push_target
+                    .filter(|_| g.push_contact)
+                    .map(|v| v.min(self.tuning.push_max_speed))
+            }
             Some(g) => self.graph_push(g.push_contact, g.push_target, dt),
             None => self.update_push(pad, dt, events),
         };
@@ -1517,6 +1664,10 @@ impl Skater {
                 st.turn
             },
             push_target,
+            pushing: match self.graph {
+                Some(g) => g.pushing,
+                None => push_target.is_some(),
+            },
             brake,
             manual: self.manual.is_some(),
             slide: self
@@ -1524,6 +1675,7 @@ impl Skater {
                 .as_ref()
                 .filter(|s| !s.releasing)
                 .map(|s| s.angle),
+            slide_time: self.slide.as_ref().map_or(0.0, |s| s.time),
             pivot: kick || self.revert.is_some(),
             keep_velocity: self.revert.is_some(),
             intentional_pump: flick.crouch > 0.0 || self.crouch > 0.05,
@@ -2021,9 +2173,24 @@ impl Skater {
     fn pop(&mut self, f: Flick, strength: f32, stick: [f32; 2], events: &mut Vec<Event>) {
         self.end_manual(events);
         let h = self.tuning.jump_height(strength, self.speed);
-        self.vel = self.pop_velocity(self.pop_speed(h), stick);
+        // Skate 3 pops the centre of mass from where the animation has it at the jump (SK8
+        // ground_jump `animation_com_position`): over the deck, which the tail strike has already
+        // pitched up off its riding height. Without the imported rider, from `AbsoluteMinHeight`.
+        let posed = self
+            .graph
+            .and_then(|g| Some((self.body_com.or(g.pose_com)?, g.pose_lift)));
+        let speed = match posed {
+            Some((com, lift)) => {
+                let now = DECK_HEIGHT - WHEEL_RADIUS + lift + com;
+                sqrtf((2.0 * self.tuning.gravity * (h - now)).max(0.0))
+            }
+            None => self.pop_speed(h),
+        };
+        self.vel = self.pop_velocity(speed, stick);
         let on_vert = self.contact_n.y < self.tuning.vert_align_max_ny;
-        self.pos += self.contact_n * 0.02;
+        // The flight starts from the lifted deck.
+        let lift = posed.map_or(0.0, |p| p.1);
+        self.pos += self.contact_n * (0.02 + lift);
         self.take_off(Some(f));
         self.takeoff.on_vert = on_vert;
         self.takeoff.lean = stick[1];
@@ -2046,6 +2213,7 @@ impl Skater {
         self.slide = None;
         self.revert = None;
         self.kickturn = None;
+        self.kick_rate = 0.0;
         self.hippy = None;
         self.wallride = None;
         self.collide = None;
@@ -2067,6 +2235,9 @@ impl Skater {
             lean: 0.0,
         };
         self.trick = f.map(ActiveTrick::new);
+        self.air_com = self.body_com;
+        self.air_lift = 0.0;
+        self.air_lift_rate = 0.0;
     }
 
     /// The landing prediction (SK8 PhysicsAir / trajectory selector): while no landing is known, a
@@ -2142,7 +2313,20 @@ impl Skater {
             },
             None => air::physics_air_spin(&t, stick, now),
         };
+        // Let go before the take-off's landing is known (it resolves over a few ticks here; Skate 3's
+        // known air has it from the first) and not spinning yet: no let-go spin starts (SK8: a turn let
+        // go just before an ollie doesn't spin it). A spin already going carries on, as in Skate 3,
+        // whose assist takes over only from no spin or the same way.
+        let waiting = stick == 0.0
+            && self.plan.is_none()
+            && self.selector.pending()
+            && self.body.speed.abs() < 0.02;
         let spin = self.body.air(&t, stick, auto);
+        let spin = if waiting {
+            self.body.hold_still()
+        } else {
+            spin
+        };
         // A body flip: started, turned, and off when falling upside down without the grab.
         if self.update_body_flip(now, dt) {
             self.bail("fell upside down", events);
@@ -2178,6 +2362,12 @@ impl Skater {
         self.spin_rate = spin;
         self.spin += turn;
         self.fwd = rotate(self.fwd, self.normal, turn);
+        // The legs: the board follows the animated centre of mass's height over it, as fast as the
+        // rider's body follows its animation (SK8's physical rider; measured, 0.15 of the gap a tick).
+        if let (Some(c0), Some(d)) = (self.air_com, self.body_com) {
+            self.air_lift_rate = (c0 - d - self.air_lift) / dt.max(1e-4);
+            self.air_lift = c0 - d;
+        }
         if let Some(g) = self.graph {
             self.follow_graph_trick(&g);
         } else if let Some(tr) = &mut self.trick {
@@ -2196,6 +2386,14 @@ impl Skater {
         if let Some(target) = self.plan.as_ref().and_then(|p| p.grind) {
             self.grind_air_assist(park, target, dt);
         }
+        // Rolled off an edge without a pop, the board is still tipping over it on its back wheels for a
+        // moment (SK8's rigid board stays on the ground pivoting): a rail it meets is ridden onto, not
+        // landed on from the air (a slow roll off a deck drops in rather than stopping on the coping).
+        let category = if self.trick.is_none() && !self.takeoff.hippy && now < ROLL_OFF_TIME {
+            Category::Ground
+        } else {
+            Category::Air
+        };
         // Fly: the known landing's flight (its start error blended away), else ballistically.
         match &self.plan {
             Some(p) => {
@@ -2209,15 +2407,18 @@ impl Skater {
         let delta = self.vel * dt;
         let len = delta.length();
         let mut moved = false;
+        // The legs reaching for the landing hold the board under the flight's path: it touches down
+        // when the board does (SK8: the deck under the flying centre of mass).
+        let sink = Vec3::UP * self.air_lift.min(0.0);
         if len > 1e-6 {
             let dir = delta * (1.0 / len);
-            if let Some(h) = park.raycast(from, dir, len + 0.01)
+            if let Some(h) = park.raycast(from + sink, dir, len + 0.01)
                 && self.vel.dot(h.normal) < 0.0
             {
                 let landable = self.normal.dot(h.normal) > 0.5 || h.normal.y > 0.6;
                 if landable {
                     self.pos = h.point;
-                    if self.try_grind(park, Category::Air, events) {
+                    if self.try_grind(park, category, events) {
                         return;
                     }
                     self.land(h.normal, h.surface, time, events);
@@ -2242,7 +2443,7 @@ impl Skater {
             self.pos = from + delta;
         }
 
-        if self.try_grind(park, Category::Air, events) {
+        if self.try_grind(park, category, events) {
             return;
         }
         if self.pos.y < park.kill_height() {
@@ -2365,6 +2566,7 @@ impl Skater {
         self.slide = None;
         self.revert = None;
         self.kickturn = None;
+        self.kick_rate = 0.0;
         self.hippy = None;
         self.collide = None;
         self.plan = None;
@@ -2388,6 +2590,7 @@ impl Skater {
         self.slide = None;
         self.revert = None;
         self.kickturn = None;
+        self.kick_rate = 0.0;
         self.hippy = None;
         self.collide = None;
         events.push(Event::RanOut);
@@ -2518,6 +2721,8 @@ impl Skater {
     /// surface is kept (gaining on transitions), and the landing is classified as Skate 3 does.
     fn land(&mut self, normal: Vec3, surface: u16, air_time: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
+        self.air_com = None;
+        self.air_lift = 0.0;
         let n = normal.normalize_or(Vec3::UP);
         let vt = self.vel - n * self.vel.dot(n);
         // A body flip ends with the landing: its turn baked into the board, which has to come down on
@@ -2604,6 +2809,12 @@ impl Skater {
         self.contact_n = n;
         self.fwd = axis;
         self.set_ground_velocity(along);
+        // Skate 3's rigid board comes down on its wheels: their friction against the touchdown's
+        // impact takes the sideways speed off a crooked landing (measured on SK8: about 0.4 of the
+        // speed into the ground, a 70-degree landing at 6 m/s keeping 0.75 m/s).
+        let into = (-(self.vel + Vec3::UP * self.air_lift_rate).dot(n)).max(0.0);
+        let scrub = (LAND_SIDE_FRICTION * into).min(self.slip.abs());
+        self.slip -= scrub * self.slip.signum();
         let quality = landing::classify(&t, along, self.fwd, n, spin);
         let kind = match quality.kind {
             1 => LandKind::Sketchy {
@@ -3059,6 +3270,172 @@ mod tests {
         assert!(s.slide.is_none(), "too slow to slide");
     }
 
+    // ---- Pinned to SK8's simulation (SK8-ENGINE/skate-3-rust-engine run headless with the stock tuning,
+    // the same scripted pad on both; see docs/graph-runner.md, "Measured against SK8") ----
+
+    /// The travel's turn rate (rad/s, + left) over the last half second of 1.5 s with the main stick at
+    /// `x`, from `speed`, and the speed at the end.
+    fn carve(speed: f32, x: f32) -> (f32, f32) {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.put_at(
+            &park,
+            v3(-40.0, 0.0, -40.0),
+            core::f32::consts::FRAC_PI_4,
+            speed,
+        );
+        steps(&mut s, &park, &Pad::default(), None, 5);
+        let pad = Pad {
+            stick: [x, 0.0],
+            ..Pad::default()
+        };
+        steps(&mut s, &park, &pad, None, 60);
+        let y0 = s.travel_yaw();
+        steps(&mut s, &park, &pad, None, 30);
+        (wrap_angle(s.travel_yaw() - y0) / 0.5, s.speed)
+    }
+
+    #[test]
+    fn carves_turn_as_fast_as_sk8_and_cost_no_speed() {
+        // SK8: full stick 1.75 rad/s at 6.5 m/s and 1.83 at 8.3 m/s; half a stick 0.42 at 6.65 m/s and
+        // 0.48 at 8.46 m/s (a 16 m and a 17.5 m radius). The speed model keeps the speed through them.
+        for (speed, x, want) in [
+            (6.5, -1.0, 1.75),
+            (8.3, -1.0, 1.83),
+            (6.65, -0.5, 0.42),
+            (8.46, -0.5, 0.48),
+        ] {
+            let (rate, end) = carve(speed, x);
+            assert!(
+                (rate - want).abs() < 0.08 * want,
+                "{speed} m/s, stick {x}: {rate} rad/s, SK8 {want}"
+            );
+            assert!(end > speed * 0.98, "{speed} m/s carving ends at {end}");
+        }
+        // Mirrored.
+        let (rate, _) = carve(6.5, 1.0);
+        assert!((rate + 1.75).abs() < 0.14, "{rate}");
+    }
+
+    #[test]
+    fn carves_weaken_through_a_push_and_settle_as_sk8s() {
+        // SK8 at 6.5 m/s: let go of a full carve, the yaw rate is under a tenth of it after 0.25 s.
+        // Through a push's whole animation (its contact events, the foot down and coming back) the
+        // steering is at `PushScalarMin`, recovering by `PushScalarIncriment` a tick after.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 6.5;
+        let left = Pad {
+            stick: [-1.0, 0.0],
+            ..Pad::default()
+        };
+        steps(&mut s, &park, &left, None, 90);
+        let full = s.yaw_rate.abs();
+        let mut settle = None;
+        for i in 0..60 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            if settle.is_none() && s.yaw_rate.abs() < 0.1 * full {
+                settle = Some((i + 1) as f32 * DT);
+            }
+        }
+        let settle = settle.expect("settles");
+        assert!((0.18..0.3).contains(&settle), "{settle} s (SK8 0.25)");
+        // Pushing: half the tilt.
+        let half = Pad {
+            stick: [-0.5, 0.0],
+            ..Pad::default()
+        };
+        let rate = |pushing: bool| {
+            let mut s = spawn(&park);
+            s.speed = 6.65;
+            s.graph = Some(GraphControl {
+                pushing,
+                ..GraphControl::default()
+            });
+            steps(&mut s, &park, &half, None, 60);
+            s.yaw_rate.abs()
+        };
+        let (free, pushing) = (rate(false), rate(true));
+        let min = s.tuning.push_steer_min;
+        assert!(
+            (pushing / free - min).abs() < 0.1,
+            "{pushing} vs {free} (x{min})"
+        );
+    }
+
+    #[test]
+    fn kick_turns_build_up_and_run_down_as_sk8s() {
+        // SK8 standing: the yaw rate builds to 3.2 rad/s and turns about 148 degrees in the second the
+        // stick is held; let go, it runs down by 0.7 a tick.
+        let park = flat();
+        let mut s = spawn(&park);
+        let yaw = |s: &Skater| atan2f(s.fwd.x, s.fwd.z);
+        let y0 = yaw(&s);
+        let pad = Pad {
+            stick: [-1.0, 0.0],
+            ..Pad::default()
+        };
+        let mut peak: f32 = 0.0;
+        for _ in 0..60 {
+            let before = yaw(&s);
+            steps(&mut s, &park, &pad, None, 1);
+            peak = peak.max(wrap_angle(yaw(&s) - before).abs() * 60.0);
+        }
+        let turned = wrap_angle(yaw(&s) - y0).abs().to_degrees();
+        assert!((135.0..160.0).contains(&turned), "{turned} degrees");
+        assert!((peak - 3.2).abs() < 0.15, "peak {peak} rad/s");
+        let before = yaw(&s);
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        let after = wrap_angle(yaw(&s) - before).abs() * 60.0;
+        assert!((after - 0.7 * peak).abs() < 0.3, "let go: {after} rad/s");
+        // Rolling slows it: about 2.0 rad/s at 3.4 m/s.
+        assert!((kickturn_rate(3.4) - 2.0).abs() < 1e-3 && kickturn_rate(1.8) < 2.8);
+    }
+
+    #[test]
+    fn the_foot_brake_slows_as_sk8s() {
+        // SK8: once the foot drags, 4.08 m/s^2 (its force 50 on smooth concrete).
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 6.65;
+        steps(&mut s, &park, &hold(btn::X), None, 20);
+        let v0 = s.speed;
+        steps(&mut s, &park, &hold(btn::X), None, 30);
+        let decel = (v0 - s.speed) * 2.0;
+        assert!((decel - 4.08).abs() < 0.2, "{decel} m/s^2");
+    }
+
+    #[test]
+    fn a_powerslide_brings_the_travel_round_as_sk8s() {
+        // SK8 from 6.65 m/s, the stick back and to the side: the travel turns about 150 degrees and the
+        // speed falls to about 2 m/s in the slide's second.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.put_at(&park, v3(-30.0, 0.0, -30.0), 0.0, 6.65);
+        steps(&mut s, &park, &Pad::default(), None, 2);
+        let y0 = atan2f(s.ground_velocity().x, s.ground_velocity().z);
+        let mut turned: f32 = 0.0;
+        let mut last = y0;
+        let mut ticks = 0;
+        for _ in 0..90 {
+            steps(&mut s, &park, &stick_back(-35.0), None, 1);
+            let v = s.ground_velocity();
+            let y = atan2f(v.x, v.z);
+            turned += wrap_angle(y - last);
+            last = y;
+            ticks += 1;
+            if s.slide.is_none_or(|sl| sl.releasing) {
+                break;
+            }
+        }
+        let turned = turned.abs().to_degrees();
+        assert!(
+            (110.0..200.0).contains(&turned),
+            "{turned} degrees in {ticks} ticks"
+        );
+        assert!(s.speed.abs() < 3.0, "{}", s.speed);
+    }
+
     #[test]
     fn ollie_lands_on_flat_and_a_quicker_flick_pops_higher() {
         let park = flat();
@@ -3221,7 +3598,8 @@ mod tests {
         let (s, _) = touch_down(-25.0, 5.0, 2.0, 3.0);
         assert_eq!(s.landing.map(|l| l.kind), Some(LandKind::Spin));
         assert!(s.collide.is_some_and(|(rate, _)| rate > 0.0));
-        // A sketchy landing scores half; speed along the ground is kept (no scrub on a clean one).
+        // A sketchy landing scores half; a clean one keeps its speed along the ground, a crooked one
+        // loses some of the sideways part to the wheels on the impact (2 m/s into the ground).
         let (s, ev) = touch_down(25.0, 5.0, 2.0, 0.0);
         let (c, ev2) = touch_down(0.0, 5.0, 2.0, 0.0);
         let points = |ev: &[Event]| {
@@ -3235,7 +3613,14 @@ mod tests {
         assert_eq!(landed(&ev), ["SKETCHY OLLIE"]);
         assert_eq!(points(&ev), points(&ev2) / 2);
         assert!((c.ground_velocity().length() - 5.0).abs() < 1e-3);
-        assert!((s.ground_velocity().length() - 5.0).abs() < 1e-3);
+        let a = 25.0f32.to_radians();
+        let side = 5.0 * sinf(a) - LAND_SIDE_FRICTION * 2.0;
+        let kept = sqrtf((5.0 * cosf(a)).powi(2) + side * side);
+        assert!(
+            (s.ground_velocity().length() - kept).abs() < 0.05,
+            "{} vs {kept}",
+            s.ground_velocity().length()
+        );
     }
 
     #[test]
@@ -3748,7 +4133,13 @@ mod tests {
         let g = s.grind.clone().unwrap();
         assert_eq!(g.family, Family::FiftyFifty);
         assert_eq!(g.class, crate::rails::RailClass::Thin);
-        assert!(g.dir > 0.0 && (s.pos.y - 0.5).abs() < 1e-3, "{:?}", s.pos);
+        // The trucks' hangers on the rail: the deck's centre that far over it.
+        let deck = s.pos.y + DECK_HEIGHT;
+        assert!(
+            g.dir > 0.0 && (deck - (0.5 + HANGER_DROP)).abs() < 1e-3,
+            "{:?}",
+            s.pos
+        );
         let ev = steps(&mut s, &park, &Pad::default(), None, 120);
         let names = landed(&ev);
         assert!(
@@ -4103,6 +4494,97 @@ mod tests {
         let rail = rail.classified(&m);
         m.rails = vec![rail];
         m
+    }
+
+    #[test]
+    fn a_crooked_landing_loses_its_sideways_speed_to_the_wheels() {
+        // SK8 landing 72 degrees crooked at 5.7 m/s, 6.1 m/s into the ground: the rigid board's
+        // wheels take 2.4 m/s of the sideways speed off on the impact (0.41 per m/s into it).
+        let park = flat();
+        let mut s = spawn(&park);
+        let yaw = 72.0f32.to_radians();
+        place(
+            &mut s,
+            v3(0.0, 0.08, 0.0),
+            Vec3::UP,
+            v3(sinf(yaw), 0.0, cosf(yaw)),
+        );
+        s.vel = v3(0.0, -6.1, 5.7);
+        s.mode = Mode::Air { time: 0.5 };
+        let mut n = 0;
+        while s.mode != Mode::Rolling && n < 10 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            n += 1;
+        }
+        assert_eq!(s.mode, Mode::Rolling);
+        let side = 5.7 * sinf(yaw) - LAND_SIDE_FRICTION * 6.1;
+        assert!((s.slip.abs() - side).abs() < 0.25, "{} vs {side}", s.slip);
+    }
+
+    #[test]
+    fn rolling_slowly_off_a_deck_drops_in_instead_of_stopping_on_the_coping() {
+        // SK8 at 1.4 m/s off a half pipe's deck: the board tips over the coping and rolls into the
+        // transition. The deck a deck's height over the coping is outside Skate 3's drop-in depth
+        // window (0.06 m), and while the board is still tipping over the edge a rail is ridden onto,
+        // not landed on (flatground caught it as a 0 m/s nose blunt or lipslide).
+        let park = coping_pipe();
+        let mut s = spawn(&park);
+        place(&mut s, v3(0.0, 4.0, 3.8), Vec3::UP, v3(0.0, 0.0, -1.0));
+        s.speed = 1.4;
+        for _ in 0..240 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            assert!(s.mode != Mode::Grind, "caught the coping at {:?}", s.pos);
+        }
+        assert!(
+            s.pos.y < 2.0 && s.speed.abs() > 3.0,
+            "{:?} {}",
+            s.pos,
+            s.speed
+        );
+    }
+
+    #[test]
+    fn the_transition_compresses_the_rider_and_springing_back_pumps() {
+        // SK8 pumping/controller.rs: the ground's angle asks the animation for a crouch
+        // (`CompressionVsGroundAngle` x `CompressionGroundScalar`, `MinCrouchVsGroundAngle`); the
+        // animated centre of mass rising over the board on a curving transition pays out speed, with
+        // no input at `UnintentionalPumpScalar` of the pump, at most 10 m/s^2 (0.117 m/s a tick).
+        let park = quarter_pipe();
+        let mut s = spawn(&park);
+        let (n, f) = (v3(0.0, 0.866, -0.5), v3(0.0, 0.5, 0.866));
+        place(&mut s, v3(0.0, 0.4, 1.5), n, f);
+        s.speed = 6.0;
+        let mut h = 0.5;
+        s.graph = Some(GraphControl {
+            pose_com: Some(h),
+            ..GraphControl::default()
+        });
+        steps(&mut s, &park, &Pad::default(), None, 2);
+        assert!(s.pump.ground_absorption < -1.0, "{:?}", s.pump);
+        assert!(s.pump.min_crouch > 0.1, "{:?}", s.pump);
+        let plain = {
+            let mut p = spawn(&park);
+            place(&mut p, v3(0.0, 0.4, 1.5), n, f);
+            p.speed = 6.0;
+            p.graph = Some(GraphControl {
+                pose_com: Some(h),
+                ..GraphControl::default()
+            });
+            steps(&mut p, &park, &Pad::default(), None, 9);
+            p.speed
+        };
+        let mut most = 0.0f32;
+        for _ in 0..7 {
+            h += 0.02;
+            s.graph = Some(GraphControl {
+                pose_com: Some(h),
+                ..GraphControl::default()
+            });
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            most = most.max(s.pump.dv);
+        }
+        assert!(s.speed > plain + 0.3, "{} vs {plain}", s.speed);
+        assert!((most - 0.7 * 10.0 * DT).abs() < 0.01, "{most}");
     }
 
     #[test]
@@ -4683,7 +5165,9 @@ mod tests {
         // Half a stick turns far less than half of a full one (Skate 3's signed tilt).
         let t = Tuning::BUILT_IN;
         assert!(t.steer_tilt(0.5, 3.0, 0.0, 1.0) < 0.5 * t.steer_tilt(1.0, 3.0, 0.0, 1.0));
-        // Rolling backwards the trucks turn the board the other way.
+        // Rolling backwards the trucks turn the board the other way, but riding fakie Skate 3 negates
+        // the turn (`FakieTurn`): the stick still turns the travel its way, so the board yaws as it does
+        // rolling forwards.
         let mut s = spawn(&park);
         let pad = Pad {
             stick: [1.0, 0.0],
@@ -4693,7 +5177,8 @@ mod tests {
             s.speed = -2.0;
             steps(&mut s, &park, &pad, None, 1);
         }
-        assert!(s.heading > 0.05, "{}", s.heading);
+        assert!(s.fakie, "rolling backwards at 2 m/s is fakie");
+        assert!(s.heading < -0.05, "{}", s.heading);
     }
 
     #[test]

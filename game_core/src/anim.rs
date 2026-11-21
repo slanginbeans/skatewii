@@ -227,6 +227,56 @@ impl<'a> Clip<'a> {
             _ => 1.0,
         }
     }
+    /// `bone`'s translation at `time` (s), between frames as the pose sampler blends them (a looping
+    /// clip wraps, any other holds its last frame).
+    pub fn translation_at(&self, bone: usize, time: f32) -> [f32; 3] {
+        let n = self.frames;
+        if n == 0 || bone >= self.bones {
+            return [0.0; 3];
+        }
+        let f = time.max(0.0) * self.fps();
+        let (a, b, k) = if self.looping() {
+            let f = f % n as f32;
+            let a = f as usize % n;
+            (a, (a + 1) % n, f - f as usize as f32)
+        } else if f >= (n - 1) as f32 {
+            (n - 1, n - 1, 0.0)
+        } else {
+            (f as usize, f as usize + 1, f - f as usize as f32)
+        };
+        let (ta, tb) = (
+            self.sample(a, bone).translation,
+            self.sample(b, bone).translation,
+        );
+        core::array::from_fn(|i| ta[i] + (tb[i] - ta[i]) * k)
+    }
+
+    /// How far the trajectory (bone 0) moved from `previous` to `time`: the root motion the pose carries
+    /// this step (SK8 contact_events.rs reads it off the posed trajectory bone). A step across a looping
+    /// clip's wrap (or back to the start) is measured over `dt` just inside the clip instead.
+    pub fn trajectory_step(&self, previous: f32, time: f32, dt: f32) -> [f32; 3] {
+        let fps = self.fps().max(1.0);
+        let len = self.frames.saturating_sub(1) as f32 / fps;
+        if len <= 0.0 {
+            return [0.0; 3];
+        }
+        let span = |t: f32| {
+            if self.looping() {
+                (t.max(0.0) % (self.frames as f32 / fps)).min(len)
+            } else {
+                t.clamp(0.0, len)
+            }
+        };
+        let (mut a, mut b) = (span(previous), span(time));
+        if b < a {
+            let dt = dt.clamp(0.0, len);
+            b = b.max(dt);
+            a = b - dt;
+        }
+        let (ta, tb) = (self.translation_at(0, a), self.translation_at(0, b));
+        core::array::from_fn(|i| tb[i] - ta[i])
+    }
+
     /// Dequantised sample of `bone` at `frame` (both must be in range).
     pub fn sample(&self, frame: usize, bone: usize) -> Sample {
         let d = self.data;
@@ -361,5 +411,41 @@ mod tests {
         // Twice is the identity.
         mirror_pose(&mut pose, &parents, &partners, 2);
         assert_eq!(pose, before);
+    }
+
+    /// One bone, unpacked, at 60 fps; the root's z is `zs[frame]` (translation step 0.001 m).
+    fn root_clip(zs: &[f32], looping: bool) -> alloc::vec::Vec<u8> {
+        let mut c = alloc::vec![0u8; ANIM_HEADER + 14 * zs.len()];
+        c[1] = 1;
+        c[2..4].copy_from_slice(&(zs.len() as u16).to_be_bytes());
+        c[4..8].copy_from_slice(&60.0f32.to_be_bytes());
+        c[8..12].copy_from_slice(&u32::from(looping).to_be_bytes());
+        for i in 0..3 {
+            c[36 + 4 * i..40 + 4 * i].copy_from_slice(&0.001f32.to_be_bytes());
+        }
+        for (f, z) in zs.iter().enumerate() {
+            let at = ANIM_HEADER + 14 * f;
+            c[at + 6..at + 8].copy_from_slice(&32767i16.to_be_bytes());
+            c[at + 12..at + 14].copy_from_slice(&((z * 1000.0) as u16).to_be_bytes());
+        }
+        c
+    }
+
+    #[test]
+    fn the_trajectory_step_is_the_roots_motion_over_the_step() {
+        let dt = 1.0 / 60.0;
+        let data = root_clip(&[0.0, 0.01, 0.03, 0.06, 0.10], false);
+        let c = Clip::parse(&data).unwrap();
+        let close = |a: [f32; 3], z: f32| (a[2] - z).abs() < 1e-4 && a[0] == 0.0;
+        assert!(close(c.trajectory_step(0.0, dt, dt), 0.01));
+        assert!(close(c.trajectory_step(2.0 * dt, 3.0 * dt, dt), 0.03));
+        // Halfway between frames, as the pose blends them.
+        assert!(close(c.trajectory_step(1.5 * dt, 2.5 * dt, dt), 0.025));
+        // A clip held on its last frame doesn't move.
+        assert!(close(c.trajectory_step(5.0 * dt, 6.0 * dt, dt), 0.0));
+        // A looping clip's wrap is measured just inside the clip, not as a jump back.
+        let data = root_clip(&[0.0, 0.02, 0.04, 0.06], true);
+        let c = Clip::parse(&data).unwrap();
+        assert!(close(c.trajectory_step(3.5 * dt, 0.5 * dt, dt), 0.02));
     }
 }

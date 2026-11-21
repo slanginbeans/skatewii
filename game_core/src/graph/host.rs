@@ -86,6 +86,8 @@ pub struct World {
     pub grind: Str,
     /// The rider's poses are mirrored (regular stance, or goofy riding switch).
     pub mirrored: bool,
+    /// The board's frame has been turned end for end (`Skater::frame_turned`): trees remember it.
+    pub frame_turned: bool,
     pub fakie: bool,
     pub goofy: bool,
     pub switch: bool,
@@ -134,6 +136,15 @@ pub struct World {
     pub body_flipping: bool,
     /// The physics' pumping acceleration (Pumping).
     pub pump_acc: f32,
+    /// The pumping's feedback to the crouch (SK8 PhysOutAnimation crouching: absorption, ground
+    /// compression, least crouch, deck compression).
+    pub crouch_force: f32,
+    pub crouch_ground_force: f32,
+    pub crouch_min: f32,
+    pub crouch_deck: f32,
+    /// The rider's centre of mass over the board as the physics has it (SK8 `animation_height`),
+    /// when it knows (the imported rider): what `SetDistComToBoard` and the crouch read.
+    pub com_height: Option<f32>,
     /// The deck's travel along its nose (-1 backwards .. 1 forwards; PowerSlideSpin).
     pub slide_dir: f32,
     /// The board's acceleration along the ground in its frame (x right, z forward; m/s^2), with the
@@ -156,6 +167,7 @@ impl Default for World {
             speed_and_slope: 0.0,
             grind: NONE,
             mirrored: false,
+            frame_turned: false,
             fakie: false,
             goofy: true,
             switch: false,
@@ -190,6 +202,11 @@ impl Default for World {
             landing_spin: 0.0,
             body_flipping: false,
             pump_acc: 0.0,
+            crouch_force: 0.0,
+            crouch_ground_force: 0.0,
+            crouch_min: 0.0,
+            crouch_deck: 0.0,
+            com_height: None,
             slide_dir: 1.0,
             ground_acc: [0.0; 2],
             hips: [0.0; 2],
@@ -222,6 +239,17 @@ enum RidingInst {
     Value(f32),
     Spin(SpinChannels),
     Fade(GrindFade),
+    AirLeg(AirLeg),
+}
+
+/// ControlAirLegExtension's state (SK8 air_leg_extension.rs): its mode (0 to begin, 1 going up, 2
+/// coming down, 3 reaching for the landing), the centre of mass over the board it drives, and the
+/// seconds coming down.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AirLeg {
+    mode: u8,
+    height: f32,
+    down_time: f32,
 }
 
 /// BodySpin's state (SK8 motion_spin.rs): its mode (0 idle, 1 armed, 2 spinning on the ground or
@@ -833,8 +861,11 @@ impl<'a> Runner<'a> {
             },
             &anim,
         );
-        // The rider's centre-of-mass height over the board is where the playing clips put it.
-        if let (Some(db), Some(n)) = (db, self.names.disttocog)
+        // The rider's centre-of-mass height over the board: the physics' (the posed rider's) when it
+        // has one, as SK8 reads it (PhysOutAnimation's height), else where the playing clips put it.
+        if let Some(h) = w.com_height {
+            self.s.com_height = h;
+        } else if let (Some(db), Some(n)) = (db, self.names.disttocog)
             && let Some(a) = self.s.player.attribute(db, n)
             && a.value().is_finite()
             && a.value() > 0.0
@@ -1244,6 +1275,7 @@ impl Host<'_, '_> {
                         Tree {
                             play,
                             mirror: w.mirrored,
+                            turned: w.frame_turned,
                             name: def.anim_name,
                         },
                         def.speed,
@@ -1697,21 +1729,8 @@ impl Host<'_, '_> {
                 _ => {}
             },
             Beh::AirLegExtension(n) => match phase {
-                0 => self.set_riding(op, RidingInst::Value(0.0)),
-                1 => {
-                    // Seconds coming down (none while going up): the arms reach out as the rider falls.
-                    let w = self.s.world;
-                    let curve = self.s.push_curves.tuning.air_arm_extend;
-                    let RidingInst::Value(t) = self.riding_inst(op, || RidingInst::Value(0.0))
-                    else {
-                        return;
-                    };
-                    *t = if w.vel_y > 0.0 { 0.0 } else { *t + dt };
-                    let v = curve.eval(*t);
-                    if let Some(n) = n {
-                        self.s.player.set_param(*n, v, false);
-                    }
-                }
+                0 => self.set_riding(op, RidingInst::AirLeg(AirLeg::default())),
+                1 => self.air_leg(op, *n, dt),
                 _ => {}
             },
             Beh::DeckPitchAndYaw { yaw, pitch } => {
@@ -1918,6 +1937,7 @@ impl Host<'_, '_> {
                 let tree = Tree {
                     play,
                     mirror: self.s.world.mirrored,
+                    turned: self.s.world.frame_turned,
                     name: NONE,
                 };
                 let blend = ops::TransitionDef {
@@ -2086,6 +2106,7 @@ impl Host<'_, '_> {
             let tree = Tree {
                 play,
                 mirror: false,
+                turned: s.world.frame_turned,
                 name: NONE,
             };
             s.player
@@ -2235,6 +2256,59 @@ impl Host<'_, '_> {
         }
     }
 
+    /// ControlAirLegExtension (SK8 air_leg_extension.rs): the rider's centre of mass over the board
+    /// (`disttocog`) starts where the last clip had it and closes in going up and coming down, to at
+    /// least `air_com_min` (the legs tucked); near the landing it reaches out at `preland_com_speed`.
+    /// The arms' reach (`extend`) follows the seconds coming down.
+    fn air_leg(&mut self, op: OpId, extend: Option<NameId>, dt: f32) {
+        let w = self.s.world;
+        let t = self.s.push_curves.tuning;
+        let first = self
+            .db
+            .zip(self.n.disttocog)
+            .and_then(|(db, n)| self.s.player.attribute(db, n))
+            .map(|a| a.value());
+        let com = self.s.com_height;
+        let mut a = match self.get_riding(op) {
+            Some(RidingInst::AirLeg(a)) => a,
+            _ => AirLeg::default(),
+        };
+        let ascending = w.vel_y > 0.0;
+        // SK8 PrelandingPhysical::near_landing: coming down, within the time the legs need to reach
+        // out from where the body is now.
+        let near = !ascending
+            && w.time_to_land
+                .is_some_and(|l| l < (t.preland_com - com) / t.preland_com_speed.max(0.01));
+        match a.mode {
+            0 => {
+                a.mode = if ascending { 1 } else { 2 };
+                a.height = first.unwrap_or(com);
+            }
+            1 if w.vel_y >= 0.0 => {
+                a.height = (a.height - dt * t.air_com_up_speed).max(t.air_com_min);
+            }
+            1 | 2 if near => {
+                a.mode = 3;
+                a.height += dt * t.preland_com_speed;
+            }
+            1 | 2 => {
+                a.mode = 2;
+                let speed = (-w.vel_y).max(0.0).min(t.air_com_down_speed);
+                a.height = (a.height - speed * dt).max(t.air_com_min);
+            }
+            _ => a.height += dt * t.preland_com_speed,
+        }
+        a.down_time = if ascending { 0.0 } else { a.down_time + dt };
+        self.set_riding(op, RidingInst::AirLeg(a));
+        if let Some(n) = self.n.disttocog {
+            self.s.player.set_param(n, a.height, false);
+        }
+        if let Some(n) = extend {
+            let v = t.air_arm_extend.eval(a.down_time);
+            self.s.player.set_param(n, v, false);
+        }
+    }
+
     /// Crouching (SK8 crouching.rs): the centre-of-mass height from the crouch intents, the auto pump
     /// and the absorption, as the `crouchName` tree parameter.
     fn crouching(&mut self, op: OpId, name: Option<NameId>, phase: u8, dt: f32) {
@@ -2244,8 +2318,11 @@ impl Host<'_, '_> {
             vel_y: w.vel_y,
             ground_speed: w.ground_speed,
             pump_potential: w.pump_potential,
+            force: w.crouch_force,
+            ground_force: w.crouch_ground_force,
+            min_crouch: w.crouch_min,
+            deck_angle: w.crouch_deck,
             height: self.s.com_height,
-            ..CrouchPhysical::default()
         };
         match phase {
             0 => self.set_riding(op, RidingInst::Crouch(Crouch::begin(p, &anim))),
@@ -2388,6 +2465,7 @@ impl Host<'_, '_> {
                             let tree = Tree {
                                 play,
                                 mirror: w.mirrored,
+                                turned: w.frame_turned,
                                 name: NONE,
                             };
                             let blend = ops::TransitionDef {
@@ -2480,6 +2558,7 @@ impl Host<'_, '_> {
                 let tree = Tree {
                     play,
                     mirror: s.world.mirrored,
+                    turned: s.world.frame_turned,
                     name: NONE,
                 };
                 s.player

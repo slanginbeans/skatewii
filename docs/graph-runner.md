@@ -95,8 +95,11 @@ With `motion/graph` loaded (`Game::graph`), each tick:
    - kick turns turn the board while `KickTurnSteering` runs (at its spin scale; the action graph gates
      them on the stick, the speed (lower riding fakie) and `PhysicsSpeedAndSlopeCompare`, which is
      Skate 3's heading adjust factor from the turn torque curves, SK8 speed_and_slope.rs), reverts start on
-     entering `Revert/Fs|Bs`, and entering `Switch` or `PushFromFakie` turns the rider round (fakie to
-     switch);
+     entering `Revert/Fs|Bs`, and `Switch` and `PushFromFakie` turn the rider round (fakie to
+     switch) when their clip (`B_SWITCH`: `R_SWITCH_RIDE_*`) crosses its `MIRRORED` / `SWITCH` events,
+     just after it starts, as Skate 3 toggles its mirror and switch flags on them (SK8
+     skater_animation/state.rs `apply_stance_events`; a library without them turns round on entering
+     the states). See "The board and turning round" below;
    - powerslides stay in the physics (flatground's Skate 3 rules); `CanEnterSlide` and
      `ShouldLeaveSlide` read them;
    - the physics' grinds reach `IsGrinding` by Skate 3's names (below, "Grinds"; `BF_` variants
@@ -153,7 +156,8 @@ With `motion/graph` loaded (`Game::graph`), each tick:
    with `useChannelFromWeights`, else the newer): clips that are channel animations (525 of the
    bank's, kept by the importer as a weight per bone) take only their bones; other clips weigh 1
    everywhere. Persistent channels are blended over the result the same way. Clips that don't fit the
-   skeleton fall back to the clip roles.
+   skeleton fall back to the clip roles. A tree started before the board's frame was turned end for
+   end ("The board and turning round", below) is turned half round about the rider's up before blending.
 
 Channels the on-board graph uses: `channelblend` transitions (landings into riding, pushes, slides,
 grind exits, anticipation); `FakieHeadChannel`, the one persistent channel (`fakie`, tree
@@ -196,6 +200,33 @@ else flatground's own):
 
 The graphs start over when the physics puts the rider back on the board after a wipeout or runout.
 Without the entry everything above is flatground's hand-written logic, unchanged.
+
+## The board and turning round (`skater/board.rs`, `rider.rs`, `game.rs`)
+
+- **Height**: the clips' board (`SKATEBOARD_ROOT`, the character's origin) is the deck's centre, which
+  Skate 3 puts on its physical deck (SK8 skeleton_root.rs `animation_to_board`). The physical deck's
+  centre is `DECK_HEIGHT` (0.0875 m: SK8 `RETAIL_LEVEL_GROUND_DECK_CENTER_HEIGHT`, the wheel radius
+  0.031 plus the trucks' 0.0565) over the board's contact point. The imported rider is drawn with its
+  board's lowest wheel (as posed: a manual pitches the board about the wheels left down) on the
+  contact point, along the chord between the two trucks' contacts (so over a ramp's kink both wheels
+  touch), and lifted out of the ground under any wheel (at most 4 cm: on a transition ridden across,
+  the smoothed roll would dip a side's wheels in). The board used to be drawn with its deck centre
+  on the contact point, its wheels 8 cm in the ground.
+- **Steering fakie**: Skate 3's action graph hands the physics `FakieTurn` (`Turn` with
+  `fakieFilter="negate"`, the `Turn` packet SetTurning publishes, SK8 set_turning.rs), so riding fakie
+  the turn is negated before the trucks, whose yaw already reverses rolling tail first: the stick turns
+  the travel its own way, as rolling forwards. flatground used to leave it as it was, so steering fakie
+  felt inverted.
+- **Turning round** (fakie to switch, the auto switch and pushing from fakie): Skate 3's physical board
+  never turns; its mirror flag toggles on the switch clip's event and the "effective" board frame
+  (SK8 board_motion_output.rs, `board_flipped`) turns end for end with it. flatground turns the
+  board's frame (`fwd`, the speed, `Skater::frame_turned`), and every animation tree remembers the
+  frame it started in (`playback::Tree::turned`): trees from before (the fakie riding and `B_SWITCH`
+  itself, whose `R_SWITCH_RIDE_*` clips turn the shoulders from fakie to switch) are drawn turned back
+  half round, so the rider and board stay where they are in the world and the blend into the switch
+  trees turns only what the clips do. PAL50's blend between ticks turns its older frame with it. The
+  board used to be drawn turned half round for the rest of the switch clip and then spun through
+  180 degrees as the next tree faded in, 0.7 s after the switch.
 
 ## The air (physics: `skater/air.rs`, `skater/landing.rs`, `skater/respawn.rs`)
 
@@ -303,8 +334,9 @@ family strengths, the launch and energy figures, the 17/24/60-degree windows) ar
   outnumber the rest (110 thin, 8 fat, 226 curb, 194 blocked). Lean-off applies only to ledges and curbs
   (and tip slides off thin rails), as in SK8: every grind of the Phase 6 tour was on a ledge or coping,
   so each leaned off; a thin rail's grind goes to its end (`grind: off (off the end)`).
-- **Contact**: the rail must cross one of the board's boxes, around the deck 0.09 m over the board's
-  contact point (`DECK_HEIGHT`, ours): under each truck (`TruckToWheel` each side, 0.02 to 0.22 m under
+- **Contact**: the rail must cross one of the board's boxes, around the deck's centre 0.0875 m over the
+  board's contact point (`DECK_HEIGHT`, SK8's level-ground deck height: wheel radius 0.031 plus the
+  trucks' 0.0565 drop): under each truck (`TruckToWheel` each side, 0.02 to 0.22 m under
   the deck), under the deck between the trucks (`TestDepthEpsilon` over to `TestDepth` under, the
   deck-centre-to-truck distance each way), past each truck under a tip (0.215 m long), over an upside-down
   deck (after a dark catch). The family, the board's current one tried first: both trucks a 50-50 (the
@@ -341,7 +373,8 @@ family strengths, the launch and energy figures, the 17/24/60-degree windows) ar
 - **On the rail** the board is held on the rail (a kinematic stand-in for Skate 3's rigid board and its
   pins) and its frame eases (0.1 a tick) to the family's: 50-50 along the rail on its up, 5-0 tipped by
   the pitch and turned by the yaw, slides across it, tip slides leaned 20 degrees, blunts 42, darkslides
-  upside down. Gravity acts along the rail; friction = 0.48 x the rail's up y x strength[family][class]
+  upside down; the trucks' hangers (0.064 m under the deck's centre, ours) rest on the rail in 50-50s
+  and 5-0s, the deck's underside (its grip in a darkslide) in slides. Gravity acts along the rail; friction = 0.48 x the rail's up y x strength[family][class]
   (grinds 50/40/40 thin/fat/ledge, slides 55/55/60, tips 60, blunts 70/80/80) x `FrictionVsTime` x 1.3,
   over an effective mass of 25 kg (ours: a thin-rail 50-50 slows about 0.8 m/s^2 at entry, flatground's
   grind friction before). The C-stick's y (cubed, smoothed 0.91) tips a 50-50 past 0.12 into a nosegrind
@@ -572,6 +605,64 @@ field of view).
   shots (no body tweaks), moving obstacles in the avoidance (flatground's parks are static), the
   avoidance's swept paths (straight rays), `TransitionTimeUnits` 2 uses the distance to the new shot's arm.
   Fat lines are rays with the radius taken off the hit distance.
+
+## Measured against SK8
+
+SK8's own simulation (skate-game's production frame: graphs, rigid board, rider, camera) runs headless
+on this PC from a scratch harness outside the repository: the skate-game modules the frame needs are
+compiled as a library with the renderer, audio, SDL and mod host left out, on the stock data its setup
+extracts from the player's disc (only the "core" export: miscload, miscboot, db). The same scripted
+pad drives SK8 and flatground on SK8's test course (flatground rebuilt it as a park pack, quad for
+quad) and both log a row a tick. Scenarios: pushing (taps, held), coasting, carves at 3 to 8.5 m/s with
+half and full stick, kick turns standing and rolling, ollies and kickflips (quick and wound up), held
+and let-go 180s, manuals and the tail brake, the foot brake, powerslides, a drop-in into the half pipe,
+a thin-rail run, and the camera while riding and carving.
+
+Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_sk8.rs`):
+
+- **Brake contact**: `BRAKE_CONTACT` is a value (0 in the brake's `INTO` clip, 1 in `CYC`); its presence
+  was read as contact, so the foot dragged from the first tick. Now 0.23 s after the press, as SK8, at
+  SK8's 4.08 m/s^2 (`brake_scale` calibrated; it was 3.0).
+- **Speed model**: Skate 3 holds the speed to a target only the slope and rolling resistance move
+  (`UpdateSpeedModel`); carving cost 1 to 2 m/s at 6 to 8 m/s here. Now the target pulls the speed back
+  (`GeneralAmount` of the gap a tick, within `Friction_MaxSpeedChange`), off while a foot pushes or
+  brakes and in a slide; the target restarts from the speed after anything outside the ride sets it.
+- **Steering**: the tilt was missing the trucks' tightness factor (`SteeringScalar_TightTrucks`, SK8's
+  default tightness 0.7). The board follows 0.88 of the trucks' curve, turns at most 1.5 + 0.04 x speed
+  rad/s and builds its yaw over 0.1 s (ours, measured): full stick 1.8 rad/s at 6.5 to 8.5 m/s, half a
+  stick within 7% of SK8 (it was 1.1 to 1.25 rad/s grip-capped at speed, and half a stick 40% sharp).
+- **Kick turns**: SK8's rate against speed (3.2 rad/s standing, 2.0 at 3.4 m/s), building up and
+  running down by 0.7 a tick when let go (was a fixed 2.25 rad/s, instant).
+- **Powerslide**: the slide's side force now brings the travel round (about 1 g, after 0.25 s): SK8's
+  slide turns the travel about 150 degrees; ours went straight on.
+- **Let-go spin before a pop**: a turn let go just before take-off no longer spins the board on while
+  our landing prediction resolves (SK8 -7 degrees, ours was 46).
+
+Matching within about 5%: tapped pushes (2.15, 1.9, 1.9, 1.9 m/s a push, 8.5 m/s top, 4.9 s to 8 m/s),
+manual pitch (14 and 28 degrees braking) and its speed loss, the take-off tick of an ollie, the low
+camera's distance (1.84 m).
+
+Left, as SK8's rigid board and rider do it and flatground approximates (sizes measured):
+
+- **Held pushes** are 40% stronger here (first held push 4.5 against 3.2 m/s; 1.7 against 2.6 s to 8 m/s):
+  SK8 chases the posed push clips' trajectory speed at the contact, we chase the push sets' end speed.
+- **Ollies**: SK8's legs lift the board (peak deck 0.50 m quick, 1.16 m wound up; ours 0.40 and 0.78),
+  and its takeoff clip starts lifting the board 5 ticks before the jump; its body pops from the animated
+  centre of mass (about 1.08 m up), ours from `AbsoluteMinHeight`, so our flights are about 0.08 s longer
+  wound up (held 180s turn 10% further).
+- **Transitions**: SK8's rider is compressed by a transition and springs back, which its pump controller
+  pays out with no input: about +2 m/s a pass (9.1 against 7.0 m/s at the bottom after a 2.5 m drop).
+- **Sideways landings** keep more speed here (4.1 against 0.8 m/s after landing 70 degrees round).
+- **Tail brake**: matches at 6.5 m/s (4.8 m/s^2); SK8's rises to 6.2 below 4 m/s, so ours stops 0.5 s
+  later.
+- **Carves**: our turn builds faster at half a stick (0.17 against 0.35 to 0.43 s), settles slower when
+  let go (0.3 against 0.2 s) and slips less (3 against 8 degrees).
+- **Camera**: in a carve ours trails the board about 13 degrees further.
+- **Grinds**: no scripted grind entered on both (SK8's board drifts sideways on a long run-up). Ours
+  catches the coping as a lip slide at 0 m/s when rolling slowly off a deck (SK8 drops in): our contact
+  boxes are looser than Skate 3's depth windows.
+- **Coasting**: Skate 3's no-input friction is kept here (after 3 s); SK8 never sets the flag that runs
+  its timer, so its board rolls on. Its rolling resistance on smooth concrete is 0 under 8 m/s, as ours.
 
 ## Numbers (Dolphin, US/EU disc)
 

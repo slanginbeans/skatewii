@@ -126,7 +126,9 @@ pub struct Tuning {
     /// Foot brake and tail brake strength (deceleration = force * `brake_scale` * `braking_scalar`).
     pub foot_brake: f32,
     pub tail_brake: f32,
-    /// flatground's own calibration from Skate 3's brake forces to a deceleration (m/s^2 per unit).
+    /// flatground's own calibration from Skate 3's brake forces to a deceleration (m/s^2 per unit),
+    /// measured against SK8's simulation: its foot brake (force 50 on smooth ground) slows the board
+    /// 4.08 m/s^2 once the foot drags.
     pub brake_scale: f32,
     /// The surface's braking factor (smooth concrete).
     pub braking_scalar: f32,
@@ -147,6 +149,11 @@ pub struct Tuning {
     pub steer_vs_speed: Curve,
     pub steer_speed_range: f32,
     pub hard_turn_boost: f32,
+    /// The trucks' tightness (0 loose .. 1 tight; Skate 3's equipment setting, SK8's default 0.7) and how
+    /// much tight trucks steer (`SteeringScalar_TightTrucks`): the tilt is scaled by
+    /// `tight_trucks_scalar * truck_tightness + 1 - truck_tightness`.
+    pub truck_tightness: f32,
+    pub tight_trucks_scalar: f32,
     /// Steering is weaker while pushing: falls by `push_steer_drop` per tick while a push is on, recovers
     /// by `push_steer_rise`, never below `push_steer_min`.
     pub push_steer_drop: f32,
@@ -265,6 +272,14 @@ pub struct Tuning {
     pub pump_factor: f32,
     pub pump_max_accel: f32,
     pub pump_unintentional: f32,
+    /// How the ground presses the rider down (SK8 pumping/controller.rs `calculate`): the crouch the
+    /// physics asks of the animation against the ground's angle (quarter turns), the least crouch,
+    /// and the deck's angle's; times their scalars (negative: down into the board).
+    pub compression_vs_ground_angle: Curve,
+    pub min_crouch_vs_ground_angle: Curve,
+    pub compression_vs_deck_angle: Curve,
+    pub compression_ground_scale: f32,
+    pub compression_deck_scale: f32,
 
     // Jumping.
     /// Centre-of-mass heights (m): the lowest any jump reaches, and the range a flick's strength picks
@@ -414,6 +429,14 @@ pub struct Tuning {
     // Air animation (the state graphs' air behaviours).
     /// The arms' reach in the air (`EXTEND`) against seconds coming down.
     pub air_arm_extend: Curve,
+    /// ControlAirLegExtension's centre of mass over the board (`disttocog`, SK8 air_leg_extension.rs):
+    /// how fast it closes going up and coming down (m/s), its least, and before the landing how fast it
+    /// extends to how far.
+    pub air_com_up_speed: f32,
+    pub air_com_down_speed: f32,
+    pub air_com_min: f32,
+    pub preland_com_speed: f32,
+    pub preland_com: f32,
     /// The body spin channels: influence against the spin intent, its blend in and out per update, and
     /// its rate and acceleration limits.
     pub spin_map: Curve,
@@ -744,6 +767,7 @@ pub const PATHS: &[&str] = &[
     "physics_heading/default/TurnTorqueVsSpeed",
     "physics_heading/default/TurnTorqueVsNegAngVel",
     "physics_steering/default/SteeringTiltBlending",
+    "physics_steering/default/SteeringScalar_TightTrucks",
     "physics_manual/default/Tilt_TiltScalar",
     "physics_manual/default/BrakeTiltAngle",
     "physics_manual/default/MaxTiltAngle",
@@ -798,6 +822,11 @@ pub const PATHS: &[&str] = &[
     // Most pumping acceleration per second (no name in the database).
     "physics_mode/normal/Hash_D77AFD320B6241C5",
     "physics_mode/normal/UnintentionalPumpScalar",
+    "physics_pumping/default/CompressionVsGroundAngle",
+    "physics_pumping/default/MinCrouchVsGroundAngle",
+    "physics_pumping/default/CompressionVsDeckAngle",
+    "physics_pumping/default/CompressionGroundScalar",
+    "physics_pumping/default/CompressionDeckScalar",
     "physics_steering/default/Damping",
     "physics_steering/default/GeneralScalar",
     "physics_steering/default/SteeringVsInput",
@@ -893,6 +922,11 @@ pub const PATHS: &[&str] = &[
     "Hash_018E8A2E5028AB3F/default/Hash_3387562E9BEA0AF6",
     "Hash_018E8A2E5028AB3F/default/Hash_035D9805EB9E2EE2",
     "anim_motion/inair_disttocog/lo_air_arm_extend",
+    "anim_motion/inair_disttocog/goingup_disttocog_speed",
+    "anim_motion/inair_disttocog/goingdown_disttocog_speed",
+    "anim_motion/inair_disttocog/min_inair_disttocog",
+    "anim_motion/inair_disttocog/preland_disttocom_vel",
+    "anim_motion/inair_disttocog/preland_final_disttocom",
     "anim_motion/body_spin/spin_map",
     "anim_motion/body_spin/spin_influence_blendin",
     "anim_motion/body_spin/spin_influence_blendout",
@@ -981,27 +1015,67 @@ impl Tuning {
         push_blend_acc_frames: Curve::constant(6.0),
         push_teleport_window: 0.5,
         push_slope_limit: 40.0,
-        friction: Curve::new(&[(0.0, 0.0), (8.0, 0.05), (30.0, 1.0)]),
-        friction_no_input: Curve::new(&[(0.0, 0.1), (8.0, 0.45)]),
-        no_input_time: 2.5,
+        // Skate 3's smooth concrete (`physics_surfaces/smooth/FrictionVsSpeedNew`): no rolling resistance
+        // below about 8 m/s.
+        friction: Curve::new(&[
+            (0.0, 0.0),
+            (8.120_522, 0.0),
+            (10.421_34, 0.03),
+            (12.045_44, 0.162_857),
+            (12.857_49, 0.6),
+            (14.332_25, 0.904_054),
+            (18.403_91, 1.05),
+            (26.978_18, 1.2),
+        ]),
+        friction_no_input: Curve::new(&[
+            (0.0, 0.128_571),
+            (1.145_145, 0.151_786),
+            (2.282_282, 0.207_143),
+            (3.331_331, 0.292_857),
+            (4.196_196, 0.385_714),
+            (5.157_157, 0.441_071),
+            (6.526_526, 0.480_357),
+            (8.0, 0.5),
+        ]),
+        no_input_time: 3.0,
         friction_manual: Curve::new(&[(0.0, 0.1), (8.0, 0.45)]),
-        foot_brake: 45.0,
+        foot_brake: 50.0,
         tail_brake: 32.0,
-        brake_scale: 0.06,
+        brake_scale: 0.0816,
         braking_scalar: 1.0,
         brake_slow_speed: 0.02,
-        friction_max_change: 0.4,
-        speed_general_amount: 0.2,
-        steer_follow: 0.75,
+        friction_max_change: 0.3,
+        speed_general_amount: 0.25,
+        steer_follow: 0.7,
         steer_scalar: 0.6,
-        steer_vs_input: Curve::new(&[(0.0, 0.0), (0.2, 0.02), (1.0, 0.8)]),
-        steer_vs_speed: Curve::new(&[(0.0, 1.0), (0.1, 0.9), (0.5, 0.35), (1.0, 0.3)]),
-        steer_speed_range: 45.0,
+        steer_vs_input: Curve::new(&[
+            (0.0, 0.0),
+            (0.058_594, 0.0),
+            (0.25, 0.033_784),
+            (0.375, 0.077_703),
+            (0.508_789, 0.172_297),
+            (0.690_43, 0.334_46),
+            (0.857_715, 0.564_189),
+            (1.0, 0.834_459),
+        ]),
+        steer_vs_speed: Curve::new(&[
+            (0.056_955, 1.0),
+            (0.123_768, 0.969_595),
+            (0.173_056, 0.847_973),
+            (0.219_058, 0.608_108),
+            (0.297_919, 0.395_27),
+            (0.4, 0.3),
+            (0.5, 0.28),
+            (1.0, 0.27),
+        ]),
+        steer_speed_range: 50.0,
         hard_turn_boost: 1.0,
+        truck_tightness: 0.7,
+        tight_trucks_scalar: 0.7,
         push_steer_drop: 0.02,
         push_steer_rise: 0.05,
         push_steer_min: 0.5,
-        steer_tilt_blend: 0.25,
+        steer_tilt_blend: 0.2,
         manual_tilt: 0.5,
         manual_brake_tilt: 25.0,
         manual_max_tilt: 20.0,
@@ -1076,15 +1150,65 @@ impl Tuning {
         wallride_max_time: 1.2,
         wallride_jump_ydown: 0.6,
         wallride_jump_force: 2.5,
-        pump_damping: 0.15,
-        pump_min_change: 0.003,
-        pump_max_change: 0.008,
-        pump_vs_time: Curve::new(&[(0.0, 1.0), (0.4, 1.0), (0.7, 0.4), (1.0, 0.1)]),
-        pump_ang_damping: 0.25,
-        pump_vs_vel: Curve::new(&[(0.0, 3.0), (3.0, 1.8), (6.0, 1.0), (10.0, 0.7), (13.0, 0.1)]),
-        pump_factor: 15.0,
-        pump_max_accel: 8.0,
-        pump_unintentional: 0.6,
+        pump_damping: 0.1,
+        pump_min_change: 0.004,
+        pump_max_change: 0.006,
+        pump_vs_time: Curve::new(&[
+            (0.0, 1.0),
+            (0.402, 1.0),
+            (0.507, 0.896),
+            (0.572, 0.732),
+            (0.653, 0.432),
+            (0.741, 0.246),
+            (0.862, 0.114),
+            (0.995, 0.096),
+        ]),
+        pump_ang_damping: 0.2,
+        pump_vs_vel: Curve::new(&[
+            (0.0, 4.0),
+            (2.45, 2.443),
+            (4.56, 1.1),
+            (7.01, 1.0),
+            (8.81, 0.964),
+            (10.68, 0.571),
+            (12.2, 0.157),
+            (14.2, 0.007),
+        ]),
+        pump_factor: 18.0,
+        pump_max_accel: 10.0,
+        pump_unintentional: 0.7,
+        compression_vs_ground_angle: Curve::new(&[
+            (0.0, 0.0),
+            (0.072, 0.044),
+            (0.147, 0.196),
+            (0.238, 0.321),
+            (0.381, 0.372),
+            (0.793, 0.48),
+            (0.938, 0.757),
+            (1.0, 1.0),
+        ]),
+        min_crouch_vs_ground_angle: Curve::new(&[
+            (0.0, 0.0),
+            (0.09, 0.0),
+            (0.161, 0.03),
+            (0.34, 0.365),
+            (0.461, 0.537),
+            (0.607, 0.666),
+            (0.792, 0.75),
+            (1.0, 0.794),
+        ]),
+        compression_vs_deck_angle: Curve::new(&[
+            (0.0, 0.0),
+            (0.061, 0.253),
+            (0.112, 0.419),
+            (0.163, 0.601),
+            (0.239, 0.767),
+            (0.313, 0.878),
+            (0.371, 0.929),
+            (0.528, 1.0),
+        ]),
+        compression_ground_scale: -8.0,
+        compression_deck_scale: -8.0,
         jump_floor: 0.9,
         jump_low: 1.3,
         jump_high: 1.7,
@@ -1172,6 +1296,11 @@ impl Tuning {
         revert_tolerance: Curve::new(&[(0.0, 35.0), (0.7, 8.0), (1.0, 8.0)]),
         revert_duration: 1.1,
         air_arm_extend: Curve::new(&[(0.0, 0.0), (0.3, 0.6), (0.6, 1.0)]),
+        air_com_up_speed: 0.2,
+        air_com_down_speed: 0.4,
+        air_com_min: 0.5,
+        preland_com_speed: 2.0,
+        preland_com: 1.0,
         spin_map: Curve::new(&[(0.0, 0.0), (0.3, 0.2), (1.0, 1.0)]),
         spin_blend_in: 0.2,
         spin_blend_out: 0.1,
@@ -1339,6 +1468,19 @@ impl Tuning {
             "physics_mode/normal/PumpEffectFactor" => scalar!(self.pump_factor),
             "physics_mode/normal/Hash_D77AFD320B6241C5" => scalar!(self.pump_max_accel),
             "physics_mode/normal/UnintentionalPumpScalar" => scalar!(self.pump_unintentional),
+            "physics_pumping/default/CompressionVsGroundAngle" => {
+                curve!(self.compression_vs_ground_angle)
+            }
+            "physics_pumping/default/MinCrouchVsGroundAngle" => {
+                curve!(self.min_crouch_vs_ground_angle)
+            }
+            "physics_pumping/default/CompressionVsDeckAngle" => {
+                curve!(self.compression_vs_deck_angle)
+            }
+            "physics_pumping/default/CompressionGroundScalar" => {
+                scalar!(self.compression_ground_scale)
+            }
+            "physics_pumping/default/CompressionDeckScalar" => scalar!(self.compression_deck_scale),
             "anim_motion/hippy_flip/antic_length_to_hippy_height" => curve!(self.hippy_windup),
             "physics_jump/default/VerticalResponse" => curve!(self.vertical_response),
             "physics_jump/default/MinScalar" => scalar!(self.jump_min_scalar),
@@ -1358,6 +1500,9 @@ impl Tuning {
             "physics_steering/default/SteeringVsSpeed" => curve!(self.steer_vs_speed),
             "physics_steering/default/SteeringVsSpeedMaxSpeed" => scalar!(self.steer_speed_range),
             "physics_steering/default/HardTurnIncrease" => scalar!(self.hard_turn_boost),
+            "physics_steering/default/SteeringScalar_TightTrucks" => {
+                scalar!(self.tight_trucks_scalar)
+            }
             "physics_steering/default/PushScalarDecriment" => scalar!(self.push_steer_drop),
             "physics_steering/default/PushScalarIncriment" => scalar!(self.push_steer_rise),
             "physics_steering/default/PushScalarMin" => scalar!(self.push_steer_min),
@@ -1488,6 +1633,17 @@ impl Tuning {
                 scalar!(self.revert_duration)
             }
             "anim_motion/inair_disttocog/lo_air_arm_extend" => curve!(self.air_arm_extend),
+            "anim_motion/inair_disttocog/goingup_disttocog_speed" => {
+                scalar!(self.air_com_up_speed)
+            }
+            "anim_motion/inair_disttocog/goingdown_disttocog_speed" => {
+                scalar!(self.air_com_down_speed)
+            }
+            "anim_motion/inair_disttocog/min_inair_disttocog" => scalar!(self.air_com_min),
+            "anim_motion/inair_disttocog/preland_disttocom_vel" => {
+                scalar!(self.preland_com_speed)
+            }
+            "anim_motion/inair_disttocog/preland_final_disttocom" => scalar!(self.preland_com),
             "anim_motion/body_spin/spin_map" => curve!(self.spin_map),
             "anim_motion/body_spin/spin_influence_blendin" => scalar!(self.spin_blend_in),
             "anim_motion/body_spin/spin_influence_blendout" => scalar!(self.spin_blend_out),
@@ -1515,8 +1671,12 @@ impl Tuning {
             .steer_vs_speed
             .eval((speed.abs() / self.steer_speed_range).clamp(0.0, 1.0));
         // Skate 3 multiplies by the signed turn value itself (not just its sign): half a stick tilts the
-        // deck far less than half of a full one.
+        // deck far less than half of a full one. Tighter trucks tilt less (SK8 steering.rs
+        // `calculate_tilt`, its `tightness` factor).
+        let tightness =
+            self.tight_trucks_scalar * self.truck_tightness + 1.0 - self.truck_tightness;
         self.steer_scalar
+            * tightness
             * self.steer_vs_input.eval(input.abs())
             * speed_k
             * push_scalar
