@@ -20,7 +20,7 @@ crash screen.
   game's Dolphin profile stops without asking). If Dolphin isn't found, put `dolphin=<path to Dolphin.exe>` in
   `fg_local.txt` at the repo root (git-ignored).
 - **Scripted test run in Dolphin:** `powershell -ExecutionPolicy Bypass -File tools\dolphin_test.ps1 [-Seconds 60]
-  [-NoBuild] [-Manual] [-Lines 80]`. It builds (`build.bat fast noupdate nopause`, one Cargo job at a time unless
+  [-NoBuild] [-Manual] [-Minimized] [-SwitchEvery 15] [-Lines 80]`. It builds (`build.bat fast noupdate nopause`, one Cargo job at a time unless
   `CARGO_BUILD_JOBS` says otherwise; `-NoBuild` skips it), puts `autoplay.txt` in the app folder, starts the
   game in Dolphin (as `build.bat dolphin` does), waits, then closes Dolphin by posting `WM_CLOSE` to its
   hidden main window (the profile has `ConfirmStop = False`, so emulation stops at once and the SD card is
@@ -32,6 +32,10 @@ crash screen.
   jump, a bail) over and over, each tour starting once the rider is up again (`autoplay: tour N done` in the
   log). In an imported park the script doesn't know the layout, so a phase that hasn't finished after 20 s
   ends the tour. Delete the file to play normally again; `dolphin_test.ps1` removes it after its run.
+  Autoplay skips the start menu and rides the default location. A line `switch <seconds>` in the file
+  (`dolphin_test.ps1 -SwitchEvery <seconds>`) moves on to the next location (the demo park included, then
+  round again) every so often, so one run logs each park loading, its memory and its frame cost, and the
+  memory after switching back.
 - **On the PC without a Wii:** `cargo run --release -p fg_preview -- out/preview --tour --log` prints the same game
   lines as the preview plays.
 
@@ -42,13 +46,19 @@ At the start:
 - each pack (rules, skater, park, motion): the file, its size and its build stamp (which converter version and disc image
   made it), and what it holds (for the motion library: clips, clips with poses, trees, attribute records, timed
   events/windows); the main tuning values in use; whether autoplay is on; the line shown on the start screen.
+- `locations:` the location index read (`data/parks.txt`) and its parks, or the old single `park.fgpak`.
 
 While playing:
 - `frame:` once a second: the CPU's own work per frame (average and worst, split into physics (with the state
   graphs, the air step and the camera's tick in it), skinning and drawing), the time waiting for the GPU to finish, the idle time until the TV's next refresh, frames that missed
   their refresh, park meshes and vertices drawn, the vertex arena, heap and free memory. The budget at 60 Hz is
   16.7 ms for CPU + GPU wait; idle is what is left.
-- `slow frame:` whenever a frame missed its refresh, with that frame's breakdown.
+- `slow frame:` whenever a frame missed its refresh, with that frame's breakdown (a location loading misses a
+  few).
+- `location:` every time a location loads (at start-up and from the menus): the pack read and parse times,
+  what the park holds, and memory before, after the old park was freed, and with the new one loaded (heap
+  counts the gap between MEM1 and MEM2 once the heap spills into MEM2, so compare heap figures with each
+  other: after the old park is freed it is back to the same value every time). `menu: quit to the loader`.
 - `status:` once a second: the skater's mode, position, heading, speed, stance (switch, fakie), the camera's
   distance and how often a wall pulled it in, and the range each stick axis and trigger reached (for tuning the
   C-stick, whose range differs between pads).

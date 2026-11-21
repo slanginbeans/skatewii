@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use crate::collision::{self, TriMesh, WALKABLE_Y};
-use crate::gfx::{Gfx, SUN, TexVertex, Texture, Vertex, rgb, shade};
+use crate::gfx::{Gfx, SUN, StaticVerts, TexVertex, Texture, Vertex, rgb, shade};
 use crate::math::{Vec3, Xform, v3};
 use crate::pack::{Kind, Pack};
 
@@ -31,7 +31,8 @@ pub struct Chunk {
 
 /// One of the park's own meshes, ready to draw.
 pub struct ParkMesh {
-    pub verts: Vec<TexVertex>,
+    /// Read in place by the Wii's GPU.
+    pub verts: StaticVerts,
     pub indices: Vec<u16>,
     pub texture: Option<Texture<'static>>,
     /// Bounding sphere for culling.
@@ -132,7 +133,7 @@ fn parse_mesh(
         } else {
             (hi - center).length()
         },
-        verts,
+        verts: StaticVerts::new(&verts),
         indices,
         texture,
         center,
@@ -233,7 +234,7 @@ impl ImportedPark {
             let (dx, dz) = (p.center.x - eye.x, p.center.z - eye.z);
             let reach = DRAW_DISTANCE + p.radius;
             if dx * dx + dz * dz <= reach * reach {
-                gfx.draw_indexed(&p.verts, &p.indices, p.texture.as_ref(), &m);
+                gfx.draw_indexed_static(&p.verts, &p.indices, p.texture.as_ref(), &m);
                 draws += 1;
                 verts += p.verts.len() as u32;
             }

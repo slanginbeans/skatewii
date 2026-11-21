@@ -3,7 +3,8 @@
 An original skateboarding game for the Nintendo Wii, written in Rust. Physics-driven board, flick-stick
 tricks on the C-stick, played on a GameCube controller. Runs from the Homebrew Channel.
 
-Status: **skeleton**. One placeholder park (kicker, funbox, ledge, manual pad, bank) and Skate 3-style
+Status: **skeleton**. One placeholder park (kicker, funbox, ledge, manual pad, bank), or six skate parks
+converted from your own disc (chosen in a start menu, changed from the pause menu), and Skate 3-style
 riding: goofy or regular, fakie and switch, held pushes and mongo pushes, foot and tail brakes,
 powerslides and reverts, kick turns, 30 flick tricks (every flip, shove-it and varial, and their nollie
 versions), held double and triple kickflips, air spins that reward a wind-up, grabs, manuals, hippie jumps.
@@ -38,10 +39,24 @@ X, Y). The default stance is goofy, as in Skate 3.
 | Come down onto a rail | The grind or slide comes from how the board meets it: along it a 50-50 (C-stick held back: 5-0, forward: nosegrind), angled a crooked, willy, feeble or smith, across it a boardslide, lipslide, noseslide or tailslide. Flick to pop off |
 | C-stick held back on a transition, then let go | Pump (gain speed) |
 | Rolling tail first (fakie), push | The rider turns round and pushes switch |
-| HOME (Wii Remote) or START + Z | Quit to the Homebrew Channel |
+| START | Pause menu (see Menus) |
+| HOME (Wii Remote) or START + Z | Quit to the Homebrew Channel at once |
 
 The flick directions are for a goofy rider; regular and switch mirror them (a goofy kickflip flick is a
 heelflip for a regular rider), as in Skate 3.
+
+## Menus and locations
+With parks converted from your own disc, the game starts in a **start menu** listing the locations (the
+skate parks the build converted, then the built-in demo park), with the last one you chose highlighted
+(`settings.txt` in the app folder remembers it; the first time, the build's default). Up/down on the d-pad or
+the control stick moves, A (or START) rides. **START** while riding opens the **pause menu**: Resume, Change
+location (the same list; B goes back), Respawn (back to the park's start), Quit to loader. B or START resumes.
+While a menu is open the riding waits and the pad only drives the menu (the d-pad's gestures don't fire, and
+the A that chose an item is not a push until you let go of it). Changing location shows a loading screen
+while the park is read from the SD card (Dolphin reads the biggest, 4.2 MB, in well under a second; a real
+SD card is slower).
+
+Without converted parks there is no start menu: the demo park is ridden straight away.
 
 ## Layout
 ```
@@ -53,6 +68,7 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
   camera/          Skate 3's camera: shots and blends, the camera graph's choice, rig, collision, framing
   park.rs          height-field park made of blocks and ramps (placeholder geometry in code)
   game.rs          update + render loop; draws only through gfx::Gfx
+  menu.rs          locations (the index the importer writes), start and pause menus
   character.rs     imported skinned character: pack parsing, clip sampling, CPU skinning
   rider.rs         picks and crossfades the imported skater's clips from the game state
 wii/
@@ -78,7 +94,8 @@ Double-click **`build.bat`**. It updates from GitHub, builds the game and puts i
 **`dist\apps\flatground`**. Copy that folder into the SD card's `apps` folder.
 
 If you own Skate 3 for Xbox 360 and keep an `.iso` of your disc next to this folder (or one folder down), the
-build also converts what the game uses from it (the skater and a park; `FG_PARK` picks which) into `dist\apps\flatground\data`. It only
+build also converts what the game uses from it (the skater, and every skate park the Wii can hold as a
+location; `FG_PARK` picks the default one) into `dist\apps\flatground\data` (about 37 MB). It only
 converts what is missing or out of date, so later builds take seconds. Details:
 [docs/importing.md](docs/importing.md).
 
@@ -97,7 +114,7 @@ drive; `build.bat` offers to install Rust for you), or Docker Desktop.
 
 Switches combine. Optional settings: `set FG_SD=E:` also copies the app to `E:\apps\flatground`;
 `FG_DEVKITPRO` points at devkitPro if it's somewhere unusual; `FG_ASSUME_YES=1` installs Rust without asking;
-`FG_ISO` picks your disc image; `FG_PARK` the park (default BlackBoxPark); `FG_NO_ASSETS=1` skips converting;
+`FG_ISO` picks your disc image; `FG_PARK` the default location (default BlackBoxPark); `FG_NO_ASSETS=1` skips converting;
 `FG_DOLPHIN` points at `Dolphin.exe`.
 
 On Linux/macOS with Docker: `./build.sh`. No installs at all: download `flatground-sd-card` from the newest

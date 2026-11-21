@@ -16,8 +16,14 @@ folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg
   image's size and modification time, and the conversion options; a different stamp means convert again. So
   pulling a converter fix re-converts once, and an unchanged build skips straight past.
 - copies each pack into `dist/apps/flatground/data/` unless the copy there is already the same version.
+- converts every location (below) into `data/parks/<name>.fgpak` with its stamp beside it, and writes the
+  location index `data/parks.txt`. `FG_PARK=<name>` makes that park the default location (first in the
+  menu, ridden at the first start; converted even if it is not in the list); the default is BlackBoxPark. An
+  old single `data/park.fgpak` from earlier builds is removed (the game still reads one when there is no
+  `parks.txt`).
 
-Copy `dist/apps/flatground` to the SD card's `apps` folder and the game finds its packs at
+All of it is about 37 MB (the motion library 20 MB, the six parks 12.5 MB). Copy `dist/apps/flatground` to
+the SD card's `apps` folder and the game finds its packs at
 `sd:/apps/flatground/data/` (or `usb:/`). `FG_NO_ASSETS=1` skips all of this. The Docker route only sees files
 inside the repo folder, so put the image there (`*.iso` is git-ignored) or point `FG_ISO` at a path inside it.
 
@@ -178,12 +184,44 @@ runs the two state graphs every tick ([graph-runner.md](graph-runner.md)).
 ```bash
 cargo run --release -p fg_import -- park path/to/skate3.iso --park BlackBoxPark
 ```
-Writes `imported/park.fgpak` (about 1 MB with the models): `park/collision` (every collision triangle,
+Writes `imported/park.fgpak` (`--file <name>` for another name inside `--out`; about 1 MB with the models):
+`park/collision` (every collision triangle,
 format in `game_core/src/collision.rs`), `park/spawn` and `park/rails` (grind rails with each segment's
-class and high side, `game_core/src/rails.rs`; version 2, older packs still load as thin rails). The build converts `BlackBoxPark` unless `FG_PARK` names
-another. Parks small enough for the Wii: `StartPark` (the opening warehouse: an empty floor), `MegaPark`,
-`BlackBoxPark`, `IndustrialSkatePark`, `DownTownSkatePark`, `SkateSchool` and `MaloofMoneyCup`. The city
-districts are hundreds of MB each.
+class and high side, `game_core/src/rails.rs`; version 2, older packs still load as thin rails). Parks small
+enough for the Wii: `StartPark` (the opening warehouse: an empty floor), `MegaPark`, `BlackBoxPark`,
+`IndustrialSkatePark`, `DownTownSkatePark`, `SkateSchool` and `MaloofMoneyCup`.
+
+#### Locations
+`fg_import build` converts these as the game's locations (`park::LOCATIONS`), measured with the US/EU disc
+and in Dolphin (`tools\dolphin_test.ps1 -SwitchEvery 15`; memory with the skater, rules and 20 MB motion
+library loaded; heap is what the park adds; CPU is the frame's own work on the emulated Wii, a real Wii has
+measured about 1.5 times Dolphin's figure):
+
+| Location | Pack | Collision tris | Rails | Meshes | Vertices | Heap | MEM1 / MEM2 free | CPU avg / peak (draw) |
+|---|---|---|---|---|---|---|---|---|
+| Black Box Park | 1064 KB | 12,597 | 120 | 132 | 15,670 | 2.3 MB | 15.2 / 31.2 MB | 3.4 / 6.4 ms (1.3) |
+| Mega Park | 1157 KB | 12,170 | 0 | 102 | 20,469 | 2.5 MB | 15.2 / 31.1 MB | 2.8 / 3.7 ms (0.8) |
+| Industrial Skate Park | 1758 KB | 17,642 | 17 | 136 | 33,798 | 3.7 MB | 15.2 / 30.5 MB | 3.2 / 4.0 ms (1.1) |
+| Downtown Skate Park | 4198 KB | 43,206 | 0 | 362 | 78,873 | 8.9 MB | 15.2 / 24.2 MB | 3.6 / 4.7 ms (1.6) |
+| Maloof Money Cup | 3620 KB | 36,163 | 353 | 341 | 64,725 | 7.5 MB | 15.2 / 25.4 MB | 3.9 / 5.9 ms (1.7) |
+| Start Park | 1035 KB | 12,533 | 0 | 55 | 15,957 | 2.2 MB | 15.2 / 30.4 MB | 2.8 / 3.7 ms (0.8) |
+
+Downtown and Maloof draw up to about 55,000 vertices a frame (meshes within 90 m of the camera); park
+vertices are read by the GPU where they are (`fg_draw_indexed_static`), not copied every frame. Dolphin
+reads the biggest pack in about 40 ms; budget a few seconds per park on a real SD card.
+
+Left out: **SkateSchool**, an 8.6 MB pack (91,790 collision triangles, 1,105 meshes, 157,783 vertices over a
+950 x 1180 m area). It fits in memory (13 MB of MEM2 left) and holds its frame near the start, but it is a
+district, not a park: the spawn rule lands under the island (y -73), and it takes the longest to read.
+`FG_PARK=SkateSchool` still converts it as the default location.
+
+Other places on the disc: `worldDIST_University.big`, `worldDIST_DownTown.big` and
+`worldDIST_Industrial.big` are the city districts (480 to 840 MB each: 230 to 1,200 `Sim` cells, 150 to
+275 MB of `Pres` cells, 280 to 520 MB of textures). Their stream cells are named by position
+(`cSim_<x>_<z>_high.xsf`), so a block of a few cells around a known spot could be converted like a park
+(roughly 1 MB of collision and 8 MB of models before shrinking textures for a 3 x 3 block), but that needs
+picking cells by position and a spawn inside the block: not done. `worlddmo.big` and `worldmisc.big` hold
+dynamic-object data, not places to ride.
 
 A district's assets sit in streams inside `worldDIST_<park>.big`: an `ATOC` table
 (`DIST_<park>_<stream>.xst`) and `SFIL` stream files (`c<stream>_*.xsf`, RefPack-compressed sections). The
@@ -296,12 +334,12 @@ plenty for an offline converter.
   can't blend bone weights). It is checked in the PC preview only, not yet in Dolphin or on hardware, and
   its frame cost on the Wii is unmeasured (the HUD now shows it). Bails are clip-based: Skate 3 plays its
   wipeout clips over a physics ragdoll, which is not ported, so a bail is a step-off and a get-up.
-- Park visuals: lightmaps (the second UV set), display lists instead of copying vertices every frame, and
-  the city districts' streaming cells.
+- Park visuals: lightmaps (the second UV set), display lists, model LOD for districts, and the city
+  districts' streaming cells (a block of cells as a location).
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
 - Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
 - Riding: Skate 3 turns, pumps and wipes out through rigid-body truck and ragdoll physics; flatground keeps
   a simpler board model and uses Skate 3's numbers where they carry over (see `game_core::tuning`). The
   board-sideways, late-flip and finger-flip shapes are converted but not used yet, nor dark catches.
-- Game side: `skater.fgpak`, `park.fgpak` and `rules.fgpak` are loaded. Texture packs, animation packs and the executable
+- Game side: `skater.fgpak`, `rules.fgpak`, `motion.fgpak` and the location packs (`parks/*.fgpak`) are loaded. Texture packs, animation packs and the executable
   tables are parsed and validated, but nothing uses them yet.

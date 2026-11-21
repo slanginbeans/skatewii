@@ -116,6 +116,12 @@ content second.
   `data/`; the game loads from `sd:/apps/flatground/data/`; `build.bat dolphin` runs it with `dist/` as the SD card
 - [ ] Load texture packs and other `.fgpak` content from SD
 - [x] Imported park collision: triangle ground and walls (`game_core::collision`), loaded from SD
+- [x] Locations: the build converts every skate park that fits (six; `data/parks/` and the `parks.txt` index),
+  a start menu to choose one, a pause menu (resume, change location, respawn, quit) on START, parks
+  switched at runtime with the old one freed (heap back to the same value every time, checked in Dolphin),
+  the last location remembered on the SD card; park meshes drawn in place (no per-frame vertex copy)
+- [ ] More locations: Skate School needs a spawn on the island and LOD; blocks of the city districts'
+  streaming cells (docs/importing.md "Locations")
 
 ## Phase 4: Game
 - [x] Grinds: 50-50 and boardslide on rails (imported parks and the demo ledge)

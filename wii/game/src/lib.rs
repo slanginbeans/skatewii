@@ -20,9 +20,10 @@ use core::ptr;
 use game_core::autoplay::Autoplay;
 use game_core::character;
 use game_core::game::{FrameCost, Game};
-use game_core::gfx::{Camera, Gfx, TexVertex, Texture, Vertex};
+use game_core::gfx::{Camera, Gfx, StaticVerts, TexVertex, Texture, Vertex};
 use game_core::input::PadRaw;
 use game_core::math::Mat34;
+use game_core::menu::{self, Location, LocationTour, Request};
 
 /// Max vertices per `GX_Begin` (it takes a u16), rounded down to whole triangles.
 const MAX_BATCH: usize = 65535 / 3 * 3;
@@ -58,31 +59,17 @@ impl Gfx for WiiGfx {
         texture: Option<&Texture>,
         model: &Mat34,
     ) {
-        // One GX_Begin takes at most 65535 indices; 16-bit indices reach 65536 vertices.
-        if verts.len() > 0x10000 {
-            return;
-        }
-        let tex = texture.map(|t| ffi::FgTexture {
-            data: t.data.as_ptr(),
-            width: t.width,
-            height: t.height,
-            format: t.format,
-            alpha_test: t.alpha_test as u8,
-            _pad: 0,
-        });
-        let tex_ptr = tex.as_ref().map_or(ptr::null(), |t| t as *const _);
-        for chunk in indices.chunks(MAX_BATCH) {
-            unsafe {
-                ffi::fg_draw_indexed(
-                    verts.as_ptr(),
-                    verts.len() as u32,
-                    chunk.as_ptr(),
-                    chunk.len() as u32,
-                    tex_ptr,
-                    model,
-                )
-            }
-        }
+        draw(ffi::fg_draw_indexed, verts, indices, texture, model);
+    }
+    fn draw_indexed_static(
+        &mut self,
+        verts: &StaticVerts,
+        indices: &[u16],
+        texture: Option<&Texture>,
+        model: &Mat34,
+    ) {
+        // Flushed once when the park loaded (`flush_park`).
+        draw(ffi::fg_draw_indexed_static, verts, indices, texture, model);
     }
     fn draw_2d(&mut self, verts: &[Vertex]) {
         for chunk in verts.chunks(MAX_BATCH) {
@@ -91,6 +78,54 @@ impl Gfx for WiiGfx {
     }
     fn end_frame(&mut self) {
         unsafe { ffi::fg_end_frame() }
+    }
+}
+
+type DrawFn = unsafe extern "C" fn(
+    *const TexVertex,
+    u32,
+    *const u16,
+    u32,
+    *const ffi::FgTexture,
+    *const Mat34,
+);
+
+/// An indexed mesh through `f` (copying or in place), in batches one `GX_Begin` takes.
+fn draw(f: DrawFn, verts: &[TexVertex], indices: &[u16], texture: Option<&Texture>, model: &Mat34) {
+    // One GX_Begin takes at most 65535 indices; 16-bit indices reach 65536 vertices.
+    if verts.len() > 0x10000 {
+        return;
+    }
+    let tex = texture.map(|t| ffi::FgTexture {
+        data: t.data.as_ptr(),
+        width: t.width,
+        height: t.height,
+        format: t.format,
+        alpha_test: t.alpha_test as u8,
+        _pad: 0,
+    });
+    let tex_ptr = tex.as_ref().map_or(ptr::null(), |t| t as *const _);
+    for chunk in indices.chunks(MAX_BATCH) {
+        unsafe {
+            f(
+                verts.as_ptr(),
+                verts.len() as u32,
+                chunk.as_ptr(),
+                chunk.len() as u32,
+                tex_ptr,
+                model,
+            )
+        }
+    }
+}
+
+/// Writes a freshly loaded park's vertex arrays out of the CPU cache once: the GPU reads them in place.
+fn flush_park(game: &Game) {
+    if let Some(p) = game.imported_park() {
+        for m in &p.models {
+            let (data, len) = m.verts.bytes();
+            unsafe { ffi::fg_flush_range(data, len as u32) };
+        }
     }
 }
 
@@ -103,11 +138,16 @@ const SKATER_PACKS: &[&CStr] = &[
     c"usb:/flatground/skater.fgpak",
 ];
 
-/// The park `fg_import park` converts from the player's disc (collision; drawn from it for now).
-const PARK_PACKS: &[&CStr] = &[
-    c"sd:/apps/flatground/data/park.fgpak",
-    c"usb:/apps/flatground/data/park.fgpak",
-];
+/// The app folder's data directories: the location index (`parks.txt`, written by `fg_import build`) and the
+/// park packs it lists are read from the first that has an index, else from the first with an old single
+/// `park.fgpak`.
+const DATA_DIRS: &[&str] = &["sd:/apps/flatground/data/", "usb:/apps/flatground/data/"];
+/// The location index in a data directory.
+const INDEX_FILE: &str = "parks.txt";
+/// What builds before the location index made: one park, `data/park.fgpak`.
+const OLD_PARK: &str = "park.fgpak";
+/// The last location chosen, in the app folder (next to `data/`).
+const SETTINGS_FILE: &str = "settings.txt";
 
 /// Skate 3's riding tuning and flick shapes, converted from the player's disc (`fg_import rules`).
 const RULES_PACKS: &[&CStr] = &[
@@ -129,12 +169,213 @@ const AUTOPLAY_FILES: &[&CStr] = &[
     c"usb:/apps/flatground/autoplay.txt",
 ];
 
-/// A whole file, or `None`. Loaded once and kept for the rest of the game: the GPU reads textures straight
-/// out of packs.
+/// A whole file, or `None`. Kept until given to [`unload`] (the packs the game keeps for the whole session
+/// never are): the GPU reads textures straight out of packs.
 fn load(path: &CStr) -> Option<&'static [u8]> {
     let mut size = 0u32;
     let data = unsafe { ffi::fg_load_file(path.as_ptr(), &mut size) };
     (!data.is_null()).then(|| unsafe { core::slice::from_raw_parts(data, size as usize) })
+}
+
+/// [`load`] by a path built at runtime.
+fn load_path(path: &str) -> Option<&'static [u8]> {
+    alloc::ffi::CString::new(path).ok().and_then(|p| load(&p))
+}
+
+/// Gives back a file from [`load`].
+///
+/// # Safety
+/// Nothing may refer to `data` any more, and no draw still queued for the GPU may read it.
+unsafe fn unload(data: &'static [u8]) {
+    unsafe { ffi::fg_free_file(data.as_ptr() as *mut u8) }
+}
+
+/// Small text file, or `None`.
+fn load_text(path: &str) -> Option<String> {
+    let data = load_path(path)?;
+    let text = String::from_utf8_lossy(data).into_owned();
+    unsafe { unload(data) };
+    Some(text)
+}
+
+fn save(path: &str, data: &[u8]) -> bool {
+    alloc::ffi::CString::new(path).is_ok_and(|p| unsafe {
+        ffi::fg_save_file(p.as_ptr(), data.as_ptr(), data.len() as u32) == 0
+    })
+}
+
+fn stats() -> ffi::FgFrameStats {
+    let mut st = ffi::FgFrameStats::default();
+    unsafe { ffi::fg_frame_stats(&mut st) };
+    st
+}
+
+/// Heap and arena memory, for the log.
+fn memory_text(st: &ffi::FgFrameStats) -> String {
+    format!(
+        "heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
+        st.heap_used / 1024,
+        st.mem1_free / 1024,
+        st.mem2_free / 1024
+    )
+}
+
+/// Where the locations come from, and the park pack in use.
+struct Places {
+    /// The data directory the index (or old park pack) was found in, e.g. `sd:/apps/flatground/data/`.
+    data_dir: Option<&'static str>,
+    /// The pack of the park being ridden (freed when another location is loaded).
+    pack: Option<&'static [u8]>,
+    /// Autoplay visiting every location in turn (`switch <seconds>` in `autoplay.txt`).
+    tour: Option<LocationTour>,
+}
+
+/// The locations: the index in the first data directory that has one, else an old single `park.fgpak`,
+/// else none (the demo park only). Logs which.
+fn find_locations() -> (Option<&'static str>, menu::Index) {
+    for dir in DATA_DIRS {
+        if let Some(text) = load_text(&format!("{dir}{INDEX_FILE}")) {
+            let index = menu::parse_index(&text);
+            log(
+                false,
+                &format!(
+                    "locations: {dir}{INDEX_FILE}, {} parks ({}), default {}",
+                    index.locations.len(),
+                    index
+                        .locations
+                        .iter()
+                        .map(|l| l.id.as_str())
+                        .collect::<alloc::vec::Vec<_>>()
+                        .join(" "),
+                    index
+                        .default
+                        .map_or("none", |d| index.locations[d].id.as_str())
+                ),
+            );
+            return (Some(dir), index);
+        }
+    }
+    for dir in DATA_DIRS {
+        let path = format!("{dir}{OLD_PARK}");
+        if let Some(data) = load_path(&path) {
+            let bytes = data.len() as u32;
+            unsafe { unload(data) };
+            log(
+                false,
+                &format!("locations: no {INDEX_FILE}, the one park in {path}"),
+            );
+            let index = menu::Index {
+                locations: alloc::vec![Location {
+                    id: "park".into(),
+                    name: "Imported park".into(),
+                    file: OLD_PARK.into(),
+                    bytes,
+                }],
+                default: Some(0),
+            };
+            return (Some(dir), index);
+        }
+    }
+    log(false, "locations: no park packs, the demo park only");
+    (None, menu::Index::default())
+}
+
+/// The app folder of a data directory (`sd:/apps/flatground/`).
+fn app_dir(data_dir: &str) -> &str {
+    data_dir.strip_suffix("data/").unwrap_or(data_dir)
+}
+
+/// Rides location `i`: shows the loading screen (`show`), lets go of the park ridden so far and frees its
+/// pack, then reads and parses the new one (the demo park needs nothing). Logs the times and the memory
+/// before, between and after. On failure the demo park is ridden. Returns whether the location loaded.
+fn load_location(game: &mut Game, places: &mut Places, i: usize, show: bool) -> bool {
+    let Some(loc) = game.locations.get(i).cloned() else {
+        return false;
+    };
+    let before = stats();
+    if show {
+        let size = if loc.bytes > 0 {
+            format!("  {} KB", loc.bytes / 1024)
+        } else {
+            String::new()
+        };
+        game.loading = Some(format!("{}{size}", loc.name.to_ascii_uppercase()));
+        // One frame with the message (it waits for the GPU, so nothing draws from the old pack after).
+        game.render(&mut WiiGfx);
+    }
+    game.unload_park();
+    if let Some(old) = places.pack.take() {
+        // SAFETY: the game let go of the park, and the last frame (the loading screen, or the frame before
+        // this request) finished drawing in fg_end_frame.
+        unsafe { unload(old) };
+    }
+    let freed = stats();
+    let demo = game.locations.len() - 1;
+    let mut ok = true;
+    let (mut read_ms, mut parse_ms) = (0.0, 0.0);
+    if !loc.is_demo() {
+        let t0 = clock_us();
+        let data = places
+            .data_dir
+            .and_then(|d| load_path(&format!("{d}{}", loc.file)));
+        let t1 = clock_us();
+        read_ms = t1.wrapping_sub(t0) as f32 / 1000.0;
+        match data {
+            Some(pack) => match game.load_park(pack) {
+                Ok(()) => {
+                    flush_park(game);
+                    places.pack = Some(pack)
+                }
+                Err(e) => {
+                    log(true, &format!("location {}: unreadable ({e:?})", loc.id));
+                    unsafe { unload(pack) };
+                    ok = false;
+                }
+            },
+            None => {
+                log(true, &format!("location {}: no file {}", loc.id, loc.file));
+                ok = false;
+            }
+        }
+        parse_ms = clock_us().wrapping_sub(t1) as f32 / 1000.0;
+    }
+    game.location = if ok { i } else { demo };
+    game.loading = None;
+    let after = stats();
+    let park = match game.imported_park() {
+        Some(p) => format!(
+            "{} collision triangles, {} rails, {} meshes, {} vertices",
+            p.mesh.tris.len(),
+            p.mesh.rails.len(),
+            p.models.len() + p.chunks.len(),
+            p.vertex_count()
+        ),
+        None => "the demo park".into(),
+    };
+    log(
+        true,
+        &format!(
+            "location: {} ({}), {} KB read in {read_ms:.0} ms, parsed in {parse_ms:.0} ms: {park} | before: {} | old park freed: {} | loaded: {}",
+            loc.name,
+            if loc.is_demo() { "built in" } else { &loc.file },
+            places.pack.map_or(0, |p| p.len() / 1024),
+            memory_text(&before),
+            memory_text(&freed),
+            memory_text(&after)
+        ),
+    );
+    ok
+}
+
+/// Remembers the location the player chose (`settings.txt` in the app folder).
+fn save_location(places: &Places, id: &str) {
+    let Some(dir) = places.data_dir.map(app_dir) else {
+        return;
+    };
+    let path = format!("{dir}{SETTINGS_FILE}");
+    if !save(&path, menu::write_settings(id).as_bytes()) {
+        log(false, &format!("settings: could not write {path}"));
+    }
 }
 
 /// The first of `paths` that exists, read whole. Logs which one (with its size and the build stamp next to
@@ -263,29 +504,29 @@ pub extern "C" fn fg_rust_init() {
         },
         None => "PLACEHOLDER".into(),
     };
-    let park: String = match load_first("park", PARK_PACKS) {
-        Some(pack) => match game.load_park(pack) {
-            Ok(()) => {
-                if let Some(p) = game.imported_park() {
-                    log(
-                        false,
-                        &format!(
-                            "park: {} collision triangles, {} rails, {} meshes, {} vertices in all",
-                            p.mesh.tris.len(),
-                            p.mesh.rails.len(),
-                            p.models.len() + p.chunks.len(),
-                            p.vertex_count()
-                        ),
-                    );
-                }
-                "IMPORTED".into()
-            }
-            Err(e) => {
-                log(true, &format!("park: unreadable ({e:?})"));
-                "UNREADABLE".into()
-            }
-        },
-        None => "DEMO".into(),
+    // The locations, and the one to start in: the last one chosen, else the build's default (autoplay: the
+    // default always).
+    let autoplay = AUTOPLAY_FILES.iter().find_map(|p| load(p));
+    let tour = autoplay.and_then(|a| LocationTour::from_autoplay(&String::from_utf8_lossy(a)));
+    let (data_dir, index) = find_locations();
+    let last = match (autoplay, data_dir) {
+        (None, Some(dir)) => load_text(&format!("{}{SETTINGS_FILE}", app_dir(dir)))
+            .and_then(|t| menu::parse_settings(&t)),
+        _ => None,
+    };
+    game.set_locations(index.locations);
+    let start = menu::start_location(&game.locations, last.as_deref(), index.default);
+    let mut places = Places {
+        data_dir,
+        pack: None,
+        tour,
+    };
+    let park: String = if game.locations[start].is_demo() {
+        "DEMO".into()
+    } else if load_location(&mut game, &mut places, start, false) {
+        "IMPORTED".into()
+    } else {
+        "UNREADABLE".into()
     };
     let motion_start = clock_us();
     let motion: String = match load_first("motion", MOTION_PACKS) {
@@ -353,12 +594,25 @@ pub extern "C" fn fg_rust_init() {
     log(true, &format!("ready: {notice}, stance {:?}", game.stance));
     game.notice = Some(notice);
     game.frame_cost = Some(FrameCost::default());
-    if AUTOPLAY_FILES.iter().any(|p| load(p).is_some()) {
-        log(true, "autoplay: on (trick tour, repeated)");
+    if let Some(a) = autoplay {
+        let every = places.tour.as_ref().map_or(String::new(), |_| {
+            format!(
+                ", every location in turn ({})",
+                String::from_utf8_lossy(a).trim()
+            )
+        });
+        log(true, &format!("autoplay: on (trick tour, repeated{every})"));
         unsafe { AUTOPLAY = Box::into_raw(Box::new(Autoplay::new())) };
+        unsafe { unload(a) };
+    } else {
+        game.open_start_menu();
     }
+    unsafe { PLACES = Box::into_raw(Box::new(places)) };
     unsafe { GAME = Box::into_raw(game) };
 }
+
+/// Where the locations come from and the park pack in use.
+static mut PLACES: *mut Places = ptr::null_mut();
 
 /// Short, HUD-font-safe (upper case) reason a pack was rejected.
 fn error_text(e: character::Error) -> String {
@@ -371,13 +625,42 @@ fn error_text(e: character::Error) -> String {
 }
 
 /// One displayed frame: the game runs its fixed 60 Hz ticks for `dt` (1/60, or 1/50 on PAL50), then
-/// renders.
+/// renders, then does what the menus asked (another location, quitting). Returns nonzero to quit.
 ///
 /// # Safety
 /// `pad` must point to a valid `FgPadRaw`; `fg_rust_init` must have been called.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
+pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) -> i32 {
     let game = unsafe { &mut *GAME };
+    let places = unsafe { &mut *PLACES };
+    frame(game, pad, dt);
+    // What the menus asked for, after the frame (a load shows its own loading screen).
+    match game.take_request() {
+        Some(Request::Quit) => {
+            log(true, "menu: quit to the loader");
+            return 1;
+        }
+        Some(Request::Load(i)) => {
+            if load_location(game, places, i, true) {
+                save_location(places, &game.locations[i].id);
+            } else {
+                game.open_start_menu();
+            }
+        }
+        None => {}
+    }
+    // Autoplay visiting every location in turn.
+    if let (Some(auto), Some(tour)) = (unsafe { AUTOPLAY.as_mut() }, &mut places.tour)
+        && let Some(i) = tour.next(game.location, game.locations.len())
+    {
+        load_location(game, places, i, true);
+        auto.new_location();
+    }
+    0
+}
+
+/// Runs and draws one frame, and logs what happened.
+fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
     let mut pad = unsafe { &*pad };
     // Hands-off play replaces the controller.
     let scripted;

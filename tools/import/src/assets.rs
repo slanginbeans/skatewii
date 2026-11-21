@@ -15,45 +15,89 @@ const SRC_HASH: &str = env!("FG_IMPORT_SRC_HASH");
 
 /// One converted output: what the game loads from the app folder's `data/`.
 struct Job {
-    name: &'static str,
+    /// Which converter runs it (`skater`, `motion`, `rules`, `park`).
+    kind: &'static str,
+    /// The job's stamp is `<name>.stamp` (a park's sits next to its pack: `parks/<park>.stamp`).
+    name: String,
     /// Files the job writes into its output directory, all copied to the app folder.
-    files: &'static [&'static str],
+    files: Vec<String>,
     args: Vec<String>,
 }
 
-/// The park the build converts unless `FG_PARK` names another (`fg_import park` lists them).
-/// StartPark, the first district, is an empty warehouse; BlackBoxPark is a full skate park.
+/// The location the build makes the default (first in the menu, ridden at first start) unless `FG_PARK`
+/// names another (`fg_import park` lists them). StartPark, the first district, is an empty warehouse;
+/// BlackBoxPark is a full skate park.
 pub const DEFAULT_PARK: &str = "BlackBoxPark";
 
+/// The location index the game reads (`data/parks.txt`).
+const INDEX: &str = "parks.txt";
+
+/// The default location: `FG_PARK` if it names a park, else [`DEFAULT_PARK`].
+fn default_park() -> Res<&'static str> {
+    match std::env::var("FG_PARK").ok().filter(|p| !p.is_empty()) {
+        Some(p) => park::canonical(&p).ok_or_else(|| {
+            format!(
+                "FG_PARK={p} is not a park; parks: {}",
+                park::PARKS.join(", ")
+            )
+            .into()
+        }),
+        None => Ok(DEFAULT_PARK),
+    }
+}
+
+/// The locations the build converts, the default first (it is converted even when it is not one of
+/// `park::LOCATIONS`: asked for by name).
+fn locations(default: &'static str) -> Vec<&'static str> {
+    let mut list = vec![default];
+    list.extend(park::LOCATIONS.iter().filter(|p| **p != default));
+    list
+}
+
+fn park_job(name: &str) -> Job {
+    let file = format!("parks/{name}.fgpak");
+    Job {
+        kind: "park",
+        name: format!("parks/{name}"),
+        files: vec![file.clone()],
+        args: vec!["--park".into(), name.into(), "--file".into(), file],
+    }
+}
+
 /// What the game loads.
-fn jobs() -> Vec<Job> {
-    let park = std::env::var("FG_PARK")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| DEFAULT_PARK.to_string());
-    vec![
-        Job {
-            name: "skater",
-            files: &["skater.fgpak"],
-            // LOD 2: the Wii skins on its CPU every frame.
-            args: vec!["--lod".into(), "2".into()],
-        },
-        Job {
-            name: "motion",
-            files: &["motion.fgpak"],
-            args: Vec::new(),
-        },
-        Job {
-            name: "rules",
-            files: &["rules.fgpak"],
-            args: Vec::new(),
-        },
-        Job {
-            name: "park",
-            files: &["park.fgpak"],
-            args: vec!["--park".into(), park],
-        },
-    ]
+fn jobs(default: &'static str) -> Vec<Job> {
+    let one = |kind: &'static str, args: Vec<String>| Job {
+        kind,
+        name: kind.into(),
+        files: vec![format!("{kind}.fgpak")],
+        args,
+    };
+    let mut jobs = vec![
+        // LOD 2: the Wii skins on its CPU every frame.
+        one("skater", vec!["--lod".into(), "2".into()]),
+        one("motion", Vec::new()),
+        one("rules", Vec::new()),
+    ];
+    jobs.extend(locations(default).into_iter().map(park_job));
+    jobs
+}
+
+/// The location index for the converted parks in `dir` (sizes from the packs there).
+fn index(dir: &Path, default: &'static str) -> String {
+    let list: Vec<_> = locations(default)
+        .into_iter()
+        .map(|p| {
+            let file = format!("parks/{p}.fgpak");
+            let bytes = std::fs::metadata(dir.join(&file)).map_or(0, |m| m.len() as u32);
+            game_core::menu::Location {
+                id: p.into(),
+                name: park::display_name(p),
+                file,
+                bytes,
+            }
+        })
+        .collect();
+    game_core::menu::write_index(&list, Some(default))
 }
 
 const BUILD_USAGE: &str = "usage:
@@ -185,6 +229,7 @@ fn stamp(iso: &Path, job: &Job) -> Res<String> {
 }
 
 fn stamp_path(dir: &Path, job: &Job) -> PathBuf {
+    // Inside the job's own folder (`parks/`) when its name has one.
     dir.join(format!("{}.stamp", job.name))
 }
 
@@ -200,12 +245,13 @@ fn install(cache: &Path, dest: &Path, job: &Job, want: &str) -> Res<bool> {
         let (a, b) = (cache.join(f), dest.join(f));
         matches!((a.metadata(), b.metadata()), (Ok(a), Ok(b)) if a.len() == b.len())
     };
-    if up_to_date(dest, job, want) && job.files.iter().all(same_size) {
+    if up_to_date(dest, job, want) && job.files.iter().map(String::as_str).all(|f| same_size(&f)) {
         return Ok(false);
     }
-    std::fs::create_dir_all(dest)?;
-    for f in job.files {
-        std::fs::copy(cache.join(f), dest.join(f))?;
+    for f in &job.files {
+        let to = dest.join(f);
+        std::fs::create_dir_all(to.parent().unwrap_or(dest))?;
+        std::fs::copy(cache.join(f), to)?;
     }
     // The stamp last: an interrupted copy is redone next time.
     std::fs::write(stamp_path(dest, job), want)?;
@@ -216,7 +262,7 @@ fn convert(iso: &Path, job: &Job, out: &Path) -> Res<()> {
     let mut disc = Disc::open(iso)?;
     let mut args = job.args.clone();
     args.extend(["--out".to_string(), out.display().to_string()]);
-    match job.name {
+    match job.kind {
         "skater" => skater::run(&mut disc, &args),
         "park" => park::run(&mut disc, &args),
         "rules" => crate::rules::run(&mut disc, &args),
@@ -234,13 +280,14 @@ pub fn run(args: &[String]) -> Res<()> {
         return Err(format!("disc image {} not found", iso.display()).into());
     }
     println!("[assets] Disc image: {}", iso.display());
-    for job in &jobs() {
+    let default = default_park()?;
+    for job in &jobs(default) {
         let want = stamp(&iso, job)?;
         if up_to_date(&o.cache, job, &want) {
             println!("[assets] {}: up to date", job.name);
         } else {
             println!("[assets] {}: converting...", job.name);
-            std::fs::create_dir_all(&o.cache)?;
+            std::fs::create_dir_all(o.cache.join(&job.name).parent().unwrap_or(&o.cache))?;
             // A failed conversion must not leave an old stamp claiming the files are current.
             let _ = std::fs::remove_file(stamp_path(&o.cache, job));
             convert(&iso, job, &o.cache).map_err(|e| format!("{}: {e}", job.name))?;
@@ -254,6 +301,31 @@ pub fn run(args: &[String]) -> Res<()> {
             }
         }
     }
+    // The location index, next to the parks.
+    let text = index(&o.cache, default);
+    std::fs::write(o.cache.join(INDEX), &text)?;
+    if let Some(dest) = &o.dest {
+        if std::fs::read_to_string(dest.join(INDEX)).ok().as_deref() != Some(text.as_str()) {
+            std::fs::write(dest.join(INDEX), &text)?;
+            println!("[assets] {INDEX}: written to {}", dest.display());
+        }
+        // Builds before the location index made one park.fgpak; the game reads parks.txt now.
+        for old in ["park.fgpak", "park.stamp"] {
+            if std::fs::remove_file(dest.join(old)).is_ok() {
+                println!("[assets] removed the old {old} from {}", dest.display());
+            }
+        }
+    }
+    let total: u64 = locations(default)
+        .iter()
+        .filter_map(|p| std::fs::metadata(o.cache.join(format!("parks/{p}.fgpak"))).ok())
+        .map(|m| m.len())
+        .sum();
+    println!(
+        "[assets] locations: {} ({} KiB of park packs), default {default}",
+        locations(default).join(", "),
+        total / 1024
+    );
     Ok(())
 }
 
@@ -270,8 +342,9 @@ mod tests {
 
     fn job() -> Job {
         Job {
-            name: "thing",
-            files: &["a.fgpak", "b.fgpak"],
+            kind: "thing",
+            name: "thing".into(),
+            files: vec!["a.fgpak".into(), "b.fgpak".into()],
             args: vec!["--x".into()],
         }
     }
@@ -289,7 +362,7 @@ mod tests {
         // Nothing there yet.
         assert!(!up_to_date(&cache, &job, &want));
         std::fs::create_dir_all(&cache).unwrap();
-        for f in job.files {
+        for f in &job.files {
             std::fs::write(cache.join(f), b"pack").unwrap();
         }
         // Files without a stamp are not trusted.
@@ -308,6 +381,41 @@ mod tests {
         std::fs::write(dest.join("b.fgpak"), b"truncated?").unwrap();
         assert!(install(&cache, &dest, &job, &want).unwrap());
         assert_eq!(std::fs::read(dest.join("b.fgpak")).unwrap(), b"pack");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn every_location_gets_a_job_and_an_index_line() {
+        let all = jobs(DEFAULT_PARK);
+        let parks: Vec<_> = all.iter().filter(|j| j.kind == "park").collect();
+        assert_eq!(parks.len(), park::LOCATIONS.len());
+        assert_eq!(parks[0].name, format!("parks/{DEFAULT_PARK}"));
+        assert_eq!(parks[0].files, [format!("parks/{DEFAULT_PARK}.fgpak")]);
+        // A park left out of the list is still converted when asked for, and comes first.
+        let l = locations("SkateSchool");
+        assert_eq!(l[0], "SkateSchool");
+        assert_eq!(l.len(), park::LOCATIONS.len() + 1);
+        assert_eq!(locations("MegaPark").len(), park::LOCATIONS.len());
+
+        // Packs in a sub-folder install with their stamps next to them; the index lists them.
+        let root = tmp("parks");
+        let (cache, dest) = (root.join("cache"), root.join("dest"));
+        let job = park_job("MegaPark");
+        std::fs::create_dir_all(cache.join("parks")).unwrap();
+        std::fs::write(cache.join("parks/MegaPark.fgpak"), vec![0u8; 1234]).unwrap();
+        std::fs::write(stamp_path(&cache, &job), "s").unwrap();
+        assert!(up_to_date(&cache, &job, "s"));
+        assert!(install(&cache, &dest, &job, "s").unwrap());
+        assert!(dest.join("parks/MegaPark.stamp").is_file());
+        let index = game_core::menu::parse_index(&super::index(&cache, "MegaPark"));
+        assert_eq!(index.default, Some(0));
+        let m = &index.locations[0];
+        assert_eq!(
+            (m.id.as_str(), m.name.as_str(), m.bytes),
+            ("MegaPark", "Mega Park", 1234)
+        );
+        assert_eq!(m.file, "parks/MegaPark.fgpak");
+        assert_eq!(index.locations.len(), park::LOCATIONS.len());
         let _ = std::fs::remove_dir_all(&root);
     }
 

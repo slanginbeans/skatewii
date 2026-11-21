@@ -12,8 +12,9 @@ use crate::flick::{FlickInput, FlickOut};
 use crate::gesture;
 use crate::gfx::{Gfx, MeshBuilder, SCREEN_H, SCREEN_W, Vertex, rgb};
 use crate::hud;
-use crate::input::{Pad, PadRaw, flag};
+use crate::input::{Pad, PadRaw, btn, flag};
 use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
+use crate::menu::{Choice, Location, Menu, Request};
 use crate::model::Models;
 use crate::pack::Pack;
 use crate::park::{Park, Terrain};
@@ -189,6 +190,20 @@ pub struct Game {
     /// The view one tick before the current one, and where between the two the frame is drawn (0..1).
     prev_view: Option<View>,
     alpha: f32,
+    /// Where the player can ride (the platform fills it from the location index; the demo park is always
+    /// last) and which of them is loaded.
+    pub locations: Vec<Location>,
+    pub location: usize,
+    /// The start or pause menu, when one is open: the simulation waits, and the pad only drives the menu.
+    pub menu: Option<Menu>,
+    /// What the game asks of the platform (load a location, quit); see [`Game::take_request`].
+    request: Option<Request>,
+    /// Shown over a black screen while the platform reads a park from the card.
+    pub loading: Option<String>,
+    /// Buttons held last frame (for START), and buttons still held from a menu: ignored by the riding
+    /// until they are let go, so the A that chose a location is not a push.
+    menu_prev: u32,
+    blocked: u32,
 }
 
 /// Lines kept while nobody takes them.
@@ -249,6 +264,13 @@ impl Game {
             ticks: 0,
             prev_view: None,
             alpha: 1.0,
+            locations: alloc::vec![Location::demo()],
+            location: 0,
+            menu: None,
+            request: None,
+            loading: None,
+            menu_prev: 0,
+            blocked: 0,
         }
     }
 
@@ -289,15 +311,69 @@ impl Game {
         self.rider.as_ref()
     }
 
-    /// Rides an imported park (`fg_import park`) instead of the demo park, starting at its spawn.
+    /// Rides an imported park (`fg_import park`) instead of the demo park (or the park loaded before),
+    /// starting at its spawn. The bytes stay borrowed until [`Game::unload_park`]: the Wii reads the park's
+    /// textures in place. On an error the park ridden before stays.
     pub fn load_park(&mut self, pack: &'static [u8]) -> Result<(), collision::Error> {
         let p = ImportedPark::parse(pack)?;
-        let clips = self.skater.clips;
-        self.skater = Skater::spawn_with(&p.mesh, self.tuning, self.stance);
-        self.skater.clips = clips;
-        self.cam.request_reset();
         self.imported_park = Some(p);
+        self.start_over();
         Ok(())
+    }
+
+    /// Drops the imported park (back to the demo park, at its spawn). Afterwards nothing refers to the
+    /// pack given to [`Game::load_park`] any more, so the platform may free it.
+    pub fn unload_park(&mut self) {
+        self.imported_park = None;
+        self.start_over();
+    }
+
+    /// A fresh start on whatever park is loaded now (a new location): the rider at the spawn, the
+    /// camera cut to it, the flick reader and both state graphs started over, nothing blended from the
+    /// last frame, the old park's checkpoints gone.
+    fn start_over(&mut self) {
+        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        self.skater.reset_to_spawn(ground);
+        self.flick.reset();
+        self.cam.request_reset();
+        self.prev_view = None;
+        self.popup = None;
+        if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
+            g.runner.reset(Some(&lib.db));
+            g.input.reset();
+        }
+    }
+
+    /// The places to ride (from the platform's location index). The demo park is added at the end; the
+    /// demo park is what is loaded until the platform loads another and sets [`Game::location`].
+    pub fn set_locations(&mut self, mut list: Vec<Location>) {
+        list.retain(|l| !l.is_demo());
+        list.push(Location::demo());
+        self.location = list.len() - 1;
+        self.locations = list;
+    }
+
+    /// Shows the start menu (at boot) with the location being ridden highlighted.
+    pub fn open_start_menu(&mut self) {
+        self.menu = Some(Menu::start(self.location, self.menu_prev));
+    }
+
+    /// What the game wants the platform to do, once.
+    pub fn take_request(&mut self) -> Option<Request> {
+        self.request.take()
+    }
+
+    /// A menu's decision. `held`: the buttons down as it closes (ignored by the riding until let go).
+    fn choose(&mut self, c: Choice, held: u32) {
+        self.menu = None;
+        self.blocked = held;
+        match c {
+            Choice::Resume => {}
+            Choice::Respawn => self.restart_at_spawn(),
+            Choice::Quit => self.request = Some(Request::Quit),
+            Choice::Ride(i) if i == self.location => {}
+            Choice::Ride(i) => self.request = Some(Request::Load(i.min(self.locations.len() - 1))),
+        }
     }
 
     /// Uses a rules pack (`fg_import rules`): Skate 3's tuning values and flick shapes from the player's
@@ -440,6 +516,29 @@ impl Game {
     pub fn update(&mut self, raw: &PadRaw, dt: f32) {
         self.connected = raw.flags & flag::CONNECTED != 0;
         self.events.clear();
+        let pressed = raw.buttons & !self.menu_prev;
+        self.menu_prev = raw.buttons;
+        // A menu freezes the riding and takes the pad (the d-pad moves its cursor, not the rider's
+        // gestures).
+        if let Some(menu) = &mut self.menu {
+            if let Some(c) = menu.update(raw, dt, self.locations.len(), self.location) {
+                self.choose(c, raw.buttons);
+            }
+            return;
+        }
+        if self.loading.is_some() {
+            return;
+        }
+        if pressed & btn::START != 0 {
+            self.menu = Some(Menu::pause(raw.buttons));
+            return;
+        }
+        self.blocked &= raw.buttons;
+        let unblocked = PadRaw {
+            buttons: raw.buttons & !self.blocked,
+            ..*raw
+        };
+        let raw = &unblocked;
         self.ahead -= dt;
         // A little slack so float error never runs (or skips) a tick at 60 Hz.
         while self.ahead < -1e-4 {
@@ -644,6 +743,23 @@ impl Game {
         let now = || self.timer.map_or(0, |f| f());
         let t0 = now();
         let cam = self.drawn_camera();
+        if let Some(text) = &self.loading {
+            gfx.begin_frame(&cam, rgb(0, 0, 0));
+            let mut m = MeshBuilder::new();
+            m.rect_2d(0.0, 0.0, SCREEN_W, SCREEN_H, rgb(0, 0, 0));
+            hud::text_centered(
+                &mut m,
+                SCREEN_W / 2.0,
+                200.0,
+                5.0,
+                "LOADING",
+                rgb(255, 230, 90),
+            );
+            hud::text_centered(&mut m, SCREEN_W / 2.0, 250.0, 3.0, text, rgb(255, 255, 255));
+            gfx.draw_2d(&m.verts);
+            gfx.end_frame();
+            return;
+        }
         gfx.begin_frame(&cam, SKY);
         let (draws, verts) = match &self.imported_park {
             Some(p) => p.draw(gfx, cam.eye),
@@ -811,6 +927,12 @@ impl Game {
             };
             hud::text(&mut m, 24.0, 52.0, 2.5, &line, colour);
         }
+        if let Some(menu) = &self.menu {
+            let names: Vec<&str> = self.locations.iter().map(|l| l.name.as_str()).collect();
+            menu.draw(&mut m, &names, self.location);
+            gfx.draw_2d(&m.verts);
+            return;
+        }
         if let Some(n) = &self.notice
             && self.clock < HINT_TIME
         {
@@ -833,6 +955,7 @@ impl Game {
                 "STICK STEER - FULL BACK + SIDE: POWERSLIDE",
                 "C-STICK: PULL BACK, FLICK UP TO OLLIE",
                 "FLICK OR ROLL FOR FLIPS - HOLD LIGHT: MANUAL",
+                "START: MENU - CHANGE LOCATION",
             ]
             .iter()
             .enumerate()
@@ -840,7 +963,7 @@ impl Game {
                 hud::text_centered(
                     &mut m,
                     SCREEN_W / 2.0,
-                    392.0 + 18.0 * i as f32,
+                    374.0 + 18.0 * i as f32,
                     3.0,
                     line,
                     white,

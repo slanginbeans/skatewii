@@ -95,11 +95,24 @@ void fg_draw_2d(const FgVertex *verts, uint32_t count);
 // The vertices are copied, so the caller's buffer only has to live for the call.
 void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
                      uint32_t index_count, const FgTexture *tex, const float model[3][4]);
+// fg_draw_indexed for vertices the GPU reads in place, not copied: 32-byte aligned, flushed from the CPU
+// cache (fg_flush_range) after they were written, and alive until the frame that draws them is done.
+// Misaligned arrays are skipped.
+void fg_draw_indexed_static(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
+                            uint32_t index_count, const FgTexture *tex, const float model[3][4]);
+// Writes `size` bytes at `data` out of the CPU's data cache, so the GPU sees them.
+void fg_flush_range(const void *data, uint32_t size);
 // Microseconds from a free-running CPU timer (wraps every ~71 minutes; subtract with wrap-around).
 uint32_t fg_time_us(void);
-// Reads a whole file (e.g. "sd:/apps/flatground/data/skater.fgpak") into 32-byte aligned memory that is never
-// freed, flushed for the GPU. NULL if there is no such file or no SD/USB storage.
+// Reads a whole file (e.g. "sd:/apps/flatground/data/skater.fgpak") into 32-byte aligned memory, flushed for
+// the GPU. NULL if there is no such file or no SD/USB storage. Kept until fg_free_file (packs the game keeps
+// for the whole session are never freed).
 void *fg_load_file(const char *path, uint32_t *size);
+// Gives back what fg_load_file returned (NULL: nothing). Nothing may use it afterwards, the GPU included: call
+// it after the frame that last drew from it has finished (fg_end_frame waits for that).
+void fg_free_file(void *data);
+// Writes a whole (small) file, replacing it: settings in the app folder. 0 on success, -1 if it couldn't.
+int32_t fg_save_file(const char *path, const void *data, uint32_t size);
 void fg_end_frame(void);
 // One line for the session log (no trailing newline needed). `important`: written to the card at once.
 void fg_log(const char *line, uint32_t len, int32_t important);
@@ -110,6 +123,7 @@ void fg_panic(const char *msg, uint32_t len) __attribute__((noreturn));
 
 // ---- Provided by Rust (libfg_game.a) ----
 void fg_rust_init(void);
-void fg_rust_frame(const FgPadRaw *pad, float dt);
+// Nonzero: the player chose to quit to the loader.
+int32_t fg_rust_frame(const FgPadRaw *pad, float dt);
 
 #endif

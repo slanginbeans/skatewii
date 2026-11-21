@@ -37,7 +37,9 @@ use xdvdfs::{Disc, DiscFile};
 
 const USAGE: &str = "usage:
   fg_import build    [options]                    convert what the game loads into the app folder (only
-                                                  what is missing or out of date; `fg_import build -h`)
+                                                  what is missing or out of date; `fg_import build -h`):
+                                                  the skater, motion, rules, and every location
+                                                  (data/parks/<name>.fgpak + data/parks.txt)
   fg_import ls       <disc.iso> [dir]             list a directory on the disc
   fg_import tree     <disc.iso>                   list every file on the disc with its size
   fg_import big      <disc.iso> <file.big>        list the entries of a BIG archive on the disc
@@ -55,6 +57,7 @@ const USAGE: &str = "usage:
                         DownTownSkatePark, SkateSchool or MaloofMoneyCup
       --max <n>         largest texture edge for the models (default 128; 0: no models)
       --out <dir>       output directory (default: imported)
+      --file <name>     the pack's file name inside --out (default park.fgpak)
   fg_import rules    <disc.iso> [--out <dir>]     Skate 3's riding tuning and flick shapes as rules.fgpak
   fg_import skater   <disc.iso> [options]         the default skater as skinned meshes + textures
       --lod <0|2>       model detail (default 0)
