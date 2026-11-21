@@ -20,9 +20,46 @@ pub const PARKS: &[&str] = &[
     "MaloofMoneyCup",
 ];
 
+/// The parks `fg_import build` converts as locations (in menu order, after the default). Left out:
+/// StartPark (an empty warehouse: no rails, nothing sloped to ride), SkateSchool (a district-sized area,
+/// 8.6 MB and 158k vertices: too much to draw on the Wii; `FG_PARK=SkateSchool` still converts it), see
+/// docs/importing.md.
+pub const LOCATIONS: &[&str] = &[
+    "BlackBoxPark",
+    "MegaPark",
+    "IndustrialSkatePark",
+    "DownTownSkatePark",
+    "MaloofMoneyCup",
+];
+
+/// The name shown in the game's menus.
+pub fn display_name(park: &str) -> String {
+    match park {
+        "DownTownSkatePark" => "Downtown Skate Park".into(),
+        _ => {
+            // Words from the CamelCase name.
+            let mut out = String::new();
+            for (i, c) in park.chars().enumerate() {
+                if i > 0 && c.is_ascii_uppercase() {
+                    out.push(' ');
+                }
+                out.push(c);
+            }
+            out
+        }
+    }
+}
+
+/// The district's name as the disc spells it, for a name in any case.
+pub fn canonical(park: &str) -> Option<&'static str> {
+    PARKS.iter().copied().find(|p| p.eq_ignore_ascii_case(park))
+}
+
 pub struct Options {
     pub park: String,
     pub out: PathBuf,
+    /// The pack's file name inside `out` (default `park.fgpak`).
+    pub file: PathBuf,
     /// Largest texture edge kept for the park's models (0: no models, draw the collision).
     pub max: usize,
 }
@@ -31,6 +68,7 @@ pub fn options(args: &[String]) -> Res<Options> {
     let mut o = Options {
         park: crate::assets::DEFAULT_PARK.into(),
         out: PathBuf::from("imported"),
+        file: PathBuf::from("park.fgpak"),
         max: 128,
     };
     let mut it = args.iter();
@@ -38,12 +76,16 @@ pub fn options(args: &[String]) -> Res<Options> {
         match a.as_str() {
             "--park" => o.park = it.next().ok_or(USAGE)?.clone(),
             "--out" => o.out = PathBuf::from(it.next().ok_or(USAGE)?),
+            "--file" => o.file = PathBuf::from(it.next().ok_or(USAGE)?),
             "--max" => o.max = it.next().ok_or(USAGE)?.parse::<usize>()?.min(1024),
             _ => return Err(format!("unknown option {a}\n{USAGE}").into()),
         }
     }
-    if !PARKS.iter().any(|p| p.eq_ignore_ascii_case(&o.park)) {
-        return Err(format!("unknown park {}; parks: {}", o.park, PARKS.join(", ")).into());
+    match canonical(&o.park) {
+        Some(p) => o.park = p.into(),
+        None => {
+            return Err(format!("unknown park {}; parks: {}", o.park, PARKS.join(", ")).into());
+        }
     }
     Ok(o)
 }
@@ -281,9 +323,9 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         }
         items.extend(models);
     }
-    std::fs::create_dir_all(&o.out)?;
     let bytes = pack::write(&items);
-    let path = o.out.join("park.fgpak");
+    let path = o.out.join(&o.file);
+    std::fs::create_dir_all(path.parent().unwrap_or(&o.out))?;
     std::fs::write(&path, &bytes)?;
     println!(
         "{} -> {} ({} KiB), spawn at {:.1?}, yaw {:.0} degrees",
@@ -339,4 +381,20 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         .count();
     println!("sloped (rideable) triangles below 8 m: {ramps}");
     Ok(())
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+
+    #[test]
+    fn names_and_the_build_list() {
+        assert_eq!(display_name("BlackBoxPark"), "Black Box Park");
+        assert_eq!(display_name("MaloofMoneyCup"), "Maloof Money Cup");
+        assert_eq!(display_name("DownTownSkatePark"), "Downtown Skate Park");
+        assert_eq!(canonical("megapark"), Some("MegaPark"));
+        assert_eq!(canonical("Nowhere"), None);
+        assert!(LOCATIONS.iter().all(|l| PARKS.contains(l)));
+        assert_eq!(LOCATIONS[0], crate::assets::DEFAULT_PARK);
+    }
 }
