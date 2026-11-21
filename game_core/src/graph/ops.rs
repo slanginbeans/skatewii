@@ -308,6 +308,8 @@ pub enum Beh {
         angle: Str,
     },
     BodyFlippingSignal,
+    /// FakieHeadChannel: the fakie head and torso channel.
+    FakieHead,
     /// Behaviours with nothing to do in flatground (hand services, debug text, off-board helpers).
     Nothing,
     Unsupported(Str),
@@ -327,12 +329,25 @@ pub enum Flag {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PushOp {
     Init,
-    Cycle,
-    Out { right: bool },
+    /// PushCycle: `foot` is its `newPushName` intent (`RightPush` / `LeftPush`).
+    Cycle {
+        foot: Str,
+    },
+    Out {
+        right: bool,
+    },
     FirstStrength,
-    Coefs,
-    RepushDeadline,
-    TargetCoefs,
+    /// SetPushCoefs (`onFirstUpdateOnly`).
+    Coefs {
+        first_only: bool,
+    },
+    /// ComputeRepushDeadline / ComputeTargetCoefsFromSpeedAndStrength (`regularAttributes`).
+    RepushDeadline {
+        regular: bool,
+    },
+    TargetCoefs {
+        regular: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -624,7 +639,6 @@ const NOTHING: &[&str] = &[
     "MatchCadence",
     "MatchAirTime",
     "OffboardBodyTweakBlend",
-    "FakieHeadChannel",
     "SetDistComToBoard",
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
@@ -785,14 +799,25 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         "SetGrabType" => Beh::SetGrabType(a.str("grab")),
         "ScoringGrabs" => Beh::ScoringGrabs,
         "InitPush" => Beh::Push(PushOp::Init),
-        "PushCycle" => Beh::Push(PushOp::Cycle),
+        "PushCycle" => Beh::Push(PushOp::Cycle {
+            foot: match a.get("newPushName") {
+                Some(_) => a.str("newPushName"),
+                None => p.find("LeftPush").unwrap_or(NONE),
+            },
+        }),
         "PushOut" => Beh::Push(PushOp::Out {
             right: a.b("isRightFoot", true),
         }),
         "ComputeFirstPushStrength" => Beh::Push(PushOp::FirstStrength),
-        "SetPushCoefs" => Beh::Push(PushOp::Coefs),
-        "ComputeRepushDeadline" => Beh::Push(PushOp::RepushDeadline),
-        "ComputeTargetCoefsFromSpeedAndStrength" => Beh::Push(PushOp::TargetCoefs),
+        "SetPushCoefs" => Beh::Push(PushOp::Coefs {
+            first_only: a.b("onFirstUpdateOnly", false),
+        }),
+        "ComputeRepushDeadline" => Beh::Push(PushOp::RepushDeadline {
+            regular: a.b("regularAttributes", true),
+        }),
+        "ComputeTargetCoefsFromSpeedAndStrength" => Beh::Push(PushOp::TargetCoefs {
+            regular: a.b("regularAttributes", true),
+        }),
         "CreateSlide" => Beh::CreateSlide {
             right: a.b("right", true),
         },
@@ -832,6 +857,7 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
             angle: a.str("MGIntentAngle"),
         },
         "BodyFlippingSignal" => Beh::BodyFlippingSignal,
+        "FakieHeadChannel" => Beh::FakieHead,
         _ if NOTHING.contains(&name) => Beh::Nothing,
         _ if UNSUPPORTED.contains(&name) => Beh::Unsupported(NONE),
         _ => Beh::Unsupported(NONE),

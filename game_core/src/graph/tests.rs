@@ -475,3 +475,325 @@ mod runner {
         assert!(!r.s.ag.has(r.pack.find("RightPush").unwrap()));
     }
 }
+
+/// The whole game on a synthetic motion pack (made-up clips, a made-up pair of graphs shaped like the
+/// manual part of Skate 3's): the pad through the action graph, the motion graph and the physics.
+mod in_game {
+    use super::*;
+    use crate::game::Game;
+    use crate::input::{PadRaw, flag as pad_flag};
+    use crate::pack::Kind;
+
+    fn has(intent: &str, cmp: &str, v: &str, mask: &str) -> Element {
+        Element::of(
+            "condition",
+            &[
+                ("name", "HasIntent"),
+                ("intent", intent),
+                (cmp, v),
+                ("mask", mask),
+            ],
+            vec![],
+        )
+    }
+
+    /// Action graph: the C-stick's `Manual` and how long it has been held, as motion intents. Motion
+    /// graph: `OnBoard/Riding/Turning/Manual/TailManual` once held over 0.2 s, while `Manual` < 0.
+    pub fn manual_graphs() -> Vec<u8> {
+        let action = st(
+            "Action",
+            &[],
+            vec![
+                Element::of(
+                    "behaviour",
+                    &[
+                        ("name", "CreateMGIntentFromAGIntent"),
+                        ("MGIntent", "Manual"),
+                        ("AGIntent", "Manual"),
+                    ],
+                    vec![],
+                ),
+                Element::of(
+                    "behaviour",
+                    &[
+                        ("name", "CreateMGTimeIntentFromAGIntent"),
+                        ("MGIntent", "ManualEngageTime"),
+                        ("AGIntent", "Manual"),
+                    ],
+                    vec![],
+                ),
+            ],
+        );
+        let manual = st(
+            "Manual",
+            &[],
+            vec![
+                when(vec![has("ManualEngageTime", "greater", "0.2", "precond")]),
+                st(
+                    "TailManual",
+                    &[],
+                    vec![when(vec![has("Manual", "less", "0.0", "always")])],
+                ),
+            ],
+        );
+        let motion = st(
+            "Motion",
+            &[],
+            vec![st(
+                "OnBoard",
+                &[],
+                vec![st(
+                    "Riding",
+                    &[],
+                    vec![st("Turning", &[], vec![manual, st("Idle", &[], vec![])])],
+                )],
+            )],
+        );
+        crate::graph::write::compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap()
+    }
+
+    fn game() -> Game {
+        let bytes = crate::motion::tests::pack(&[
+            ("motion/db", Kind::MotionDb, crate::motion::tests::lib()),
+            ("motion/graph", Kind::StateGraph, manual_graphs()),
+        ]);
+        let mut g = Game::new();
+        g.load_motion(alloc::boxed::Box::leak(bytes.into_boxed_slice()))
+            .unwrap();
+        assert!(g.graph.is_some());
+        g
+    }
+
+    #[test]
+    fn a_held_manual_lasts_until_the_stick_is_let_go() {
+        let mut g = game();
+        g.skater.speed = 4.0;
+        let light_back = PadRaw {
+            flags: pad_flag::CONNECTED,
+            cstick_y: -47,
+            ..PadRaw::default()
+        };
+        let mut manual = 0;
+        for _ in 0..(60 * 4) {
+            g.update(&light_back, 1.0 / 60.0);
+            manual += g.skater.manual.is_some() as u32;
+        }
+        let state = g.graph.as_ref().unwrap().runner.motion_state();
+        assert!(state.ends_with("Manual/TailManual"), "{state}");
+        assert!(manual >= 3 * 60, "manualled for {manual} ticks");
+        g.update(
+            &PadRaw {
+                flags: pad_flag::CONNECTED,
+                ..PadRaw::default()
+            },
+            1.0 / 60.0,
+        );
+        g.update(&PadRaw::default(), 1.0 / 60.0);
+        assert!(g.skater.manual.is_none());
+    }
+}
+
+/// Phase 4: channels, the typed operations, string lookups, gesture order, air tricks.
+mod phase4 {
+    use super::*;
+    use crate::graph::ops::{Op, TransitionDef};
+    use crate::graph::playback::{ChannelSettings, Fade, Player, PoseOp, PoseProgram, Tree};
+    use crate::motion::MotionDb;
+    use crate::motion::tree::Playback;
+
+    fn tree(db: &MotionDb, name: &str) -> Tree {
+        let node = db.find(name).unwrap();
+        Tree {
+            play: Playback::build_node(db, node, &[], &mut Vec::new()).unwrap(),
+            mirror: false,
+            name: NONE,
+        }
+    }
+
+    fn blend(kind: u8, first: bool) -> TransitionDef {
+        TransitionDef {
+            kind,
+            seconds: 0.2,
+            under: false,
+            matching: 0,
+            channels_from_weights: first,
+        }
+    }
+
+    #[test]
+    fn channel_blends_are_their_own_pose_operation() {
+        let bytes = crate::motion::tests::lib();
+        let db = MotionDb::parse(&bytes).unwrap();
+        let mut p = Player::default();
+        p.play(&db, tree(&db, "LOOP_A"), 1.0, blend(1, false));
+        p.play(&db, tree(&db, "LOOP_B"), 1.0, blend(3, true));
+        p.advance(&db, 0.1);
+        let mut prog = PoseProgram::default();
+        p.program(&mut prog, &mut Vec::new());
+        assert_eq!(prog.ops.len(), 3, "{:?}", prog.ops);
+        assert!(
+            matches!(prog.ops[2], PoseOp::Channel { first: true, weight } if weight > 0.0 && weight < 1.0)
+        );
+        let shares: f32 = prog.shares().iter().map(|s| s.1).sum();
+        assert!((shares - 1.0).abs() < 1e-4);
+        // A plain blend stays a blend.
+        p.play(&db, tree(&db, "SHORT"), 1.0, blend(2, false));
+        p.program(&mut prog, &mut Vec::new());
+        assert!(matches!(prog.ops.last(), Some(PoseOp::Blend(_))));
+    }
+
+    #[test]
+    fn a_channel_fades_in_over_the_animation_and_out_when_ended() {
+        let bytes = crate::motion::tests::lib();
+        let db = MotionDb::parse(&bytes).unwrap();
+        let mut p = Player::default();
+        p.play(&db, tree(&db, "LOOP_A"), 1.0, blend(1, false));
+        let settings = ChannelSettings {
+            priority: 0,
+            keep_alive: true,
+            speed: 1.0,
+            blend_in: 0.3,
+            hold_in: false,
+            blend_out: 0.3,
+            hold_out: false,
+        };
+        p.transition_channel(
+            &db,
+            7,
+            tree(&db, "LOOP_B"),
+            settings,
+            blend(2, false),
+            true,
+            true,
+        );
+        for _ in 0..30 {
+            p.advance(&db, 1.0 / 60.0);
+        }
+        assert!((p.channel_weight(7) - 1.0).abs() < 1e-4);
+        let mut prog = PoseProgram::default();
+        p.program(&mut prog, &mut Vec::new());
+        assert!(matches!(
+            prog.ops.last(),
+            Some(PoseOp::Channel { first: false, .. })
+        ));
+        p.end_channel(7);
+        for _ in 0..40 {
+            p.advance(&db, 1.0 / 60.0);
+        }
+        assert!(!p.has_channel(7), "faded out and gone");
+        // Fades use the time before the step, as Skate 3's.
+        let mut f = Fade::new(settings);
+        f.advance(0.15, 1.0);
+        assert_eq!(f.weight, 0.0);
+        f.advance(0.15, 1.0);
+        assert!((f.weight - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn typed_operations_read_back_the_same() {
+        let action = st(
+            "Action",
+            &[],
+            vec![Element::of(
+                "behaviour",
+                &[
+                    ("name", "CreateMGIntentFromAGIntent"),
+                    ("MGIntent", "Manual"),
+                    ("AGIntent", "Manual"),
+                    ("scale", "2.0"),
+                ],
+                vec![],
+            )],
+        );
+        let motion = st(
+            "Motion",
+            &[],
+            vec![
+                st(
+                    "A",
+                    &[],
+                    vec![
+                        when(vec![Element::of(
+                            "condition",
+                            &[("name", "HasIntent"), ("intent", "Manual"), ("less", "0.0")],
+                            vec![],
+                        )]),
+                        Element::of(
+                            "behaviour",
+                            &[("name", "PushCycle"), ("newPushName", "RightPush")],
+                            vec![],
+                        ),
+                        Element::of("behaviour", &[("name", "FakieHeadChannel")], vec![]),
+                    ],
+                ),
+                st("B", &[], vec![]),
+            ],
+        );
+        let bytes = compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap();
+        let pack = Pack::parse(&bytes).unwrap();
+        let typed: Vec<Vec<Op>> = pack
+            .graphs
+            .iter()
+            .map(|g| crate::graph::ops::parse(&pack, g, None))
+            .collect();
+        let code = crate::graph::opcode::encode(bytes.len(), &typed);
+        assert_eq!(
+            crate::graph::opcode::decode(&code, bytes.len()).as_ref(),
+            Some(&typed)
+        );
+        // Made for another graph entry: not used.
+        assert!(crate::graph::opcode::decode(&code, bytes.len() + 1).is_none());
+        assert!(crate::graph::opcode::decode(&code[..code.len() - 1], bytes.len()).is_none());
+        let r =
+            crate::graph::host::Runner::with_ops(Pack::parse(&bytes).unwrap(), None, Some(typed));
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn strings_are_found_by_binary_search() {
+        let bytes = compile(&[("G", &riding())]).unwrap();
+        let p = Pack::parse(&bytes).unwrap();
+        for i in 0..p.strings() as u16 {
+            assert_eq!(p.find(p.str(i)), Some(i), "{}", p.str(i));
+        }
+        assert_eq!(p.find("NotThere"), None);
+    }
+
+    #[test]
+    fn simultaneous_gestures_go_by_skate_3s_hash_bucket() {
+        use crate::graph::host::gesture_bucket;
+        // The engine's text encoding folds case; the bucket is the words' sum modulo 43.
+        assert_eq!(gesture_bucket("Kickflip"), gesture_bucket("KICKFLIP"));
+        assert!(gesture_bucket("360InwardHeelflip") < 43);
+        // "A": one digit (11) at the first weight, 38^5.
+        assert_eq!(gesture_bucket("A"), (11 * 79_235_168u32) % 43);
+    }
+
+    #[test]
+    fn air_tricks_by_their_scoring_names() {
+        use crate::gesture::Trick;
+        use crate::graph::drive::{air_flick, air_trick_state};
+        assert_eq!(air_flick("Kickflip3").0.trick, Trick::Kickflip);
+        assert_eq!(air_flick("Kickflip3").1, 3);
+        assert_eq!(air_flick("N_Heelflip").0.trick, Trick::Heelflip);
+        assert_eq!(air_flick("L_F_Heelflip").0.trick, Trick::Heelflip);
+        assert_eq!(air_flick("U_Kickflip").0.trick, Trick::Kickflip);
+        assert_eq!(air_flick("FS_Varial").0.trick, Trick::VarialKickflip);
+        assert!(air_trick_state(
+            "OnBoard/Trick/TailTrick/Kickflip/LeftGround/Default"
+        ));
+        assert!(!air_trick_state(
+            "OnBoard/Trick/TailTrick/Kickflip/Takeoff/FromAntic"
+        ));
+        assert!(air_trick_state("OnBoard/InAir/Lateflip/LateKickflip"));
+        assert!(!air_trick_state("OnBoard/InAir/InAirStatic/Air/Default"));
+    }
+}

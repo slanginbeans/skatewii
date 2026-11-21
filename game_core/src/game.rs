@@ -145,7 +145,7 @@ pub struct Game {
     /// Gesture files from the rules pack, by name (for the graph's input).
     gesture_sets: Vec<(&'static str, Vec<gesture::Shape>)>,
     /// The clips the motion graph plays this frame (reused buffer).
-    leaves: Vec<crate::graph::playback::Leaf>,
+    pose: crate::graph::playback::PoseProgram,
     pub skater: Skater,
     flick: FlickInput,
     /// This frame's flick-stick reading (for the preview and tests).
@@ -229,7 +229,7 @@ impl Game {
             motion: None,
             graph: None,
             gesture_sets: Vec::new(),
-            leaves: Vec::new(),
+            pose: Default::default(),
             imported_park: None,
             log: Vec::new(),
             devlog: DevLog::new(),
@@ -264,9 +264,11 @@ impl Game {
             && let Some(e) = p.find("motion/graph")
         {
             let t0 = self.timer.map_or(0, |f| f());
-            match crate::graph::drive::Driver::new(e.data, &lib.db, self.gesture_sets()) {
+            let ops = p.find(crate::graph::opcode::ENTRY).map(|o| o.data);
+            match crate::graph::drive::Driver::new(e.data, ops, &lib.db, self.gesture_sets()) {
                 Ok(mut d) => {
                     d.load_us = self.timer.map_or(0, |f| f()).wrapping_sub(t0);
+                    d.set_tuning(&self.tuning);
                     self.graph = Some(d)
                 }
                 Err(e) => self.notice = Some(format!("state graphs unreadable ({e:?})")),
@@ -320,10 +322,19 @@ impl Game {
         let sets = self.gesture_sets();
         if let Some(g) = &mut self.graph {
             g.set_gestures(sets);
+            g.set_tuning(&self.tuning);
         }
         self.skater.tuning = self.tuning;
         self.cam = ChaseCam::new(&self.skater);
         Ok((values, shapes))
+    }
+
+    /// A shape of a gesture file from the rules pack (`skaterls`, `SlideFs180` ...), if loaded.
+    pub fn gesture_shape(&self, set: &str, name: &str) -> Option<&gesture::Shape> {
+        self.gesture_sets
+            .iter()
+            .find(|s| s.0 == set)
+            .and_then(|s| s.1.iter().find(|x| x.name == name))
     }
 
     /// The gesture files for the graph's input: the disc's, else flatground's own flick shapes.
@@ -375,8 +386,8 @@ impl Game {
             let mut posed = false;
             if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
             {
-                g.runner.leaves(&mut self.leaves);
-                posed = r.update_graph(lib, &self.leaves, rot);
+                g.runner.pose(&mut self.pose);
+                posed = r.update_graph(lib, &self.pose, rot);
             }
             if !posed && let Some(r) = &mut self.rider {
                 r.update(&self.skater, self.clock, land_in, dt, rot);
@@ -449,6 +460,7 @@ impl Game {
                 finger_flips_blocked: s.grab.is_none(),
                 reverts_blocked: false,
                 grinding: s.mode == Mode::Grind,
+                ..Default::default()
             };
             g.tick(&lib.db, &pad, world, gates, dt, self.timer);
             self.skater.graph = Some(g.control(&lib.db, &self.tuning));
@@ -606,6 +618,10 @@ impl Game {
             lift = 0.28 * sinf(PI * p);
             board_rot =
                 Mat3::rot_y(shove * PI * p).mul(&Mat3::rot_z(flip * t.flips as f32 * TAU * p));
+        }
+        // Caught dark (or riding dark): grip down.
+        if s.dark || s.trick.is_some_and(|t| t.dark && t.progress() >= 1.0) {
+            board_rot = board_rot.mul(&Mat3::rot_z(PI));
         }
         let pivot = 0.09;
         let board = base

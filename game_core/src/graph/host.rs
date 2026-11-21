@@ -15,7 +15,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::ops::{self, Beh, Cond, Flag, Group, Hook, Op, PushOp, phys};
-use super::playback::{Leaf, Player, Tree};
+use super::playback::{ChannelSettings, Player, PoseProgram, Tree};
+use super::push::{self, PushCurves, PushSets, PushState};
 use super::{Controller, Frame, Graph, NONE, OpId, Pack, Str};
 use crate::motion::tree::{Attr, Playback, PoseCommand};
 use crate::motion::{KIND_CURVE, KIND_SCALAR, MotionDb, NameId};
@@ -75,7 +76,7 @@ pub struct World {
     /// Speed (m/s) and speed along the board (negative: rolling tail first).
     pub speed: f32,
     pub forward_speed: f32,
-    /// Speed plus the downhill pull of the slope (m/s).
+    /// The downhill turn torque share at this speed and slope (`drive::speed_and_slope`).
     pub speed_and_slope: f32,
     /// The graph's name of the grind being done (string id), or `NONE`.
     pub grind: Str,
@@ -174,6 +175,12 @@ pub struct Names {
     pub tweak_x: Str,
     pub tweak_y: Str,
     pub pushing: Str,
+    pub new_push: Str,
+    /// The push trees' parameters (motion-library names): `HSTR_VEL_B`, `LSTR_VEL_B`, `VEL_E`.
+    push_params: [Option<NameId>; 3],
+    /// The fakie head and torso channel's tree and its `torso` parameter.
+    fakie_tree: Option<crate::motion::Node>,
+    torso: Option<NameId>,
     /// Motion-library names: the construction keys `Trick` and `Random`, `manualInto`, `defaultcyc`.
     trick_key: Option<NameId>,
     random_key: Option<NameId>,
@@ -213,6 +220,14 @@ pub struct Shared {
     /// Sources the motion graph reads from the previous animation (`lastAnim`, SetTrickHeight `from`).
     last_sources: Vec<NameId>,
     pub push_count: u32,
+    /// The push behaviours' shared state, the push sets (regular foot, mongo) and the curves.
+    pub push: PushState,
+    pub push_sets: [PushSets; 2],
+    pub push_curves: PushCurves,
+    /// The speed the playing push coefficients end at (m/s): what the board chases in push contact.
+    pub push_speed: f32,
+    /// Seconds since the rider was (re)placed on the board.
+    pub time_since_teleport: f32,
 }
 
 impl Shared {
@@ -274,6 +289,46 @@ const TAIL_KEYS: [&str; 15] = [
     "Kickflip",
     "Heelflip",
 ];
+
+/// The hash bucket Skate 3's gesture-to-trick table keeps a gesture in (SK8 gesture_mapping.rs
+/// `select`): the sum of the name's encoded words (`intent_key`: the engine's five-word text encoding of
+/// the first 30 characters, plus the first word of the rest) modulo 43. When several gestures are
+/// recognised on the same tick, the one in the lowest bucket becomes the trick.
+pub fn gesture_bucket(name: &str) -> u32 {
+    fn encode(text: &[u8]) -> [u32; 5] {
+        let mut words = [0u32; 5];
+        let mut at = 0;
+        while at < 30 && at < text.len() && text[at] != 0 {
+            let mut weight = 79_235_168u32; // 38^5
+            let word = at / 6;
+            let mut n = 0;
+            while n < 6 && at < text.len() && text[at] != 0 {
+                let byte = text[at] as i8 as i32;
+                let digit = if byte >= 97 {
+                    byte - 86
+                } else if byte > 90 {
+                    byte - 58
+                } else if byte > 57 {
+                    byte - 54
+                } else {
+                    byte - 47
+                };
+                words[word] = words[word].wrapping_add((digit as u32).wrapping_mul(weight));
+                weight /= 38;
+                n += 1;
+                at += 1;
+            }
+        }
+        words
+    }
+    let b = name.as_bytes();
+    let tail = if b.len() > 30 && !b[..30].contains(&0) {
+        encode(&b[30..])[0]
+    } else {
+        0
+    };
+    encode(b).iter().fold(tail, |sum, w| sum.wrapping_add(*w)) % 43
+}
 
 /// The other-foot version of a trick (a mirrored rider's flick does the opposite trick).
 pub fn mirror_trick(t: &str) -> String {
@@ -399,10 +454,24 @@ pub struct Runner<'a> {
 }
 
 pub const ACTION: &str = "ActionGraph_OnBoard";
+/// The fakie head and torso channel's tree (SK8 FakieHeadChannel).
+pub const FAKIE_CHANNEL: &str = "B_FAKIE_CHANNEL";
+/// The channel's name (an id no graph string has).
+pub const CHANNEL_FAKIE: u16 = NONE - 1;
 pub const MOTION: &str = "MotionGraph_OnBoard";
 
 impl<'a> Runner<'a> {
     pub fn new(pack: Pack<'a>, db: Option<&MotionDb>) -> Option<Runner<'a>> {
+        Runner::with_ops(pack, db, None)
+    }
+
+    /// `typed`: every graph's operations as the importer typed them (`graph::opcode`), in pack order;
+    /// without them they are parsed here.
+    pub fn with_ops(
+        pack: Pack<'a>,
+        db: Option<&MotionDb>,
+        typed: Option<Vec<Vec<Op>>>,
+    ) -> Option<Runner<'a>> {
         let action = pack
             .graphs
             .iter()
@@ -411,8 +480,21 @@ impl<'a> Runner<'a> {
             .graphs
             .iter()
             .position(|g| pack.str(g.name) == MOTION)?;
-        let ag_ops = ops::parse(&pack, &pack.graphs[action], db);
-        let mg_ops = ops::parse(&pack, &pack.graphs[motion], db);
+        let (ag_ops, mg_ops) = match typed {
+            Some(mut t) if t.len() == pack.graphs.len() => (
+                core::mem::take(&mut t[action]),
+                core::mem::take(&mut t[motion]),
+            ),
+            _ => (
+                ops::parse(&pack, &pack.graphs[action], db),
+                ops::parse(&pack, &pack.graphs[motion], db),
+            ),
+        };
+        if ag_ops.len() != pack.graphs[action].ops.len()
+            || mg_ops.len() != pack.graphs[motion].ops.len()
+        {
+            return None;
+        }
         let id = |s: &str| pack.find(s).unwrap_or(NONE);
         let lib = |s: &str| db.and_then(|d| d.name_id(s));
         let names = Names {
@@ -426,6 +508,11 @@ impl<'a> Runner<'a> {
             tweak_x: id("TweakX"),
             tweak_y: id("TweakY"),
             pushing: id("Pushing"),
+            new_push: id("NewPush"),
+            push_params: ["HSTR_VEL_B", "LSTR_VEL_B", "VEL_E"]
+                .map(|n| lib(n).or_else(|| lib(&n.to_ascii_lowercase()))),
+            fakie_tree: db.and_then(|d| d.find(FAKIE_CHANNEL)),
+            torso: lib("TORSO").or_else(|| lib("torso")),
             trick_key: lib("Trick"),
             random_key: lib("Random"),
             manual_into: lib("manualInto"),
@@ -458,7 +545,15 @@ impl<'a> Runner<'a> {
                 gestures.push(i);
             }
         }
+        // In the order SK8's gesture selection visits them: by hash bucket, lowest first (a stable
+        // sort keeps string order within a bucket).
+        gestures.sort_by_key(|&g| gesture_bucket(pack.str(g)));
         let n = pack.strings();
+        let sets = |names| {
+            db.and_then(|d| PushSets::from_motion(d, names))
+                .unwrap_or(PushSets::new(push::BUILT_IN))
+        };
+        let push_sets = [sets(push::REGULAR_CLIPS), sets(push::MONGO_CLIPS)];
         let ag_ctl = Controller::new(&pack.graphs[action]);
         let mg_ctl = Controller::new(&pack.graphs[motion]);
         Some(Runner {
@@ -494,6 +589,13 @@ impl<'a> Runner<'a> {
                 new_unsupported: Vec::new(),
                 last_sources,
                 push_count: 0,
+                push: PushState::default(),
+                push_sets,
+                push_curves: PushCurves {
+                    tuning: crate::tuning::Tuning::BUILT_IN,
+                },
+                push_speed: 0.0,
+                time_since_teleport: 0.0,
             },
             names,
             gestures,
@@ -531,6 +633,7 @@ impl<'a> Runner<'a> {
         self.s.kickturn = None;
         self.s.tricks_disabled = (self.s.tricks_disabled - dt).max(0.0);
         self.s.time_since_kickturn += dt;
+        self.s.time_since_teleport += dt;
         {
             let g = &self.pack.graphs[self.action];
             let mut h = Host {
@@ -602,14 +705,14 @@ impl<'a> Runner<'a> {
         self.s.mg.clear();
         self.s.filtered.clear();
         self.s.flags = [0; 7];
+        self.s.push = PushState::default();
+        self.s.time_since_teleport = 0.0;
     }
 
-    /// The clips to pose this tick (weights sum to 1); commits the clips' event windows.
-    pub fn leaves(&mut self, out: &mut Vec<Leaf>) {
-        out.clear();
-        if let Some(c) = &mut self.s.player.current {
-            c.leaves(true, out, &mut self.scratch);
-        }
+    /// What to pose this tick (the clips and how they blend, channels included); commits the clips'
+    /// event windows.
+    pub fn pose(&mut self, out: &mut PoseProgram) {
+        self.s.player.program(out, &mut self.scratch);
     }
 
     pub fn packet(&self, s: Str) -> Option<f32> {
@@ -771,8 +874,7 @@ impl Host<'_, '_> {
             // Past the push's out point with no push button held (SK8: the repush deadline keeps a
             // held push cycling).
             Cond::BreakOutOfPush => {
-                let len = s.player.length();
-                (len <= 0.0 || s.player.time() >= 0.6 * len) && !s.ag.has(self.n.pushing)
+                s.player.time() >= s.push.out_factor * s.player.length() && !s.push.continue_push
             }
             Cond::SurfaceSlope(n) => n.matches(w.surface_slope),
             Cond::SkateSlope(n) => n.matches(w.skate_slope),
@@ -1127,11 +1229,7 @@ impl Host<'_, '_> {
                 }
             }
             Beh::ScoringGrabs => {}
-            Beh::Push(p) => {
-                if phase == 0 && matches!(p, PushOp::Init | PushOp::Cycle) {
-                    self.s.push_count += 1;
-                }
-            }
+            Beh::Push(p) => self.push(op, *p, phase, dt),
             Beh::CreateSlide { right } => {
                 if phase == 0 {
                     self.s.slide_request = Some(*right);
@@ -1224,8 +1322,160 @@ impl Host<'_, '_> {
                     self.set_intent(*angle, None);
                 }
             }
+            Beh::FakieHead => {
+                if phase == 1 {
+                    self.fakie_head(op);
+                }
+            }
             Beh::BodyFlippingSignal | Beh::Nothing => {}
             Beh::Unsupported(n) => self.s.unsupported(*n),
+        }
+    }
+
+    /// FakieHeadChannel (SK8 motion_channels.rs FakieHead): riding fakie, the fakie channel (head and
+    /// torso looking where the board goes) fades in over the animation, its `torso` share snapped to
+    /// its target on entry, then eased towards it: all of it in a manual, none in a powerslide, half
+    /// otherwise. It fades out when the rider stops riding fakie.
+    fn fakie_head(&mut self, op: OpId) {
+        let s = &mut *self.s;
+        let i = &mut self.inst[op as usize];
+        let fakie = s.world.fakie;
+        let target = if s.flags[flag_index(Flag::Manual)] > 0 {
+            1.0
+        } else if s.flags[flag_index(Flag::PowerSlide)] > 0 {
+            0.0
+        } else {
+            0.5
+        };
+        if fakie && !i.on {
+            if let (Some(db), Some(node)) = (self.db, self.n.fakie_tree)
+                && let Ok(play) = Playback::build_node(db, node, &s.construction, &mut Vec::new())
+            {
+                let settings = ChannelSettings {
+                    priority: 0,
+                    keep_alive: true,
+                    speed: 1.0,
+                    blend_in: 0.3,
+                    hold_in: false,
+                    blend_out: 0.3,
+                    hold_out: false,
+                };
+                let blend = ops::TransitionDef {
+                    kind: 2,
+                    seconds: 0.1,
+                    under: false,
+                    matching: 0,
+                    channels_from_weights: false,
+                };
+                let tree = Tree {
+                    play,
+                    mirror: s.world.mirrored,
+                    name: NONE,
+                };
+                s.player
+                    .transition_channel(db, CHANNEL_FAKIE, tree, settings, blend, true, true);
+            }
+            i.v = target;
+        } else if !fakie && i.on {
+            s.player.end_channel(CHANNEL_FAKIE);
+        }
+        i.on = fakie;
+        if fakie {
+            i.v += (target - i.v).clamp(-0.01, 0.01);
+            if let Some(t) = self.n.torso {
+                s.player.set_param(t, i.v, false);
+            }
+        }
+    }
+
+    /// The push behaviours (SK8 graph_host pushing.rs): push strength from the button, the push trees'
+    /// coefficients, the repush deadline.
+    fn push(&mut self, op: OpId, p: PushOp, phase: u8, dt: f32) {
+        let s = &mut *self.s;
+        let speed = s.world.forward_speed;
+        let curves = s.push_curves;
+        let sets = |regular: bool, s: &Shared| s.push_sets[usize::from(regular == s.world.switch)];
+        let i = &mut self.inst[op as usize];
+        match (p, phase) {
+            (PushOp::Init, 0) => {
+                s.push.init();
+                s.push_count += 1;
+            }
+            (PushOp::FirstStrength, 0) => {
+                let f = push::FirstPush::begin(
+                    s.time_since_teleport,
+                    curves.tuning.push_teleport_window,
+                );
+                (i.t, i.n, i.on) = (f.simulated, i32::from(f.from_teleport), f.first);
+            }
+            (PushOp::FirstStrength, 1) => {
+                let mut f = push::FirstPush {
+                    simulated: i.t,
+                    from_teleport: i.n != 0,
+                    first: i.on,
+                };
+                let pushing = s.mg.get(self.n.pushing);
+                f.update(&mut s.push, &curves, pushing, speed, dt);
+                (i.t, i.on) = (f.simulated, f.first);
+            }
+            (PushOp::TargetCoefs { regular }, 1) => {
+                s.push.regular = regular;
+                s.push.target = sets(regular, s).target(speed, s.push.dv);
+            }
+            (PushOp::Coefs { .. }, 0) => i.on = true,
+            (PushOp::Coefs { first_only }, 1) => {
+                if !first_only || i.on {
+                    s.push.current = curves.ease(s.push.current, s.push.target, speed, dt);
+                    let c = s.push.current;
+                    for (name, v) in self
+                        .n
+                        .push_params
+                        .iter()
+                        .zip([c.strong, c.gentle, c.strength])
+                    {
+                        if let Some(n) = name {
+                            s.player.set_param(*n, v, true);
+                        }
+                    }
+                    s.push_speed = sets(s.push.regular, s).end_speed(c);
+                }
+                i.on = false;
+            }
+            (PushOp::Cycle { foot }, 0 | 1) => {
+                let intents = push::Intents {
+                    pushing: s.mg.get(self.n.pushing),
+                    new_push: s.mg.has(self.n.new_push),
+                    foot: foot != NONE && s.mg.has(foot),
+                };
+                if phase == 0 {
+                    s.push_count += 1;
+                    let c = push::Cycle::begin(&mut s.push, &curves, intents);
+                    (i.n, i.v) = (c.phase as i32, c.next_dv);
+                } else {
+                    let phases = [
+                        push::Phase::HoldingFirst,
+                        push::Phase::WaitingNext,
+                        push::Phase::HoldingNext,
+                        push::Phase::NextReleased,
+                    ];
+                    let mut c = push::Cycle {
+                        phase: phases[(i.n as usize).min(3)],
+                        next_dv: i.v,
+                    };
+                    c.update(&mut s.push, &curves, intents, speed);
+                    (i.n, i.v) = (c.phase as i32, c.next_dv);
+                }
+            }
+            (PushOp::RepushDeadline { regular }, 2) => {
+                let t = &curves.tuning;
+                s.push.out_factor = sets(regular, s).out_factor(
+                    speed,
+                    s.push.dv,
+                    t.push_out_speed_weight,
+                    t.push_out_max,
+                );
+            }
+            _ => {}
         }
     }
 

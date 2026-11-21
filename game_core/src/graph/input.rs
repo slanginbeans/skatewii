@@ -80,6 +80,9 @@ pub struct Gates {
     pub reverts_blocked: bool,
     /// Grinding: only the grind trick-out flicks.
     pub grinding: bool,
+    /// A grab trigger is in, a push button down (body flips need the one and not the other).
+    pub grabbing: bool,
+    pub pushing: bool,
 }
 
 struct Set {
@@ -325,6 +328,11 @@ impl Intentions {
         if still_held {
             put(id.hold_pattern, 1.0);
         }
+        let gates = Gates {
+            grabbing: gates.grabbing || trig > 0.0,
+            pushing: gates.pushing || right || left,
+            ..gates
+        };
         for &(gid, strength) in recognised.iter() {
             if permitted(p.str(gid), gates) {
                 put(id.trick, 1.0);
@@ -354,6 +362,10 @@ pub fn permitted(name: &str, g: Gates) -> bool {
         return false;
     }
     if g.reverts_blocked && matches!(name, "SlideFs180" | "SlideBs180") {
+        return false;
+    }
+    // Body flips only while grabbing, not pushing.
+    if matches!(name, "FrontFlip" | "BackFlip") && (!g.grabbing || g.pushing) {
         return false;
     }
     true

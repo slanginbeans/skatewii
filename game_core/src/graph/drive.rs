@@ -13,7 +13,7 @@ use crate::gesture::Shape;
 use crate::input::Pad;
 use crate::motion::MotionDb;
 use crate::motion::NameId;
-use crate::skater::{GraphControl, GrindKind, Mode, Skater, Stance};
+use crate::skater::{AirTrick, GraphControl, GrindKind, Mode, Skater, Stance};
 use crate::tuning::Tuning;
 
 /// Motion-library names the driver reads from the playing clips.
@@ -23,6 +23,7 @@ struct Clips {
     brake_contact: Option<NameId>,
     jump: Option<NameId>,
     trick_height: Option<NameId>,
+    danger: Option<NameId>,
 }
 
 pub struct Driver {
@@ -62,12 +63,15 @@ const GRIND_NAMES: [(GrindKind, &str); 11] = [
 
 impl Driver {
     /// `entry`: the `motion/graph` pack entry. `sets`: gesture files by name (`skater`, `skaterls`, ...).
+    /// `ops`: the `motion/graph/ops` entry (the operations typed at import), if the pack has it.
     pub fn new(
         entry: &'static [u8],
+        ops: Option<&[u8]>,
         db: &MotionDb,
         sets: Vec<(&str, Vec<Shape>)>,
     ) -> Result<Driver, Error> {
         let pack = Pack::parse(entry)?;
+        let typed = ops.and_then(|o| super::opcode::decode(o, entry.len()));
         let memory = pack.graphs.iter().map(|g| g.memory()).sum();
         let input = Intentions::new(&pack, sets);
         let grinds = GRIND_NAMES.map(|(_, n)| {
@@ -76,7 +80,7 @@ impl Driver {
                     .unwrap_or(super::NONE)
             })
         });
-        let runner = Runner::new(pack, Some(db)).ok_or(Error::Bad)?;
+        let runner = Runner::with_ops(pack, Some(db), typed).ok_or(Error::Bad)?;
         Ok(Driver {
             runner,
             input,
@@ -90,6 +94,7 @@ impl Driver {
                 brake_contact: db.name_id("BRAKE_CONTACT"),
                 jump: db.name_id("JUMP"),
                 trick_height: db.name_id("TRICKHEIGHT"),
+                danger: db.name_id("DANGERZONE"),
             },
             jumping: false,
             last_path: String::new(),
@@ -99,6 +104,11 @@ impl Driver {
 
     pub fn set_gestures(&mut self, sets: Vec<(&str, Vec<Shape>)>) {
         self.input = Intentions::new(&self.runner.pack, sets);
+    }
+
+    /// The tuning the push behaviours read (`anim_motion/pushing`).
+    pub fn set_tuning(&mut self, t: &Tuning) {
+        self.runner.s.push_curves = super::push::PushCurves { tuning: *t };
     }
 
     /// What the graphs read of the skater.
@@ -116,7 +126,7 @@ impl Driver {
             phys,
             speed: s.vel.length(),
             forward_speed: s.speed,
-            speed_and_slope: s.speed.abs() - s.fwd.y * s.speed.signum() * 2.0,
+            speed_and_slope: speed_and_slope(s, up.y),
             mirrored: s.mirrored(),
             fakie: s.fakie,
             goofy: (s.stance == Stance::Goofy) != s.switch,
@@ -175,8 +185,10 @@ impl Driver {
         let path = r.motion_state();
         let has = |n: Option<NameId>| n.is_some_and(|n| r.attribute(db, n).is_some());
         let entered = |part: &str| path.contains(part) && !self.last_path.contains(part);
+        let push_contact = has(self.clips.push_contact) || path.contains("/PushContact/");
         let mut c = GraphControl {
-            push_contact: has(self.clips.push_contact) || path.contains("/PushContact/"),
+            push_contact,
+            push_target: push_contact.then_some(r.s.push_speed),
             brake_contact: has(self.clips.brake_contact),
             kickturn: r.s.kickturn,
             ..GraphControl::default()
@@ -217,6 +229,45 @@ impl Driver {
             c.pop = Some((flick, jump_strength(height, over, t)));
         }
         self.jumping = jump;
+        // In the air: the trick the clips animate, whether the board is caught yet, a dark catch.
+        // The danger zone's end (seconds into the clip; untimed: the whole clip): landing within the
+        // last moment of it (`DANGER_GRACE`) still counts as caught.
+        c.danger = self
+            .clips
+            .danger
+            .and_then(|n| r.attribute(db, n))
+            .is_some_and(|a| {
+                let end = if a.end >= 0.0 {
+                    a.end
+                } else {
+                    r.s.player.length()
+                };
+                end - r.s.player.time() > DANGER_GRACE
+            });
+        c.dark = r.s.dark;
+        if r.s.world.phys == phys::AIR && air_trick_state(&path) {
+            let name = r.str(r.s.trick);
+            let (flick, flips) = air_flick(name);
+            let len = r.s.player.length();
+            c.air_trick = Some(AirTrick {
+                flick,
+                flips,
+                progress: if len > 0.0 {
+                    (r.s.player.time() / len).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                },
+                late: [
+                    "/Lateflip/",
+                    "/DarkLateflip",
+                    "/DarkToLightflip",
+                    "FingerFlip",
+                ]
+                .iter()
+                .any(|k| path.contains(k)),
+                id: r.s.trick,
+            });
+        }
         self.last_path = path;
         c
     }
@@ -238,6 +289,73 @@ impl Driver {
         r.s.new_unsupported.clear();
         names
     }
+}
+
+/// `PhysicsSpeedAndSlopeCompare`'s value (SK8 riding/speed_and_slope.rs, Skate 3's heading adjust
+/// factor): the downhill turn torque's share at this speed and slope, from the turn torque curves
+/// against speed (as a share of the heading adjust's top speed) and slope (as a share of a right
+/// angle; nothing past 1.2). Kick turns need it under 0.1.
+pub fn speed_and_slope(s: &Skater, normal_y: f32) -> f32 {
+    let t = &s.tuning;
+    let mut slope = libm::acosf(normal_y.clamp(-1.0, 1.0)) / (crate::math::PI / 2.0);
+    if slope > 1.2 {
+        slope = 0.0;
+    }
+    let top = t.heading_adjust_max_speed.max(0.01);
+    let k = s.speed.abs().min(top) / top;
+    t.turn_torque_vs_speed.eval(k) * t.turn_torque_vs_slope.eval(slope)
+}
+
+/// Seconds before the end of a clip's `DANGERZONE` (the board not caught yet) from which a landing
+/// counts as caught. flatground's own number: Skate 3 doesn't bail on the zone itself but makes its
+/// physical wipeout checks more sensitive there, which flatground's landing rules don't model.
+pub const DANGER_GRACE: f32 = 0.1;
+
+/// The motion graph's states that animate a trick in the air: a flicked trick after its takeoff, late
+/// flips, finger flips, under flips and dark catches.
+pub fn air_trick_state(path: &str) -> bool {
+    (path.contains("/Trick/") && !path.contains("/Takeoff/"))
+        || [
+            "/Lateflip/",
+            "/DarkLateflip",
+            "/DarkToLightflip",
+            "FingerFlip",
+            "Underflip",
+            "DarkCatch",
+        ]
+        .iter()
+        .any(|k| path.contains(k))
+}
+
+/// What a trick the graph scores (by name) looks like on the board, and its flips (a held kickflip
+/// scores `Kickflip2`, `Kickflip3` ...).
+pub fn air_flick(name: &str) -> (Flick, u8) {
+    use crate::gesture::Trick;
+    let digits = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    let flips = name[digits.len()..].parse::<u8>().unwrap_or(1).clamp(1, 4);
+    let base = digits.strip_prefix("U_").unwrap_or(digits);
+    if let Some(f) = Flick::from_gesture(base) {
+        return (f, flips);
+    }
+    let l = base.to_ascii_lowercase();
+    let late = l.strip_prefix("l_b_").or_else(|| l.strip_prefix("l_f_"));
+    let l = late.unwrap_or(&l);
+    let trick = if l.contains("varial") && l.contains("heel") {
+        Trick::VarialHeelflip
+    } else if l.contains("varial") {
+        Trick::VarialKickflip
+    } else if l.contains("heelflip") {
+        Trick::Heelflip
+    } else if l.contains("fs_shuv") || l.contains("fsshuv") {
+        Trick::FsPopShuvit
+    } else if l.contains("shuv") || l.contains("_to_") {
+        Trick::PopShuvit
+    } else if l.contains("flip") || l.contains("dark") {
+        Trick::Kickflip
+    } else {
+        Trick::Ollie
+    };
+    (Flick::of(trick), flips)
 }
 
 /// SK8's jump finalisation (animation attribute finalization): a trick height at or under the low clamp

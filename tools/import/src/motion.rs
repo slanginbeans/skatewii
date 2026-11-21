@@ -28,6 +28,9 @@ const BUDGET_MIB: f64 = 20.0;
 /// Graph areas in the order they are converted, with keywords for the graph's state names. A reference
 /// belongs to the area of its most specific (deepest) state that has a keyword; references under no
 /// keyword are `other`, last.
+/// The fakie head and torso channel's tree (played by `game_core::graph` while riding fakie).
+pub const FAKIE_CHANNEL: &str = game_core::graph::host::FAKIE_CHANNEL;
+
 pub const AREAS: &[(&str, &[&str])] = &[
     ("riding", &["turning", "riding", "idle"]),
     ("push", &["push"]),
@@ -219,6 +222,14 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
                 );
             }
             let e = roots.entry(a.text.to_ascii_uppercase()).or_insert(ar);
+            *e = (*e).min(ar);
+        }
+    }
+    // Trees the runner plays by name rather than from a graph attribute: the fakie head and torso
+    // channel (SK8 FakieHeadChannel).
+    for (name, ar) in [(FAKIE_CHANNEL, 0usize)] {
+        if m.contains(name) {
+            let e = roots.entry(name.to_ascii_uppercase()).or_insert(ar);
             *e = (*e).min(ar);
         }
     }
@@ -418,10 +429,32 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         parsed_graphs.strings(),
         graphs.len() / 1024
     );
+    // Their operations typed once here (names resolved against the graph strings and the motion
+    // library), so the game reads them back instead of parsing them at load.
+    let parsed_db =
+        game_core::motion::MotionDb::parse(&db).map_err(|e| format!("motion db: {e:?}"))?;
+    let typed: Vec<_> = parsed_graphs
+        .graphs
+        .iter()
+        .map(|g| game_core::graph::ops::parse(&parsed_graphs, g, Some(&parsed_db)))
+        .collect();
+    let ops = game_core::graph::opcode::encode(graphs.len(), &typed);
+    if game_core::graph::opcode::decode(&ops, graphs.len()).as_ref() != Some(&typed) {
+        return Err("typed graph operations don't read back".into());
+    }
+    println!("graph operations: {} KiB typed", ops.len() / 1024);
     items.push(pack::Item {
         name: "motion/graph".into(),
         kind: Kind::StateGraph,
         data: graphs,
+        width: 0,
+        height: 0,
+        gx_format: 0,
+    });
+    items.push(pack::Item {
+        name: game_core::graph::opcode::ENTRY.into(),
+        kind: Kind::Data,
+        data: ops,
         width: 0,
         height: 0,
         gx_format: 0,

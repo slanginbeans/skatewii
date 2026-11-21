@@ -208,46 +208,108 @@ impl Node {
         matches!(self, Node::Transition(t) if !t.complete())
     }
 
-    /// The clips to blend this frame, with weights summing to 1. `update_history` commits the clocks
-    /// (start the next step's event window).
-    pub fn leaves(
+    /// What to pose this frame, appended to `out`: each tree's clips as one weighted group, joined by
+    /// the transitions' blends (a channel blend takes each bone by its channel weight). Returns whether
+    /// it pushed a pose. `update_history` commits the clocks (start the next step's event window).
+    pub fn program(
         &mut self,
         update_history: bool,
-        out: &mut Vec<Leaf>,
+        out: &mut PoseProgram,
         scratch: &mut Vec<PoseCommand>,
-    ) {
+    ) -> bool {
         match self {
             Node::Tree(t) => {
                 scratch.clear();
+                let start = out.leaves.len();
                 if t.play.evaluate(0.01, true, update_history, scratch) {
-                    flatten(scratch, t.mirror, out);
+                    flatten(scratch, t.mirror, &mut out.leaves);
                 }
+                let end = out.leaves.len();
+                if end == start {
+                    return false;
+                }
+                out.ops.push(PoseOp::Group {
+                    start: start as u16,
+                    end: end as u16,
+                });
+                true
             }
             Node::Transition(t) => {
                 if t.def.kind == 4 {
-                    if t.sequence_done {
-                        t.to.leaves(update_history, out, scratch)
+                    return if t.sequence_done {
+                        t.to.program(update_history, out, scratch)
                     } else {
-                        t.from.leaves(update_history, out, scratch)
-                    }
-                    return;
+                        t.from.program(update_history, out, scratch)
+                    };
                 }
                 let w = t.weight();
-                let start = out.len();
-                t.from.leaves(update_history, out, scratch);
-                let mid = out.len();
-                t.to.leaves(update_history, out, scratch);
-                if mid == start || mid == out.len() {
-                    return;
+                let from = t.from.program(update_history, out, scratch);
+                let to = t.to.program(update_history, out, scratch);
+                if from && to {
+                    out.ops.push(if t.def.kind == 3 {
+                        PoseOp::Channel {
+                            weight: w,
+                            first: t.def.channels_from_weights,
+                        }
+                    } else {
+                        PoseOp::Blend(w)
+                    });
                 }
-                for l in &mut out[start..mid] {
-                    l.weight *= 1.0 - w;
-                }
-                for l in &mut out[mid..] {
-                    l.weight *= w;
+                from || to
+            }
+        }
+    }
+}
+
+/// How the rider builds this frame's pose: a small program over a stack of poses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PoseOp {
+    /// Push the weighted mix of `leaves[start..end]` (weights summing to 1).
+    Group { start: u16, end: u16 },
+    /// Pop the newer pose and the older one; push the older blended towards the newer by the weight.
+    Blend(f32),
+    /// A channel blend (SK8 ACSChannelBlend): as `Blend`, but each bone by the weight times its channel
+    /// weight in the older pose (`first`, `useChannelFromWeights`) or the newer one, at most 1. Clips
+    /// that aren't channel animations weigh 1 everywhere, so between them it is a crossfade; a channel
+    /// animation (the fakie head and torso) takes only its bones.
+    Channel { weight: f32, first: bool },
+}
+
+/// The clips and the program to pose them (see [`PoseOp`]).
+#[derive(Clone, Debug, Default)]
+pub struct PoseProgram {
+    pub leaves: Vec<Leaf>,
+    pub ops: Vec<PoseOp>,
+}
+
+impl PoseProgram {
+    pub fn clear(&mut self) {
+        self.leaves.clear();
+        self.ops.clear();
+    }
+
+    /// Each clip's share of the final pose, ignoring channel weights (for logs and tests).
+    pub fn shares(&self) -> Vec<(u16, f32)> {
+        let mut stack: Vec<Vec<(u16, f32)>> = Vec::new();
+        for op in &self.ops {
+            match *op {
+                PoseOp::Group { start, end } => stack.push(
+                    self.leaves[start as usize..end as usize]
+                        .iter()
+                        .map(|l| (l.clip, l.weight))
+                        .collect(),
+                ),
+                PoseOp::Blend(w) | PoseOp::Channel { weight: w, .. } => {
+                    let (Some(b), Some(mut a)) = (stack.pop(), stack.pop()) else {
+                        return Vec::new();
+                    };
+                    a.iter_mut().for_each(|x| x.1 *= 1.0 - w);
+                    a.extend(b.into_iter().map(|x| (x.0, x.1 * w)));
+                    stack.push(a);
                 }
             }
         }
+        stack.pop().unwrap_or_default()
     }
 }
 
@@ -337,10 +399,136 @@ fn empty() -> Tree {
     }
 }
 
+/// How a persistent channel plays (SK8 ChannelSettings).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChannelSettings {
+    pub priority: i32,
+    /// Stays (at full weight) after its tree ends, until ended.
+    pub keep_alive: bool,
+    pub speed: f32,
+    pub blend_in: f32,
+    /// Its tree doesn't advance while fading in.
+    pub hold_in: bool,
+    pub blend_out: f32,
+    /// Fade out only once ended, holding the last frame.
+    pub hold_out: bool,
+}
+
+/// A channel's fades (SK8 channel_playback.rs: NewChannel, AddTime, RemoveExpiredChannels,
+/// EndChannelPrematurely, StartTransition).
+#[derive(Clone, Copy, Debug)]
+pub struct Fade {
+    pub settings: ChannelSettings,
+    pub weight: f32,
+    pub influence: f32,
+    fade_in: f32,
+    fade_out: f32,
+    revive: f32,
+    revive_len: f32,
+    ending: bool,
+    crossed_end: bool,
+}
+
+impl Fade {
+    pub fn new(settings: ChannelSettings) -> Fade {
+        Fade {
+            settings,
+            weight: 0.0,
+            influence: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            revive: 0.0,
+            revive_len: 0.0,
+            ending: false,
+            crossed_end: false,
+        }
+    }
+
+    /// Faded out (or, not kept alive and without a fade-out, its tree ended).
+    pub fn expired(&self) -> bool {
+        if self.settings.blend_out > 0.0 {
+            self.fade_out >= self.settings.blend_out
+        } else {
+            !self.settings.keep_alive && self.crossed_end
+        }
+    }
+
+    /// Ends the channel: it fades out (or goes at once without a fade-out).
+    pub fn end(&mut self) {
+        if self.fade_out == 0.0 {
+            self.ending = true;
+            if self.settings.blend_out <= 0.0 {
+                self.settings.keep_alive = false;
+                self.crossed_end = true;
+            }
+        }
+    }
+
+    pub fn can_transition(&self, revive: bool) -> bool {
+        self.fade_out <= 0.0 || revive
+    }
+
+    /// A new tree for the channel: fading out, it comes back from where it was (`revive`).
+    pub fn transition(&mut self, settings: ChannelSettings, revive: bool) {
+        if self.fade_out > 0.0 && revive {
+            self.revive_len = settings.blend_in;
+            let left = if self.settings.blend_out > 0.0 {
+                1.0 - self.fade_out / self.settings.blend_out
+            } else {
+                0.0
+            };
+            self.revive = left.clamp(0.0, 1.0) * settings.blend_in;
+        }
+        self.fade_out = 0.0;
+        self.ending = false;
+        self.settings.keep_alive = settings.keep_alive;
+        self.settings.blend_out = settings.blend_out;
+        self.settings.hold_out = settings.hold_out;
+    }
+
+    /// Updates the weight for a step of `dt` (the fades use the times before the step). Returns
+    /// whether the channel's tree advances.
+    pub fn advance(&mut self, dt: f32, remaining: f32) -> bool {
+        let st = self.settings;
+        let mut fade_in = 1.0;
+        if st.blend_in > 0.0 && self.fade_in < st.blend_in {
+            fade_in = (self.fade_in / st.blend_in).clamp(0.0, 1.0);
+            self.fade_in += dt;
+        }
+        let automatic = if st.hold_out {
+            self.crossed_end
+        } else {
+            remaining.max(0.0) < st.blend_out
+        };
+        let mut fade_out = 1.0;
+        if st.blend_out > 0.0 && (self.ending || (!st.keep_alive && automatic)) {
+            fade_out = (1.0 - self.fade_out / st.blend_out).clamp(0.0, 1.0);
+            self.fade_out += dt;
+        }
+        let mut revive = 1.0;
+        if self.revive_len > 0.0 && self.revive < self.revive_len {
+            revive = (self.revive / self.revive_len).clamp(0.0, 1.0);
+            self.revive += dt;
+        }
+        self.weight = (fade_in.min(fade_out).min(revive) * self.influence).clamp(0.0, 1.0);
+        !(st.hold_in && self.fade_in < st.blend_in) && !(st.hold_out && self.fade_out > 0.0)
+    }
+}
+
+/// A persistent channel over the motion graph's animation (the fakie head and torso, ...).
+pub struct Channel {
+    /// Graph string id of its name.
+    pub name: u16,
+    pub node: Node,
+    pub fade: Fade,
+}
+
 /// The motion graph's player: the current node and the advance result conditions read.
 #[derive(Default)]
 pub struct Player {
     pub current: Option<Node>,
+    /// Channels over it, lowest priority first.
+    pub channels: Vec<Channel>,
     /// The last advance (WillExpire, ExpireInTime).
     pub property: Option<Advance>,
     /// Parameters set on trees (latest value per name).
@@ -394,6 +582,95 @@ impl Player {
             c.advance(dt, &mut r);
             self.property = Some(r);
             self.current = Some(c);
+        }
+        // Channels: finished transitions collapse, faded ones go, the rest advance over the base.
+        self.channels.retain(|c| !c.fade.expired());
+        for c in &mut self.channels {
+            let node = core::mem::replace(&mut c.node, Node::tree(empty()));
+            c.node = node.collapse();
+            c.node.set_parameters(db, &self.params);
+            if c.fade.advance(dt, c.node.length() - c.node.time()) {
+                let mut r = Advance::default();
+                c.node.advance(dt, &mut r);
+                c.fade.crossed_end = r.crossed_end;
+            }
+        }
+    }
+
+    pub fn has_channel(&self, name: u16) -> bool {
+        self.channels.iter().any(|c| c.name == name)
+    }
+
+    /// The channel's weight now (0 without it).
+    pub fn channel_weight(&self, name: u16) -> f32 {
+        self.channels
+            .iter()
+            .find(|c| c.name == name)
+            .map_or(0.0, |c| c.fade.weight)
+    }
+
+    /// Plays `tree` on channel `name`: a new channel when there is none (`create`), else a transition
+    /// to it (`revive`: a fading channel comes back).
+    #[allow(clippy::too_many_arguments)]
+    pub fn transition_channel(
+        &mut self,
+        db: &MotionDb,
+        name: u16,
+        mut tree: Tree,
+        settings: ChannelSettings,
+        def: TransitionDef,
+        revive: bool,
+        create: bool,
+    ) {
+        tree.play.set_speed(settings.speed);
+        tree.play.set_parameters(db, &self.params);
+        match self.channels.iter().position(|c| c.name == name) {
+            None if create => {
+                let at = self
+                    .channels
+                    .partition_point(|c| c.fade.settings.priority <= settings.priority);
+                self.channels.insert(
+                    at,
+                    Channel {
+                        name,
+                        node: Node::tree(tree),
+                        fade: Fade::new(settings),
+                    },
+                );
+            }
+            Some(i) if self.channels[i].fade.can_transition(revive) => {
+                let c = &mut self.channels[i];
+                let old = match core::mem::replace(&mut c.node, Node::tree(empty())) {
+                    Node::Transition(t) => t.to,
+                    n => n,
+                };
+                c.node = Node::Transition(Box::new(Transition::new(old, Node::tree(tree), def)));
+                c.fade.transition(settings, revive);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn end_channel(&mut self, name: u16) {
+        if let Some(c) = self.channels.iter_mut().find(|c| c.name == name) {
+            c.fade.end();
+        }
+    }
+
+    /// This frame's pose: the base, then each channel with weight over it (see [`PoseOp`]).
+    pub fn program(&mut self, out: &mut PoseProgram, scratch: &mut Vec<PoseCommand>) {
+        out.clear();
+        let Some(c) = &mut self.current else { return };
+        if !c.program(true, out, scratch) {
+            return;
+        }
+        for ch in &mut self.channels {
+            if ch.fade.weight > 0.0 && ch.node.program(true, out, scratch) {
+                out.ops.push(PoseOp::Channel {
+                    weight: ch.fade.weight,
+                    first: false,
+                });
+            }
         }
     }
 

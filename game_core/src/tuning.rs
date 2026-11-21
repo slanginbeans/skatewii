@@ -100,6 +100,12 @@ pub struct Tuning {
     pub push_out_speed_weight: f32,
     /// Most speed a held, repeated push adds (m/s).
     pub push_hold_cap: f32,
+    /// How many frames (1/60 s) the push trees' start-speed blends take to cross their whole range,
+    /// against the strength blend; and the strength blend's, against speed.
+    pub push_blend_speed_frames: Curve,
+    pub push_blend_acc_frames: Curve,
+    /// A first push this soon after the rider was put on the board pushes as if held (s).
+    pub push_teleport_window: f32,
     /// No pushing or foot braking on slopes steeper than this (degrees).
     pub push_slope_limit: f32,
 
@@ -343,6 +349,9 @@ pub const PATHS: &[&str] = &[
     "anim_motion/pushing/last_push_out_time",
     "anim_motion/pushing/dynamic_out_factor_speed_vs_acc",
     "anim_motion/pushing/max_holding_acc",
+    "anim_motion/pushing/blend_speed_over_frames",
+    "anim_motion/pushing/blend_acc_over_frames",
+    "anim_motion/pushing/pushing_usemaxpushfromteleporttime",
     "anim_motion/pushing/disable_push_brake_at_slope",
     "physics_surfaces/smooth/FrictionVsSpeedNew",
     "physics_friction/default/FrictionVsSpeed_NoInput",
@@ -476,6 +485,9 @@ impl Tuning {
         push_out_max: 0.6,
         push_out_speed_weight: 0.5,
         push_hold_cap: 3.5,
+        push_blend_speed_frames: Curve::constant(6.0),
+        push_blend_acc_frames: Curve::constant(6.0),
+        push_teleport_window: 0.5,
         push_slope_limit: 40.0,
         friction: Curve::new(&[(0.0, 0.0), (8.0, 0.05), (30.0, 1.0)]),
         friction_no_input: Curve::new(&[(0.0, 0.1), (8.0, 0.45)]),
@@ -696,6 +708,11 @@ impl Tuning {
                 scalar!(self.push_out_speed_weight)
             }
             "anim_motion/pushing/max_holding_acc" => scalar!(self.push_hold_cap),
+            "anim_motion/pushing/blend_speed_over_frames" => curve!(self.push_blend_speed_frames),
+            "anim_motion/pushing/blend_acc_over_frames" => curve!(self.push_blend_acc_frames),
+            "anim_motion/pushing/pushing_usemaxpushfromteleporttime" => {
+                scalar!(self.push_teleport_window)
+            }
             "anim_motion/pushing/disable_push_brake_at_slope" => scalar!(self.push_slope_limit),
             "physics_brakes/default/SlowSpeed" => scalar!(self.brake_slow_speed),
             "physics_surfaces/smooth/BrakingScalar" => scalar!(self.braking_scalar),

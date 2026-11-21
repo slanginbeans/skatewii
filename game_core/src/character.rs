@@ -297,6 +297,18 @@ impl Character {
     /// Samples any clip with this skeleton's bones (a motion-library clip) at `time` seconds into `out`,
     /// mirrored left for right first when `mirror` (a pose of the other stance: Skate 3 mirrors each
     /// tree's pose before blending). False when the clip has a different bone count.
+    /// The clip's channel weight for each bone as posed (mirrored, left and right swap): 1 everywhere
+    /// unless it is a channel animation.
+    pub fn channel_weights(&self, clip: &Clip, mirror: bool, out: &mut [f32]) {
+        for (b, o) in out.iter_mut().enumerate() {
+            let src = match self.partners.get(b) {
+                Some(&p) if mirror && p >= 0 => p as usize,
+                _ => b,
+            };
+            *o = clip.channel_weight(src);
+        }
+    }
+
     pub fn sample_clip(&self, clip: &Clip, time: f32, mirror: bool, out: &mut [Local]) -> bool {
         let n = clip.frames();
         if clip.bones() != self.bones() || n == 0 {

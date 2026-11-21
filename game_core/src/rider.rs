@@ -419,6 +419,10 @@ pub struct Rider {
     graph_posed: bool,
     a: Vec<Local>,
     b: Vec<Local>,
+    /// The state graphs' pose stack: poses and their bones' channel weights (see
+    /// `graph::playback::PoseOp`), and a sampled clip's channel weights.
+    stack: Vec<(Vec<Local>, Vec<f32>, bool)>,
+    weights: Vec<f32>,
 }
 
 impl Rider {
@@ -445,6 +449,8 @@ impl Rider {
             graph_posed: false,
             a: vec![Local::IDENTITY; n],
             b: vec![Local::IDENTITY; n],
+            stack: Vec::new(),
+            weights: vec![1.0; n],
         };
         r.pose_and_skin(Mat3::IDENTITY);
         r
@@ -514,33 +520,88 @@ impl Rider {
     pub fn update_graph(
         &mut self,
         lib: &crate::motion::Library,
-        leaves: &[crate::graph::playback::Leaf],
+        prog: &crate::graph::playback::PoseProgram,
         rot: Mat3,
     ) -> bool {
-        let mut total = 0.0;
-        for l in leaves {
-            let Some(clip) = lib.pose(l.clip) else {
-                continue;
-            };
-            if !self
-                .character
-                .sample_clip(&clip, l.time, l.mirror, &mut self.b)
-            {
-                return false;
-            }
-            if total == 0.0 {
-                self.a.copy_from_slice(&self.b);
-            } else {
-                let k = l.weight / (total + l.weight);
-                for (a, b) in self.a.iter_mut().zip(&self.b) {
-                    *a = a.blend(b, k);
+        use crate::graph::playback::PoseOp;
+        let n = self.a.len();
+        let mut depth = 0usize;
+        for op in &prog.ops {
+            match *op {
+                PoseOp::Group { start, end } => {
+                    if self.stack.len() <= depth {
+                        self.stack
+                            .push((vec![Local::IDENTITY; n], vec![1.0; n], false));
+                    }
+                    let (pose, chan, valid) = &mut self.stack[depth];
+                    let mut total = 0.0;
+                    for l in &prog.leaves[start as usize..end as usize] {
+                        let Some(clip) = lib.pose(l.clip) else {
+                            continue;
+                        };
+                        if !self
+                            .character
+                            .sample_clip(&clip, l.time, l.mirror, &mut self.b)
+                        {
+                            return false;
+                        }
+                        self.character
+                            .channel_weights(&clip, l.mirror, &mut self.weights);
+                        if total == 0.0 {
+                            pose.copy_from_slice(&self.b);
+                            chan.copy_from_slice(&self.weights);
+                        } else {
+                            let k = l.weight / (total + l.weight);
+                            for ((a, b), (c, w)) in pose
+                                .iter_mut()
+                                .zip(&self.b)
+                                .zip(chan.iter_mut().zip(&self.weights))
+                            {
+                                *a = a.blend(b, k);
+                                *c += (w - *c) * k;
+                            }
+                        }
+                        total += l.weight;
+                    }
+                    *valid = total > 0.0;
+                    depth += 1;
+                }
+                PoseOp::Blend(_) | PoseOp::Channel { .. } => {
+                    if depth < 2 {
+                        return false;
+                    }
+                    let (low, high) = self.stack.split_at_mut(depth - 1);
+                    let (a, ca, va) = &mut low[depth - 2];
+                    let (b, cb, vb) = &high[0];
+                    match (*va, *vb) {
+                        (_, false) => {}
+                        (false, true) => {
+                            a.copy_from_slice(b);
+                            ca.copy_from_slice(cb);
+                            *va = true;
+                        }
+                        (true, true) => {
+                            for i in 0..n {
+                                let k = match *op {
+                                    PoseOp::Channel { weight, first } => {
+                                        (weight * if first { ca[i] } else { cb[i] }).clamp(0.0, 1.0)
+                                    }
+                                    PoseOp::Blend(w) => w,
+                                    PoseOp::Group { .. } => 0.0,
+                                };
+                                a[i] = a[i].blend(&b[i], k);
+                                ca[i] += (cb[i] - ca[i]) * k;
+                            }
+                        }
+                    }
+                    depth -= 1;
                 }
             }
-            total += l.weight;
         }
-        if total == 0.0 {
+        if depth == 0 || !self.stack[0].2 {
             return false;
         }
+        self.a.copy_from_slice(&self.stack[0].0);
         self.graph_posed = true;
         let ch = &mut self.character;
         ch.pose(&self.a);
@@ -631,12 +692,9 @@ mod tests {
     }
 
     fn trick(t: Trick, flips: u8) -> Option<ActiveTrick> {
-        Some(ActiveTrick {
-            flick: Flick::of(t),
-            t: 0.1,
-            duration: 0.4,
-            flips,
-        })
+        let mut a = ActiveTrick::new(Flick::of(t));
+        (a.t, a.duration, a.flips) = (0.1, 0.4, flips);
+        Some(a)
     }
 
     #[test]

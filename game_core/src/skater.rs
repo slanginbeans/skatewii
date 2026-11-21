@@ -234,11 +234,36 @@ pub struct ActiveTrick {
     pub duration: f32,
     /// Flips of a held kickflip or heelflip (1 otherwise).
     pub flips: u8,
+    /// With the state graphs: how far through the trick its clips are (0..1, 1 done). One clock: the
+    /// clip's, not `duration`.
+    pub clock: Option<f32>,
+    /// Done after the first trick (a late flip, a finger flip).
+    pub late: bool,
+    /// Caught dark (grip down).
+    pub dark: bool,
+    /// The graph's name for it (string id), to tell a new trick from the one playing.
+    pub id: u16,
 }
 
 impl ActiveTrick {
+    pub fn new(flick: Flick) -> ActiveTrick {
+        ActiveTrick {
+            flick,
+            t: 0.0,
+            duration: trick_duration(flick.trick),
+            flips: 1,
+            clock: None,
+            late: false,
+            dark: false,
+            id: u16::MAX,
+        }
+    }
+
     /// 0..1 progress of the board animation.
     pub fn progress(&self) -> f32 {
+        if let Some(c) = self.clock {
+            return c.clamp(0.0, 1.0);
+        }
         if self.duration <= 0.0 {
             1.0
         } else {
@@ -258,10 +283,21 @@ impl ActiveTrick {
         } else {
             String::from(self.flick.trick.name())
         };
-        match self.flips {
+        let base = match self.flips {
             2 => format!("DOUBLE {base}"),
             3 => format!("TRIPLE {base}"),
+            4 => format!("QUADRUPLE {base}"),
             _ => base,
+        };
+        let base = if self.late {
+            format!("LATE {base}")
+        } else {
+            base
+        };
+        if self.dark {
+            format!("{base} DARK CATCH")
+        } else {
+            base
         }
     }
 }
@@ -551,6 +587,8 @@ pub struct Skater {
     pub switch: bool,
     /// Rolling tail first (Skate 3's fakie detection: a moment of backwards speed).
     pub fakie: bool,
+    /// Riding dark (the board grip down after a dark catch; the state graphs decide).
+    pub dark: bool,
     fakie_timer: f32,
     /// Seconds since the rider was put on the board (spawn or respawn).
     pub since_spawn: f32,
@@ -625,8 +663,6 @@ pub struct Skater {
     pub graph: Option<GraphControl>,
     /// A graph-driven push in contact: the speed it started at, the speed it chases, seconds left.
     graph_push: Option<(f32, f32, f32)>,
-    /// How long a push button has been held (graph-driven pushes).
-    push_hold: f32,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -634,6 +670,9 @@ pub struct Skater {
 pub struct GraphControl {
     /// A push clip's foot is on the ground (its `PUSHCONTACT` window): only then does a push drive.
     pub push_contact: bool,
+    /// The speed the push chases while the foot is down: where the push trees' coefficients end
+    /// (`graph::push`).
+    pub push_target: Option<f32>,
     /// A brake clip's foot is down (`BRAKE_CONTACT`): only then does the foot brake slow the board.
     pub brake_contact: bool,
     /// The takeoff clip reached its jump: pop now, as this trick, at this strength (0..1).
@@ -646,6 +685,27 @@ pub struct GraphControl {
     pub revert: Option<bool>,
     /// The graph turns the rider round (riding fakie into switch, or pushing out of fakie).
     pub turn_round: bool,
+    /// The trick the graph is animating in the air (`None`: none, or it is done).
+    pub air_trick: Option<AirTrick>,
+    /// The playing clips are in their `DANGERZONE`: the board isn't caught yet, landing now bails.
+    pub danger: bool,
+    /// Dark: the board was caught grip down (a dark catch), and is ridden that way until the graph
+    /// says otherwise.
+    pub dark: bool,
+}
+
+/// A trick the state graph is animating in the air.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AirTrick {
+    /// What it looks like (for the drawn board and the score).
+    pub flick: Flick,
+    pub flips: u8,
+    /// How far through its clips (0..1).
+    pub progress: f32,
+    /// A late flip or finger flip (started in the air).
+    pub late: bool,
+    /// The graph's name for it (string id).
+    pub id: u16,
 }
 
 /// What a landing was judged on.
@@ -847,6 +907,7 @@ impl Skater {
             trick: None,
             switch: false,
             fakie: false,
+            dark: false,
             fakie_timer: 0.0,
             since_spawn: 0.0,
             takeoff: Takeoff::default(),
@@ -886,7 +947,6 @@ impl Skater {
             last_landing: None,
             graph: None,
             graph_push: None,
-            push_hold: 0.0,
             wallride: None,
             land_up: Vec3::UP,
             predict_in: 0,
@@ -1041,6 +1101,7 @@ impl Skater {
             || pad.trig_r > 0.1;
         self.idle = if touched { 0.0 } else { self.idle + dt };
         self.since_spawn += dt;
+        self.dark = self.graph.is_some_and(|g| g.dark);
         let rolling = self.mode == Mode::Rolling;
         let crouch = if rolling && self.manual.is_none() {
             flick
@@ -1288,7 +1349,7 @@ impl Skater {
         // With the state graphs, a push only drives while the push clip's foot is down, and the foot
         // brake only once the brake clip's foot touches.
         let push_target = match self.graph {
-            Some(g) => self.graph_push(pad, g.push_contact, dt),
+            Some(g) => self.graph_push(g.push_contact, g.push_target, dt),
             None => self.update_push(pad, dt, events),
         };
         let foot_brake = match self.graph {
@@ -1428,14 +1489,10 @@ impl Skater {
         }
     }
 
-    /// Pushing under the state graph: its push states decide when the foot is down (`push_contact`); the
-    /// strength comes from how long the push button has been held, with the same push curves and the
-    /// imported push clips' end speeds as flatground's own pushes.
-    fn graph_push(&mut self, pad: &Pad, contact: bool, dt: f32) -> Option<f32> {
-        let held = pad.is_held(btn::A) || pad.is_held(btn::B);
-        self.push_hold = if held { self.push_hold + dt } else { 0.0 };
-        // The foot comes down when the graph's push clip says so, and stays down for the push sets'
-        // contact time (the clips' own foot speed is not modelled: the board chases the push target).
+    /// Pushing under the state graph: its push states decide when the foot is down (`contact`, then the
+    /// push sets' contact time) and the speed the board chases (`target`: the speed the push trees'
+    /// coefficients end at, as Skate 3 takes the push from the blended clips).
+    fn graph_push(&mut self, contact: bool, target: Option<f32>, dt: f32) -> Option<f32> {
         let (base, end, left) = match self.graph_push {
             Some((b, e, l)) if l > 0.0 => (b, e, l - dt),
             _ if contact => {
@@ -1447,13 +1504,9 @@ impl Skater {
                 return None;
             }
         };
-        let t = self.tuning;
-        let dv = t.push_gain(self.push_hold.max(0.1), base.max(0.0));
-        let (_, _, _, gentle_end, strong_end, _, _) = self.clips.blend(base);
-        let lo = gentle_end.min(strong_end);
-        let end = (dv + base.max(0.0))
-            .clamp(lo, strong_end.max(lo))
-            .min(t.push_max_speed)
+        let end = target
+            .unwrap_or(end)
+            .min(self.tuning.push_max_speed)
             .max(end);
         self.graph_push = Some((base, end, left));
         Some(end)
@@ -1848,12 +1901,7 @@ impl Skater {
             switch: self.switch,
             hippy: false,
         };
-        self.trick = f.map(|f| ActiveTrick {
-            flick: f,
-            t: 0.0,
-            duration: trick_duration(f.trick),
-            flips: 1,
-        });
+        self.trick = f.map(ActiveTrick::new);
     }
 
     fn fly(
@@ -1883,7 +1931,9 @@ impl Skater {
         self.spin += turn;
         self.fwd = rotate(self.fwd, Vec3::UP, turn);
         self.normal = rotate(self.normal, Vec3::UP, turn);
-        if let Some(tr) = &mut self.trick {
+        if let Some(g) = self.graph {
+            self.follow_graph_trick(&g);
+        } else if let Some(tr) = &mut self.trick {
             tr.t += dt;
             // Holding a kickflip or heelflip on the stick keeps it flipping.
             let flip_only = matches!(tr.flick.trick, Trick::Kickflip | Trick::Heelflip);
@@ -1996,6 +2046,36 @@ impl Skater {
             "SWITCH "
         } else {
             ""
+        }
+    }
+
+    /// In the air under the state graphs, the board does what the graph's clips do: the trick (a late
+    /// flip or finger flip starts one), its flips, how far through it is, a dark catch.
+    fn follow_graph_trick(&mut self, g: &GraphControl) {
+        match g.air_trick {
+            Some(a) => {
+                let fresh = a.late && self.trick.is_none_or(|t| t.id != a.id);
+                if fresh {
+                    let mut t = ActiveTrick::new(a.flick);
+                    t.late = true;
+                    self.trick = Some(t);
+                }
+                if let Some(t) = &mut self.trick {
+                    if t.id == u16::MAX || fresh {
+                        t.id = a.id;
+                    }
+                    t.clock = Some(if g.danger { a.progress.min(0.99) } else { 1.0 });
+                    t.flips = t.flips.max(a.flips);
+                }
+            }
+            None => {
+                if let Some(t) = &mut self.trick {
+                    t.clock = Some(1.0);
+                }
+            }
+        }
+        if let Some(t) = &mut self.trick {
+            t.dark |= g.dark;
         }
     }
 
@@ -2306,7 +2386,11 @@ impl Skater {
         let backwards = off.abs() > PI / 2.0;
         let crooked_signed = if backwards { wrap_angle(off + PI) } else { off };
         let crooked = crooked_signed.abs();
-        let trick_done = self.trick.is_none_or(|t| t.progress() >= 1.0);
+        // With the state graphs, the clips say whether the board is caught (no `DANGERZONE`).
+        let trick_done = match self.graph {
+            Some(g) => !g.danger,
+            None => self.trick.is_none_or(|t| t.progress() >= 1.0),
+        };
         // Still holding a grab when the wheels touch down also takes you out.
         let reason = if !trick_done {
             Some("landed before the trick finished")
@@ -3819,6 +3903,7 @@ mod tests {
         assert!(s.speed.abs() < 0.05, "no contact yet: {}", s.speed);
         s.graph = Some(GraphControl {
             push_contact: true,
+            push_target: Some(3.0),
             ..GraphControl::default()
         });
         steps(&mut s, &park, &hold(btn::A), None, 1);
@@ -3890,5 +3975,77 @@ mod tests {
         assert_ne!(s.switch, was);
         assert!(!s.fakie && s.speed > 0.0);
         assert!(ev.contains(&Event::Switched));
+    }
+
+    /// Pops with the graph and steps until the board is back down, with `air` the graph's view of the
+    /// air (its trick, the danger zone, dark) on every tick.
+    fn graph_air(air: impl Fn(u32) -> GraphControl) -> (Skater, Vec<Event>) {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 3.0;
+        s.graph = Some(GraphControl {
+            pop: Some((Flick::OLLIE, 1.0)),
+            ..GraphControl::default()
+        });
+        let mut ev = steps(&mut s, &park, &Pad::default(), None, 1);
+        let mut k = 0;
+        while matches!(s.mode, Mode::Air { .. }) && k < 300 {
+            s.graph = Some(air(k));
+            ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+            k += 1;
+        }
+        (s, ev)
+    }
+
+    #[test]
+    fn graph_landings_bail_only_while_the_clips_say_the_board_is_not_caught() {
+        let trick = |late| AirTrick {
+            flick: Flick::of(crate::gesture::Trick::Kickflip),
+            flips: 1,
+            progress: 0.5,
+            late,
+            id: 3,
+        };
+        // Still in the danger zone at touchdown: a bail.
+        let (s, _) = graph_air(|_| GraphControl {
+            air_trick: Some(trick(false)),
+            danger: true,
+            ..GraphControl::default()
+        });
+        assert!(matches!(s.mode, Mode::Bailed { .. }), "{:?}", s.mode);
+        // The same trick caught in time: a clean landing, however long `trick_duration` says.
+        let (s, ev) = graph_air(|k| GraphControl {
+            air_trick: Some(trick(false)),
+            danger: k < 10,
+            ..GraphControl::default()
+        });
+        assert_eq!(s.mode, Mode::Rolling);
+        assert!(ev.iter().any(|e| matches!(e, Event::Landed { .. })));
+    }
+
+    #[test]
+    fn graph_late_flips_become_the_trick_and_dark_catches_ride_dark() {
+        let (s, ev) = graph_air(|k| GraphControl {
+            air_trick: (k > 5).then_some(AirTrick {
+                flick: Flick::of(crate::gesture::Trick::Kickflip),
+                flips: 2,
+                progress: 0.5,
+                late: true,
+                id: 9,
+            }),
+            dark: k > 5,
+            ..GraphControl::default()
+        });
+        assert_eq!(s.mode, Mode::Rolling, "{ev:?}");
+        let name = ev
+            .iter()
+            .find_map(|e| match e {
+                Event::Landed { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(name.contains("LATE DOUBLE KICKFLIP"), "{name}");
+        assert!(name.contains("DARK"), "{name}");
+        assert!(s.dark, "riding dark while the graph says so");
     }
 }

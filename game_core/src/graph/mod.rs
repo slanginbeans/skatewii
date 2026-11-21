@@ -16,7 +16,7 @@
 //!
 //! Entry `motion/graph` (big-endian):
 //! ```text
-//! 0   "FGSG", u32 version (1), u32 graph count, u32 string count, u32 string offsets at, u32 blob at
+//! 0   "FGSG", u32 version (2), u32 graph count, u32 string count, u32 string offsets at, u32 blob at
 //! 24  per graph, 64 bytes: u32 name (string), u32 root state, then (u32 offset, u32 count) for
 //!     states, transitions, expressions, operations, parameters, attributes, lists
 //!     state 24: u16 name, u16 parent, u16 interrupt ancestor, u16 expression, u8 flags (1 enabled,
@@ -33,15 +33,18 @@
 //!     parameter 8: u32 first attribute, u16 count, u16 0
 //!     attribute 12: u16 key, u16 text, u32 float word, u8 bool byte, u8[3] 0
 //!     lists: u16 each
-//! ... string offsets (u32 each into the blob), blob of NUL-terminated strings
+//! ... string offsets (u32 each into the blob, in id order), the ids sorted by their strings' bytes (u16
+//!     each, padded to 4), blob of NUL-terminated strings (in id order)
 //! ```
 //! Ids are u16; `NONE` (0xFFFF) is "none".
 
 pub mod drive;
 pub mod host;
 pub mod input;
+pub mod opcode;
 pub mod ops;
 pub mod playback;
+pub mod push;
 pub mod select;
 #[cfg(test)]
 mod tests;
@@ -52,7 +55,7 @@ use alloc::vec::Vec;
 pub use select::{Controller, Frame, Host, NodeId};
 
 pub const MAGIC: [u8; 4] = *b"FGSG";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const NONE: u16 = 0xFFFF;
 pub const HEADER: usize = 24;
 pub const GRAPH_HEADER: usize = 64;
@@ -165,6 +168,8 @@ pub struct Graph {
 pub struct Pack<'a> {
     pub graphs: Vec<Graph>,
     offsets: &'a [u8],
+    /// Ids in byte order of their strings.
+    sorted: &'a [u8],
     blob: &'a [u8],
     count: usize,
 }
@@ -399,6 +404,9 @@ impl<'a> Pack<'a> {
         let offsets = b
             .get(offsets_at..offsets_at + count * 4)
             .ok_or(Error::Truncated)?;
+        let sorted = b
+            .get(offsets_at + count * 4..offsets_at + count * 6)
+            .ok_or(Error::Truncated)?;
         let blob = b.get(blob_at..).ok_or(Error::Truncated)?;
         let graphs = (0..graphs.min(16))
             .map(|g| Graph::parse(b, HEADER + g * GRAPH_HEADER))
@@ -406,14 +414,26 @@ impl<'a> Pack<'a> {
         let p = Pack {
             graphs,
             offsets,
+            sorted,
             blob,
             count,
         };
+        // The strings lie in id order, each ending where the next starts.
+        let mut prev = 0;
         for i in 0..count {
             let at = be32(offsets, i * 4)? as usize;
-            if at >= blob.len() || !blob[at..].contains(&0) {
+            let end = if i + 1 < count {
+                be32(offsets, i * 4 + 4)? as usize
+            } else {
+                blob.len()
+            };
+            if at < prev || at >= end || end > blob.len() || blob[end - 1] != 0 && i + 1 < count {
                 return Err(Error::Bad);
             }
+            if be16(sorted, i * 2)? as usize >= count {
+                return Err(Error::Bad);
+            }
+            prev = at;
         }
         let strings_ok = p.graphs.iter().all(|g| {
             let s = |i: u16| (i as usize) < count;
@@ -433,19 +453,38 @@ impl<'a> Pack<'a> {
     }
 
     pub fn str(&self, id: Str) -> &'a str {
-        let at = u32::from_be_bytes(
-            self.offsets[id as usize * 4..id as usize * 4 + 4]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        let rest = &self.blob[at..];
-        let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
-        core::str::from_utf8(&rest[..end]).unwrap_or("")
+        let i = id as usize;
+        let off = |k: usize| {
+            u32::from_be_bytes([
+                self.offsets[k * 4],
+                self.offsets[k * 4 + 1],
+                self.offsets[k * 4 + 2],
+                self.offsets[k * 4 + 3],
+            ]) as usize
+        };
+        let at = off(i);
+        let bytes = if i + 1 < self.count {
+            &self.blob[at..off(i + 1) - 1]
+        } else {
+            let rest = &self.blob[at..];
+            &rest[..rest.iter().position(|&c| c == 0).unwrap_or(rest.len())]
+        };
+        core::str::from_utf8(bytes).unwrap_or("")
     }
 
-    /// The string's id, if any element uses it (linear; for load time only).
+    /// The string's id, if any element uses it (binary search over the sorted ids).
     pub fn find(&self, s: &str) -> Option<Str> {
-        (0..self.count as u16).find(|&i| self.str(i) == s)
+        let id = |k: usize| u16::from_be_bytes([self.sorted[k * 2], self.sorted[k * 2 + 1]]);
+        let (mut lo, mut hi) = (0usize, self.count);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match self.str(id(mid)).as_bytes().cmp(s.as_bytes()) {
+                core::cmp::Ordering::Less => lo = mid + 1,
+                core::cmp::Ordering::Greater => hi = mid,
+                core::cmp::Ordering::Equal => return Some(id(mid)),
+            }
+        }
+        None
     }
 
     pub fn graph(&self, name: &str) -> Option<&Graph> {

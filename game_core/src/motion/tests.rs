@@ -166,6 +166,37 @@ pub fn lib() -> Vec<u8> {
     write(&[a, b, short], &trees)
 }
 
+/// A `.fgpak` for tests: header, entries, strings, 32-byte aligned data.
+pub fn pack(items: &[(&str, crate::pack::Kind, Vec<u8>)]) -> Vec<u8> {
+    let mut strings = Vec::new();
+    let mut offs = Vec::new();
+    for (n, _, _) in items {
+        offs.push(strings.len() as u32);
+        strings.extend_from_slice(n.as_bytes());
+        strings.push(0);
+    }
+    let strings_at = 16 + items.len() * 32;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"FGPA");
+    for v in [1u32, items.len() as u32, strings_at as u32] {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    out.resize(strings_at, 0);
+    out.extend_from_slice(&strings);
+    for (i, (n, k, d)) in items.iter().enumerate() {
+        out.resize(out.len().next_multiple_of(32), 0);
+        let off = out.len();
+        out.extend_from_slice(d);
+        let e = 16 + i * 32;
+        out[e..e + 4].copy_from_slice(&crate::pack::name_hash(n).to_be_bytes());
+        out[e + 4..e + 8].copy_from_slice(&offs[i].to_be_bytes());
+        out[e + 8..e + 12].copy_from_slice(&(*k as u32).to_be_bytes());
+        out[e + 12..e + 16].copy_from_slice(&(off as u32).to_be_bytes());
+        out[e + 16..e + 20].copy_from_slice(&(d.len() as u32).to_be_bytes());
+    }
+    out
+}
+
 #[test]
 fn round_trips_names_clips_and_trees() {
     let bytes = lib();
@@ -271,36 +302,6 @@ fn rejects_garbage() {
 #[test]
 fn library_finds_poses_by_clip() {
     use crate::pack::Kind;
-    // A pack writer just for this test: header, entries, strings, 32-byte aligned data.
-    fn pack(items: &[(&str, Kind, Vec<u8>)]) -> Vec<u8> {
-        let mut strings = Vec::new();
-        let mut offs = Vec::new();
-        for (n, _, _) in items {
-            offs.push(strings.len() as u32);
-            strings.extend_from_slice(n.as_bytes());
-            strings.push(0);
-        }
-        let strings_at = 16 + items.len() * 32;
-        let mut out = Vec::new();
-        out.extend_from_slice(b"FGPA");
-        for v in [1u32, items.len() as u32, strings_at as u32] {
-            out.extend_from_slice(&v.to_be_bytes());
-        }
-        out.resize(strings_at, 0);
-        out.extend_from_slice(&strings);
-        for (i, (n, k, d)) in items.iter().enumerate() {
-            out.resize(out.len().next_multiple_of(32), 0);
-            let off = out.len();
-            out.extend_from_slice(d);
-            let e = 16 + i * 32;
-            out[e..e + 4].copy_from_slice(&crate::pack::name_hash(n).to_be_bytes());
-            out[e + 4..e + 8].copy_from_slice(&offs[i].to_be_bytes());
-            out[e + 8..e + 12].copy_from_slice(&(*k as u32).to_be_bytes());
-            out[e + 12..e + 16].copy_from_slice(&(off as u32).to_be_bytes());
-            out[e + 16..e + 20].copy_from_slice(&(d.len() as u32).to_be_bytes());
-        }
-        out
-    }
     // One bone, one frame, old (unpacked) layout: identity.
     let mut pose = vec![0u8; crate::anim::ANIM_HEADER + 14];
     pose[1] = 1;

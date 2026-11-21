@@ -531,6 +531,15 @@ pub fn compile(graphs: &[(&str, &Element)]) -> Result<Vec<u8>, String> {
         blob.extend_from_slice(s.as_bytes());
         blob.push(0);
     }
+    // The ids in byte order of their strings, so the game finds a name by binary search.
+    let mut sorted: Vec<u16> = (0..strings.list.len() as u16).collect();
+    sorted.sort_by(|&a, &b| strings.list[a as usize].cmp(&strings.list[b as usize]));
+    for i in sorted {
+        out.extend_from_slice(&i.to_be_bytes());
+    }
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
     let blob_at = out.len() as u32;
     out.extend_from_slice(&blob);
     out[16..20].copy_from_slice(&offsets_at.to_be_bytes());

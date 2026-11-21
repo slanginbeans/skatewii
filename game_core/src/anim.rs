@@ -14,7 +14,7 @@
 //! 8   u32 flags (FLAG_LOOP, FLAG_SCALE)
 //! 12  f32 translation min xyz, f32 scale min xyz
 //! 36  f32 translation step xyz, f32 scale step xyz      value = min + q * step
-//! 60  reserved
+//! 60  u32 with FLAG_CHANNEL: offset of the per-bone channel weights (f32 each), else reserved
 //! 64  samples: i16 rotation xyzw (Q15, unit quaternion, sign continuous over time),
 //!     u16 translation xyz, and u16 scale xyz only if FLAG_SCALE
 //! ```
@@ -32,6 +32,8 @@ pub const ANIM_HEADER: usize = 64;
 pub const FLAG_LOOP: u32 = 1;
 pub const FLAG_SCALE: u32 = 2;
 pub const FLAG_PACKED: u32 = 4;
+/// A channel animation: it carries a weight per bone (how much of the bone a channel blend takes).
+pub const FLAG_CHANNEL: u32 = 8;
 
 /// Range of the three smallest components of a unit quaternion.
 pub const SMALLEST_RANGE: f32 = core::f32::consts::FRAC_1_SQRT_2;
@@ -206,6 +208,24 @@ impl<'a> Clip<'a> {
     }
     pub fn looping(&self) -> bool {
         self.flags() & FLAG_LOOP != 0
+    }
+    /// A channel animation's weights live in the clip.
+    pub fn is_channel(&self) -> bool {
+        self.flags() & FLAG_CHANNEL != 0 && self.channel_at().is_some()
+    }
+    fn channel_at(&self) -> Option<usize> {
+        let at = u32::from_be_bytes([self.data[60], self.data[61], self.data[62], self.data[63]]);
+        let at = at as usize;
+        (at >= ANIM_HEADER && at + 4 * self.bones <= self.data.len()).then_some(at)
+    }
+    /// The bone's channel weight: 1 except in a channel animation.
+    pub fn channel_weight(&self, bone: usize) -> f32 {
+        match self.channel_at() {
+            Some(at) if self.flags() & FLAG_CHANNEL != 0 && bone < self.bones => {
+                f32_at(self.data, at + 4 * bone)
+            }
+            _ => 1.0,
+        }
     }
     /// Dequantised sample of `bone` at `frame` (both must be in range).
     pub fn sample(&self, frame: usize, bone: usize) -> Sample {
