@@ -49,7 +49,8 @@ content second.
   timing from the imported clips, SK8 powerslides, vert pops re-aimed up, SK8 wallrides (needs a floor),
   pumping by curvature; every curve from the disc through the rules pack
 - [ ] Calibrate the flatground-own scales (brake, powerslide grip, side grip) against SK8 runs
-- [ ] Grinds from riding (into coping, onto curbs and ledges): the lock-on hook is ready (`try_grind`)
+- [x] Grinds from riding (into coping, off a ledge's top, up a bank into a ledge, dropping in), SK8's
+  admission and coping hold
 - [x] Scripted Dolphin runs from `game_core::autoplay` (`autoplay.txt`, `tools/dolphin_test.ps1`)
 - [ ] Screenshots from scripted runs in CI-like checks
 - [x] Late flips, finger flips, under flips, dark catches: recognised and selected by the state graphs (Z is
@@ -113,10 +114,14 @@ content second.
 
 ## Phase 4: Game
 - [x] Grinds: 50-50 and boardslide on rails (imported parks and the demo ledge)
-- [x] Grinds and slides chosen by how the board meets the rail (11 kinds, frontside/backside)
-- [ ] Grind balance; blunts, darkslides; a light physics fall for bails (Skate 3's ragdoll)
-- [ ] Grind targeting in the air (Skate 3's grind air assist: the trajectory selector's grind score and
-  the spin handed to it; phase 6), body flips and their upside-down bails
+- [x] Grinds as Skate 3 does them (phase 6, docs/graph-runner.md "Grinds"): the board's contact boxes pick
+  the family (50-50, 5-0, tip slide, blunt, boardslide, darkslide), rail classes and high sides from the
+  park, grind targeting in the landing prediction and the grind air assist, stick pitch and yaw on the
+  rail, friction by family and class, lean-off, entry and in-grind wipeouts, pop-outs with energy, every
+  grind name the state graphs know (BF_ variants included), the grind trees' twist and height
+- [ ] Grind balance as a rigid board (Skate 3's pins and forces; flatground holds the board on the rail),
+  the in-grind deck closing-speed wipeout, grind grabs, a light physics fall for bails (Skate 3's ragdoll)
+- [ ] Body flips and their upside-down bails
 - [ ] Skater animation (skinned, original)
 - [ ] Session goals, combo system, replay
 - [ ] Sound (ASND): rolling, pop, landing
