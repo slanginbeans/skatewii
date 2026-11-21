@@ -15,6 +15,8 @@ impl Lib {
     pub const SELECT: &'static str = "SEL_STANCE";
     pub const CHOOSE: &'static str = "SS_ANGLE";
     pub const BROKEN: &'static str = "PB_BROKEN";
+    /// A phase blend by LEAN whose authored first child is an extreme (LOOP_B -1, LOOP_A 0, SHORT 1).
+    pub const LEAN: &'static str = "PB_LEAN";
 }
 
 /// Packs a name the way Skate 3 does (FastString), for bone-reference attributes.
@@ -106,10 +108,11 @@ pub fn lib() -> Vec<u8> {
                 end: 0.25,
                 words: bone.into_iter().chain([0.5f32.to_bits()]).collect(),
             },
+            scalar("LEAN", 0.0),
         ],
     );
-    let b = clip("LOOP_B", 61.0, true, 6.0, vec![]);
-    let short = clip("SHORT", 16.0, false, 4.0, vec![]);
+    let b = clip("LOOP_B", 61.0, true, 6.0, vec![scalar("LEAN", -1.0)]);
+    let short = clip("SHORT", 16.0, false, 4.0, vec![scalar("LEAN", 1.0)]);
     let s = |x: &str| String::from(x);
     let trees = vec![
         (
@@ -153,6 +156,13 @@ pub fn lib() -> Vec<u8> {
             TreeIn::PhaseBlend {
                 parameter: s("SPEED"),
                 children: vec![s(Lib::PHASE), s(Lib::SELECT)],
+            },
+        ),
+        (
+            s(Lib::LEAN),
+            TreeIn::PhaseBlend {
+                parameter: s("LEAN"),
+                children: vec![s("LOOP_B"), s("LOOP_A"), s("SHORT")],
             },
         ),
         (
@@ -202,7 +212,7 @@ fn round_trips_names_clips_and_trees() {
     let bytes = lib();
     let db = MotionDb::parse(&bytes).unwrap();
     assert_eq!(db.clips().len(), 3);
-    assert_eq!(db.trees().len(), 6);
+    assert_eq!(db.trees().len(), 7);
     let nested = db.tree(db.tree_index("A_NESTED").unwrap());
     let TreeDef::PhaseBlend { children, .. } = &nested.def else {
         panic!()
@@ -216,7 +226,7 @@ fn round_trips_names_clips_and_trees() {
     assert_eq!(db.name(c.name), "LOOP_A");
     assert!(c.looping() && c.has_pose && !c.phase_controlled());
     assert!((c.length() - 1.0).abs() < 1e-6);
-    assert_eq!(db.attributes(a).len(), 6);
+    assert_eq!(db.attributes(a).len(), 7);
     assert!(matches!(db.find(Lib::PHASE), Some(Node::Tree(_))));
     let t = db.tree(db.tree_index(Lib::BROKEN).unwrap());
     let TreeDef::PhaseBlend { children, .. } = &t.def else {

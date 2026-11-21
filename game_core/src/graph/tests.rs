@@ -476,6 +476,314 @@ mod runner {
     }
 }
 
+/// The motion graph and the physics agree on wipeouts: a grab state shaped like Skate 3's (wiped out when
+/// the board isn't in the air or its trucks or deck touch something) stays a grab while the physics has
+/// the board in the air, and only a grind counts as the trucks touching.
+mod wipeout_agreement {
+    use super::*;
+    use crate::graph::drive::Driver;
+    use crate::input::Pad;
+    use crate::math::Vec3;
+    use crate::park::Park;
+    use crate::skater::{Mode, Skater};
+
+    fn cond(name: &str, extra: &[(&str, &str)]) -> Element {
+        let mut a = vec![("name", name)];
+        a.extend_from_slice(extra);
+        Element::of("condition", &a, vec![])
+    }
+
+    fn graphs() -> Vec<u8> {
+        let action = st("Action", &[], vec![]);
+        let air = || cond("PhysFilteredState", &[("state", "air")]);
+        let wipe = Element::of(
+            "transition",
+            &[("target", "WipeOut"), ("priority", "high")],
+            vec![Element::of(
+                "expression",
+                &[("op", "or")],
+                vec![
+                    Element::of("expression", &[("op", "not")], vec![air()]),
+                    cond("TrucksOrDeckInContact", &[]),
+                ],
+            )],
+        );
+        let motion = st(
+            "Motion",
+            &[],
+            vec![
+                st(
+                    "OnBoard",
+                    &[],
+                    vec![
+                        st(
+                            "InAir",
+                            &[],
+                            vec![
+                                when(vec![cond(
+                                    "PhysFilteredState",
+                                    &[("state", "air"), ("mask", "always")],
+                                )]),
+                                st("Grab", &[], vec![wipe]),
+                            ],
+                        ),
+                        st("Riding", &[], vec![]),
+                    ],
+                ),
+                st("WipeOut", &[("active", "false")], vec![]),
+            ],
+        );
+        compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn a_grab_in_the_air_is_not_a_wipeout() {
+        let entry: &'static [u8] = alloc::boxed::Box::leak(graphs().into_boxed_slice());
+        let lib = crate::motion::tests::lib();
+        let db = crate::motion::MotionDb::parse(&lib).unwrap();
+        let mut d = Driver::new(entry, None, &db, Vec::new()).unwrap();
+        let park = Park {
+            shapes: Vec::new(),
+            half_size: 50.0,
+            wall_height: 2.0,
+            spawn: Vec3::ZERO,
+            spawn_yaw: 0.0,
+            rails: Vec::new(),
+        };
+        let mut s = Skater::spawn(&park);
+        s.mode = Mode::Air { time: 0.2 };
+        s.pos.y = 1.0;
+        let grab = Pad {
+            trig_r: 1.0,
+            ..Pad::default()
+        };
+        for _ in 0..30 {
+            let w = d.world(&s, Some(0.4), 0.0);
+            assert!(
+                !w.trucks_or_deck,
+                "wheels or nothing touching is not trucks or deck"
+            );
+            d.tick(&db, &grab, w, Default::default(), 1.0 / 60.0, None);
+            let state = d.runner.motion_state();
+            assert_eq!(state, "OnBoard/InAir/Grab", "the physics is in the air");
+        }
+        // On a rail the trucks touch.
+        s.mode = Mode::Grind;
+        assert!(d.world(&s, None, 0.0).trucks_or_deck);
+        s.mode = Mode::Rolling;
+        assert!(!d.world(&s, None, 0.0).trucks_or_deck);
+    }
+}
+
+/// The riding behaviours set their tree parameters: the carve lean follows the turn, the body tilt
+/// stays flat on flat ground, the crouch height comes from the trigger, and a tree played with a
+/// parameter nothing sets is reported once.
+mod riding_parameters {
+    use super::*;
+    use crate::graph::host::Runner;
+    use crate::motion::MotionDb;
+
+    fn b(name: &str, extra: &[(&str, &str)]) -> Element {
+        let mut a = vec![("name", name)];
+        a.extend_from_slice(extra);
+        Element::of("behaviour", &a, vec![])
+    }
+
+    fn graphs() -> Vec<u8> {
+        let action = st(
+            "Action",
+            &[],
+            vec![b(
+                "CreateMGIntentFromAGIntent",
+                &[("MGIntent", "Crouch"), ("AGIntent", "Crouch")],
+            )],
+        );
+        let motion = st(
+            "Motion",
+            &[],
+            vec![st(
+                "Riding",
+                &[],
+                vec![
+                    b("SettingBodyTilt", &[("tilt_x", "X")]),
+                    b("SetDistComToBoard", &[("attribute", "Y")]),
+                    b("Crouching", &[("crouchName", "Y")]),
+                    b("SetTurning", &[("angleName", "LEAN")]),
+                    st(
+                        "Idle",
+                        &[],
+                        vec![
+                            b("ApplyingBodyTilt", &[]),
+                            b("PlayAnimation", &[("anim", "PB_LEAN")]),
+                            b("PlayAnimation", &[("anim", "BS_XY")]),
+                        ],
+                    ),
+                ],
+            )],
+        );
+        compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap()
+    }
+
+    fn param(r: &Runner, db: &MotionDb, name: &str) -> Option<f32> {
+        let n = db.name_id(name)?;
+        r.s.player
+            .params
+            .iter()
+            .find(|p| p.name == n)
+            .map(|p| p.value)
+    }
+
+    #[test]
+    fn riding_behaviours_set_their_tree_parameters() {
+        let bytes = graphs();
+        let lib = crate::motion::tests::lib();
+        let db = MotionDb::parse(&lib).unwrap();
+        let mut r = Runner::new(Pack::parse(&bytes).unwrap(), Some(&db)).unwrap();
+        let dt = 1.0 / 60.0;
+        r.s.world.speed = 5.0;
+        r.s.world.forward_speed = 5.0;
+        r.s.world.ground_speed = 5.0;
+        for _ in 0..60 {
+            r.update(Some(&db), dt);
+        }
+        assert_eq!(r.motion_state(), "Riding/Idle");
+        assert_eq!(param(&r, &db, "LEAN"), Some(0.0), "riding straight");
+        assert_eq!(param(&r, &db, "X"), Some(0.0), "flat ground");
+        let standing = param(&r, &db, "Y").unwrap();
+        // A held carve leans; the trigger crouches.
+        r.s.world.turn = 1.0;
+        r.s.world.lean = 0.3;
+        let crouch = r.pack.find("Crouch").unwrap();
+        for _ in 0..180 {
+            r.s.ag.set(crouch, 1.0);
+            r.update(Some(&db), dt);
+        }
+        let lean = param(&r, &db, "LEAN").unwrap();
+        assert!(lean.abs() > 0.2, "{lean}");
+        let crouched = param(&r, &db, "Y").unwrap();
+        assert!(crouched < standing - 0.2, "{standing} -> {crouched}");
+        // The blend space's X and Y are set; nothing set LEAN's sibling parameters in PB_LEAN's
+        // children (clips), so only the blend space's own parameters count: none unset.
+        assert!(
+            r.s.player.unset.is_empty(),
+            "{:?}",
+            r.s.player
+                .unset
+                .iter()
+                .map(|u| db.name(u.1))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_manual_out_timer_starts_when_the_manual_ends() {
+        let has = Element::of(
+            "condition",
+            &[
+                ("name", "HasIntent"),
+                ("intent", "Manual"),
+                ("mask", "always"),
+            ],
+            vec![],
+        );
+        let motion = st(
+            "Motion",
+            &[],
+            vec![st(
+                "Riding",
+                &[],
+                vec![
+                    b("UpdateManualOutTimer", &[]),
+                    st(
+                        "Manual",
+                        &[],
+                        vec![
+                            when(vec![has]),
+                            b("IsManualing", &[]),
+                            b("SetManualOutTimer", &[("length", "0.1")]),
+                        ],
+                    ),
+                    st("Idle", &[], vec![]),
+                ],
+            )],
+        );
+        let action = st(
+            "Action",
+            &[],
+            vec![b(
+                "CreateMGIntentFromAGIntent",
+                &[("MGIntent", "Manual"), ("AGIntent", "Manual")],
+            )],
+        );
+        let bytes = compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap();
+        let mut r = Runner::new(Pack::parse(&bytes).unwrap(), None).unwrap();
+        let manual = r.pack.find("Manual").unwrap();
+        let dt = 1.0 / 60.0;
+        for _ in 0..30 {
+            r.s.ag.set(manual, -1.0);
+            r.update(None, dt);
+        }
+        assert_eq!(r.motion_state(), "Riding/Manual");
+        assert_eq!(r.s.manual_out_timer, 0.0, "not while manualing");
+        r.s.ag.clear();
+        r.update(None, dt);
+        r.update(None, dt);
+        assert_eq!(r.motion_state(), "Riding/Idle");
+        assert!(r.s.manual_out_timer > 0.05, "{}", r.s.manual_out_timer);
+        for _ in 0..8 {
+            r.update(None, dt);
+        }
+        assert_eq!(r.s.manual_out_timer, 0.0);
+    }
+
+    #[test]
+    fn a_tree_with_a_parameter_nothing_sets_is_reported_once() {
+        use crate::graph::ops::TransitionDef;
+        use crate::graph::playback::{Player, Tree};
+        use crate::motion::tree::Playback;
+        let lib = crate::motion::tests::lib();
+        let db = MotionDb::parse(&lib).unwrap();
+        let mut p = Player::default();
+        let tree = |name: &str| Tree {
+            play: Playback::build(&db, name, &[]).unwrap(),
+            mirror: false,
+            name: 7,
+        };
+        let cut = TransitionDef {
+            kind: 1,
+            seconds: 0.0,
+            under: false,
+            matching: 0,
+            channels_from_weights: false,
+        };
+        p.play(&db, tree("PB_LEAN"), 1.0, cut);
+        p.advance(&db, 1.0 / 60.0);
+        assert_eq!(p.unset, [(7, db.name_id("LEAN").unwrap())]);
+        p.unset.clear();
+        p.play(&db, tree("PB_LEAN"), 1.0, cut);
+        p.advance(&db, 1.0 / 60.0);
+        assert!(p.unset.is_empty(), "once per parameter");
+        // Set before the tick ends: not reported.
+        p.play(&db, tree("BS_XY"), 1.0, cut);
+        p.set_param(db.name_id("X").unwrap(), 0.5, false);
+        p.set_param(db.name_id("Y").unwrap(), 0.5, false);
+        p.advance(&db, 1.0 / 60.0);
+        assert!(p.unset.is_empty());
+    }
+}
+
 /// The whole game on a synthetic motion pack (made-up clips, a made-up pair of graphs shaped like the
 /// manual part of Skate 3's): the pad through the action graph, the motion graph and the physics.
 mod in_game {

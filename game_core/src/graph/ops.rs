@@ -283,7 +283,30 @@ pub enum Beh {
         attr: Option<NameId>,
         value: Option<f32>,
     },
-    SetTurning,
+    /// SetTurning: the carve's tree parameters (`angleName`, `dirName`, `quicknessName`, `speedName`,
+    /// `holdingName`; motion-library names).
+    SetTurning {
+        names: [Option<NameId>; 5],
+    },
+    /// ApplyingBodyTilt: SettingBodyTilt runs while one of these does.
+    ApplyingBodyTilt,
+    /// SettingBodyTilt: the body tilt's tree parameter (`tilt_x`).
+    SettingBodyTilt(Option<NameId>),
+    /// Crouching: the crouch height's tree parameter (`crouchName`).
+    Crouching(Option<NameId>),
+    /// SetDistComToBoard: the centre of mass's height over the board as a tree parameter on begin
+    /// (`setManually`: a fixed height; `adjustForVel`: less the landing speed's share of a tick).
+    SetDistComToBoard {
+        attr: Option<NameId>,
+        manually: bool,
+        adjust: bool,
+    },
+    /// SetLandingData: the landing trees' `Spin`, `AvgVelY` and `disttocog`.
+    SetLandingData,
+    /// StoreLandingData: tracks the landing speed.
+    StoreLandingData,
+    /// SetManualAngle: the manual trees' `manual_angle`.
+    SetManualAngle,
     // Action graph:
     MgFromAg {
         mg: Str,
@@ -631,15 +654,11 @@ const NOTHING: &[&str] = &[
     "SetScoreAugmentation",
     "ControlAirLegExtension",
     "MatchTwistAndLean",
-    "ApplyingBodyTilt",
-    "SettingBodyTilt",
-    "Crouching",
     "Pumping",
     "BipedCadence",
     "MatchCadence",
     "MatchAirTime",
     "OffboardBodyTweakBlend",
-    "SetDistComToBoard",
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
     "GrindControlFade",
@@ -661,8 +680,6 @@ const NOTHING: &[&str] = &[
     "Shove",
     "HippyJumpAntic",
     "LandOnBoard",
-    "StoreLandingData",
-    "SetLandingData",
     "AddRunoutAttribs",
     "Wipeout",
     "EnableWipeoutGestures",
@@ -674,7 +691,6 @@ const NOTHING: &[&str] = &[
     "PowerSlideDecel",
     "PowerSlideManualAtt",
     "PowerSlideSpin",
-    "SetManualAngle",
     "SetDeckPitch",
 ];
 /// Off-board and NPC behaviours flatground doesn't run (logged once as unsupported when reached).
@@ -825,7 +841,27 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
             attr: a.text("attribute").and_then(lib),
             value: a.of("setToValue"),
         },
-        "SetTurning" => Beh::SetTurning,
+        "SetTurning" => Beh::SetTurning {
+            names: [
+                ("angleName", "angle"),
+                ("dirName", "dir"),
+                ("quicknessName", "quickness"),
+                ("speedName", "speedtuck"),
+                ("holdingName", "holding"),
+            ]
+            .map(|(k, d)| lib(a.text(k).unwrap_or(d))),
+        },
+        "ApplyingBodyTilt" => Beh::ApplyingBodyTilt,
+        "SettingBodyTilt" => Beh::SettingBodyTilt(lib(a.text("tilt_x").unwrap_or("tilt_x"))),
+        "Crouching" => Beh::Crouching(a.text("crouchName").and_then(lib)),
+        "SetDistComToBoard" => Beh::SetDistComToBoard {
+            attr: a.text("attribute").and_then(lib),
+            manually: a.b("setManually", false),
+            adjust: a.b("adjustForVel", false),
+        },
+        "SetLandingData" => Beh::SetLandingData,
+        "StoreLandingData" => Beh::StoreLandingData,
+        "SetManualAngle" => Beh::SetManualAngle,
         "CreateMGIntentFromAGIntent" => Beh::MgFromAg {
             mg: a.str("MGIntent"),
             ag: a.str("AGIntent"),

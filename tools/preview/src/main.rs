@@ -433,15 +433,19 @@ fn main() {
             }
         );
     }
-    // --poses: still shots of each stance (goofy, fakie, switch, regular) to check facing and mirroring.
+    // --poses: still shots of each stance (goofy, fakie, switch, regular) to check facing and mirroring,
+    // and of a held carve each way (the rider leans into the turn), each also close up from the side
+    // and from behind.
     if args.iter().any(|a| a == "--poses") {
         use game_core::skater::Stance;
         let base = game;
-        for (name, stance, switch, speed) in [
-            ("goofy", Stance::Goofy, false, 3.0f32),
-            ("fakie", Stance::Goofy, false, -3.0),
-            ("switch", Stance::Goofy, true, 3.0),
-            ("regular", Stance::Regular, false, 3.0),
+        for (name, stance, switch, speed, stick_x) in [
+            ("goofy", Stance::Goofy, false, 3.0f32, 0i8),
+            ("fakie", Stance::Goofy, false, -3.0, 0),
+            ("switch", Stance::Goofy, true, 3.0, 0),
+            ("regular", Stance::Regular, false, 3.0, 0),
+            ("carve_left", Stance::Goofy, false, 5.0, -70),
+            ("carve_right", Stance::Goofy, false, 5.0, 70),
         ] {
             let mut g = Game::new();
             if let Some(path) = value("--rules") {
@@ -460,11 +464,12 @@ fn main() {
             g.skater.switch = switch;
             g.skater.speed = speed;
             g.skater.pos.z = -10.0;
-            for _ in 0..60 {
+            for _ in 0..90 {
                 g.skater.speed = speed;
                 g.update(
                     &PadRaw {
                         flags: game_core::input::flag::CONNECTED,
+                        stick_x,
                         ..Default::default()
                     },
                     1.0 / 60.0,
@@ -479,11 +484,44 @@ fn main() {
                 side,
             });
             raster.save(&out.join(format!("pose_{name}_side.png")));
+            g.render(&mut CloseUp {
+                inner: &mut raster,
+                target: g.skater.pos,
+                side: yaw_dir(g.skater.heading + std::f32::consts::PI),
+            });
+            raster.save(&out.join(format!("pose_{name}_back.png")));
             let fakie = g.rider().map_or(0.0, |r| r.fakie_weight());
+            // The riding trees' parameters, as the graph's behaviours set them.
+            let params = match (&g.graph, g.motion.as_ref().map(|m| &m.db)) {
+                (Some(d), Some(db)) => d
+                    .runner
+                    .s
+                    .player
+                    .params
+                    .iter()
+                    .filter(|p| {
+                        matches!(
+                            db.name(p.name).to_ascii_uppercase().as_str(),
+                            "ANGLE"
+                                | "DIR"
+                                | "QUICKNESS"
+                                | "HOLDING"
+                                | "SPEEDTUCK"
+                                | "TILT_X"
+                                | "DISTTOCOG"
+                        )
+                    })
+                    .map(|p| format!("{} {:.2}", db.name(p.name), p.value))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                _ => String::new(),
+            };
             println!(
-                "{name}: fakie {} mirrored {} fakie look {fakie:.2}",
+                "{name}: fakie {} mirrored {} fakie look {fakie:.2}, yaw rate {:.2} | {}",
                 g.skater.fakie,
-                g.skater.mirrored()
+                g.skater.mirrored(),
+                g.skater.yaw_rate,
+                params
             );
         }
         drop(base);

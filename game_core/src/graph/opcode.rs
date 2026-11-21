@@ -14,7 +14,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 struct W(Vec<u8>);
 
@@ -479,7 +479,7 @@ fn read_cond(r: &mut R) -> Option<Cond> {
 }
 
 /// Behaviours without fields, by tag.
-const PLAIN_BEHS: [Beh; 13] = [
+const PLAIN_BEHS: [Beh; 16] = [
     Beh::JumpInto,
     Beh::ClearTrickAttr,
     Beh::SetDark,
@@ -489,10 +489,13 @@ const PLAIN_BEHS: [Beh; 13] = [
     Beh::ResetTimeSinceKickturn,
     Beh::UpdateTimeSinceKickturn,
     Beh::ScoringGrabs,
-    Beh::SetTurning,
     Beh::BodyFlippingSignal,
     Beh::FakieHead,
     Beh::Nothing,
+    Beh::ApplyingBodyTilt,
+    Beh::SetLandingData,
+    Beh::StoreLandingData,
+    Beh::SetManualAngle,
 ];
 
 fn beh(w: &mut W, b: &Beh) {
@@ -687,6 +690,30 @@ fn beh(w: &mut W, b: &Beh) {
             w.u8(21);
             w.u16(*s);
         }
+        Beh::SetTurning { names } => {
+            w.u8(22);
+            for n in names {
+                w.o16(*n);
+            }
+        }
+        Beh::SettingBodyTilt(n) => {
+            w.u8(23);
+            w.o16(*n);
+        }
+        Beh::Crouching(n) => {
+            w.u8(24);
+            w.o16(*n);
+        }
+        Beh::SetDistComToBoard {
+            attr,
+            manually,
+            adjust,
+        } => {
+            w.u8(25);
+            w.o16(*attr);
+            w.b(*manually);
+            w.b(*adjust);
+        }
         // Every field-less behaviour was written above.
         _ => w.u8(255),
     }
@@ -694,7 +721,7 @@ fn beh(w: &mut W, b: &Beh) {
 
 fn read_beh(r: &mut R) -> Option<Beh> {
     let tag = r.u8()?;
-    if (100..113).contains(&tag) {
+    if (100..100 + PLAIN_BEHS.len() as u8).contains(&tag) {
         return Some(PLAIN_BEHS[(tag - 100) as usize].clone());
     }
     Some(match tag {
@@ -807,6 +834,16 @@ fn read_beh(r: &mut R) -> Option<Beh> {
             angle: r.u16()?,
         },
         21 => Beh::Unsupported(r.u16()?),
+        22 => Beh::SetTurning {
+            names: [r.o16()?, r.o16()?, r.o16()?, r.o16()?, r.o16()?],
+        },
+        23 => Beh::SettingBodyTilt(r.o16()?),
+        24 => Beh::Crouching(r.o16()?),
+        25 => Beh::SetDistComToBoard {
+            attr: r.o16()?,
+            manually: r.b()?,
+            adjust: r.b()?,
+        },
         _ => return None,
     })
 }

@@ -149,6 +149,22 @@ impl Driver {
                 .as_ref()
                 .map_or(0, |p| if p.side > 0.0 { 2 } else { 1 }),
             slide_ending: s.slide.as_ref().is_some_and(|p| p.releasing),
+            // Only the trucks or the deck (a grind), not the wheels: SK8 TrucksOrDeckInContact reads the
+            // truck and deck contacts. Counting the wheels (or nothing) wiped grabs out in the air.
+            trucks_or_deck: s.mode == Mode::Grind,
+            // Skate 3's processed turn (and its lean) are positive turning left, the way the board
+            // yaws (`s.steer` is positive to the right): so the rider leans into the turn.
+            turn: -s.steer,
+            // The lean into the turn: the angle that balances the turn's centripetal pull (signed
+            // like the turn, rolling either way).
+            lean: libm::atanf(s.yaw_rate * s.speed / s.tuning.gravity.max(0.1)),
+            ground_speed: s.ground_velocity().length(),
+            lateral_up: up.cross(s.fwd).y,
+            body_spin: s.spin_rate,
+            vel_y: s.vel.y,
+            vel_up: s.vel.dot(up),
+            pump_potential: s.pump.effect.abs().min(1.0),
+            landing_spin: s.yaw_rate,
             ..World::default()
         }
     }
@@ -280,6 +296,20 @@ impl Driver {
         }
         self.shown = now.clone();
         Some(now)
+    }
+
+    /// Trees played with a parameter no behaviour has set (tree, parameter), each parameter once, since
+    /// the last call.
+    pub fn new_unset(&mut self, db: &MotionDb) -> Vec<(&'static str, String)> {
+        let r = &mut self.runner;
+        let out =
+            r.s.player
+                .unset
+                .iter()
+                .map(|&(t, n)| (r.pack.str(t), String::from(db.name(n))))
+                .collect();
+        r.s.player.unset.clear();
+        out
     }
 
     /// Unsupported operations reached for the first time since the last call.

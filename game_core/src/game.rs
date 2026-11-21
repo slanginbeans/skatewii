@@ -472,6 +472,10 @@ impl Game {
                 for n in g.new_unsupported() {
                     self.log.push(format!("graph: unsupported {n}"));
                 }
+                for (tree, param) in g.new_unset(&lib.db) {
+                    self.log
+                        .push(format!("graph: {tree} plays with unset parameter {param}"));
+                }
             }
         }
         let mut events = Vec::new();

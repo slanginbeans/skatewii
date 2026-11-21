@@ -428,6 +428,31 @@ impl Playback {
         }
     }
 
+    /// Every parameter the tree reads (phase blends, blend spaces, selection spaces), added to `out`
+    /// once each.
+    pub fn parameters(&self, out: &mut Vec<NameId>) {
+        let mut add = |n: NameId| {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        };
+        match self {
+            Playback::Clip { .. } => {}
+            Playback::PhaseBlend(t) => {
+                add(t.parameter);
+                t.children.iter().for_each(|c| c.parameters(out));
+            }
+            Playback::BlendSpace(t) => {
+                t.parameters.iter().for_each(|&p| add(p));
+                t.children.iter().for_each(|c| c.parameters(out));
+            }
+            Playback::SelectionSpace(t) => {
+                t.parameters.iter().for_each(|p| add(p.name));
+                t.candidates.iter().for_each(|c| c.2.parameters(out));
+            }
+        }
+    }
+
     /// Hands the game's parameters to every node; returns whether anything changed.
     pub fn set_parameters(&mut self, db: &MotionDb, params: &[Param]) -> bool {
         match self {
@@ -556,6 +581,8 @@ pub struct PhaseBlend {
     pub weight: f32,
     value: f32,
     normalized: bool,
+    /// The children have been placed once (see `set_parameters` for a parameter never set).
+    resolved: bool,
     cull: f32,
     pub length: f32,
     pub time: f32,
@@ -578,6 +605,7 @@ impl PhaseBlend {
             weight: 0.0,
             value: f32::MAX,
             normalized: true,
+            resolved: false,
             cull: 0.0,
             time: 0.0,
         })
@@ -629,7 +657,12 @@ impl PhaseBlend {
             self.normalized = p.normalized;
             changed = true;
         }
-        if !changed {
+        // A parameter no behaviour has set yet: SK8 (and Skate 3) stay on the authored first child, which
+        // relies on the graph's behaviours always setting it. flatground places the blend once at the
+        // neutral point instead (0, when the children's range holds it: no lean, no tilt), so a gap in
+        // the behaviours shows as a neutral pose rather than the first child's extreme one.
+        let unset = self.value == f32::MAX;
+        if !changed && (self.resolved || !unset) {
             return false;
         }
         // Each child's own value of the parameter (an untimed attribute of its clips).
@@ -649,7 +682,15 @@ impl PhaseBlend {
         }
         let min = values[self.order[0]];
         let max = values[*self.order.last().unwrap()];
-        let target = if self.normalized {
+        let first = !self.resolved;
+        self.resolved = true;
+        let neutral = unset && min <= 0.0 && max >= 0.0;
+        if unset && !neutral && !changed {
+            return false;
+        }
+        let target = if neutral {
+            0.0
+        } else if self.normalized {
             (max - min) * self.value + min
         } else {
             self.value
@@ -671,7 +712,7 @@ impl PhaseBlend {
         self.left = left;
         self.right = right;
         self.update_length(phase);
-        true
+        changed || first
     }
     fn query_attribute(&self, db: &MotionDb, name: NameId, mask: u32, out: &mut Attr) -> bool {
         if self.weight < self.cull {
@@ -730,6 +771,8 @@ pub struct BlendSpace {
     pub current: usize,
     pub weights: Vec<f32>,
     pub time: f32,
+    /// Weighted once already (parameters never set are taken at 0, as for phase blends).
+    resolved: bool,
 }
 
 /// Signed distances to the planes opposite each vertex, scaled to 1 at the vertex.
@@ -842,6 +885,7 @@ impl BlendSpace {
             current: 0,
             weights,
             time: 0.0,
+            resolved: false,
         })
     }
     /// (child index, weight) of the playing simplex.
@@ -894,9 +938,10 @@ impl BlendSpace {
                 changed = true;
             }
         }
-        if !changed {
+        if !changed && self.resolved {
             return false;
         }
+        self.resolved = true;
         let mut selected = None;
         let mut closest = f32::MAX;
         for (index, s) in self.simplexes.iter().enumerate() {
@@ -1133,6 +1178,41 @@ mod tests {
         let mut a = Attr::scalar(db.name_id("SPEED").unwrap(), 0.0);
         assert!(p.query_attribute(&db, db.name_id("SPEED").unwrap(), 15, &mut a));
         assert!((a.value() - 6.0).abs() < 1e-5, "{}", a.value());
+    }
+
+    #[test]
+    fn a_parameter_never_set_plays_the_neutral_child() {
+        let bytes = lib();
+        let db = MotionDb::parse(&bytes).unwrap();
+        let name = |p: &Playback| match p {
+            Playback::Clip { clip, .. } => db.name(db.clip(*clip).name),
+            _ => "tree",
+        };
+        let mut p = Playback::build(&db, Lib::LEAN, &[]).unwrap();
+        // Nothing sets LEAN: the blend sits on the child at 0, not the authored first (-1) one.
+        assert!(p.set_parameters(&db, &[param(&db, "SPEED", 3.0)]));
+        let mut out = Vec::new();
+        assert!(p.evaluate(0.01, true, false, &mut out));
+        let leaves = leaf_weights(&out);
+        let main = leaves
+            .iter()
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|l| db.name(db.clip(l.0).name));
+        assert_eq!(main, Some("LOOP_A"), "{leaves:?}");
+        assert!(!p.set_parameters(&db, &[]), "placed once");
+        // Once set, the value counts.
+        p.set_parameters(&db, &[param(&db, "LEAN", -1.0)]);
+        let Playback::PhaseBlend(t) = &p else {
+            panic!()
+        };
+        let at = if t.weight < 0.5 { t.left } else { t.right };
+        assert_eq!(name(&t.children[at]), "LOOP_B");
+        // A range without 0 keeps the authored first child (as SK8).
+        let p = Playback::build(&db, Lib::PHASE, &[]).unwrap();
+        let Playback::PhaseBlend(t) = &p else {
+            panic!()
+        };
+        assert_eq!((t.left, t.weight), (0, 0.0));
     }
 
     #[test]

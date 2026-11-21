@@ -535,6 +535,12 @@ pub struct Player {
     pub params: Vec<Param>,
     /// Attribute values of the tree that was playing before the last `play` (`lastAnim` sources).
     pub last_attrs: Vec<(NameId, f32)>,
+    /// Trees started this tick (graph string of the name, the parameters they read), checked at the
+    /// end of the tick for parameters no behaviour has set.
+    started: Vec<(u16, Vec<NameId>)>,
+    /// (tree, parameter) pairs played unset, each reported once; the ones not yet taken.
+    reported: Vec<NameId>,
+    pub unset: Vec<(u16, NameId)>,
 }
 
 impl Player {
@@ -556,6 +562,7 @@ impl Player {
     pub fn play(&mut self, db: &MotionDb, mut tree: Tree, speed: f32, def: TransitionDef) {
         tree.play.set_speed(speed);
         tree.play.set_parameters(db, &self.params);
+        self.started_tree(&tree);
         let new = Node::tree(tree);
         let prior = if def.kind == 1 {
             None
@@ -574,7 +581,26 @@ impl Player {
         self.property = None;
     }
 
+    /// Notes a tree started this tick, for the unset-parameter check in [`Player::advance`].
+    fn started_tree(&mut self, tree: &Tree) {
+        let mut names = Vec::new();
+        tree.play.parameters(&mut names);
+        if !names.is_empty() {
+            self.started.push((tree.name, names));
+        }
+    }
+
     pub fn advance(&mut self, db: &MotionDb, dt: f32) {
+        // Trees started this tick, after every behaviour has run: a parameter nothing has set is a gap
+        // in the behaviours (reported once per parameter).
+        for (tree, names) in core::mem::take(&mut self.started) {
+            for n in names {
+                if !self.reported.contains(&n) && !self.params.iter().any(|p| p.name == n) {
+                    self.reported.push(n);
+                    self.unset.push((tree, n));
+                }
+            }
+        }
         if let Some(c) = self.current.take() {
             let mut c = c.collapse();
             c.set_parameters(db, &self.params);
@@ -624,6 +650,7 @@ impl Player {
     ) {
         tree.play.set_speed(settings.speed);
         tree.play.set_parameters(db, &self.params);
+        self.started_tree(&tree);
         match self.channels.iter().position(|c| c.name == name) {
             None if create => {
                 let at = self
