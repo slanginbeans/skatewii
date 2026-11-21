@@ -258,26 +258,30 @@ impl Database {
         None
     }
 
-    /// A value as floats: a float scalar, a small integer (one byte), or a point graph as its x values
-    /// then its y values (8 points: 64 bytes, or 80 with a 4-float header; 16 points: 128 bytes).
+    /// A value as floats (see [`decode_values`]).
     pub fn values(&self, path: &str) -> Option<Vec<f32>> {
         let mut it = path.splitn(3, '/');
         let (class, coll, field) = (it.next()?, it.next()?, it.next()?);
-        let raw = self.raw(class, coll, field)?;
-        let floats = |b: &[u8]| -> Vec<f32> {
-            b.chunks_exact(4)
-                .map(|w| f32::from_be_bytes(w.try_into().unwrap()))
-                .collect()
-        };
-        let v = match raw.len() {
-            1 => vec![raw[0] as f32],
-            4 => floats(raw),
-            64 | 128 => floats(raw),
-            80 => floats(&raw[16..]),
-            _ => return None,
-        };
-        v.iter().all(|f| f.is_finite()).then_some(v)
+        decode_values(self.raw(class, coll, field)?)
     }
+}
+
+/// A raw field as floats: a float scalar, a small integer (one byte), a 4-float vector or controller (16
+/// bytes; used as a scalar, its first value counts), or a point graph as its x values then its y values
+/// (8 points: 64 bytes; 16 points: 128 bytes; with a 4-float header: 4 points in 48 bytes, 8 in 80).
+pub fn decode_values(raw: &[u8]) -> Option<Vec<f32>> {
+    let floats = |b: &[u8]| -> Vec<f32> {
+        b.chunks_exact(4)
+            .map(|w| f32::from_be_bytes(w.try_into().unwrap()))
+            .collect()
+    };
+    let v = match raw.len() {
+        1 => vec![raw[0] as f32],
+        4 | 16 | 64 | 128 => floats(raw),
+        48 | 80 => floats(&raw[16..]),
+        _ => return None,
+    };
+    v.iter().all(|f| f.is_finite()).then_some(v)
 }
 
 #[cfg(test)]
@@ -377,6 +381,26 @@ mod tests {
             &[(f_speed, 7.0f32.to_be_bytes())],
         ));
         Database::parse((svlt, sbin), (cvlt, cbin)).unwrap()
+    }
+
+    #[test]
+    fn decodes_every_value_size() {
+        let be = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|f| f.to_be_bytes()).collect() };
+        assert_eq!(decode_values(&[3]), Some(vec![3.0]));
+        assert_eq!(decode_values(&be(&[0.5])), Some(vec![0.5]));
+        assert_eq!(
+            decode_values(&be(&[0.25, 0.5, 0.75, 1.0])).unwrap()[0],
+            0.25
+        );
+        // A 4-point graph after a 4-float header: x values then y values.
+        let mut g = be(&[9.0; 4]);
+        g.extend(be(&[0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 8.0]));
+        assert_eq!(
+            decode_values(&g).unwrap(),
+            vec![0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 8.0]
+        );
+        assert_eq!(decode_values(&[0; 12]), None);
+        assert_eq!(decode_values(&be(&[f32::NAN])), None);
     }
 
     #[test]

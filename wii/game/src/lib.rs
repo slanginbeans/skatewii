@@ -331,7 +331,8 @@ fn error_text(e: character::Error) -> String {
     }
 }
 
-/// One fixed step plus one rendered frame.
+/// One displayed frame: the game runs its fixed 60 Hz ticks for `dt` (1/60, or 1/50 on PAL50), then
+/// renders.
 ///
 /// # Safety
 /// `pad` must point to a valid `FgPadRaw`; `fg_rust_init` must have been called.

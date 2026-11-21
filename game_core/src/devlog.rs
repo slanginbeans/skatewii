@@ -151,6 +151,10 @@ impl DevLog {
                     out.push(format!("BAIL: {why}{numbers}"));
                 }
                 Event::Respawned => out.push(String::from("respawned")),
+                Event::RanOut => out.push(format!(
+                    "RUNOUT: {} (stepped off, back on where it stops)",
+                    s.bail_reason.unwrap_or("?")
+                )),
                 Event::ManualLost => out.push(String::from("manual: tipped over")),
                 Event::Launched if s.hippie_air() => out.push(format!(
                     "hippie jump at {:.1} m/s, up {:.2} m/s",
@@ -246,6 +250,7 @@ impl DevLog {
             Mode::Rolling => "rolling",
             Mode::Air { .. } => "air",
             Mode::Bailed { .. } => "bailed",
+            Mode::Runout { .. } => "runout",
             Mode::Grind => "grind",
         };
         let line = format!(

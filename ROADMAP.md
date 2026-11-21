@@ -31,6 +31,15 @@ content second.
 - [x] Air spin with Skate 3's wind-up; hippie jumps; held double/triple kickflips
 - [x] Ramps and quarter pipes you can go vertical on: the board follows any surface under its trucks (ray
   probes against the park's triangles), airs out over coping, wallrides, pumping, bails from impacts
+- [x] Fixed 60 Hz simulation (Skate 3's tick) on every TV: PAL50 runs one or two ticks a frame and draws
+  between the last two; flicks are read at 60 Hz
+- [x] SK8-style board core (`skater/board.rs`): a full velocity with sideways slip, truck-curvature
+  steering with grip, downhill heading and steep-face turn torques, natural air off crests and lips,
+  ground-normal smoothing, wall slides with a collision yaw, runouts, wheel-height curbs, push and brake
+  timing from the imported clips, SK8 powerslides, vert pops re-aimed up, SK8 wallrides (needs a floor),
+  pumping by curvature; every curve from the disc through the rules pack
+- [ ] Calibrate the flatground-own scales (brake, powerslide grip, side grip) against SK8 runs
+- [ ] Grinds from riding (into coping, onto curbs and ledges): the lock-on hook is ready (`try_grind`)
 - [x] Scripted Dolphin runs from `game_core::autoplay` (`autoplay.txt`, `tools/dolphin_test.ps1`)
 - [ ] Screenshots from scripted runs in CI-like checks
 - [ ] Late flips, finger flips, dark catches, board-sideways flicks (shapes are already converted)

@@ -120,7 +120,8 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
     };
     let has = |r: &str| duration(r) > 0.0;
     match s.mode {
-        Mode::Bailed { time } => {
+        // A runout reuses the bail clips for now.
+        Mode::Bailed { time } | Mode::Runout { time } => {
             // The fall, then getting up (holding its last frame until the respawn).
             let fall = duration("bail/fall");
             if time < fall {
@@ -304,18 +305,18 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                 } else {
                     PUSH
                 };
-                let role = if p.count == 0 && has(set[0]) {
-                    set[0]
-                } else if p.count % 2 == 1 || !has(set[2]) {
-                    set[1]
-                } else {
-                    set[2]
+                // The foot coming down (the first push winds up with `into`), on the ground, swinging
+                // back.
+                let (stage, time) = p.stage();
+                let (role, time) = match stage {
+                    0 if p.count == 0 && has(set[0]) => (set[0], time),
+                    0 => (set[2], duration(set[2]) - p.down + time),
+                    1 => (set[1], time),
+                    _ => (set[2], time),
                 };
+                let role = if has(role) { role } else { set[1] };
                 if p.turning <= 0.0 && has(role) {
-                    return Pick {
-                        role,
-                        time: p.time(),
-                    };
+                    return Pick { role, time };
                 }
             }
             let landing = s.landing.map(|l| (land_role(l.kind), l.time));
@@ -604,25 +605,23 @@ mod tests {
         s.crouch = 0.0;
         let mut push = Push {
             t: 0.3,
-            held: 0.2,
-            mongo: false,
-            base: 0.0,
-            count: 0,
-            button: 0,
-            turning: 0.0,
-            delay: 0.0,
+            down: 0.4,
+            contact: 0.15,
+            recover: 0.8,
+            ..Push::default()
         };
+        // Foot coming down, on the ground, swinging back.
         s.push = Some(push);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push/into");
-        push.count = 1;
+        push.t = 0.45;
         s.push = Some(push);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push/cyc1");
-        push.count = 2;
+        push.t = 0.7;
         s.push = Some(push);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "push/cyc2");
         // Mongo: this pack only has its first cycle.
         push.mongo = true;
-        push.count = 1;
+        push.t = 0.45;
         s.push = Some(push);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "mongo/cyc1");
         s.push = None;
@@ -650,7 +649,7 @@ mod tests {
             side: 1.0,
             amount: 1.0,
             time: 0.4,
-            releasing: false,
+            ..Powerslide::default()
         });
         // Goofy, board turned left: backside.
         let p = pick(&s, 0.0, 0.0, &dur);
@@ -665,14 +664,15 @@ mod tests {
             nose: false,
             balance: 0.0,
             time: 1.2,
-            brake: 0.8,
+            brake: 1.0,
+            ..Manual::default()
         });
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "tailbrake");
         s.manual = Some(Manual {
             nose: true,
             balance: 0.0,
             time: 1.2,
-            brake: 0.0,
+            ..Manual::default()
         });
         // No nose manual clip in this pack: plain riding.
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
