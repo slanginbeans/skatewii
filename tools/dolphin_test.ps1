@@ -5,11 +5,13 @@
 #     -Seconds   how long the game runs (default 60)
 #     -NoBuild   use the boot.dol already in dist\apps\flatground
 #     -Manual    don't turn on autoplay (play it yourself; Dolphin still closes after -Seconds)
+#     -Minimized start Dolphin minimized (no windows popping up; the log still comes back)
 # Exit code 0 when a fresh session log came back, 1 otherwise.
 param(
     [int]$Seconds = 60,
     [switch]$NoBuild,
     [switch]$Manual,
+    [switch]$Minimized,
     [int]$Lines = 80,
     [string]$Repo = (Split-Path -Parent $PSScriptRoot)
 )
@@ -66,7 +68,7 @@ public static class FgWin {
 
 $status = 1
 try {
-    $process = & (Join-Path $PSScriptRoot 'dolphin.ps1') -Repo $Repo -PassThru | Select-Object -Last 1
+    $process = & (Join-Path $PSScriptRoot 'dolphin.ps1') -Repo $Repo -PassThru -Minimized:$Minimized | Select-Object -Last 1
     if (-not ($process -is [System.Diagnostics.Process])) {
         Write-Host '[test] Dolphin did not start.'
         exit 1

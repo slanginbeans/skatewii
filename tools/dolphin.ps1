@@ -4,7 +4,8 @@
 # player's normal Dolphin settings alone.
 #   FG_DOLPHIN=C:\path\to\Dolphin.exe   if Dolphin isn't found by itself
 #   -PassThru   return Dolphin's process (tools\dolphin_test.ps1 uses it to close Dolphin again)
-param([string]$Repo = (Split-Path -Parent $PSScriptRoot), [switch]$PassThru)
+#   -Minimized  start Dolphin's windows minimized (scripted runs; the game still runs and logs)
+param([string]$Repo = (Split-Path -Parent $PSScriptRoot), [switch]$PassThru, [switch]$Minimized)
 $ErrorActionPreference = 'Stop'
 
 function Find-Dolphin {
@@ -90,5 +91,6 @@ Set-IniValue (Join-Path $user 'Config\GFX.ini') 'Settings' 'ShowFPS' 'True'
 Write-Host "[dolphin] $dolphin"
 Write-Host "[dolphin] Profile: $user (controller mapping: Controllers in Dolphin's menu)"
 Write-Host "[dolphin] SD card: $sdFolder"
-$process = Start-Process -FilePath $dolphin -ArgumentList @('-u', "`"$user`"", '-b', '-e', "`"$dol`"") -PassThru
+$style = if ($Minimized) { 'Minimized' } else { 'Normal' }
+$process = Start-Process -FilePath $dolphin -ArgumentList @('-u', "`"$user`"", '-b', '-e', "`"$dol`"") -WindowStyle $style -PassThru
 if ($PassThru) { $process }
