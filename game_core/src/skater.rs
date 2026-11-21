@@ -81,6 +81,8 @@ const AIR_LEGS_FOLLOW: f32 = 0.15;
 /// Rolled off an edge without a pop, the board meets rails as if still riding for this long (s, ours:
 /// SK8's board pivots on its back wheels over a coping for about half a second at walking pace).
 const ROLL_OFF_TIME: f32 = 0.3;
+/// The wheels' friction on a landing's impact: sideways speed taken off per m/s into the ground.
+const LAND_SIDE_FRICTION: f32 = 0.41;
 /// The posed board lifted this far (m) means the pop's tail strike has started.
 const POP_LIFT_MIN: f32 = 0.002;
 /// A repeated push puts the foot down this long after the re-push point (s, ours).
@@ -823,8 +825,10 @@ pub struct Skater {
     /// animation only so fast (SK8's rider is physical). And in the air, its height at take-off.
     pub body_com: Option<f32>,
     air_com: Option<f32>,
-    /// How far the legs have lifted the board over the flight's path (m, world up).
+    /// How far the legs have lifted the board over the flight's path (m, world up), and how fast it
+    /// moved last tick (m/s).
     pub air_lift: f32,
+    air_lift_rate: f32,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -1057,6 +1061,7 @@ impl Skater {
             body_com: None,
             air_com: None,
             air_lift: 0.0,
+            air_lift_rate: 0.0,
             wallride: None,
             checkpoints: Checkpoints::default(),
             riding_ticks: 0,
@@ -2225,6 +2230,7 @@ impl Skater {
         self.trick = f.map(ActiveTrick::new);
         self.air_com = self.body_com;
         self.air_lift = 0.0;
+        self.air_lift_rate = 0.0;
     }
 
     /// The landing prediction (SK8 PhysicsAir / trajectory selector): while no landing is known, a
@@ -2352,6 +2358,7 @@ impl Skater {
         // The legs: the board follows the animated centre of mass's height over it, as fast as the
         // rider's body follows its animation (SK8's physical rider; measured, 0.15 of the gap a tick).
         if let (Some(c0), Some(d)) = (self.air_com, self.body_com) {
+            self.air_lift_rate = (c0 - d - self.air_lift) / dt.max(1e-4);
             self.air_lift = c0 - d;
         }
         if let Some(g) = self.graph {
@@ -2795,6 +2802,12 @@ impl Skater {
         self.contact_n = n;
         self.fwd = axis;
         self.set_ground_velocity(along);
+        // Skate 3's rigid board comes down on its wheels: their friction against the touchdown's
+        // impact takes the sideways speed off a crooked landing (measured on SK8: about 0.4 of the
+        // speed into the ground, a 70-degree landing at 6 m/s keeping 0.75 m/s).
+        let into = (-(self.vel + Vec3::UP * self.air_lift_rate).dot(n)).max(0.0);
+        let scrub = (LAND_SIDE_FRICTION * into).min(self.slip.abs());
+        self.slip -= scrub * self.slip.signum();
         let quality = landing::classify(&t, along, self.fwd, n, spin);
         let kind = match quality.kind {
             1 => LandKind::Sketchy {
@@ -4420,6 +4433,31 @@ mod tests {
         let rail = rail.classified(&m);
         m.rails = vec![rail];
         m
+    }
+
+    #[test]
+    fn a_crooked_landing_loses_its_sideways_speed_to_the_wheels() {
+        // SK8 landing 72 degrees crooked at 5.7 m/s, 6.1 m/s into the ground: the rigid board's
+        // wheels take 2.4 m/s of the sideways speed off on the impact (0.41 per m/s into it).
+        let park = flat();
+        let mut s = spawn(&park);
+        let yaw = 72.0f32.to_radians();
+        place(
+            &mut s,
+            v3(0.0, 0.08, 0.0),
+            Vec3::UP,
+            v3(sinf(yaw), 0.0, cosf(yaw)),
+        );
+        s.vel = v3(0.0, -6.1, 5.7);
+        s.mode = Mode::Air { time: 0.5 };
+        let mut n = 0;
+        while s.mode != Mode::Rolling && n < 10 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            n += 1;
+        }
+        assert_eq!(s.mode, Mode::Rolling);
+        let side = 5.7 * sinf(yaw) - LAND_SIDE_FRICTION * 6.1;
+        assert!((s.slip.abs() - side).abs() < 0.25, "{} vs {side}", s.slip);
     }
 
     #[test]
