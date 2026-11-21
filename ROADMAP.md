@@ -24,11 +24,21 @@ content second.
   rolling resistance, all from Skate 3's tuning when the player's disc supplies it
 - [x] Controls laid out like Skate 3's Xbox 360 pad by button position
 - [ ] Speed wobble
-- [x] Sketchy and heavy landings besides clean/bail
-- [ ] Slope matching on landing
+- [x] Landings classified as Skate 3 does (straight, sketchy with a magnitude, spin landings that keep
+  pivoting; nothing judged under 2 m/s); the graphs pick their landing clips by it
+- [x] Slope matching on landing: the board's up arrives at the landing surface 3 ticks before touchdown
+  (Skate 3's known air), within its per-tick limit
 - [x] Manuals and nose manuals (C-stick held lightly, with a balance meter), grabs on the triggers
 - [x] Reverts
-- [x] Air spin with Skate 3's wind-up; hippie jumps; held double/triple kickflips
+- [x] Air spin with Skate 3's body spin controller: signed wind-up, a let-go spin carries on, spins about
+  the body's up; hippie jumps; held kickflips up to four flips
+- [x] Air and landings (phase 5, SK8 air): Skate 3's trajectory selector (7 candidate flights in a cone,
+  scored, followed with the start error blended away; long drops resolve over a few ticks), the landing
+  assist's automatic spin (lands fakie when that end is nearer), landing speed kept (gaining on
+  transitions, no snap to travel: the wheels straighten it), bails only on Skate 3's rules (landing angle
+  against speed, into-ground, stairs and rail speeds, landing before the board is caught), wipeouts the
+  graph makes (a grab tweaked into the landing), the reset after a bail on the spot or a recent checkpoint
+  (A/B to skip once settled), a yaw-servo revert
 - [x] Ramps and quarter pipes you can go vertical on: the board follows any surface under its trucks (ray
   probes against the park's triangles), airs out over coping, wallrides, pumping, bails from impacts
 - [x] Fixed 60 Hz simulation (Skate 3's tick) on every TV: PAL50 runs one or two ticks a frame and draws
@@ -84,9 +94,11 @@ content second.
   lean, its blend parameters never set); trees played with unset parameters are logged and placed at the
   neutral point; the no-op operations audited (docs/graph-runner.md); a GameCube trigger dead zone;
   `TrucksOrDeckInContact` from the physics (grabs no longer wiped out the graph while the physics landed)
-- [ ] Graph runner, next: the pose parameters still unset (pump channel, air leg extension `EXTEND`, late
-  shove-it deck pitch/yaw, push out distance, powerslide spin/decel, grab tweaks, wipeout lean/twist, grind
-  crouch/twist, bumps), CalcLandingQuality and landing types from the landing behaviours, the push speed
+- [x] Graph runner, air: `ScoringGrabs` (grab variants by C-stick), `TweakProject` (grab tweaks),
+  `BodySpin` channels, `ControlAirLegExtension` (`EXTEND`), `SetDeckPitchAndYaw`, the physics spin from the
+  graph's `PhysBodySpin`, landing types and `TimeToLand` from the physics' landing prediction
+- [ ] Graph runner, next: the pose parameters still unset (pump channel, push out distance, powerslide
+  spin/decel, wipeout lean/twist, grind crouch/twist, bumps), the air leg's centre-of-mass height, the push speed
   from the posed clips' trajectory, SK8's manual PID (PhysicsWantsManualExit), character gestures (d-pad)
   and shoves, grind trick-outs by grind type (needs the grind physics of phase 6), camera shots from the
   graph (phase 7)
@@ -103,6 +115,8 @@ content second.
 - [x] Grinds: 50-50 and boardslide on rails (imported parks and the demo ledge)
 - [x] Grinds and slides chosen by how the board meets the rail (11 kinds, frontside/backside)
 - [ ] Grind balance; blunts, darkslides; a light physics fall for bails (Skate 3's ragdoll)
+- [ ] Grind targeting in the air (Skate 3's grind air assist: the trajectory selector's grind score and
+  the spin handed to it; phase 6), body flips and their upside-down bails
 - [ ] Skater animation (skinned, original)
 - [ ] Session goals, combo system, replay
 - [ ] Sound (ASND): rolling, pop, landing

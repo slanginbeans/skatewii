@@ -76,9 +76,17 @@ With `motion/graph` loaded (`Game::graph`), each tick:
      the servo has no opposing motion to report);
    - in the air the board does what the clips do: a late flip, finger flip, under flip or dark catch
      becomes the trick (its look and flips from the graph's `ScoringTrick`, `Kickflip2`..`4` for held
-     multi-flips), a dark catch rides dark (`SetDark`, the board grip down), and a landing bails only
-     while the playing clips are in their `DANGERZONE` (the board not caught; within its last 0.1 s
-     counts as caught) instead of after a fixed trick time. The imported rider's board is a skinned
+     multi-flips; the graph's `TimeToLand` thresholds read the physics' landing prediction, below), a
+     dark catch rides dark (`SetDark`, the board grip down), and landing while the playing clips are in
+     their `DANGERZONE` (the board not caught; within its last 0.1 s counts as caught) bails when the
+     board comes down faster than Skate 3's danger-zone closing speed (`Wipeout_AirYTrick`), as SK8's
+     wipeout checks do, instead of after a fixed trick time;
+   - the body spin's input is the graph's `PhysBodySpin` packet (the main stick's x as the graph hands
+     it over), and the landing assist only turns the body while the graph's `BodySpin` is 0;
+   - grabs are scored by the graph's `ScoringGrabs` name (the variant the C-stick picks; a variant once
+     picked stays) and their tweak is the filtered `TweakX`/`TweakY`; when the motion graph goes to
+     `WipeOut` on its own (its grab `Cyc` states do when the board touches down while `HasTweak` holds),
+     the physics bails with it. The imported rider's board is a skinned
      part on the clips' `SKATEBOARD_ROOT`, so it flips exactly as the clip does; the built-in board
      follows the graph's trick and its progress;
    - kick turns turn the board while `KickTurnSteering` runs (at its spin scale; the action graph gates
@@ -92,7 +100,8 @@ With `motion/graph` loaded (`Game::graph`), each tick:
      `NOSEGRIND`, `CROOK`, `WILLY`, `FEEBLE`, `SMITH`, `BOARD`, `LIP`, `NOSESLIDE`, `TAILSLIDE`);
    - wipeouts have one source, the physics: the graph's wipeout conditions (`PhysFilteredState
      wipeout`, `IsPhysicsWiping`, `PhysicsWantsWipeOut`, `PhysicsWantsRunout`) read the physics'
-     bail and runout, and `TrucksOrDeckInContact` is true only while grinding (SK8 reads the truck
+     bail and runout (the graph's own `WipeOut` transitions, above, take the physics with them), and
+     `TrucksOrDeckInContact` is true only while grinding (SK8 reads the truck
      and deck contacts, not the wheels). It used to be true always, so every grab state's
      "board not in the air or trucks touching" transition sent the graph to `WipeOut/Air/Flailing`
      while the physics landed clean (the graph then started over and grabbed again, three times a
@@ -118,7 +127,10 @@ With `motion/graph` loaded (`Game::graph`), each tick:
      over the board is the playing clips' own `DISTTOCOG` (`IsCrouchedEnoughForBlendToGrabCycle`
      is that under 0.6 m);
    - `StoreLandingData` / `SetLandingData`: the landing trees' `AvgVelY` (fastest descent since
-     leaving the ground), `Spin` (the board's yaw rate) and `disttocog`; `SetManualAngle` (SK8
+     leaving the ground), `Spin` (the landing classifier's signed magnitude) and `disttocog`;
+     `HasLandingType` reads the physics' landing type (Skate 3's `CalcLandingQuality`: 0 straight, 1
+     sketchy, 2 spin, 3 slightly off, which the graph lands straight) and `ChooseRandomLanding` picks the
+     variant; `SetManualAngle` (SK8
      manual.rs): `manual_angle` from the C-stick;
    - the manual out timer starts when a manual ends and runs down only off the manual (SK8), so a
      trick just after a manual still pops from it.
@@ -149,20 +161,88 @@ channel (`Shove` / `MaintainShove`, shoving people).
 The graphs start over when the physics puts the rider back on the board after a wipeout or runout.
 Without the entry everything above is flatground's hand-written logic, unchanged.
 
+## The air (physics: `skater/air.rs`, `skater/landing.rs`, `skater/respawn.rs`)
+
+After SK8's `air/` (body_spin.rs, known/, state/, reckoning/, trajectory/), `animation/landing_quality.rs`,
+`player/wipeout/air.rs`, `player/wipeout_state/recovery.rs`, `player/respawn.rs` and
+`physics/revert_state.rs`; every number from the disc through the rules pack (`physics_bodyspin`,
+`physics_airstates`, `physics_trajectory`, `physics_reckoning`, `physics_wipeout`, `physics_animation`,
+the revert and checkpoint classes), else flatground's own.
+
+- **Landing prediction** (the trajectory selector): at take-off, and every 7 ticks until a landing is
+  known, the launch velocity and six more round a cone (`ConeAngleX`/`Z`, the latter scaled by
+  `ConeAngleZVsSpeed`, at a cone speed clamped to `SpeedFactorMin`/`Max`, none faster than the launch)
+  are followed through the park up to `TrajectoryMaxTime` / `TrajectoryMaxDrop`, with chord rays four
+  ticks long, at most 28 a tick (Skate 3 queries them asynchronously too: an ollie resolves in two or
+  three ticks, a long drop in more). Scores: `LandingTimeBonus` against the flight time, the landing
+  force and direction terms (scaled by `LandingForceScalarVsDPVelNorm`), the middle candidate's bonus,
+  wallride candidates (a floor well below: height x `ScoreWallrideHeight`, the highest +2000, the flight
+  lifted by `WallRideBoost` within `MaxTrajectoryAdjust`), unrideable and don't-align surfaces (the
+  collision surface id's category, bits 7..11: 6, 7, 8), the vert transition term after a vert pop. Under
+  `MinTimeForTrajectoryToBeValid` it isn't a known landing (only its normal is kept); otherwise the board
+  flies it ("known air"), its start error blended away over `TrajErrorBlendAwayTime`; a second, narrower
+  pass (`ConeAngle*SecondPass`) runs when the landing surface is more than `MinNormalDeltaForSecondPass`
+  off the ground left. A wall hit drops it and asks again. The cone itself bounds the nudge: an ollie's
+  landing moves by a few tenths of a metre, onto a bank or ledge just beside it, not across a gap. Grind
+  targeting (Skate 3's grind score and grind air assist) is phase 6: a flight that comes down within reach
+  of a rail just leaves the spin to the player. The graphs' `TimeToLand` and the built-in rider's trick
+  timing read this prediction.
+- **Body spin** (SK8 `BodySpin::Update`): the stick's spin `PropBodySpinVsTime`, weighted by the
+  strongest signed wind-up around take-off (`DerivativeBodySpinVsTime`, floor `MinDerivativeScalar`; a
+  wind-up the other way is lost); let go, a low-passed copy of the stick (0.8/0.2, also on the ground, so
+  a turn ridden into a pop carries into the air) decays by 0.96 a tick and keeps the spin going; speeding
+  up by `MaxDeltaVsTime` a tick, slowing by no more than `MaxDeltaOppositeDirection`. The body (board and
+  rider) turns about its own up, not world up.
+- **Landing assist** (SK8 KnownAir `CalculateBodySpinSpeed`): with a known landing whose direction is
+  faster than `MinTargetHeadingVel` and the spin intent at 0, the body turns its leading end (the nose,
+  the tail after a fakie take-off) towards the landing direction, or the other way round (landing fakie
+  or switch) past `MaxHeadingAdjustVsUpY`; aiming to finish 1.2x as fast as the time left asks (never in
+  under 0.032 s), at most `MaxAutoBodySpinSpeed`, halved under `MinAutoBodySpeed`, x0.005 against the
+  current spin and x0.75 slowing it, through the spin controller at `MaxDeltaForAutoVsTime` (at most
+  2 rad/s). Without a known landing (PhysicsAir) the stick's spin goes through the same path
+  (`BodySpinInputFilter` x `MaxSpinSpeed`). In Skate 3 a flag the external-physics path sets
+  (`flags_2472` bit 28) hands the stick straight to the spin; it is never set in play, so flatground
+  doesn't have it.
+- **Attitude**: the board's up turns towards the landing surface to arrive 3 ticks before touchdown,
+  never more than `Air_MaxUpVectAngleDelta` a tick (read at a 0.8 m centre of mass over the deck,
+  flatground's); without a known landing `SpeedToAlignToGround_PhysAir` of the angle a tick, none past
+  `DontAlignAnglePhysicsAir`.
+- **Landing**: bails only on Skate 3's rules: the landing angle (board against the travel along the
+  surface, from the nearer end) over the angle limit against that speed (lenient enough that riding
+  speeds never bail on it), into the ground faster than `Wipeout_AirMaxSpeedIntoGround` (onto stairs,
+  surface category 8, `Wipeout_AirMaxSpeedIntoStairs`; onto a rail, `..IntoCollisionNearGrind`), the board
+  not caught (above), or (without the graphs, flatground's own rule) still tweaking a grab. The speed
+  along the surface is kept, times `LandingSpeedScalarVsGroundNormalY` (transitions gain); the board keeps
+  its heading and the wheels' grip and straightening take out the sideways part. The landing type
+  (`CalcLandingQuality`) uses `LandingSketchySideSpeed` and `LandingSketchyTwistSpin`; a spin landing
+  keeps pivoting 0.15 s (flatground's).
+- **After a bail** (SK8 recovery and checkpoints): put back automatically once the body has been under
+  `WipeoutOverSpeed` for `TeleportMinTimeAfterSettlingForAutoReset` after `TeleportMinTimeForAutoReset`,
+  or after `TeleportMaxTime`, after a `TeleportAutoResetFadeOutTime` fade; A or B (Skate 3's push
+  buttons, the `WipeOutRecover` request) put the rider back early once settled or after 1.6 s. Where: the
+  spot the body came to rest on when it is safe (ground under it within reach, facing up enough, clear
+  above, no rail at it), else the best of the last 32 checkpoints (recorded every 20 ticks of riding at
+  least 1.5 m apart, skipping the newest; the one used is taken out), else the park's spawn; facing the
+  way it was travelling, in the same stance.
+- **Reverts**: a yaw servo (the revert class's speed against the angle left, gain, tolerance against the
+  slope, longest time) turns the board half round on its wheels with the travel kept.
+- Not done: body flips (and the upside-down bails that come with them), runouts while body flipping
+  (`IsBodyFlipping` is always false), the air leg's centre-of-mass height.
+
 ## Controls (GameCube pad)
 
 Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB to Z, LT/RT to L/R.
 
 | GC | Intents | Does |
 |---|---|---|
-| A | `RightPush`, `Pushing`, `NewPush` | push (a press is remembered for 0.3 s) |
-| B | `LeftPush`, `Pushing`, `NewPush` | mongo push |
+| A | `RightPush`, `Pushing`, `NewPush` | push (a press is remembered for 0.3 s); after a bail, back on the board once settled (Skate 3's `WipeOutRecover`) |
+| B | `LeftPush`, `Pushing`, `NewPush` | mongo push; after a bail, as A |
 | A and B | neither push | hippie jump (flatground's physics) |
 | X | `Brake` | foot brake |
 | Z | `DarkCatch`, `NewDarkCatch`, `GrabWorld` | dark catch. SK8 also reads Xbox B for it; on the GameCube that is X, the foot brake, so only Z |
 | L / R | `LeftAirGrab` / `RightAirGrab`, fully in `Left/RightGroundGrab`, `Crouch` | grabs, crouch. A GameCube trigger at rest reads 1..7 of 255 and SK8 counts any trigger above 0, so the pad has a dead zone (`input::TRIGGER_DEAD_ZONE`, 0.1 of full, then rescaled); the physics grabs on the same reading |
 | main stick | `Turn`, `HardTurn`, `HardTurnCrouch`, `KickTurn`, `BodySpin`, `Left/RightSlide`, `Left/RightSlideStart` | steering, kick turns, powerslides, spins |
-| C-stick | `AnticMag`, `AnticAngle`, `Manual`, `ManualBrake`, `TweakX/Y`, `BoardAdjustAngle/Mag` | wind-up (past 0.9), manuals (held below full for 0.2 s), tweaks |
+| C-stick | `AnticMag`, `AnticAngle`, `Manual`, `ManualBrake`, `TweakX/Y`, `BoardAdjustAngle/Mag` | wind-up (past 0.9), manuals (held below full for 0.2 s), grab variants (past half way) and tweaks |
 | gestures | `Trick`, the gesture's name, `GestureSpeed`, `HoldPattern` | right stick: `skater`, `skater90`, `skaterN90`, `skater_air`, `skater_fingerflip`; left stick: `skaterls` (SlideFs180/SlideBs180 reverts), `skaterstep`; all recognised in parallel at 60 Hz |
 
 Gesture groups come from the graphs (`HasGestureIntent`, `CreateTrickIntentFromGesture`): Square takes
@@ -192,11 +272,16 @@ and current state, physics state, grind name, stance, speed, slope, time to land
 tweak, manual timer, wipeout and runout, trucks or deck contact, crouch height, dark catch and
 underflip requests.
 
-### Audit of the no-ops (960 operations)
+### Audit of the no-ops (935 operations)
 
 Every behaviour and condition that was a no-op or a fixed value, by whether it matters on the board.
 
-Ported (they set riding tree parameters or decide states): `SetTurning` (3, was a no-op arm),
+Ported (they set riding tree parameters or decide states): `ScoringGrabs` (the grab's scored variant),
+`TweakProject` (`TWEAK_X`, `TWEAK_Y`), `BodySpin` (the `IA_BODYSPIN_OLLIE_FS/BS` channels' influence from
+the spin intent, `anim_motion/body_spin`), `ControlAirLegExtension` (`EXTEND` against seconds coming down,
+`anim_motion/inair_disttocog/lo_air_arm_extend`; its centre-of-mass height part isn't run: the riding
+behaviours keep `disttocog`), `SetDeckPitchAndYaw` (`SKATEPITCH`, `SKATEYAW` at 0: flatground's board isn't
+posed apart from the body), `SetTurning` (3, was a no-op arm),
 `ApplyingBodyTilt` (7), `SettingBodyTilt` (1), `Crouching` (1), `SetDistComToBoard` (31),
 `StoreLandingData` (1), `SetLandingData` (1), `SetManualAngle` (2); `SetManualOutTimer` /
 `UpdateManualOutTimer` now follow SK8 (set on leaving the manual); `TrucksOrDeckInContact` and
@@ -223,14 +308,11 @@ point or SK8's first child):
 | Operations | Parameters | What it needs |
 |---|---|---|
 | `Pumping` (channel `B_PUMP`) | pump layer | the physics' pumping acceleration as SK8 publishes it |
-| `ControlAirLegExtension` (10) | `EXTEND` (`B_AIR_CYC`) | the legs' reach to the board in the air |
-| `SetDeckPitchAndYaw` (12) | `SKATEPITCH`, `SKATEYAW` (late shove-its) | the posed deck's pitch and yaw |
 | `PushOut` | `OUTDISTANCEX`, `OUTDISTANCEY` (push outs) | the pushing foot's posed position |
 | `PowerSlideSpin`, `PowerSlideDecel`, `PowerSlideManualAtt` | `SLIDESPIN`, `DECEL` | the slide's direction and deceleration curves (`anim_motion/power_slide`) |
-| `TweakProject` | `TWEAK_X`, `TWEAK_Y` (grab tweaks) | the tweak's projection |
 | `MatchTwistAndLean`, wipeout gestures | `LEAN`, `TWIST`, `WIPEOUTGESTUREX/Y` | the physics' wipeout body angles |
 | `GrindControlFade`, `ControlGrindCrouch`, `CreateGrindAttributes` | grind `DistToCog`, `twist` | the grind balance and crouch |
-| `BodySpin`, `FingerFlipOut`, `UpdateIsWeightOnNose`, `SetBumpCoefficients` | body spin, finger flip out, nose weight, bumps (`IsBumped` is fixed false, so `Bumped` isn't reached) | spin, grab and bump feedback from the physics |
+| `FingerFlipOut`, `UpdateIsWeightOnNose`, `SetBumpCoefficients` | finger flip out, nose weight, bumps (`IsBumped` is fixed false, so `Bumped` isn't reached) | grab and bump feedback from the physics |
 | conditions: `IsBumped`, `MongoPushFootToFar`, `HasTiltToLargeForPreland`, `IsLandingIntoGrind`, `IsGrindApproach`, `WipeoutTimeToLand`, `WipeoutTimeSinceContact`, `IsPushOffEnabled` | (fixed false) | bumps, the mongo-push wind-up shortcut, pre-landing tilt, grind approach, wipeout timing |
 
 Unsupported, logged once when reached: `EnterSkitchingBehaviour`, `SkitchingBehaviour`,
@@ -239,12 +321,13 @@ Unsupported, logged once when reached: `EnterSkitchingBehaviour`, `SkitchingBeha
 Approximations to revisit: the push speed is where the push coefficients' blended clips end, not the
 trajectory bone's speed sampled from the posed clips; how long the push foot stays down still comes
 from the push sets' contact time; the manual servo is a kinematic stand-in for SK8's PID on the rigid
-board (so `PhysicsWantsManualExit` never fires); a landing in the danger zone bails outright where
-Skate 3 makes its physical wipeout checks more sensitive; character gestures and shoves don't run. The
+board (so `PhysicsWantsManualExit` never fires); a landing in the danger zone is judged on the speed
+into the ground only (Skate 3's closing-velocity check also has a sideways part); character gestures
+and shoves don't run. The
 turn conditioner reads the physics' smoothed steering and a centripetal lean instead of Skate 3's
 processed turn and reckoning lean, with no speed wobble; Crouching has no board or ground absorption
 force (only its restoring force) and no deck-angle crouch; the powerslide's side for SetTurning is the
-physics' slide; `SetLandingData`'s spin is the board's yaw rate.
+physics' slide.
 
 ## Numbers (Dolphin, US/EU disc)
 
@@ -254,7 +337,8 @@ physics' slide; `SetLandingData`'s spin is the board's yaw rate.
 | parsed in memory | 554 KB; MEM2 about 2.2 MB lower than before the graphs (pack entry, parsed tables, typed operations) |
 | load | 12.7 ms in Dolphin (was 216.8 ms when the operations were parsed at load): the typed operations read back from `motion/graph/ops` (85 KiB), strings found by binary search over an index the compiler sorts (format version 2) |
 | per tick | 0.13 ms on average, 0.27 at most over the trick tour (pad intents, both graphs, the turn conditioner and the riding behaviours, push coefficients, animation and channel advance), part of `physics` in the frame line (`graph`); frame CPU 3.5 ms average, 5.3 ms peak, no dropped frames |
-| operations | 8,215 run, 960 deliberate no-ops (audited above), 4 unsupported (skitching, `GestureType`) |
+| air step | the skater's tick in the air (landing prediction at up to 28 chord rays, spin, flight): 0.03 to 0.06 ms typically, 1.3 ms at most (Dolphin, three trick tours; frame CPU 5.9 ms peak, no dropped frames) |
+| operations | 8,240 run, 935 deliberate no-ops (audited above), 4 unsupported (skitching, `GestureType`) |
 
 ## Trick tour (`autoplay`)
 
@@ -266,6 +350,8 @@ turn (`Riding/KickTurn`), an ollie with an indy grab, a revert (Skate 3's `Slide
 player's gesture file, played on the main stick: `Riding/Revert/Fs`), a 360 flip, a 180 to fakie,
 riding fakie until the graph turns the rider round (`Turning/Switch/NoPush`), a held double kickflip, an
 ollie with a late kickflip (`InAir/Lateflip/LateKickflip`), a powerslide, a hippie jump and a grab held
-into the landing (`WipeOut`, then back on the board). Each tour ends with a summary line
-(`autoplay: tour N done (manual 3.2 s, kick turn true, revert true, auto switch true, 2 flips held, late
-flip true)`).
+and tweaked into the landing (`WipeOut`, then back on the board at a safe spot). The indy grab's C-stick
+picks a variant, and the 180 lets the stick go early: the let-go spin and the landing assist finish it.
+Each tour ends with a summary line (`autoplay: tour N done (manual 3.2 s, kick turn true, revert true,
+auto switch true, 2 flips held, late flip true, grab variant true)`), and the next one starts from the
+park's spawn. The frame line shows the air step's cost (`air <last tick> / <peak> ms`).
