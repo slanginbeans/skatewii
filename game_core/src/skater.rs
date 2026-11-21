@@ -1336,10 +1336,12 @@ impl Skater {
             self.air_lift = 0.0;
         }
         // The rider's body over the board: the animation's while riding; following it only so fast
-        // once the pop's tail strike starts (SK8's GroundAnimation) and in the air.
+        // from the pop's tail strike (SK8's GroundAnimation) until the jump's top (measured: SK8's
+        // COM over the deck lags its animation there, and follows it again coming down).
         self.body_com = match (self.graph.and_then(|g| g.pose_com), self.body_com) {
             (Some(c), Some(d))
-                if self.is_airborne() || self.graph.is_some_and(|g| g.pose_lift > POP_LIFT_MIN) =>
+                if (self.is_airborne() && self.vel.y > 0.0)
+                    || self.graph.is_some_and(|g| g.pose_lift > POP_LIFT_MIN) =>
             {
                 Some(d + (c - d) * (AIR_LEGS_FOLLOW * dt * 60.0).min(1.0))
             }
@@ -2391,9 +2393,12 @@ impl Skater {
         let delta = self.vel * dt;
         let len = delta.length();
         let mut moved = false;
+        // The legs reaching for the landing hold the board under the flight's path: it touches down
+        // when the board does (SK8: the deck under the flying centre of mass).
+        let sink = Vec3::UP * self.air_lift.min(0.0);
         if len > 1e-6 {
             let dir = delta * (1.0 / len);
-            if let Some(h) = park.raycast(from, dir, len + 0.01)
+            if let Some(h) = park.raycast(from + sink, dir, len + 0.01)
                 && self.vel.dot(h.normal) < 0.0
             {
                 let landable = self.normal.dot(h.normal) > 0.5 || h.normal.y > 0.6;
