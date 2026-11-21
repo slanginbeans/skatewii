@@ -76,6 +76,10 @@ const TRUCK_RAMP: f32 = 0.165;
 /// of `side_friction` (1/s). Ours: SK8's board holds a full carve at 8.3 m/s (about 1.55 g) with 8
 /// degrees of slip.
 const SIDE_GRIP: f32 = 1.6;
+/// The share of a push tick's speed change the board keeps: SK8's push force (the gap to the target, at
+/// most `MaxPushDVStart`..`End`) moves the whole rigid board and rider, and the deck gains 0.955 to 0.97
+/// of it (measured, 0 to 7 m/s).
+pub const PUSH_TRANSFER: f32 = 0.96;
 const SIDE_DAMP: f32 = 0.4;
 /// The trucks may turn the board a little faster than grip lets the travel turn (a drift), up to a
 /// sideways angle of `MAX_SLIP` (rad). Ours.
@@ -312,7 +316,9 @@ impl Skater {
         if let Some(target) = d.push_target
             && self.speed < target
         {
-            self.speed = (self.speed + t.push_tick_limit(self.speed.max(0.0)) * ticks).min(target);
+            // SK8 push.rs: the gap to the target, at most the tick's change, as a force on the board.
+            let step = (target - self.speed).min(t.push_tick_limit(self.speed.max(0.0)) * ticks);
+            self.speed += step * PUSH_TRANSFER;
         }
         if d.brake > 0.0 {
             self.speed = approach(self.speed, 0.0, d.brake * dt);

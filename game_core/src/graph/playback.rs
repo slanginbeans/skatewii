@@ -293,6 +293,65 @@ impl PoseProgram {
         self.ops.clear();
     }
 
+    /// The trajectory's speed (m/s) in the pose this step: the blended root motion of the playing clips
+    /// over `dt`, as SK8 measures a push contact's speed off the posed trajectory bone
+    /// (contact_events.rs, `push_speed`). Leaves blend as the rider poses them; a channel layer (upper
+    /// body, arms) doesn't move the trajectory. `turned`: the board's frame now (`Skater::frame_turned`).
+    /// `None` when no playing clip has its pose in the library.
+    pub fn trajectory_speed(
+        &self,
+        lib: &crate::motion::Library,
+        dt: f32,
+        turned: bool,
+    ) -> Option<f32> {
+        let mut stack: Vec<Option<[f32; 3]>> = Vec::new();
+        for op in &self.ops {
+            match *op {
+                PoseOp::Group { start, end } => {
+                    let mut sum = [0.0f32; 3];
+                    let mut total = 0.0;
+                    for l in &self.leaves[start as usize..end as usize] {
+                        let Some(clip) = lib.pose(l.clip) else {
+                            continue;
+                        };
+                        let mut d = clip.trajectory_step(l.previous, l.time, dt);
+                        if l.mirror {
+                            d[0] = -d[0];
+                        }
+                        if l.turned != turned {
+                            d[0] = -d[0];
+                            d[2] = -d[2];
+                        }
+                        for (s, d) in sum.iter_mut().zip(d) {
+                            *s += d * l.weight;
+                        }
+                        total += l.weight;
+                    }
+                    stack.push((total > 0.0).then(|| sum.map(|s| s / total)));
+                }
+                PoseOp::Blend(w) => {
+                    let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
+                        return None;
+                    };
+                    stack.push(match (a, b) {
+                        (Some(a), Some(b)) => {
+                            Some(core::array::from_fn(|i| a[i] + (b[i] - a[i]) * w))
+                        }
+                        (a, b) => a.or(b),
+                    });
+                }
+                PoseOp::Channel { .. } => {
+                    let (Some(_), Some(a)) = (stack.pop(), stack.pop()) else {
+                        return None;
+                    };
+                    stack.push(a);
+                }
+            }
+        }
+        let d = stack.pop().flatten()?;
+        (dt > 0.0).then(|| crate::math::sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) / dt)
+    }
+
     /// Each clip's share of the final pose, ignoring channel weights (for logs and tests).
     pub fn shares(&self) -> Vec<(u16, f32)> {
         let mut stack: Vec<Vec<(u16, f32)>> = Vec::new();

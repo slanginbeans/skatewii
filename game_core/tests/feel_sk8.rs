@@ -127,3 +127,47 @@ fn a_turn_let_go_just_before_the_pop_does_not_spin_it() {
     let turned = wrap_angle(b - a).abs().to_degrees();
     assert!(turned < 20.0, "{turned} degrees in the air");
 }
+
+#[test]
+fn held_pushes_chase_the_posed_trajectory_speed() {
+    // SK8 holding the push from a standstill: the board chases the posed push's trajectory speed while
+    // the foot is down (0.06, 0.39, 1.16, 2.24, 3.18, 3.43, 2.70, 3.96 m/s on its eight contact ticks),
+    // so the first push ends at 3.22 m/s, the second at 6.09, the third at 8.07, and 8 m/s takes
+    // 2.63 s. Chasing the push sets' end speed gave 4.5 m/s and 1.7 s.
+    let Some(mut g) = imported_game("held push") else {
+        return;
+    };
+    g.place_rider(v3(-16.0, 0.0, -17.0), 0.0, 0.0);
+    for _ in 0..60 {
+        g.update(&held(0), TICK);
+    }
+    let mut plateaus = Vec::new();
+    let mut last = 0.0f32;
+    let mut still = 0;
+    let mut to_8 = None;
+    for i in 0..300 {
+        g.update(&held(btn::A), TICK);
+        let v = g.skater.speed;
+        if (v - last).abs() < 1e-3 && v > 0.5 {
+            still += 1;
+            if still == 10 && plateaus.last().is_none_or(|p: &f32| (v - p).abs() > 0.5) {
+                plateaus.push(v);
+            }
+        } else {
+            still = 0;
+        }
+        if to_8.is_none() && v >= 8.0 {
+            to_8 = Some((i + 1) as f32 * TICK);
+        }
+        last = v;
+    }
+    assert!(plateaus.len() >= 3, "plateaus {plateaus:?}");
+    for (got, sk8) in plateaus.iter().zip([3.22, 6.09, 8.07]) {
+        assert!(
+            (got - sk8).abs() < 0.12,
+            "plateaus {plateaus:?} (SK8 3.22, 6.09, 8.07)"
+        );
+    }
+    let t = to_8.expect("reaches 8 m/s");
+    assert!((t - 2.63).abs() < 0.1, "{t} s to 8 m/s (SK8 2.63)");
+}

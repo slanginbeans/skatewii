@@ -818,8 +818,11 @@ pub struct GraphControl {
     /// A push clip's foot is on the ground (its `PUSHCONTACT` window): only then does a push drive.
     pub push_contact: bool,
     /// The speed the push chases while the foot is down: where the push trees' coefficients end
-    /// (`graph::push`).
+    /// (`graph::push`), or with `push_posed` the posed clips' trajectory speed this tick.
     pub push_target: Option<f32>,
+    /// `push_target` is the posed trajectory's speed (Skate 3's): it holds this tick only, as SK8's
+    /// push contact does; else the push sets' end speed, held for the contact's length.
+    pub push_posed: bool,
     /// A brake clip's foot is down (`BRAKE_CONTACT`): only then does the foot brake slow the board.
     pub brake_contact: bool,
     /// The takeoff clip reached its jump: pop now, as this trick, at this strength (0..1).
@@ -1537,6 +1540,14 @@ impl Skater {
         // With the state graphs, a push only drives while the push clip's foot is down, and the foot
         // brake only once the brake clip's foot touches.
         let push_target = match self.graph {
+            Some(g) if g.push_posed => {
+                // Skate 3 (SK8 contact_events.rs, push.rs): while the push clip's foot is down the
+                // board chases the posed trajectory's speed, within the push's change a tick.
+                self.graph_push = None;
+                g.push_target
+                    .filter(|_| g.push_contact)
+                    .map(|v| v.min(self.tuning.push_max_speed))
+            }
             Some(g) => self.graph_push(g.push_contact, g.push_target, dt),
             None => self.update_push(pad, dt, events),
         };

@@ -649,7 +649,20 @@ impl Game {
                 pushing: pad.held & (crate::input::btn::A | crate::input::btn::B) != 0,
             };
             g.tick(&lib.db, &pad, world, gates, dt, self.timer);
-            self.skater.graph = Some(g.control(&lib.db, &self.tuning));
+            let mut control = g.control(&lib.db, &self.tuning);
+            if control.push_target.is_some() {
+                // Skate 3 chases the posed push's trajectory speed while the foot is on the ground
+                // (SK8 contact_events.rs `push_speed`, ground_runtime/input.rs `push_target`).
+                g.runner.pose(&mut self.pose);
+                if let Some(v) = self
+                    .pose
+                    .trajectory_speed(lib, dt, self.skater.frame_turned)
+                {
+                    control.push_target = Some(v);
+                    control.push_posed = true;
+                }
+            }
+            self.skater.graph = Some(control);
             self.times.graph_us = g.cost_us;
             if self.log.len() < LOG_CAP {
                 if let Some(state) = g.state_change() {
