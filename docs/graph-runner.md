@@ -510,6 +510,7 @@ field of view).
 | per tick | 0.13 ms on average, 0.27 at most over the trick tour (pad intents, both graphs, the turn conditioner and the riding behaviours, push coefficients, animation and channel advance), part of `physics` in the frame line (`graph`); frame CPU 3.5 ms average, 5.3 ms peak, no dropped frames |
 | air step | the skater's tick in the air (landing prediction at up to 28 chord rays, spin, flight): 0.03 to 0.06 ms typically, 1.3 ms at most (Dolphin, three trick tours; frame CPU 5.9 ms peak, no dropped frames) |
 | grinds | the grind tick (contact boxes, admission, the rail, naming) and riding past rails: no change to the frame line (physics 0.1 to 0.4 ms); frame CPU 5.9 ms peak over two trick tours with grinds, no dropped frames (Dolphin); host worst tick 0.2 ms |
+| camera | the camera's tick (graph shot choice, shot tree, rig, six collision rays, avoidance paths, five drop probes): 0.14 ms on average, 0.54 ms at most over two trick tours on BlackBoxPark; frame CPU 3.5 ms average, 6.0 ms peak, physics 0.4 ms average, no dropped frames (Dolphin, 16:9) |
 | operations | 8,302 run, 873 deliberate no-ops (audited above), 4 unsupported (skitching, `GestureType`) |
 
 ## Trick tour (`autoplay`)
@@ -532,4 +533,4 @@ grind entered (`grind: BS 50-50 (BS_50_50, FiftyFifty, AirToGrind) on rail 83 (l
 graph's grind state (`graph: OnBoard/Grinding/BS_5_O/Cycle`), the score and why it ended (`grind: off
 (leaned off)`). Each tour ends with a summary line (`autoplay: tour N done (manual 3.2 s, kick turn true,
 revert true, auto switch true, 2 flips held, late flip true, grab variant true, ledge grind true, 5-0 true,
-coping true, slide true)`), and the next one starts from the park's spawn. The frame line shows the air step's cost (`air <last tick> / <peak> ms`).
+coping true, slide true)`), and the next one starts from the park's spawn. The frame line shows the air step's cost (`air <last tick> / <peak> ms`) and the camera's (`camera <last tick> / <peak> ms`).

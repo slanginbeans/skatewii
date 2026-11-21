@@ -44,8 +44,8 @@ At the start:
   events/windows); the main tuning values in use; whether autoplay is on; the line shown on the start screen.
 
 While playing:
-- `frame:` once a second: the CPU's own work per frame (average and worst, split into physics, skinning and
-  drawing), the time waiting for the GPU to finish, the idle time until the TV's next refresh, frames that missed
+- `frame:` once a second: the CPU's own work per frame (average and worst, split into physics (with the state
+  graphs, the air step and the camera's tick in it), skinning and drawing), the time waiting for the GPU to finish, the idle time until the TV's next refresh, frames that missed
   their refresh, park meshes and vertices drawn, the vertex arena, heap and free memory. The budget at 60 Hz is
   16.7 ms for CPU + GPU wait; idle is what is left.
 - `slow frame:` whenever a frame missed its refresh, with that frame's breakdown.

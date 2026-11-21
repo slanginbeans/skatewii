@@ -123,6 +123,10 @@ pub struct SectionTimes {
     /// of `physics_us`, and the most one took since the platform last cleared `air_peak_us`.
     pub air_us: u32,
     pub air_peak_us: u32,
+    /// The camera's tick (shot choice, rig, collision, predictors), part of `physics_us`, and the most
+    /// one took since the platform last cleared `cam_peak_us`.
+    pub cam_us: u32,
+    pub cam_peak_us: u32,
 }
 
 struct Popup {
@@ -543,7 +547,11 @@ impl Game {
             self.flick.reset();
             self.cam.request_reset();
         }
+        let t_cam = now(self.timer);
         self.cam.update(&self.skater, ground, dt);
+        let us = now(self.timer).wrapping_sub(t_cam);
+        self.times.cam_us = us;
+        self.times.cam_peak_us = self.times.cam_peak_us.max(us);
         self.times.physics_us = now(self.timer).wrapping_sub(t0);
         // Development log: what happened this tick, and a status line now and then.
         let cam_lines = self.cam.take_log();

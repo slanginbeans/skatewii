@@ -432,13 +432,15 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
             log(
                 false,
                 &format!(
-                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, air {:.2} / {:.2} peak, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
+                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, air {:.2} / {:.2} peak, camera {:.2} / {:.2} peak, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
                     c.avg_us / 1000.0,
                     c.peak_us as f32 / 1000.0,
                     t.physics_us as f32 / 1000.0,
                     t.graph_us as f32 / 1000.0,
                     t.air_us as f32 / 1000.0,
                     t.air_peak_us as f32 / 1000.0,
+                    t.cam_us as f32 / 1000.0,
+                    t.cam_peak_us as f32 / 1000.0,
                     t.skin_us as f32 / 1000.0,
                     t.render_us as f32 / 1000.0,
                     c.gpu_avg_us / 1000.0,
@@ -453,6 +455,7 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
                 ),
             );
             game.times.air_peak_us = 0;
+            game.times.cam_peak_us = 0;
         }
     }
     // What the game noticed this frame (flicks, landings, bails, status lines).
