@@ -95,6 +95,13 @@ void fg_draw_2d(const FgVertex *verts, uint32_t count);
 // The vertices are copied, so the caller's buffer only has to live for the call.
 void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
                      uint32_t index_count, const FgTexture *tex, const float model[3][4]);
+// fg_draw_indexed for vertices the GPU reads in place, not copied: 32-byte aligned, flushed from the CPU
+// cache (fg_flush_range) after they were written, and alive until the frame that draws them is done.
+// Misaligned arrays are skipped.
+void fg_draw_indexed_static(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
+                            uint32_t index_count, const FgTexture *tex, const float model[3][4]);
+// Writes `size` bytes at `data` out of the CPU's data cache, so the GPU sees them.
+void fg_flush_range(const void *data, uint32_t size);
 // Microseconds from a free-running CPU timer (wraps every ~71 minutes; subtract with wrap-around).
 uint32_t fg_time_us(void);
 // Reads a whole file (e.g. "sd:/apps/flatground/data/skater.fgpak") into 32-byte aligned memory, flushed for

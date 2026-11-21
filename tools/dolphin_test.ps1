@@ -6,12 +6,15 @@
 #     -NoBuild   use the boot.dol already in dist\apps\flatground
 #     -Manual    don't turn on autoplay (play it yourself; Dolphin still closes after -Seconds)
 #     -Minimized start Dolphin minimized (no windows popping up; the log still comes back)
+#     -SwitchEvery  autoplay moves on to the next location every this many seconds (0: stays in the default
+#                location); the log shows each park loading, its memory and its frame cost
 # Exit code 0 when a fresh session log came back, 1 otherwise.
 param(
     [int]$Seconds = 60,
     [switch]$NoBuild,
     [switch]$Manual,
     [switch]$Minimized,
+    [int]$SwitchEvery = 0,
     [int]$Lines = 80,
     [string]$Repo = (Split-Path -Parent $PSScriptRoot)
 )
@@ -32,7 +35,9 @@ $app = Join-Path $Repo 'dist\apps\flatground'
 $autoplay = Join-Path $app 'autoplay.txt'
 $logs = Join-Path $app 'logs'
 if (-not $Manual) {
-    Set-Content -LiteralPath $autoplay -Value 'trick tour (written by tools\dolphin_test.ps1)' -Encoding ascii
+    $text = @('trick tour (written by tools\dolphin_test.ps1)')
+    if ($SwitchEvery -gt 0) { $text += "switch $SwitchEvery" }
+    Set-Content -LiteralPath $autoplay -Value $text -Encoding ascii
 }
 $before = @()
 if (Test-Path $logs) { $before = @(Get-ChildItem -LiteralPath $logs -Filter 'session_*.txt' | ForEach-Object Name) }

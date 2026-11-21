@@ -67,6 +67,17 @@ pub trait Gfx {
         texture: Option<&Texture>,
         model: &Mat34,
     );
+    /// [`Gfx::draw_indexed`] for vertices that stay put until the park is unloaded ([`StaticVerts`]): the
+    /// Wii reads them in place instead of copying them every frame.
+    fn draw_indexed_static(
+        &mut self,
+        verts: &StaticVerts,
+        indices: &[u16],
+        texture: Option<&Texture>,
+        model: &Mat34,
+    ) {
+        self.draw_indexed(verts, indices, texture, model)
+    }
     /// Triangle list in screen space ([`SCREEN_W`] x [`SCREEN_H`], z ignored), drawn over the 3D scene.
     fn draw_2d(&mut self, verts: &[Vertex]);
     fn end_frame(&mut self);
@@ -205,5 +216,73 @@ mod tests {
     fn shade_keeps_alpha_and_clamps() {
         assert_eq!(shade(0x80402010, 2.0), 0xff804010);
         assert_eq!(shade(0xffffff7f, 0.5), 0x7f7f7f7f);
+    }
+}
+
+/// Four vertices in 96 bytes, 32-byte aligned (no padding: 96 is three cache lines).
+#[repr(C, align(32))]
+#[derive(Clone, Copy, Default)]
+struct Quad([TexVertex; 4]);
+
+const _: () = assert!(core::mem::size_of::<Quad>() == 4 * core::mem::size_of::<TexVertex>());
+
+/// Vertices the Wii's GPU can read where they are: 32-byte aligned (as GX vertex arrays need), and never
+/// written after they are built (the platform flushes them from the CPU cache once, after a park loads).
+/// Reads as a `[TexVertex]`.
+#[derive(Clone, Default)]
+pub struct StaticVerts {
+    blocks: Vec<Quad>,
+    len: usize,
+}
+
+impl StaticVerts {
+    pub fn new(verts: &[TexVertex]) -> StaticVerts {
+        let mut blocks = alloc::vec![Quad::default(); verts.len().div_ceil(4)];
+        for (b, chunk) in blocks.iter_mut().zip(verts.chunks(4)) {
+            b.0[..chunk.len()].copy_from_slice(chunk);
+        }
+        StaticVerts {
+            blocks,
+            len: verts.len(),
+        }
+    }
+
+    /// The memory the vertices take (whole blocks), for flushing it from the CPU cache.
+    pub fn bytes(&self) -> (*const u8, usize) {
+        (
+            self.blocks.as_ptr() as *const u8,
+            self.blocks.len() * core::mem::size_of::<Quad>(),
+        )
+    }
+}
+
+impl core::ops::Deref for StaticVerts {
+    type Target = [TexVertex];
+    fn deref(&self) -> &[TexVertex] {
+        // SAFETY: the blocks are `repr(C)` arrays of `TexVertex` without padding, laid end to end, and
+        // hold at least `len` vertices.
+        unsafe { core::slice::from_raw_parts(self.blocks.as_ptr() as *const TexVertex, self.len) }
+    }
+}
+
+#[cfg(test)]
+mod static_tests {
+    use super::*;
+
+    #[test]
+    fn static_vertices_read_back_and_are_aligned() {
+        let v: Vec<TexVertex> = (0..7)
+            .map(|i| TexVertex {
+                pos: [i as f32, 0.0, 0.0],
+                rgba: i,
+                uv: [0.0, i as f32],
+            })
+            .collect();
+        let s = StaticVerts::new(&v);
+        assert_eq!(&s[..], &v[..]);
+        let (p, n) = s.bytes();
+        assert_eq!(p as usize % 32, 0);
+        assert_eq!(n, 2 * 96);
+        assert!(StaticVerts::new(&[]).is_empty());
     }
 }

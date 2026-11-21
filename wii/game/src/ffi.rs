@@ -58,6 +58,15 @@ unsafe extern "C" {
         tex: *const FgTexture,
         model: *const Mat34,
     );
+    pub fn fg_draw_indexed_static(
+        verts: *const TexVertex,
+        vert_count: u32,
+        indices: *const u16,
+        index_count: u32,
+        tex: *const FgTexture,
+        model: *const Mat34,
+    );
+    pub fn fg_flush_range(data: *const u8, size: u32);
     pub fn fg_draw_2d(verts: *const Vertex, count: u32);
     pub fn fg_end_frame();
     pub fn fg_aspect() -> f32;

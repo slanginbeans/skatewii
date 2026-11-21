@@ -21,15 +21,17 @@ pub const PARKS: &[&str] = &[
 ];
 
 /// The parks `fg_import build` converts as locations (in menu order, after the default). Left out:
-/// StartPark (an empty warehouse: no rails, nothing sloped to ride), SkateSchool (a district-sized area,
-/// 8.6 MB and 158k vertices: too much to draw on the Wii; `FG_PARK=SkateSchool` still converts it), see
-/// docs/importing.md.
+/// SkateSchool, a district-sized area (950 x 1180 m, 158k vertices, an 8.6 MB pack that takes seconds to
+/// read from an SD card) whose spawn rule lands under the island; `FG_PARK=SkateSchool` still converts it.
+/// See docs/importing.md.
 pub const LOCATIONS: &[&str] = &[
     "BlackBoxPark",
     "MegaPark",
     "IndustrialSkatePark",
     "DownTownSkatePark",
     "MaloofMoneyCup",
+    // An empty warehouse: flat ground, no rails.
+    "StartPark",
 ];
 
 /// The name shown in the game's menus.

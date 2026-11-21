@@ -963,7 +963,7 @@ impl Game {
                 hud::text_centered(
                     &mut m,
                     SCREEN_W / 2.0,
-                    392.0 + 18.0 * i as f32,
+                    374.0 + 18.0 * i as f32,
                     3.0,
                     line,
                     white,

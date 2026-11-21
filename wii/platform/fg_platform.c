@@ -245,22 +245,10 @@ void fg_draw_tris(const FgVertex *verts, uint32_t count, const float model[3][4]
     emit(verts, count);
 }
 
-void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
-                     uint32_t index_count, const FgTexture *tex, const float model[3][4]) {
-    if (vert_count == 0 || index_count == 0 || index_count > 0xFFFF || vert_count > 0x10000) {
-        return;
-    }
-    // Copy the vertices where the GPU can read them until the frame is done.
-    u32 bytes = vert_count * sizeof(FgTexVertex);
-    u32 need = (bytes + 31) & ~31u;
-    if (!arena || arena_used + need > ARENA_SIZE) {
-        return; // over budget this frame: skip rather than overwrite what the GPU still reads
-    }
-    u8 *buf = arena + arena_used;
-    arena_used += need;
-    memcpy(buf, verts, bytes);
-    DCFlushRange(buf, need);
-
+// Draws an indexed mesh whose vertex array `buf` the GPU reads (32-byte aligned, flushed, alive until the
+// frame is done).
+static void draw_indexed(const u8 *buf, const uint16_t *indices, uint32_t index_count, const FgTexture *tex,
+                         const float model[3][4]) {
     if (in_2d) {
         GX_LoadProjectionMtx(proj, GX_PERSPECTIVE);
         GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
@@ -280,9 +268,9 @@ void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16
         GX_LoadTexObj(&obj, GX_TEXMAP0);
     }
     set_mode(textured ? MODE_TEXTURED : MODE_INDEXED, textured && tex->alpha_test);
-    GX_SetArray(GX_VA_POS, buf, sizeof(FgTexVertex));
-    GX_SetArray(GX_VA_CLR0, buf + 12, sizeof(FgTexVertex));
-    GX_SetArray(GX_VA_TEX0, buf + 16, sizeof(FgTexVertex));
+    GX_SetArray(GX_VA_POS, (void *)buf, sizeof(FgTexVertex));
+    GX_SetArray(GX_VA_CLR0, (void *)(buf + 12), sizeof(FgTexVertex));
+    GX_SetArray(GX_VA_TEX0, (void *)(buf + 16), sizeof(FgTexVertex));
     GX_InvVtxCache();
 
     GX_Begin(GX_TRIANGLES, GX_VTXFMT1, (u16)index_count);
@@ -295,6 +283,40 @@ void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16
         }
     }
     GX_End();
+}
+
+static int bad_counts(uint32_t vert_count, uint32_t index_count) {
+    return vert_count == 0 || index_count == 0 || index_count > 0xFFFF || vert_count > 0x10000;
+}
+
+void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
+                     uint32_t index_count, const FgTexture *tex, const float model[3][4]) {
+    if (bad_counts(vert_count, index_count)) {
+        return;
+    }
+    // Copy the vertices where the GPU can read them until the frame is done.
+    u32 bytes = vert_count * sizeof(FgTexVertex);
+    u32 need = (bytes + 31) & ~31u;
+    if (!arena || arena_used + need > ARENA_SIZE) {
+        return; // over budget this frame: skip rather than overwrite what the GPU still reads
+    }
+    u8 *buf = arena + arena_used;
+    arena_used += need;
+    memcpy(buf, verts, bytes);
+    DCFlushRange(buf, need);
+    draw_indexed(buf, indices, index_count, tex, model);
+}
+
+void fg_draw_indexed_static(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
+                            uint32_t index_count, const FgTexture *tex, const float model[3][4]) {
+    if (bad_counts(vert_count, index_count) || ((uintptr_t)verts & 31)) {
+        return;
+    }
+    draw_indexed((const u8 *)verts, indices, index_count, tex, model);
+}
+
+void fg_flush_range(const void *data, uint32_t size) {
+    DCFlushRange((void *)data, size);
 }
 
 uint32_t fg_time_us(void) {
