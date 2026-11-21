@@ -365,7 +365,7 @@ and current state, physics state, grind name, stance, speed, slope, time to land
 tweak, manual timer, wipeout and runout, trucks or deck contact, crouch height, dark catch and
 underflip requests.
 
-### Audit of the no-ops (935 operations)
+### Audit of the no-ops (873 operations)
 
 Every behaviour and condition that was a no-op or a fixed value, by whether it matters on the board.
 
@@ -434,7 +434,8 @@ physics' slide.
 | load | 12.7 ms in Dolphin (was 216.8 ms when the operations were parsed at load): the typed operations read back from `motion/graph/ops` (85 KiB), strings found by binary search over an index the compiler sorts (format version 2) |
 | per tick | 0.13 ms on average, 0.27 at most over the trick tour (pad intents, both graphs, the turn conditioner and the riding behaviours, push coefficients, animation and channel advance), part of `physics` in the frame line (`graph`); frame CPU 3.5 ms average, 5.3 ms peak, no dropped frames |
 | air step | the skater's tick in the air (landing prediction at up to 28 chord rays, spin, flight): 0.03 to 0.06 ms typically, 1.3 ms at most (Dolphin, three trick tours; frame CPU 5.9 ms peak, no dropped frames) |
-| operations | 8,240 run, 935 deliberate no-ops (audited above), 4 unsupported (skitching, `GestureType`) |
+| grinds | the grind tick (contact boxes, admission, the rail, naming) and riding past rails: no change to the frame line (physics 0.1 to 0.4 ms); frame CPU 5.9 ms peak over two trick tours with grinds, no dropped frames (Dolphin); host worst tick 0.2 ms |
+| operations | 8,302 run, 873 deliberate no-ops (audited above), 4 unsupported (skitching, `GestureType`) |
 
 ## Trick tour (`autoplay`)
 
