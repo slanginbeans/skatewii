@@ -240,6 +240,16 @@ impl DevLog {
                     g.speed
                 ));
             }
+            if !grinding {
+                out.push(format!(
+                    "grind: off ({})",
+                    s.grind_exit.unwrap_or(if s.is_airborne() {
+                        "in the air"
+                    } else {
+                        "wiped out"
+                    })
+                ));
+            }
             self.grinding = grinding;
         }
         let sliding = s.slide.is_some();

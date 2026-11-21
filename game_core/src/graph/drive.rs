@@ -138,6 +138,10 @@ impl Driver {
                 .grind
                 .as_ref()
                 .is_some_and(|g| g.family == Family::Backslash),
+            // SK8 grind_control/facing.rs: the deck's velocity against its nose, seen from above,
+            // flipped riding switch and for the mirrored rider.
+            grind_backwards: s.grind.is_some()
+                && (s.vel.cross(s.fwd).y > 0.0) != (s.switch != s.mirrored()),
             grind_out: s.grind.as_ref().map_or(0, |g| darkslide_out(s, g)),
             slide: s
                 .slide
@@ -224,7 +228,9 @@ impl Driver {
             c.revert = Some(path.contains("/Revert/Fs"));
         }
         // The takeoff clip's jump: pop on its first tick, as the trick the graph scores.
-        let jump = has(self.clips.jump) && matches!(r.s.world.phys, phys::GROUND | phys::GRIND);
+        // (On the ground or a rail: a takeoff clip still carrying its jump onto a rail is not a new pop.)
+        let attr = has(self.clips.jump);
+        let jump = attr && matches!(r.s.world.phys, phys::GROUND | phys::GRIND);
         if jump && !self.jumping {
             let name = r.str(r.s.trick);
             let name = name.strip_prefix("U_").unwrap_or(name);
@@ -242,7 +248,7 @@ impl Driver {
             let over = r.packet(r.names.jump_override).unwrap_or(0.0);
             c.pop = Some((flick, jump_strength(height, over, t)));
         }
-        self.jumping = jump;
+        self.jumping = attr;
         // In the air: the trick the clips animate, whether the board is caught yet, a dark catch.
         // The danger zone's end (seconds into the clip; untimed: the whole clip): landing within the
         // last moment of it (`DANGER_GRACE`) still counts as caught.

@@ -719,6 +719,8 @@ pub struct Skater {
     pub approach: Approach,
     /// The grind air assist towards the rail the flight was steered onto.
     pub air_assist: Option<Assist>,
+    /// Why the last grind ended (for the log).
+    pub grind_exit: Option<&'static str>,
     pub brake: Option<FootBrake>,
     pub slide: Option<Powerslide>,
     /// Last tick's powerslide reading of the stick (entry window side, continuous amount).
@@ -937,6 +939,7 @@ impl Skater {
             jumper: Jumper::default(),
             approach: Approach::default(),
             air_assist: None,
+            grind_exit: None,
             brake: None,
             slide: None,
             last_slide: (0.0, 0.0),
@@ -981,6 +984,29 @@ impl Skater {
         let clips = self.clips;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+    }
+
+    /// Puts the rider back on the board at `pos` on the ground there, heading `yaw`, rolling at `speed`
+    /// (scripted runs), keeping the tuning, clip timing, stance and checkpoints.
+    pub fn put_at(&mut self, park: &dyn Terrain, pos: Vec3, yaw: f32, speed: f32) {
+        let clips = self.clips;
+        let checkpoints = core::mem::take(&mut self.checkpoints);
+        *self = Skater::spawn_with(park, self.tuning, self.stance);
+        self.clips = clips;
+        self.checkpoints = checkpoints;
+        let g = park.ground(pos.x, pos.z, pos.y + 0.1);
+        let n = if g.height > f32::MIN / 2.0 {
+            g.normal
+        } else {
+            Vec3::UP
+        };
+        self.pos = v3(pos.x, g.height.max(pos.y - 0.1), pos.z);
+        self.normal = n;
+        self.contact_n = n;
+        self.set_heading(yaw);
+        self.speed = speed;
+        self.vel = self.ground_velocity();
+        self.since_spawn = FAKIE_GRACE;
     }
 
     /// Seconds until the board lands: the known landing's, else straight down onto the ground below.
@@ -2229,6 +2255,10 @@ impl Skater {
 
     fn bail(&mut self, reason: &'static str, events: &mut Vec<Event>) {
         self.bail_reason = Some(reason);
+        if self.mode == Mode::Grind || self.grind.is_some() {
+            self.grind_exit = Some("wiped out");
+            self.grind = None;
+        }
         if !self.is_airborne() && self.mode != Mode::Grind && self.vel == Vec3::ZERO {
             self.vel = self.surface_forward() * self.speed;
         }

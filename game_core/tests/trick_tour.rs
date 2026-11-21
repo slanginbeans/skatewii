@@ -17,6 +17,9 @@ fn trick_tour_does_every_move() {
     let mut leaned = (false, false);
     for _ in 0..(60 * 60) {
         let pad = script.next(&game);
+        if let Some(p) = script.take_place() {
+            game.place_rider(p.pos, p.heading, p.speed);
+        }
         game.update(&pad, 1.0 / 60.0);
         seen.extend(game.events.iter().cloned());
         let s = &game.skater;
@@ -76,5 +79,13 @@ fn trick_tour_does_every_move() {
     );
     assert!(slide_frames > 10, "{slide_frames}");
     assert!(has("HIPPIE JUMP"), "{names:?}");
+    // Grinds on the demo ledge: an ollie onto it into a 50-50 tipped into a 5-0 with the C-stick, and
+    // an ollie along its line with a quarter turn into a slide (the demo park has no coping).
+    assert!(
+        script.seen.ledge && script.seen.five_o && script.seen.slide,
+        "{:?} {names:?}",
+        script.seen
+    );
+    assert!(has(" 5-0"), "{names:?}");
     assert_eq!(seen.last(), Some(&Event::Bailed), "{seen:?}");
 }

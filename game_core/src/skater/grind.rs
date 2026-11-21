@@ -79,6 +79,8 @@ const DARK_UP: f32 = 0.45;
 /// Riding onto a rail: from above within this many degrees of it; slower than this is dropping in.
 const FROM_ABOVE_DEG: f32 = 17.0;
 const DROP_IN_SPEED: f32 = 1.45;
+/// Dropping in onto a tip needs the board moving at least this fast towards it (m/s, ours).
+const DROP_IN_MIN: f32 = 0.3;
 /// The approach's slope sine above which it is riding into coping, or from below.
 const INTO_COPING: f32 = 0.96;
 const FROM_BELOW: f32 = 0.25;
@@ -160,7 +162,8 @@ const LOW_ENERGY_TICKS: u32 = 10;
 /// (any rail; SK8 selector/air.rs).
 const REGRIND_AIR: f32 = 0.08;
 const REGRIND_TICKS: u32 = 10;
-/// The rail just leaned off can't be taken again for this long (s, ours).
+/// The rail just left without a pop (off its end, leaned off) can't be taken again for this long (s,
+/// ours).
 const LEAN_OFF_BLOCK: f32 = 0.5;
 /// Riding samples kept for the approach (ticks): the pose half a second before a grind from riding.
 const HISTORY: usize = 30;
@@ -1024,6 +1027,11 @@ impl Skater {
             if (entry == Entry::DropIn || descending) && f.deck.y <= h.point.y {
                 return None;
             }
+            // Riding: only a tip the board is moving towards, and moving (standing still beside an
+            // edge isn't a drop-in; ours, where SK8 reads a retained lean flag).
+            if ground && (v.length() < DROP_IN_MIN || (h.point - f.deck).dot(v) <= 0.0) {
+                return None;
+            }
             Some(contact(&h, Family::Tipslide, front, entry))
         };
         let slide = || {
@@ -1298,7 +1306,8 @@ impl Skater {
             backside,
             reversed,
         });
-        self.name_grind(c.dir, true);
+        self.grind_exit = None;
+        self.name_grind(c.dir, upright(c.dir), true);
         self.trick = None;
         self.grabbed = None;
         self.takeoff.hippy = false;
@@ -1320,12 +1329,11 @@ impl Skater {
     }
 
     /// Names the grind this tick (SK8 `Chromosome::update`).
-    fn name_grind(&mut self, d: Vec3, first: bool) {
+    fn name_grind(&mut self, d: Vec3, n: Vec3, first: bool) {
         let chest = self.chest();
         let f = self.frame();
         let Some(g) = &mut self.grind else { return };
         let rail_dir = d * g.dir;
-        let n = upright(rail_dir);
         let forward = chest.dot(rail_dir) > 0.0;
         // The truck or tip on the rail: behind the middle is the back one.
         let back = !g.front;
@@ -1565,13 +1573,17 @@ impl Skater {
                 )
             }
         };
-        // Leaning off: the board rolls away from the high side.
-        let (target_up, target_fwd) = if g.lean.angle > 0.0 {
+        // Leaning off: the board (and the grind's normal) rolls away from the high side.
+        let (target_up, target_fwd, grind_n) = if g.lean.angle > 0.0 {
             let axis = if d.cross(-low_side).y > 0.0 { d } else { -d };
             let a = g.lean.angle * PI / 180.0;
-            (rotate(target_up, axis, a), rotate(target_fwd, axis, a))
+            (
+                rotate(target_up, axis, a),
+                rotate(target_fwd, axis, a),
+                rotate(n, axis, a),
+            )
         } else {
-            (target_up, target_fwd)
+            (target_up, target_fwd, n)
         };
         let k = 1.0 - libm::powf(1.0 - ORIENT_BLEND, ticks);
         let up = frame.up.lerp(target_up, k).normalize_or(target_up);
@@ -1602,7 +1614,7 @@ impl Skater {
         self.speed = g.speed * if fwd.dot(travel) >= 0.0 { 1.0 } else { -1.0 };
         self.vel = travel * g.speed;
         self.grind = Some(g.clone());
-        self.name_grind(d, false);
+        self.name_grind(d, grind_n, false);
         let Some(g) = self.grind.clone() else { return };
         if error > t.grind.wipeout_angle && g.time > 0.1 {
             self.grind = None;
@@ -1631,6 +1643,15 @@ impl Skater {
         if !leaving {
             return;
         }
+        self.grind_exit = Some(if pop.is_some() {
+            "popped"
+        } else if forced {
+            "leaned off"
+        } else if off_end {
+            "off the end"
+        } else {
+            "stopped"
+        });
         // Leaving the rail: score it, square the board back up along the rail and fly off.
         if g.time >= GRIND_MIN_TIME {
             let name = match &g.into {
@@ -1649,11 +1670,14 @@ impl Skater {
         self.approach.away = 0;
         let mut vel = travel * g.speed;
         self.pos = p + Vec3::UP * 0.02;
+        if pop.is_none() {
+            // Not popped: this rail can't be taken again straight away (the boxes still touch it).
+            self.regrind_block = Some((g.rail, LEAN_OFF_BLOCK));
+        }
         if lean_off {
             // Leaned (or stepped) off: pushed off the low side.
             vel += low_side * g.push.max(EXIT_MIN_PUSH);
             self.pos += low_side * 0.05;
-            self.regrind_block = Some((g.rail, LEAN_OFF_BLOCK));
         } else if off_end && !g.family.is_slide() && pop.is_none() {
             // A grind off the end lifts a little (SK8 release nudge, not for slides).
             vel += n * (n.y.max(0.0) * RELEASE_LIFT);

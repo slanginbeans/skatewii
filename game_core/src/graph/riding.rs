@@ -532,6 +532,66 @@ impl Crouch {
     }
 }
 
+/// GrindControlFade's twist (SK8 animation/grind_control.rs `Fade`): the grind trees' `twist` (here
+/// across its range, 0..1, the middle straight) follows the balance intent (`GrindBalanceX` times
+/// `twist_sensitivity` a tick into a target), eased by `twist_smoothing`, its step changing by at most
+/// `twist_max_delta_delta` and never more than `twist_max_delta` a tick. The first update only clears
+/// the begin latch.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GrindFade {
+    just_began: bool,
+    pub elapsed: f32,
+    pub value: f32,
+    target: f32,
+    step: f32,
+}
+
+impl GrindFade {
+    pub fn begin(&mut self, twist: f32) -> f32 {
+        let v = twist.clamp(0.0, 1.0);
+        *self = GrindFade {
+            just_began: true,
+            value: v,
+            target: v,
+            ..GrindFade::default()
+        };
+        v
+    }
+
+    pub fn update(&mut self, dt: f32, intent: f32, t: &crate::tuning::GrindTuning) -> Option<f32> {
+        if self.just_began {
+            self.just_began = false;
+            return None;
+        }
+        self.elapsed += dt;
+        self.target = (self.target + t.twist_sensitivity * intent).clamp(0.0, 1.0);
+        let desired = self.value * (1.0 - t.twist_smoothing) + self.target * t.twist_smoothing;
+        let step =
+            (desired - self.value).clamp(self.step - t.twist_accel, self.step + t.twist_accel);
+        self.step = step.clamp(-t.twist_step, t.twist_step);
+        self.value = (self.value + self.step).clamp(0.0, 1.0);
+        Some(self.value)
+    }
+}
+
+/// ControlGrindCrouch (SK8 `crouch`): the grind trees' height between `min_grind_disttocog` and
+/// `max_grind_disttocog`, the lower of what the crouch intent and the physics' grind crouch ask, moving
+/// at most `grind_disttocog_speed` a second.
+pub fn grind_crouch(
+    previous: f32,
+    intent: f32,
+    physical: f32,
+    t: &crate::tuning::GrindTuning,
+    dt: f32,
+) -> f32 {
+    let (lo, hi) = (t.height_min, t.height_max.max(t.height_min));
+    let input = (1.0 - intent).clamp(lo, hi);
+    let body = (1.0 - physical).clamp(lo, hi);
+    let desired = input.min(body);
+    let step = dt * t.height_speed;
+    desired.clamp(previous - step, previous + step)
+}
+
 /// SetManualAngle (SK8 manual.rs): the manual's pose angle eases towards the balance curve of the
 /// C-stick (signed), rate-limited per update.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

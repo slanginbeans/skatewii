@@ -18,8 +18,8 @@ use super::ops::{self, Beh, Cond, Flag, Group, Hook, Op, PushOp, phys};
 use super::playback::{ChannelSettings, Player, PoseProgram, Tree};
 use super::push::{self, PushCurves, PushSets, PushState};
 use super::riding::{
-    BodyTilt, Conditioner, Crouch, CrouchIntents, CrouchPhysical, LandingStore, ManualAngle,
-    TurnContext, TurnInput, TurnOutput, Turning,
+    BodyTilt, Conditioner, Crouch, CrouchIntents, CrouchPhysical, GrindFade, LandingStore,
+    ManualAngle, TurnContext, TurnInput, TurnOutput, Turning,
 };
 use super::{Controller, Frame, Graph, NONE, OpId, Pack, Str};
 use crate::motion::tree::{Attr, Playback, PoseCommand};
@@ -111,6 +111,8 @@ pub struct World {
     /// Grind trick-out side allowed: 0 normal, 1 left, 2 right.
     pub grind_out: u8,
     pub blunting: bool,
+    /// Grinding facing backwards (SK8 CreateGrindAttributes' `GrindFacingBackwards`).
+    pub grind_backwards: bool,
     pub on_stairs: bool,
     /// The physics' powerslide: 0 none, 1 to the left, 2 to the right; and whether it is ending.
     pub slide: u8,
@@ -158,6 +160,7 @@ impl Default for World {
             dist_to_edge: 10.0,
             grind_out: 0,
             blunting: false,
+            grind_backwards: false,
             on_stairs: false,
             slide: 0,
             slide_ending: false,
@@ -196,6 +199,7 @@ enum RidingInst {
     Manual(ManualAngle),
     Value(f32),
     Spin(SpinChannels),
+    Fade(GrindFade),
 }
 
 /// BodySpin's state (SK8 motion_spin.rs): its mode (0 idle, 1 armed, 2 spinning on the ground or
@@ -265,6 +269,9 @@ pub struct Names {
     new_auto_pump: Str,
     player_pump: Str,
     body_spin: Str,
+    /// CreateGrindAttributes' packet values.
+    grind_backwards: Str,
+    grind_forwards: Str,
     spin_front: Option<crate::motion::Node>,
     spin_back: Option<crate::motion::Node>,
 }
@@ -628,6 +635,8 @@ impl<'a> Runner<'a> {
             turn_packet: id("Turn"),
             slide_packet: id("Slide"),
             new_auto_pump: id("NewAutoPump"),
+            grind_backwards: id("GrindFacingBackwards"),
+            grind_forwards: id("GrindFacingForwards"),
             player_pump: id("PlayerControlledPump"),
             body_spin: id("BodySpin"),
             spin_front: db.and_then(|d| d.find(SPIN_FRONT)),
@@ -1656,6 +1665,73 @@ impl Host<'_, '_> {
                     for n in [yaw, pitch].into_iter().flatten() {
                         self.s.player.set_param(*n, 0.0, false);
                     }
+                }
+            }
+            Beh::GrindFade {
+                height,
+                twist,
+                intent,
+            } => {
+                let g = self.s.push_curves.tuning.grind;
+                match phase {
+                    0 => {
+                        // The height as the riding left it; the twist from the middle of its range.
+                        if let Some(h) = height {
+                            self.s.player.set_param(*h, self.s.com_height, false);
+                        }
+                        let mut f = GrindFade::default();
+                        let v = f.begin(0.5);
+                        if let Some(t) = twist {
+                            self.s.player.set_param(*t, v, true);
+                        }
+                        self.set_riding(op, RidingInst::Fade(f));
+                    }
+                    1 => {
+                        let input = self.s.mg.get(*intent).unwrap_or(0.0);
+                        let RidingInst::Fade(f) =
+                            self.riding_inst(op, || RidingInst::Fade(GrindFade::default()))
+                        else {
+                            return;
+                        };
+                        if let Some(v) = f.update(dt, input, &g)
+                            && let Some(t) = twist
+                        {
+                            self.s.player.set_param(*t, v, true);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Beh::GrindCrouch(name) => {
+                let g = self.s.push_curves.tuning.grind;
+                match phase {
+                    0 => self.set_riding(op, RidingInst::Value(self.s.com_height)),
+                    1 => {
+                        let intent = self.s.mg.get(self.n.crouch).unwrap_or(0.0);
+                        let RidingInst::Value(h) =
+                            self.riding_inst(op, || RidingInst::Value(g.height_max))
+                        else {
+                            return;
+                        };
+                        *h = super::riding::grind_crouch(*h, intent, 0.0, &g, dt);
+                        let v = *h;
+                        if let Some(n) = name {
+                            self.s.player.set_param(*n, v, false);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Beh::GrindAttributes => {
+                let w = self.s.world;
+                if phase == 1 && w.phys == phys::GRIND && w.grind != NONE {
+                    self.s.emit(w.grind, 1.0);
+                    let facing = if w.grind_backwards {
+                        self.n.grind_backwards
+                    } else {
+                        self.n.grind_forwards
+                    };
+                    self.s.emit(facing, 1.0);
                 }
             }
             Beh::BodyFlippingSignal | Beh::Nothing => {}

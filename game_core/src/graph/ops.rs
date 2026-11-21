@@ -362,6 +362,17 @@ pub enum Beh {
     },
     /// FakieHeadChannel: the fakie head and torso channel.
     FakieHead,
+    /// GrindControlFade: the grind trees' height (`distBoardToCogAnimAttribute`) on begin and their
+    /// twist (`twistAnimAttribute`) following an intent (`twistMGIntent`, `GrindBalanceX`).
+    GrindFade {
+        height: Option<NameId>,
+        twist: Option<NameId>,
+        intent: Str,
+    },
+    /// ControlGrindCrouch: the grind trees' height (`driveDistToCom`) from the crouch.
+    GrindCrouch(Option<NameId>),
+    /// CreateGrindAttributes: the grind's name and which way the rider faces as packet values.
+    GrindAttributes,
     /// Behaviours with nothing to do in flatground (hand services, debug text, off-board helpers).
     Nothing,
     Unsupported(Str),
@@ -689,9 +700,6 @@ const NOTHING: &[&str] = &[
     "OffboardBodyTweakBlend",
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
-    "GrindControlFade",
-    "ControlGrindCrouch",
-    "CreateGrindAttributes",
     "SetBumpCoefficients",
     "UpdateIsWeightOnNose",
     "FootPlantAbsorb",
@@ -940,6 +948,15 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         "FakieHeadChannel" => Beh::FakieHead,
         "BodySpin" => Beh::BodySpin,
         "ControlAirLegExtension" => Beh::AirLegExtension(lib("EXTEND").or_else(|| lib("extend"))),
+        "GrindControlFade" => Beh::GrindFade {
+            height: lib(a.text("distBoardToCogAnimAttribute").unwrap_or("DistToCog")),
+            twist: lib(a.text("twistAnimAttribute").unwrap_or("twist")),
+            intent: a.str("twistMGIntent"),
+        },
+        "ControlGrindCrouch" => {
+            Beh::GrindCrouch(lib(a.text("driveDistToCom").unwrap_or("disttocog")))
+        }
+        "CreateGrindAttributes" => Beh::GrindAttributes,
         "SetDeckPitchAndYaw" => Beh::DeckPitchAndYaw {
             yaw: a.text("yaw").and_then(lib),
             pitch: a.text("pitch").and_then(lib),

@@ -368,6 +368,14 @@ impl Game {
         self.flick.reset();
     }
 
+    /// Puts the rider on the board at `pos` (on the ground there), heading `heading` (yaw), rolling at
+    /// `speed`: for scripted runs (`autoplay`).
+    pub fn place_rider(&mut self, pos: crate::math::Vec3, heading: f32, speed: f32) {
+        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        self.skater.put_at(ground, pos, heading, speed);
+        self.flick.reset();
+    }
+
     pub fn terrain(&self) -> &dyn Terrain {
         terrain(&self.imported_park, &self.park)
     }

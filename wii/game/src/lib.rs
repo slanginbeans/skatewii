@@ -376,6 +376,9 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) {
         if auto.take_restart() {
             game.restart_at_spawn();
         }
+        if let Some(p) = auto.take_place() {
+            game.place_rider(p.pos, p.heading, p.speed);
+        }
         scripted = p;
         pad = &scripted;
     }

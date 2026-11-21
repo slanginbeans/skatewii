@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 struct W(Vec<u8>);
 
@@ -740,6 +740,21 @@ fn beh(w: &mut W, b: &Beh) {
             w.o16(*yaw);
             w.o16(*pitch);
         }
+        Beh::GrindFade {
+            height,
+            twist,
+            intent,
+        } => {
+            w.u8(30);
+            w.o16(*height);
+            w.o16(*twist);
+            w.u16(*intent);
+        }
+        Beh::GrindCrouch(n) => {
+            w.u8(31);
+            w.o16(*n);
+        }
+        Beh::GrindAttributes => w.u8(32),
         // Every field-less behaviour was written above.
         _ => w.u8(255),
     }
@@ -887,6 +902,13 @@ fn read_beh(r: &mut R) -> Option<Beh> {
             yaw: r.o16()?,
             pitch: r.o16()?,
         },
+        30 => Beh::GrindFade {
+            height: r.o16()?,
+            twist: r.o16()?,
+            intent: r.u16()?,
+        },
+        31 => Beh::GrindCrouch(r.o16()?),
+        32 => Beh::GrindAttributes,
         _ => return None,
     })
 }
