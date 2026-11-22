@@ -129,6 +129,8 @@ content second.
 - [x] Districts streamed while riding (`game_core::district`: cells read ahead and dropped behind within a
   memory budget, ground and rails across loaded cells, the rider held where cells aren't in yet; districts in
   the location menu with `FG_CITY=1`)
+- [x] District start spots searched for in the collision (flat, open, a long run, rails around at its level;
+  up to four a district, spread out), each its own location in a scrolling menu
 - [ ] More locations: the city districts and Skate School streamed in 100 m cells (packs per cell, a
   background reader on the Wii, collision near the rider and models within the draw distance loaded,
   start spots in the location menu)

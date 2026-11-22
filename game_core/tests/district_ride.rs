@@ -56,7 +56,8 @@ fn district() -> (District, Rc<RefCell<MemReader>>) {
     }
     let index = Index {
         cell: 100.0,
-        start: (v3(20.0, 0.0, 50.0), core::f32::consts::FRAC_PI_2),
+        floor: 0.0,
+        starts: vec![(v3(20.0, 0.0, 50.0), core::f32::consts::FRAC_PI_2)],
         cells,
     };
     let d = District::new(

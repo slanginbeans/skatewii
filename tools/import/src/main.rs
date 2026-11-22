@@ -24,6 +24,7 @@ mod rules;
 mod rw4;
 mod skater;
 mod skin;
+mod starts;
 mod stategraph;
 mod texture;
 mod world;

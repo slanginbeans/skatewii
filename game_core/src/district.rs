@@ -88,6 +88,8 @@ pub struct District {
     pub timer: Option<fn() -> u32>,
     /// What happened (cells loaded, dropped, failed), for the game's log.
     pub log: Vec<String>,
+    /// Which of the index's starts the rider starts at (and respawns at).
+    start: usize,
     kill: f32,
 }
 
@@ -101,11 +103,11 @@ impl District {
         budget: u32,
     ) -> Result<District, collision::Error> {
         let index = Index::parse(index).ok_or(collision::Error::Bad)?;
+        let kill = index.floor - 5.0;
         let mut dir = String::from(dir);
         if !dir.is_empty() && !dir.ends_with('/') {
             dir.push('/');
         }
-        let kill = index.start.0.y - 100.0;
         Ok(District {
             index,
             dir,
@@ -119,8 +121,15 @@ impl District {
             flush: None,
             timer: None,
             log: Vec::new(),
+            start: 0,
             kill,
         })
+    }
+
+    /// Starts the rider at the index's start `i` (the first if there is no such start).
+    pub fn with_start(mut self, i: usize) -> District {
+        self.start = if i < self.index.starts.len() { i } else { 0 };
+        self
     }
 
     fn has(&self, x: i32, z: i32) -> bool {
@@ -443,7 +452,7 @@ impl Terrain for District {
             .min_by(|a, b| a.t.total_cmp(&b.t))
     }
     fn spawn(&self) -> (Vec3, f32) {
-        self.index.start
+        self.index.starts[self.start]
     }
     fn kill_height(&self) -> f32 {
         self.kill
@@ -528,7 +537,8 @@ mod tests {
         }
         let index = Index {
             cell: 100.0,
-            start: (v3(10.0, 0.0, 50.0), 0.0),
+            floor: 0.0,
+            starts: vec![(v3(10.0, 0.0, 50.0), 0.0)],
             cells,
         };
         let d = District::new(
@@ -668,5 +678,25 @@ mod tests {
         );
         assert_eq!(d.ground(99.0, 50.0, 0.5).height, 0.0);
         assert!(d.kill_height() < -4.0);
+    }
+
+    #[test]
+    fn a_chosen_start_and_the_floor() {
+        let (d, _) = row(3);
+        assert_eq!(d.spawn(), (v3(10.0, 0.0, 50.0), 0.0));
+        assert_eq!(d.kill_height(), -5.0, "below the district's lowest point");
+        let mut index = d.index.clone();
+        index.starts.push((v3(250.0, 3.0, 50.0), 1.0));
+        let make = |i| {
+            District::new(&index.encode(), "x", Box::new(MemReader::new()), 1 << 20)
+                .unwrap()
+                .with_start(i)
+        };
+        assert_eq!(make(1).spawn(), (v3(250.0, 3.0, 50.0), 1.0));
+        assert_eq!(
+            make(7).spawn().0,
+            v3(10.0, 0.0, 50.0),
+            "no such start: the first"
+        );
     }
 }

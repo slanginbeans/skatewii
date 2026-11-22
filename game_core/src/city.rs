@@ -6,9 +6,10 @@
 //! `park/spawn`, `park/rails`, `park/mesh/<n>`, `park/tex/<n>`), already in world space, holding what lies
 //! in the cell's square (collision triangles and meshes by their centre, rails by their middle).
 //!
-//! `city/index` in the index pack (big-endian): `"FGCI"`, `u32` version, `f32` cell edge, the start
-//! (`f32` x, y, z, yaw), `u32` cell count, then per cell `i32` centre x, `i32` centre z, `u32` pack bytes,
-//! `u32` collision triangles, `u32` vertices, `u32` texture bytes.
+//! `city/index` in the index pack (big-endian): `"FGCI"`, `u32` version (2), `f32` cell edge, `f32` the
+//! district's lowest collision height, `u32` start count, `u32` cell count, then per start `f32` x, y, z,
+//! yaw, then per cell `i32` centre x, `i32` centre z, `u32` pack bytes, `u32` collision triangles, `u32`
+//! vertices, `u32` texture bytes.
 
 use alloc::format;
 use alloc::string::String;
@@ -16,9 +17,10 @@ use alloc::vec::Vec;
 
 use crate::math::{Vec3, v3};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const MAGIC: &[u8; 4] = b"FGCI";
-const HEADER: usize = 32;
+const HEADER: usize = 24;
+const START_BYTES: usize = 16;
 const CELL_BYTES: usize = 24;
 
 /// One cell of a district.
@@ -45,8 +47,10 @@ impl CellInfo {
 pub struct Index {
     /// A cell's edge (m).
     pub cell: f32,
-    /// Where a rider starts in the district, and the yaw.
-    pub start: (Vec3, f32),
+    /// The district's lowest collision height (m): below it the rider has fallen out of the world.
+    pub floor: f32,
+    /// Where a rider can start in the district, and the yaw, best first (at least one).
+    pub starts: Vec<(Vec3, f32)>,
     /// Sorted by (x, z).
     pub cells: Vec<CellInfo>,
 }
@@ -57,19 +61,23 @@ fn be32(b: &[u8], at: usize) -> u32 {
 
 impl Index {
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER + self.cells.len() * CELL_BYTES);
+        let mut out = Vec::with_capacity(
+            HEADER + self.starts.len() * START_BYTES + self.cells.len() * CELL_BYTES,
+        );
         out.extend_from_slice(MAGIC);
-        let (p, yaw) = self.start;
         for w in [
             VERSION,
             self.cell.to_bits(),
-            p.x.to_bits(),
-            p.y.to_bits(),
-            p.z.to_bits(),
-            yaw.to_bits(),
+            self.floor.to_bits(),
+            self.starts.len() as u32,
             self.cells.len() as u32,
         ] {
             out.extend_from_slice(&w.to_be_bytes());
+        }
+        for (p, yaw) in &self.starts {
+            for f in [p.x, p.y, p.z, *yaw] {
+                out.extend_from_slice(&f.to_bits().to_be_bytes());
+            }
         }
         for c in &self.cells {
             for w in [
@@ -86,21 +94,32 @@ impl Index {
         out
     }
 
-    /// None for anything that isn't a version-1 index whose cells fit its length.
+    /// None for anything that isn't a version-2 index with a start, whose starts and cells fit its length.
     pub fn parse(b: &[u8]) -> Option<Index> {
         if b.len() < HEADER || &b[..4] != MAGIC || be32(b, 4) != VERSION {
             return None;
         }
         let f = |at: usize| f32::from_bits(be32(b, at));
-        let cell = f(8);
-        let start = (v3(f(12), f(16), f(20)), f(24));
-        let n = be32(b, 28) as usize;
-        if cell.is_nan() || cell <= 0.0 || b.len() != HEADER + n.checked_mul(CELL_BYTES)? {
+        let (cell, floor) = (f(8), f(12));
+        let (s, n) = (be32(b, 16) as usize, be32(b, 20) as usize);
+        let first = HEADER.checked_add(s.checked_mul(START_BYTES)?)?;
+        if cell.is_nan()
+            || cell <= 0.0
+            || floor.is_nan()
+            || s == 0
+            || b.len() != first.checked_add(n.checked_mul(CELL_BYTES)?)?
+        {
             return None;
         }
+        let starts = (0..s)
+            .map(|i| {
+                let at = HEADER + i * START_BYTES;
+                (v3(f(at), f(at + 4), f(at + 8)), f(at + 12))
+            })
+            .collect();
         let mut cells: Vec<CellInfo> = (0..n)
             .map(|i| {
-                let at = HEADER + i * CELL_BYTES;
+                let at = first + i * CELL_BYTES;
                 CellInfo {
                     x: be32(b, at) as i32,
                     z: be32(b, at + 4) as i32,
@@ -112,7 +131,12 @@ impl Index {
             })
             .collect();
         cells.sort_by_key(|c| (c.x, c.z));
-        Some(Index { cell, start, cells })
+        Some(Index {
+            cell,
+            floor,
+            starts,
+            cells,
+        })
     }
 
     /// The centre of the cell holding (x, z) (whether the district has it or not).
@@ -173,7 +197,8 @@ mod tests {
     fn index() -> Index {
         Index {
             cell: 100.0,
-            start: (v3(10.0, 2.0, -30.0), 1.5),
+            floor: -12.5,
+            starts: vec![(v3(10.0, 2.0, -30.0), 1.5), (v3(-40.0, 0.5, 60.0), -0.25)],
             cells: vec![
                 cell(-50, -50),
                 cell(-50, 50),
@@ -194,6 +219,11 @@ mod tests {
         v[7] = 9;
         assert_eq!(Index::parse(&v), None, "another version");
         assert_eq!(Index::parse(b"FGCX"), None);
+        let none = Index {
+            starts: vec![],
+            ..index()
+        };
+        assert_eq!(Index::parse(&none.encode()), None, "no start");
         assert_eq!(cell(-150, 250).file(), "c_-150_250.fgpak");
     }
 

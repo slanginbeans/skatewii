@@ -131,7 +131,7 @@ fn locations() -> Vec<Location> {
             name: format!("Park {n}"),
             file: format!("parks/{n}.fgpak"),
             bytes: 0,
-            district: false,
+            district: None,
         })
         .collect()
 }

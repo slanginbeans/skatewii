@@ -22,9 +22,10 @@ folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg
   old single `data/park.fgpak` from earlier builds is removed (the game still reads one when there is no
   `parks.txt`).
 - with `FG_CITY=1`, also cuts the city districts and Skate School into cell packs (`data/city/<district>/`,
-  below; about 390 MB, 25 s) and lists them in `parks.txt` (`district <id> city/<id>/index.fgpak <bytes>
-  <name>`), so they are in the location menu. Off by default while the streaming is being tried on the Wii
-  (start spots are still the importer's guesses).
+  below; about 390 MB, 40 s) and lists them in `parks.txt`, one line per start spot (`district <id>
+  city/<District>/index.fgpak <bytes> <start> <name>`: `DownTown`, `DownTown-2`, ... shown as Downtown,
+  Downtown 2, ...), so each start is a location in the menu (which scrolls when the list is long). Off by
+  default while the streaming is being tried on the Wii.
 
 All of it is about 37 MB (the motion library 20 MB, the six parks 12.5 MB). Copy `dist/apps/flatground` to
 the SD card's `apps` folder and the game finds its packs at
@@ -266,8 +267,8 @@ bound: textures that can hold alpha are counted as RGB5A3):
 ```bash
 cargo run --release -p fg_import -- district path/to/skate3.iso --district DownTown [--max 128] [--cap 3072]
 ```
-Writes `imported/city/<district>/`: `index.fgpak` (`city/index`: the cell edge, a start, and each cell's
-centre, pack size, triangles, vertices and texture bytes; format in `game_core/src/city.rs`) and one
+Writes `imported/city/<district>/`: `index.fgpak` (`city/index`: the cell edge, the lowest collision height, up to
+four start spots, and each cell's centre, pack size, triangles, vertices and texture bytes; format in `game_core/src/city.rs`) and one
 `c_<x>_<z>.fgpak` per cell with anything in it, named by its centre. A cell pack is an ordinary park pack
 (`park/collision`, `park/spawn` at the flat face nearest the cell's centre, `park/rails`, `park/mesh/<n>`,
 `park/tex/<n>`) in world space, so the game's park loader reads it as it is. Everything the district has, in
@@ -275,9 +276,16 @@ its cell files and its `Global` files, is placed by position: triangles by their
 middle of their bounds, rails by their middle point (classified against the collision of the cell and its
 eight neighbours). So the city districts come out in their own cells, and Skate School, which keeps
 everything in `Global`, is cut up the same way. Each cell carries its own copy of the textures its meshes
-use; a cell over `--cap` KiB has its textures halved until it fits (down to 16 px). The district's start
-is the park spawn rule's (the flat face nearest the origin on the main floor): for Skate School that is
-still under the island, so the start spots will be picked by hand. US/EU disc, defaults:
+use; a cell over `--cap` KiB has its textures halved until it fits (down to 16 px). The start spots are searched for in the district's collision (`tools/import/src/starts.rs`; the park
+spawn rule put Skate School's start under the island and University's in the air). Every walkable level
+on a 4 m grid is tried (Skate School has a walkable lid over the whole island): a spot must be flat, a
+surface the board rides (not stairs), with 2.5 m of headroom, 3 m clear all round, a straight run of at
+least 20 m somewhere (no wall, step or drop, no steep slope) and at least three rails within 60 m at about
+its own height, which keeps out roofs, the seabed and empty lots. It faces along its longest run. The first
+start is the good spot (within 90% of the best score) with the most rails around it; each next one is the
+good spot farthest from those already picked, at least 200 m away. Every start of the four districts was
+checked by putting the rider down there with the cells streaming in: each loads in under 4 s on a simulated
+2 MB/s card and the rider rolls straight off on the ground. US/EU disc, defaults:
 
 | District | Cells | All packs | Cell p50 / p90 / max | Cells shrunk | Converted in |
 |---|---|---|---|---|---|

@@ -25,6 +25,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
+/// Most starts a district gets (each its own location in the menu).
+const MAX_STARTS: usize = 4;
+
 /// Smallest texture edge a cell's textures are halved to while it is over its cap.
 const MIN_TEXTURE: usize = 16;
 
@@ -354,12 +357,35 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         total += bytes.len();
         infos.push(info);
     }
-    let start = park::spawn(&content.tris).unwrap_or([0.0; 4]);
+    let t1 = std::time::Instant::now();
+    let mut starts = crate::starts::pick(&content.tris, &content.rails, MAX_STARTS);
+    if starts.is_empty() {
+        // Nowhere passes: the park spawn rule.
+        let s = park::spawn(&content.tris).unwrap_or([0.0; 4]);
+        starts.push((v3(s[0], s[1], s[2]), s[3]));
+    }
+    let floor = content
+        .tris
+        .iter()
+        .flat_map(|t| t.v.iter().map(|v| v[1]))
+        .fold(f32::MAX, f32::min);
     let index = Index {
         cell: CELL,
-        start: (v3(start[0], start[1], start[2]), start[3]),
+        floor: if floor == f32::MAX { 0.0 } else { floor },
+        starts,
         cells: infos,
     };
+    for (i, (p, yaw)) in index.starts.iter().enumerate() {
+        println!(
+            "start {}: {:.1} {:.1} {:.1} yaw {:.0}",
+            i + 1,
+            p.x,
+            p.y,
+            p.z,
+            yaw.to_degrees()
+        );
+    }
+    println!("starts picked in {:.1} s", t1.elapsed().as_secs_f32());
     write_index(&dir, &index)?;
     let mut sizes: Vec<u32> = index.cells.iter().map(|c| c.bytes).collect();
     sizes.sort_unstable();
@@ -371,7 +397,7 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
             / 1024
     };
     println!(
-        "{} -> {}: {} cells, {:.1} MB (median {} KB, p90 {} KB, max {} KB); {} cells' textures shrunk to fit {} KB; rail segments: {} thin, {} fat, {} ledge, {} curb, {} blocked; start {:.1?} yaw {:.0}; {:.1} s",
+        "{} -> {}: {} cells, {:.1} MB (median {} KB, p90 {} KB, max {} KB); {} cells' textures shrunk to fit {} KB; rail segments: {} thin, {} fat, {} ledge, {} curb, {} blocked; {} starts; {:.1} s",
         o.district,
         dir.display(),
         index.cells.len(),
@@ -386,8 +412,7 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         rail_counts[2],
         rail_counts[3],
         rail_counts[4],
-        &start[..3],
-        start[3].to_degrees(),
+        index.starts.len(),
         t0.elapsed().as_secs_f32()
     );
     Ok(())
@@ -468,7 +493,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let index = Index {
             cell: CELL,
-            start: (v3(1.0, 2.0, 3.0), 0.5),
+            floor: -1.0,
+            starts: vec![(v3(1.0, 2.0, 3.0), 0.5)],
             cells: vec![CellInfo {
                 x: 50,
                 z: 50,

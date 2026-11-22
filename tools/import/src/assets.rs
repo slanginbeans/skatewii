@@ -118,26 +118,39 @@ fn index(dir: &Path, default: &'static str) -> String {
                 name: park::display_name(p),
                 file,
                 bytes,
-                district: false,
+                district: None,
             }
         })
-        .chain(crate::city::DISTRICTS.iter().filter_map(|d| {
-            // Converted districts (`FG_CITY=1`): the index and every cell next to it.
+        .chain(crate::city::DISTRICTS.iter().flat_map(|d| {
+            // Converted districts (`FG_CITY=1`): the index and every cell next to it, one location per
+            // start (`DownTown`, `DownTown-2`, ...).
             let file = format!("city/{d}/index.fgpak");
-            dir.join(&file).is_file().then(|| {
-                let bytes = std::fs::read_dir(dir.join("city").join(d))
-                    .map(|it| {
-                        it.filter_map(|e| e.ok()?.metadata().ok())
-                            .map(|m| m.len())
-                            .sum::<u64>()
-                    })
-                    .unwrap_or(0);
+            let starts = std::fs::read(dir.join(&file)).ok().and_then(|b| {
+                let pack = game_core::pack::Pack::parse(&b).ok()?;
+                let index = game_core::city::Index::parse(pack.find("city/index")?.data)?;
+                Some(index.starts.len().min(u8::MAX as usize))
+            });
+            let bytes = std::fs::read_dir(dir.join("city").join(d))
+                .map(|it| {
+                    it.filter_map(|e| e.ok()?.metadata().ok())
+                        .map(|m| m.len())
+                        .sum::<u64>()
+                })
+                .unwrap_or(0);
+            (0..starts.unwrap_or(0)).map(move |s| {
+                let (id, name) = match s {
+                    0 => ((*d).to_string(), park::display_name(d)),
+                    _ => (
+                        format!("{d}-{}", s + 1),
+                        format!("{} {}", park::display_name(d), s + 1),
+                    ),
+                };
                 game_core::menu::Location {
-                    id: (*d).into(),
-                    name: park::display_name(d),
-                    file,
+                    id,
+                    name,
+                    file: file.clone(),
                     bytes: bytes.min(u32::MAX as u64) as u32,
-                    district: true,
+                    district: Some(s as u8),
                 }
             })
         }))
@@ -407,6 +420,15 @@ pub fn run(args: &[String]) -> Res<()> {
         locations(default).join(", "),
         total / 1024
     );
+    let districts: Vec<String> = game_core::menu::parse_index(&text)
+        .locations
+        .iter()
+        .filter(|l| l.district.is_some())
+        .map(|l| l.id.clone())
+        .collect();
+    if !districts.is_empty() {
+        println!("[assets] districts (streamed): {}", districts.join(", "));
+    }
     Ok(())
 }
 
@@ -528,6 +550,42 @@ mod tests {
         );
         assert_eq!(m.file, "parks/MegaPark.fgpak");
         assert_eq!(index.locations.len(), park::LOCATIONS.len());
+
+        // A converted district: one location per start, after the parks.
+        let city = cache.join("city/DownTown");
+        std::fs::create_dir_all(&city).unwrap();
+        let starts = vec![
+            (game_core::math::v3(1.0, 0.0, 2.0), 0.0),
+            (game_core::math::v3(300.0, 5.0, 2.0), 1.0),
+        ];
+        let i = game_core::city::Index {
+            cell: 100.0,
+            floor: -3.0,
+            starts,
+            cells: vec![],
+        };
+        crate::district::write_index(&city, &i).unwrap();
+        std::fs::write(city.join("c_50_50.fgpak"), vec![0u8; 100]).unwrap();
+        let index = game_core::menu::parse_index(&super::index(&cache, "MegaPark"));
+        let d: Vec<_> = index
+            .locations
+            .iter()
+            .filter_map(|l| Some((l.id.as_str(), l.name.as_str(), l.district?, l.file.as_str())))
+            .collect();
+        assert_eq!(
+            d,
+            [
+                ("DownTown", "Downtown", 0, "city/DownTown/index.fgpak"),
+                ("DownTown-2", "Downtown 2", 1, "city/DownTown/index.fgpak"),
+            ]
+        );
+        let bytes = std::fs::metadata(city.join("index.fgpak")).unwrap().len() + 100;
+        assert!(
+            index
+                .locations
+                .iter()
+                .all(|l| l.district.is_none() || l.bytes as u64 == bytes)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

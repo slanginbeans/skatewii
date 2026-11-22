@@ -25,9 +25,10 @@ pub struct Location {
     pub file: String,
     /// The pack's size in bytes (for the loading message; 0: unknown). A district's: all its cells.
     pub bytes: u32,
-    /// A district streamed in cells (`game_core::district`): `file` is its index pack
-    /// (`city/DownTown/index.fgpak`), the cells next to it.
-    pub district: bool,
+    /// A district streamed in cells (`game_core::district`), started at this start of its index: `file`
+    /// is its index pack (`city/DownTown/index.fgpak`), the cells next to it. A district has one location
+    /// per start.
+    pub district: Option<u8>,
 }
 
 impl Location {
@@ -38,7 +39,7 @@ impl Location {
             name: "Demo park".into(),
             file: String::new(),
             bytes: 0,
-            district: false,
+            district: None,
         }
     }
 
@@ -62,7 +63,7 @@ pub struct Index {
 /// ```text
 /// default <id>
 /// park <id> <file> <bytes> <display name ...>
-/// district <id> <index file> <bytes> <display name ...>
+/// district <id> <index file> <bytes> <start> <display name ...>
 /// ```
 ///
 /// Files must be plain relative paths inside the data folder (no `:`, no `..`, no leading `/`).
@@ -82,6 +83,14 @@ pub fn parse_index(text: &str) -> Index {
                 let Ok(bytes) = bytes.parse::<u32>() else {
                     continue;
                 };
+                let district = if kind == "district" {
+                    match words.next().and_then(|s| s.parse::<u8>().ok()) {
+                        Some(s) => Some(s),
+                        None => continue,
+                    }
+                } else {
+                    None
+                };
                 let safe = !file.contains(':') && !file.contains("..") && !file.starts_with('/');
                 if !safe || id == DEMO_ID || index.locations.iter().any(|l| l.id == id) {
                     continue;
@@ -92,7 +101,7 @@ pub fn parse_index(text: &str) -> Index {
                     name: if name.is_empty() { id.into() } else { name },
                     file: file.into(),
                     bytes,
-                    district: kind == "district",
+                    district,
                 });
             }
             _ => {}
@@ -109,8 +118,10 @@ pub fn write_index(locations: &[Location], default: Option<&str>) -> String {
         out += &format!("default {d}\n");
     }
     for l in locations.iter().filter(|l| !l.is_demo()) {
-        let kind = if l.district { "district" } else { "park" };
-        out += &format!("{kind} {} {} {} {}\n", l.id, l.file, l.bytes, l.name);
+        out += &match l.district {
+            Some(s) => format!("district {} {} {} {s} {}\n", l.id, l.file, l.bytes, l.name),
+            None => format!("park {} {} {} {}\n", l.id, l.file, l.bytes, l.name),
+        };
     }
     out
 }
@@ -298,7 +309,9 @@ impl Menu {
             ),
         };
         let row = 26.0;
-        let h = 110.0 + row * items.len() as f32;
+        // A long list scrolls: the rows around the cursor, and a mark where more are above or below.
+        let (from, to) = shown(items.len(), self.cursor);
+        let h = 110.0 + row * (to - from) as f32;
         let top = ((SCREEN_H - h) / 2.0).max(16.0);
         m.rect_2d(0.0, 0.0, SCREEN_W, SCREEN_H, 0x0000_0060);
         m.rect_2d(80.0, top, SCREEN_W - 160.0, h, 0x1a1e_24e0);
@@ -320,8 +333,16 @@ impl Menu {
             };
         hud::text_centered(m, SCREEN_W / 2.0, title_y, 3.0, title, rgb(200, 220, 255));
         let first = title_y + 30.0;
-        for (i, item) in items.iter().enumerate() {
-            let y = first + row * i as f32;
+        let more = rgb(120, 140, 170);
+        if from > 0 {
+            hud::text_centered(m, SCREEN_W / 2.0, first - 14.0, 2.0, "MORE", more);
+        }
+        if to < items.len() {
+            let y = first + row * (to - from) as f32 - 4.0;
+            hud::text_centered(m, SCREEN_W / 2.0, y, 2.0, "MORE", more);
+        }
+        for (i, item) in items.iter().enumerate().take(to).skip(from) {
+            let y = first + row * (i - from) as f32;
             let on = i == self.cursor;
             if on {
                 m.rect_2d(96.0, y - 6.0, SCREEN_W - 192.0, row - 2.0, 0x3c64_a0ff);
@@ -351,6 +372,19 @@ impl Menu {
             rgb(170, 170, 170),
         );
     }
+}
+
+/// Most rows a menu shows at once.
+pub const ROWS: usize = 12;
+
+/// The rows a menu of `n` shows with the cursor on `cursor` (`from..to`): all of them when they fit, else
+/// [`ROWS`] with the cursor in the middle where it can be.
+pub fn shown(n: usize, cursor: usize) -> (usize, usize) {
+    if n <= ROWS {
+        return (0, n);
+    }
+    let from = cursor.saturating_sub(ROWS / 2).min(n - ROWS);
+    (from, from + ROWS)
 }
 
 /// Hands-off play through every location (`switch <seconds>` in `autoplay.txt`): which location comes
@@ -510,21 +544,21 @@ mod tests {
                 name: "Black Box Park".into(),
                 file: "parks/BlackBoxPark.fgpak".into(),
                 bytes: 1089632,
-                district: false,
+                district: None,
             },
             Location {
                 id: "MegaPark".into(),
                 name: "Mega Park".into(),
                 file: "parks/MegaPark.fgpak".into(),
                 bytes: 12,
-                district: false,
+                district: None,
             },
             Location {
                 id: "DownTown".into(),
                 name: "Downtown".into(),
                 file: "city/DownTown/index.fgpak".into(),
                 bytes: 170_000_000,
-                district: true,
+                district: Some(1),
             },
             Location::demo(),
         ];
@@ -542,6 +576,7 @@ mod tests {
                      park demo d.fgpak 10 Reserved\n\
                      park F\n\
                      park G g.fgpak 7\n\
+                     district H h/index.fgpak 7 Name without a start\n\
                      default Nowhere\n\
                      something else\n";
         let index = parse_index(messy);
@@ -564,14 +599,14 @@ mod tests {
                 name: "A".into(),
                 file: "a".into(),
                 bytes: 0,
-                district: false,
+                district: None,
             },
             Location {
                 id: "B".into(),
                 name: "B".into(),
                 file: "b".into(),
                 bytes: 0,
-                district: false,
+                district: None,
             },
             Location::demo(),
         ];
@@ -596,5 +631,33 @@ mod tests {
         }
         assert_eq!(seen, [1, 2, 0, 1]);
         assert_eq!(LocationTour::every(5).next(0, 1), None);
+    }
+
+    #[test]
+    fn a_long_list_scrolls_with_the_cursor() {
+        assert_eq!(shown(5, 4), (0, 5));
+        assert_eq!(shown(23, 0), (0, ROWS));
+        assert_eq!(shown(23, 10), (4, 4 + ROWS));
+        assert_eq!(shown(23, 22), (23 - ROWS, 23));
+        for c in 0..23 {
+            let (from, to) = shown(23, c);
+            assert!(from <= c && c < to && to - from == ROWS);
+        }
+        // Drawn, it stays on the screen.
+        let names: Vec<String> = (0..23).map(|i| format!("PLACE {i}")).collect();
+        let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let mut menu = Menu::start(0, 0);
+        menu.screen = Screen::Locations;
+        for c in [0, 11, 22] {
+            menu.cursor = c;
+            let mut b = MeshBuilder::new();
+            menu.draw(&mut b, &names, 3);
+            assert!(
+                b.verts
+                    .iter()
+                    .all(|v| v.pos[1] >= 0.0 && v.pos[1] <= SCREEN_H),
+                "cursor {c}: drawn off the screen"
+            );
+        }
     }
 }

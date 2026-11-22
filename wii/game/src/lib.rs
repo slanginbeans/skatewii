@@ -327,7 +327,7 @@ fn find_locations() -> (Option<&'static str>, menu::Index) {
                     name: "Imported park".into(),
                     file: OLD_PARK.into(),
                     bytes,
-                    district: false,
+                    district: None,
                 }],
                 default: Some(0),
             };
@@ -371,11 +371,12 @@ fn load_location(game: &mut Game, places: &mut Places, i: usize, show: bool) -> 
     let demo = game.locations.len() - 1;
     let mut ok = true;
     let (mut read_ms, mut parse_ms) = (0.0, 0.0);
-    if loc.district {
+    if let Some(start) = loc.district {
         match places
             .data_dir
             .ok_or_else(|| "no data folder".into())
             .and_then(|d| open_district(d, &loc.file))
+            .map(|d| d.with_start(start as usize))
         {
             Ok(d) => {
                 log(
@@ -384,7 +385,7 @@ fn load_location(game: &mut Game, places: &mut Places, i: usize, show: bool) -> 
                         "district {}: {} cells, start {:?}, budget {} KB",
                         loc.id,
                         d.index.cells.len(),
-                        d.index.start,
+                        d.index.starts.get(start as usize),
                         DISTRICT_BUDGET / 1024
                     ),
                 );
