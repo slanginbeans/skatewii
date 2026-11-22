@@ -122,6 +122,8 @@ content second.
   the last location remembered on the SD card; park meshes drawn in place (no per-frame vertex copy)
 - [x] The city districts measured cell by cell (`fg_import city`: per-cell sizes and maps; docs/importing.md
   "The city districts' cells")
+- [x] The districts and Skate School cut into 100 m cell packs (`fg_import district`, `FG_CITY=1` in the
+  build; `game_core::city` index), every cell loading with the park loader
 - [ ] More locations: the city districts and Skate School streamed in 100 m cells (packs per cell, a
   background reader on the Wii, collision near the rider and models within the draw distance loaded,
   start spots in the location menu)

@@ -294,6 +294,73 @@ pub struct Report {
     pub skipped: Vec<String>,
 }
 
+/// A texture converted for the Wii: GX format, data, size, and whether it is alpha tested.
+#[derive(Clone, Debug)]
+pub struct WiiTexture {
+    pub gx_format: u8,
+    pub data: Vec<u8>,
+    pub width: u16,
+    pub height: u16,
+    pub alpha: bool,
+}
+
+/// A texture asset shrunk to at most `max` pixels on a side: CMPR, or RGB5A3 for cut-outs (fences,
+/// foliage) that keep their alpha and are alpha tested.
+pub fn convert_texture(data: &[u8], max: usize) -> Option<WiiTexture> {
+    let a = crate::rw4::Arena::parse(data).ok()?;
+    let t = texture::textures(&a).into_iter().next()?.ok()?;
+    let img = texture::decode(t.data, &t.info).ok()?;
+    let mut small = gx::shrink_to(img, max);
+    let holes = small.pixels.chunks_exact(4).filter(|p| p[3] < 128).count();
+    let alpha = holes * 100 > small.pixels.len() / 4;
+    let (gx_format, data) = if alpha {
+        (gx::GX_TF_RGB5A3, gx::encode_rgb5a3(&small))
+    } else {
+        small.pixels.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+        (gx::GX_TF_CMPR, gx::encode_cmpr(&small))
+    };
+    Some(WiiTexture {
+        gx_format,
+        data,
+        width: small.width as u16,
+        height: small.height as u16,
+        alpha,
+    })
+}
+
+/// The pack entry of a texture.
+pub fn texture_item(name: String, t: &WiiTexture) -> pack::Item {
+    pack::Item {
+        name,
+        kind: Kind::Texture,
+        data: t.data.clone(),
+        width: t.width,
+        height: t.height,
+        gx_format: t.gx_format,
+    }
+}
+
+/// The pack entry of a mesh (lighting baked in) using texture `tex` (index, alpha tested).
+pub fn mesh_item(name: String, m: &Mesh, tex: Option<(u16, bool)>) -> pack::Item {
+    let rgba = lit(m);
+    let verts: Vec<([f32; 3], u32, [f32; 2])> = (0..m.positions.len())
+        .map(|i| (m.positions[i], rgba[i], m.uvs[i]))
+        .collect();
+    let flags = if tex.is_some_and(|t| t.1) {
+        game_core::world::MESH_ALPHA_TEST
+    } else {
+        0
+    };
+    pack::Item {
+        name,
+        kind: Kind::Data,
+        data: game_core::world::encode_mesh(&verts, &m.indices, tex.map(|t| t.0), flags),
+        width: 0,
+        height: 0,
+        gx_format: 0,
+    }
+}
+
 /// Pack items for every textured mesh and the textures they use (at most `max` pixels on a side).
 pub fn convert(assets: &[(AssetRecord, Vec<u8>)], max: usize) -> (Vec<pack::Item>, Report) {
     let mut report = Report::default();
@@ -327,56 +394,20 @@ pub fn convert(assets: &[(AssetRecord, Vec<u8>)], max: usize) -> (Vec<pack::Item
             // Convert each texture once, the first time a mesh uses it.
             let tex = m.texture.as_ref().and_then(|name| {
                 *tex_index.entry(name.clone()).or_insert_with(|| {
-                    let data = by_name.get(name)?;
-                    let a = crate::rw4::Arena::parse(data).ok()?;
-                    let t = texture::textures(&a).into_iter().next()?.ok()?;
-                    let img = texture::decode(t.data, &t.info).ok()?;
-                    let mut small = gx::shrink_to(img, max);
-                    // Cut-outs (fences, foliage) keep their alpha and are alpha tested.
-                    let holes = small.pixels.chunks_exact(4).filter(|p| p[3] < 128).count();
-                    let alpha = holes * 100 > small.pixels.len() / 4;
-                    let (fmt, data) = if alpha {
-                        (gx::GX_TF_RGB5A3, gx::encode_rgb5a3(&small))
-                    } else {
-                        small.pixels.chunks_exact_mut(4).for_each(|p| p[3] = 255);
-                        (gx::GX_TF_CMPR, gx::encode_cmpr(&small))
-                    };
+                    let t = convert_texture(by_name.get(name)?, max)?;
                     let i = report.textures as u16;
                     report.textures += 1;
-                    items.push(pack::Item {
-                        name: format!("park/tex/{i}"),
-                        kind: Kind::Texture,
-                        data,
-                        width: small.width as u16,
-                        height: small.height as u16,
-                        gx_format: fmt,
-                    });
-                    Some((i, alpha))
+                    items.push(texture_item(format!("park/tex/{i}"), &t));
+                    Some((i, t.alpha))
                 })
             });
             if tex.is_none() {
                 report.untextured += 1;
             }
-            let rgba = lit(&m);
-            let verts: Vec<([f32; 3], u32, [f32; 2])> = (0..m.positions.len())
-                .map(|i| (m.positions[i], rgba[i], m.uvs[i]))
-                .collect();
             report.meshes += 1;
-            report.vertices += verts.len();
+            report.vertices += m.positions.len();
             report.triangles += m.indices.len() / 3;
-            let flags = if tex.is_some_and(|t| t.1) {
-                game_core::world::MESH_ALPHA_TEST
-            } else {
-                0
-            };
-            items.push(pack::Item {
-                name: format!("park/mesh/{mesh_n}"),
-                kind: Kind::Data,
-                data: game_core::world::encode_mesh(&verts, &m.indices, tex.map(|t| t.0), flags),
-                width: 0,
-                height: 0,
-                gx_format: 0,
-            });
+            items.push(mesh_item(format!("park/mesh/{mesh_n}"), &m, tex));
             mesh_n += 1;
         }
     }

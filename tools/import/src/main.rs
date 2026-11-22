@@ -11,6 +11,7 @@ mod big;
 mod cac;
 mod camera;
 mod city;
+mod district;
 mod gx;
 mod mesh;
 mod motion;
@@ -67,6 +68,12 @@ const USAGE: &str = "usage:
       --max <n>         largest texture edge assumed (default 128)
       --out <dir>       report directory (default: imported/city): <district>.csv, <district>_map.png
       --no-map          skip the map
+  fg_import district <disc.iso> --district <name> [options]
+                                                  a district cut into 100 m cells for streaming:
+                                                  <out>/<district>/index.fgpak and c_<x>_<z>.fgpak
+      --max <n>         largest texture edge (default 128)
+      --cap <KiB>       largest cell pack; bigger cells get smaller textures (default 3072)
+      --out <dir>       output directory (default: imported/city)
   fg_import rules    <disc.iso> [--out <dir>]     Skate 3's riding tuning and flick shapes as rules.fgpak
   fg_import skater   <disc.iso> [options]         the default skater as skinned meshes + textures
       --lod <0|2>       model detail (default 0)
@@ -213,6 +220,7 @@ fn run(args: &[String]) -> Res<()> {
         "motion" => motion::run(&mut disc, &rest[1..])?,
         "park" => park::run(&mut disc, &rest[1..])?,
         "city" => city::run(&mut disc, &rest[1..])?,
+        "district" => district::run(&mut disc, &rest[1..])?,
         "rules" => rules::run(&mut disc, &rest[1..])?,
         _ => return Err(USAGE.into()),
     }

@@ -14,6 +14,7 @@ pub mod anim;
 pub mod autoplay;
 pub mod camera;
 pub mod character;
+pub mod city;
 pub mod collision;
 pub mod devlog;
 pub mod flick;

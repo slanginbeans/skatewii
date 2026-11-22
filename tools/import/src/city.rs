@@ -159,10 +159,10 @@ fn inside(place: Place, x: f32, z: f32) -> bool {
 }
 
 /// A stream file and where it sits.
-type StreamFile = (Place, BigEntry);
+pub(crate) type StreamFile = (Place, BigEntry);
 
 /// One stream's table and its files by place.
-fn stream_files<S: crate::big::ReadAt>(
+pub(crate) fn stream_files<S: crate::big::ReadAt>(
     big: &mut Big<S>,
     district: &str,
     stream: &str,

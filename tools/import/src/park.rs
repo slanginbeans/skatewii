@@ -229,8 +229,27 @@ pub fn classify_rails(
     rails: &[RailPoints],
     far: f32,
 ) -> Res<Vec<game_core::rails::RailData>> {
-    use game_core::math::v3;
     use game_core::rails::RailClass;
+    let (out, counts) = classify_rails_quietly(collision, rails, far)?;
+    println!(
+        "rail segments: {} thin, {} fat, {} ledge, {} curb, {} blocked",
+        counts[RailClass::Thin.to_u8() as usize],
+        counts[RailClass::Fat.to_u8() as usize],
+        counts[RailClass::Ledge.to_u8() as usize],
+        counts[RailClass::Curb.to_u8() as usize],
+        counts[RailClass::Blocked.to_u8() as usize],
+    );
+    Ok(out)
+}
+
+/// [`classify_rails`] without the printout: the rails and how many segments of each class (by
+/// `RailClass::to_u8`).
+pub fn classify_rails_quietly(
+    collision: &[u8],
+    rails: &[RailPoints],
+    far: f32,
+) -> Res<(Vec<game_core::rails::RailData>, [usize; 5])> {
+    use game_core::math::v3;
     let mesh = game_core::collision::TriMesh::parse(collision, (v3(0.0, 0.0, 0.0), 0.0))
         .map_err(|e| format!("collision: {e:?}"))?;
     let mut counts = [0usize; 5];
@@ -245,19 +264,11 @@ pub fn classify_rails(
             (r.clone(), classes)
         })
         .collect();
-    println!(
-        "rail segments: {} thin, {} fat, {} ledge, {} curb, {} blocked",
-        counts[RailClass::Thin.to_u8() as usize],
-        counts[RailClass::Fat.to_u8() as usize],
-        counts[RailClass::Ledge.to_u8() as usize],
-        counts[RailClass::Curb.to_u8() as usize],
-        counts[RailClass::Blocked.to_u8() as usize],
-    );
-    Ok(out)
+    Ok((out, counts))
 }
 
 /// `physics_grinds/default/DeckCenterToTruck` from the disc's tuning database.
-fn deck_to_truck<R: Read + Seek>(disc: &mut Disc<R>) -> Option<f32> {
+pub(crate) fn deck_to_truck<R: Read + Seek>(disc: &mut Disc<R>) -> Option<f32> {
     let db = crate::rules::database(disc).ok()?;
     db.values("physics_grinds/default/DeckCenterToTruck")?
         .first()

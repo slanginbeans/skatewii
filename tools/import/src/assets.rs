@@ -21,6 +21,8 @@ struct Job {
     name: String,
     /// Files the job writes into its output directory, all copied to the app folder.
     files: Vec<String>,
+    /// A job writing a folder of files it decides itself (a district's cells): the folder, copied whole.
+    dir: Option<String>,
     args: Vec<String>,
 }
 
@@ -60,8 +62,26 @@ fn park_job(name: &str) -> Job {
         kind: "park",
         name: format!("parks/{name}"),
         files: vec![file.clone()],
+        dir: None,
         args: vec!["--park".into(), name.into(), "--file".into(), file],
     }
+}
+
+/// A streamed district: `city/<district>/` (its index and cell packs), stamped `city/<district>.stamp`.
+fn district_job(name: &str) -> Job {
+    Job {
+        kind: "district",
+        name: format!("city/{name}"),
+        files: vec![format!("city/{name}/index.fgpak")],
+        dir: Some(format!("city/{name}")),
+        args: vec!["--district".into(), name.into()],
+    }
+}
+
+/// The streamed districts are converted only with `FG_CITY=1` until the game streams them (they are
+/// about 390 MB).
+fn with_districts() -> bool {
+    std::env::var("FG_CITY").is_ok_and(|v| v == "1")
 }
 
 /// What the game loads.
@@ -70,6 +90,7 @@ fn jobs(default: &'static str) -> Vec<Job> {
         kind,
         name: kind.into(),
         files: vec![format!("{kind}.fgpak")],
+        dir: None,
         args,
     };
     let mut jobs = vec![
@@ -79,6 +100,9 @@ fn jobs(default: &'static str) -> Vec<Job> {
         one("rules", Vec::new()),
     ];
     jobs.extend(locations(default).into_iter().map(park_job));
+    if with_districts() {
+        jobs.extend(crate::city::DISTRICTS.iter().map(|d| district_job(d)));
+    }
     jobs
 }
 
@@ -239,16 +263,47 @@ fn up_to_date(dir: &Path, job: &Job, want: &str) -> bool {
         && job.files.iter().all(|f| dir.join(f).is_file())
 }
 
-/// Copies `job`'s files and stamp from `cache` to `dest` unless `dest` already has the same version.
+/// Every file `job` wrote into `dir`: its own list, or everything in its folder.
+fn job_files(dir: &Path, job: &Job) -> Res<Vec<String>> {
+    let Some(sub) = &job.dir else {
+        return Ok(job.files.clone());
+    };
+    let mut files = Vec::new();
+    for e in std::fs::read_dir(dir.join(sub))?.flatten() {
+        if e.path().is_file() {
+            files.push(format!("{sub}/{}", e.file_name().to_string_lossy()));
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Copies `job`'s files and stamp from `cache` to `dest` unless `dest` already has the same version. A
+/// folder job's files that the cache no longer has are removed from `dest`.
 fn install(cache: &Path, dest: &Path, job: &Job, want: &str) -> Res<bool> {
     let same_size = |f: &&str| {
         let (a, b) = (cache.join(f), dest.join(f));
         matches!((a.metadata(), b.metadata()), (Ok(a), Ok(b)) if a.len() == b.len())
     };
-    if up_to_date(dest, job, want) && job.files.iter().map(String::as_str).all(|f| same_size(&f)) {
+    let files = job_files(cache, job)?;
+    if up_to_date(dest, job, want)
+        && files.iter().map(String::as_str).all(|f| same_size(&f))
+        && (job.dir.is_none() || job_files(dest, job).is_ok_and(|d| d == files))
+    {
         return Ok(false);
     }
-    for f in &job.files {
+    if let Some(sub) = &job.dir {
+        // The old version's stamp first: an interrupted copy is redone next time.
+        let _ = std::fs::remove_file(stamp_path(dest, job));
+        if dest.join(sub).is_dir() {
+            for f in job_files(dest, job)? {
+                if !files.contains(&f) {
+                    std::fs::remove_file(dest.join(f))?;
+                }
+            }
+        }
+    }
+    for f in &files {
         let to = dest.join(f);
         std::fs::create_dir_all(to.parent().unwrap_or(dest))?;
         std::fs::copy(cache.join(f), to)?;
@@ -267,6 +322,11 @@ fn convert(iso: &Path, job: &Job, out: &Path) -> Res<()> {
         "park" => park::run(&mut disc, &args),
         "rules" => crate::rules::run(&mut disc, &args),
         "motion" => crate::motion::run(&mut disc, &args),
+        "district" => {
+            let mut args = job.args.clone();
+            args.extend(["--out".to_string(), out.join("city").display().to_string()]);
+            crate::district::run(&mut disc, &args)
+        }
         other => Err(format!("unknown job {other}").into()),
     }
 }
@@ -345,8 +405,39 @@ mod tests {
             kind: "thing",
             name: "thing".into(),
             files: vec!["a.fgpak".into(), "b.fgpak".into()],
+            dir: None,
             args: vec!["--x".into()],
         }
+    }
+
+    #[test]
+    fn a_district_installs_its_whole_folder() {
+        let job = district_job("DownTown");
+        assert_eq!(job.files, vec!["city/DownTown/index.fgpak".to_string()]);
+        let root = tmp("district");
+        let (cache, dest) = (root.join("cache"), root.join("dest"));
+        let folder = cache.join("city/DownTown");
+        std::fs::create_dir_all(&folder).unwrap();
+        for f in ["index.fgpak", "c_50_50.fgpak", "c_-50_50.fgpak"] {
+            std::fs::write(folder.join(f), b"cell").unwrap();
+        }
+        std::fs::write(stamp_path(&cache, &job), "v1").unwrap();
+        assert!(up_to_date(&cache, &job, "v1"));
+        assert!(install(&cache, &dest, &job, "v1").unwrap());
+        assert!(dest.join("city/DownTown/c_-50_50.fgpak").is_file());
+        assert!(dest.join("city/DownTown.stamp").is_file());
+        assert!(!install(&cache, &dest, &job, "v1").unwrap());
+        // A new conversion without a cell: the app folder loses it too.
+        std::fs::remove_file(folder.join("c_50_50.fgpak")).unwrap();
+        std::fs::write(stamp_path(&cache, &job), "v2").unwrap();
+        assert!(install(&cache, &dest, &job, "v2").unwrap());
+        assert!(!dest.join("city/DownTown/c_50_50.fgpak").exists());
+        assert!(dest.join("city/DownTown/c_-50_50.fgpak").is_file());
+        // A cell missing from the app folder is copied again, even with the same stamp.
+        std::fs::remove_file(dest.join("city/DownTown/c_-50_50.fgpak")).unwrap();
+        assert!(install(&cache, &dest, &job, "v2").unwrap());
+        assert!(dest.join("city/DownTown/c_-50_50.fgpak").is_file());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
