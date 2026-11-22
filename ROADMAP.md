@@ -124,6 +124,8 @@ content second.
   "The city districts' cells")
 - [x] The districts and Skate School cut into 100 m cell packs (`fg_import district`, `FG_CITY=1` in the
   build; `game_core::city` index), every cell loading with the park loader
+- [x] Background file reads on the Wii (`wii/platform/fg_read.c`: a queue worked by a low-priority thread;
+  `fg_read_start`/`poll`/`cancel`; `game_core::reader` with an in-memory reader for tests)
 - [ ] More locations: the city districts and Skate School streamed in 100 m cells (packs per cell, a
   background reader on the Wii, collision near the rider and models within the draw distance loaded,
   start spots in the location menu)

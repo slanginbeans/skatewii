@@ -31,6 +31,7 @@ pub mod motion;
 pub mod pack;
 pub mod park;
 pub mod rails;
+pub mod reader;
 pub mod rider;
 pub mod skater;
 pub mod skinned;

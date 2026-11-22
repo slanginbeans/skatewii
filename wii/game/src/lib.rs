@@ -24,6 +24,7 @@ use game_core::gfx::{Camera, Gfx, StaticVerts, TexVertex, Texture, Vertex};
 use game_core::input::PadRaw;
 use game_core::math::Mat34;
 use game_core::menu::{self, Location, LocationTour, Request};
+use game_core::reader::{Poll, Reader, Ticket};
 
 /// Max vertices per `GX_Begin` (it takes a u16), rounded down to whole triangles.
 const MAX_BATCH: usize = 65535 / 3 * 3;
@@ -188,6 +189,35 @@ fn load_path(path: &str) -> Option<&'static [u8]> {
 /// Nothing may refer to `data` any more, and no draw still queued for the GPU may read it.
 unsafe fn unload(data: &'static [u8]) {
     unsafe { ffi::fg_free_file(data.as_ptr() as *mut u8) }
+}
+
+/// Background whole-file reads (`wii/platform/fg_read.c`), for streaming a district's cells.
+#[allow(dead_code)] // The district streamer is its user.
+struct WiiReader;
+
+impl Reader for WiiReader {
+    fn start(&mut self, path: &str) -> Option<Ticket> {
+        let p = alloc::ffi::CString::new(path).ok()?;
+        let t = unsafe { ffi::fg_read_start(p.as_ptr()) };
+        (t >= 0).then_some(Ticket(t))
+    }
+    fn poll(&mut self, ticket: Ticket) -> Poll {
+        let mut data = ptr::null_mut();
+        let mut size = 0u32;
+        match unsafe { ffi::fg_read_poll(ticket.0, &mut data, &mut size) } {
+            0 => Poll::Waiting,
+            1 if !data.is_null() => {
+                Poll::Done(unsafe { core::slice::from_raw_parts(data, size as usize) })
+            }
+            _ => Poll::Failed,
+        }
+    }
+    fn cancel(&mut self, ticket: Ticket) {
+        unsafe { ffi::fg_read_cancel(ticket.0) }
+    }
+    unsafe fn free(&mut self, data: &'static [u8]) {
+        unsafe { unload(data) }
+    }
 }
 
 /// Small text file, or `None`.
