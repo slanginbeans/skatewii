@@ -219,13 +219,44 @@ Left out: **SkateSchool**, an 8.6 MB pack (91,790 collision triangles, 1,105 mes
 district, not a park: the spawn rule lands under the island (y -73), and it takes the longest to read.
 `FG_PARK=SkateSchool` still converts it as the default location.
 
-Other places on the disc: `worldDIST_University.big`, `worldDIST_DownTown.big` and
-`worldDIST_Industrial.big` are the city districts (480 to 840 MB each: 230 to 1,200 `Sim` cells, 150 to
-275 MB of `Pres` cells, 280 to 520 MB of textures). Their stream cells are named by position
-(`cSim_<x>_<z>_high.xsf`), so a block of a few cells around a known spot could be converted like a park
-(roughly 1 MB of collision and 8 MB of models before shrinking textures for a 3 x 3 block), but that needs
-picking cells by position and a spawn inside the block: not done. `worlddmo.big` and `worldmisc.big` hold
-dynamic-object data, not places to ride.
+Other places on the disc: `worldDIST_DownTown.big`, `worldDIST_University.big` and
+`worldDIST_Industrial.big` are the city districts (480 to 840 MB each), kept in 100 m streaming cells named
+by their centre (`c<Sim|Pres|Tex>_<x>_<z>_high.xsf`, centres on odd multiples of 50 m; the `Tex` stream's
+own cells sit on multiples of 100 m and overlap, each repeating the textures its area uses). `worlddmo.big`
+and `worldmisc.big` hold dynamic-object data, not places to ride. Not converted yet; `fg_import city`
+measures them for that (below).
+
+#### The city districts' cells
+```bash
+cargo run --release -p fg_import -- city path/to/skate3.iso [--district DownTown] [--max 128] [--no-map]
+```
+Reads every cell of each district (`DownTown`, `University`, `Industrial`, `SkateSchool`; about 15 s for
+all) and writes `imported/city/<district>.csv` (per cell: collision triangles, rails, models, vertices,
+textures, and the bytes each would take in a flatground pack at `--max` pixels) and
+`<district>_map.png` (the collision from above, a pixel a metre, by height, with the 100 m grid and the
+origin's axes in red; +z is down the image). Measured with the US/EU disc, textures at 128 px (an upper
+bound: textures that can hold alpha are counted as RGB5A3):
+
+| District | Area | Cells (with content) | Collision tris | Rails | Meshes | Vertices | Packs, all cells | Cell pack p50 / p90 / max |
+|---|---|---|---|---|---|---|---|---|
+| Downtown | 1.4 x 2.3 km | 240 (240) | 1,545,276 | 8,630 | 13,734 | 2.63 M | 200 MB (collision 61, meshes 71, textures 68) | 220 KB / 2.3 MB / 4.2 MB |
+| University | 1.7 x 2.3 km | 231 (231) | 1,133,649 | 4,201 | 8,531 | 2.07 M | 145 MB (45, 57, 44) | 203 KB / 1.8 MB / 3.4 MB |
+| Industrial | 5.6 x 2.5 km | 1,223 (1,191) | 768,202 | 3,971 | 7,575 | 1.07 M | 88 MB (30, 29, 29) | 0 / 32 KB / 2.9 MB |
+
+- Every collision triangle and mesh belongs to exactly one cell (no asset is in two cell files); about 0.2%
+  of triangles reach more than 1 m past their cell's edge (they belong to the cell holding their centre).
+- Rails are in the cells too (the parks keep theirs in the global stream).
+- Each district also has `Global` stream files: no geometry, but materials and shared textures (`Pres`, about
+  6 MB) that the cells' meshes use. Textures: 2,792 different ones in Downtown (985 in the `Tex` stream,
+  repeated 9,525 times across its overlapping cells, the rest in `Pres`), 409 of them used by more than one
+  cell.
+- **Skate School** has cell files but keeps everything in its `Global` stream (91,790 triangles, 1,105
+  meshes): streaming it means cutting it into cells by position at import time.
+- What a rider would need loaded, from the CSVs (every 10 m inside cells with collision; pack bytes, the Wii
+  heap is more): models and textures of the cells within 90 m are 2.2 MB at the median spot in Downtown,
+  12.4 MB at the 95th percentile and 18.2 MB at the busiest (up to 9 cells); within 60 m, 1.2 / 8.0 / 12.8
+  MB. Collision of the cells within 20 m: 0.1 / 1.8 / 4.2 MB. University peaks at 15.6 MB for both,
+  Industrial at 12.5 MB.
 
 A district's assets sit in streams inside `worldDIST_<park>.big`: an `ATOC` table
 (`DIST_<park>_<stream>.xst`) and `SFIL` stream files (`c<stream>_*.xsf`, RefPack-compressed sections). The

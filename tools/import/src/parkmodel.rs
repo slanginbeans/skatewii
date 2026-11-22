@@ -20,8 +20,8 @@ use game_core::pack::Kind;
 const T_MATERIALS: u32 = 0x00eb_0005;
 const T_EXTERNAL_REFS: u32 = 0x00eb_000b;
 const T_MATERIAL_IMPORT: u32 = 0x00eb_0066;
-const ASSET_MODEL: u32 = 4;
-const ASSET_TEXTURE: u32 = 0x1000;
+pub(crate) const ASSET_MODEL: u32 = 4;
+pub(crate) const ASSET_TEXTURE: u32 = 0x1000;
 
 const FMT_FLOAT3: u32 = 0x002a_23b9;
 const FMT_HALF2: u32 = 0x002c_235f;
@@ -67,7 +67,7 @@ fn hex_id(s: &str) -> Option<String> {
 }
 
 /// A texture asset's id: the last `0x<16 hex>.Texture` name in it.
-fn texture_name(data: &[u8]) -> Option<String> {
+pub(crate) fn texture_name(data: &[u8]) -> Option<String> {
     let pat = b".Texture";
     let mut found = None;
     for i in 18..=data.len().saturating_sub(pat.len()) {
