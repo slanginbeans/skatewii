@@ -21,6 +21,7 @@
 //! skater is then mirrored.
 
 mod air;
+pub mod biped;
 mod board;
 pub mod flip;
 mod grind;
@@ -51,6 +52,7 @@ use crate::math::{PI, Vec3, atan2f, clamp, cosf, sinf, smooth, sqrtf, v3, wrap_a
 use crate::park::Park;
 use crate::park::Terrain;
 use crate::tuning::Tuning;
+use biped::{Biped, BipedInput};
 
 /// Highest ledge a bailed rider walks up (m).
 pub const STEP: f32 = 0.12;
@@ -93,6 +95,10 @@ const SLIDE_TURN_RATE: f32 = 8.0;
 const SLIDE_RELAX: f32 = 0.5;
 /// Stepping off the board after a runout and back on.
 const RUNOUT_TIME: f32 = 1.2;
+/// SK8 DisableDismount (`motion_offboard/dismount.rs`): no getting off on ground whose up is below this.
+const DISMOUNT_MIN_UP: f32 = 0.64;
+/// Y's request lapses if the graphs haven't got off (or on) the board by then (s).
+const TOGGLE_WAIT: f32 = 2.0;
 /// How long a landing is remembered (drawn: the landing clip), and how long after it a revert counts
 /// (flatground's own rules; with the state graphs the revert gesture decides).
 const LANDING_SHOW: f32 = 1.5;
@@ -183,6 +189,8 @@ pub enum Mode {
     },
     /// On a rail (details in `Skater::grind`).
     Grind,
+    /// Off the board on foot, the board in hand (details in `Skater::biped`).
+    Walk,
 }
 
 impl Mode {
@@ -655,6 +663,9 @@ pub enum Event {
     ManualLost,
     /// Turned round from fakie to push switch.
     Switched,
+    /// Got off the board to walk (Y), and back on it.
+    SteppedOff,
+    SteppedOn,
 }
 
 /// Stance and how the rider took off (for names), the surface left and whether the pop was re-aimed up
@@ -829,6 +840,15 @@ pub struct Skater {
     /// moved last tick (m/s).
     pub air_lift: f32,
     air_lift_rate: f32,
+    /// Off the board (`Mode::Walk`): the walker.
+    pub biped: Biped,
+    /// The camera's yaw: the walker reads the stick against it (the game sets it each tick).
+    pub cam_yaw: f32,
+    /// Y asked to get off the board (riding) or on it (walking), seconds ago: the graphs' clips decide
+    /// the moment (`toggle_board`).
+    pub board_toggle: Option<f32>,
+    /// The mount clip's `OB_TRAJ` has started (the rider is on the board when it ends).
+    mount_traj: bool,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -888,6 +908,11 @@ pub struct GraphControl {
     /// (`Grabbing`, `WantsLeftAirGrab`, `WantsRightAirGrab`).
     pub body_flip: Option<bool>,
     pub grabbing: bool,
+    /// Off the board: the playing clips carry `OB_TRAJ` (Skate 3's physics walks the rider while they
+    /// do), and the motion graph is in its `Dismount` or `Mount` states.
+    pub ob_traj: bool,
+    pub dismounting: bool,
+    pub mounting: bool,
 }
 
 /// A trick the state graph is animating in the air.
@@ -1072,6 +1097,10 @@ impl Skater {
             grind_pitch_input: 0.0,
             grind_sticks_x: 0.0,
             fwd: yaw_dir(heading),
+            biped: Biped::default(),
+            cam_yaw: heading,
+            board_toggle: None,
+            mount_traj: false,
         }
     }
 
@@ -1375,6 +1404,7 @@ impl Skater {
                 self.regrind_block = None;
             }
         }
+        self.toggle_board(park, pad, dt, events);
         self.step_mode(park, pad, flick, dt, events);
         if self.mode == Mode::Rolling {
             // The drawn board follows the ground smoothly; the velocity is the ground's.
@@ -1418,6 +1448,7 @@ impl Skater {
             Mode::Rolling => self.roll(park, pad, flick, dt, events),
             Mode::Air { time } => self.fly(park, pad, flick, time + dt, dt, events),
             Mode::Grind => self.slide_rail(park, pad, flick, dt, events),
+            Mode::Walk => self.walk(park, pad, dt),
             Mode::Bailed { time } | Mode::Runout { time } => {
                 let time = time + dt;
                 let h = self.vel.horizontal() * (1.0 - smooth(3.0, dt));
@@ -1459,6 +1490,128 @@ impl Skater {
                 }
             }
         }
+    }
+
+    /// Y gets off the board on the ground and back on it on foot (Skate 3's `ToggleOffBoardState`). With
+    /// the state graphs the clips time it: off once the dismount clip starts walking the rider
+    /// (`OB_TRAJ`), on once the mount clip's `OB_TRAJ` is over; without them at once.
+    fn toggle_board(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
+        if pad.was_pressed(btn::Y) && self.board_toggle.is_none() {
+            let ok = match self.mode {
+                // SK8 DisableDismount: not on ground steeper than this.
+                Mode::Rolling => self.contact_n.y >= DISMOUNT_MIN_UP,
+                Mode::Walk => self.biped.air.is_none(),
+                _ => false,
+            };
+            if ok {
+                self.board_toggle = Some(0.0);
+                self.mount_traj = false;
+            }
+        }
+        let Some(t) = self.board_toggle else {
+            return;
+        };
+        let t = t + dt;
+        self.board_toggle = Some(t);
+        let go = match (self.mode, self.graph) {
+            (Mode::Rolling | Mode::Walk, None) => true,
+            (Mode::Rolling, Some(g)) => g.ob_traj && g.dismounting,
+            (Mode::Walk, Some(g)) => {
+                if g.mounting && g.ob_traj {
+                    self.mount_traj = true;
+                }
+                self.mount_traj && !g.ob_traj
+            }
+            _ => {
+                self.board_toggle = None;
+                return;
+            }
+        };
+        if go {
+            if self.mode == Mode::Walk {
+                self.step_on(park, events);
+            } else {
+                self.step_off(events);
+            }
+        } else if t > TOGGLE_WAIT {
+            self.board_toggle = None;
+        }
+    }
+
+    /// Off the board, facing the way it was going (or its nose, standing).
+    fn step_off(&mut self, events: &mut Vec<Event>) {
+        let travel = self.vel.horizontal();
+        let heading = if travel.length() > 0.3 {
+            atan2f(travel.x, travel.z)
+        } else {
+            self.travel_yaw()
+        };
+        self.biped = Biped::new(heading, self.vel, self.contact_n);
+        self.mode = Mode::Walk;
+        self.board_toggle = None;
+        self.manual = None;
+        self.slide = None;
+        self.kickturn = None;
+        self.revert = None;
+        self.hippy = None;
+        self.sync_walk();
+        events.push(Event::SteppedOff);
+    }
+
+    /// Back on the board, its nose the way the rider faces, rolling at his speed that way.
+    fn step_on(&mut self, park: &dyn Terrain, events: &mut Vec<Event>) {
+        let n = park
+            .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
+            .normal;
+        self.contact_n = n;
+        self.normal = n;
+        self.fwd = tangent(self.biped.forward(), n);
+        let along = self.biped.vel.dot(self.fwd).max(0.0);
+        self.speed = along;
+        self.slip = 0.0;
+        self.vn = 0.0;
+        self.vel = self.fwd * along;
+        self.fakie = false;
+        self.fakie_timer = 0.0;
+        self.switch = false;
+        self.spin = 0.0;
+        self.spin_rate = 0.0;
+        self.mode = Mode::Rolling;
+        self.board_toggle = None;
+        self.sync_heading();
+        events.push(Event::SteppedOn);
+    }
+
+    /// On foot: Skate 3's biped controller (`skater::biped`). Sprint is A (Skate 3's A, without its
+    /// B: here X), jump is B (Skate 3's X, by position).
+    fn walk(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32) {
+        let input = BipedInput {
+            stick: pad.stick,
+            cam_yaw: self.cam_yaw,
+            sprint: pad.held & btn::A != 0 && pad.held & btn::X == 0,
+            jump: pad.was_pressed(btn::B) && self.board_toggle.is_none(),
+        };
+        let mut pos = self.pos;
+        let tuning = self.tuning;
+        self.biped
+            .step(&tuning.biped, tuning.gravity, park, &mut pos, input, dt);
+        self.pos = pos;
+        self.sync_walk();
+        if self.pos.y < park.kill_height() {
+            self.respawn(park);
+        }
+    }
+
+    /// The board-riding view of the walker (what the camera and the rest read).
+    fn sync_walk(&mut self) {
+        let b = &self.biped;
+        self.heading = b.heading;
+        self.fwd = b.forward();
+        self.vel = b.vel;
+        self.speed = b.vel.dot(self.fwd);
+        self.slip = 0.0;
+        self.normal = Vec3::UP;
+        self.contact_n = b.normal;
     }
 
     /// Skate 3's fakie flag: a moment of rolling tail first; never just after a spawn, and off again

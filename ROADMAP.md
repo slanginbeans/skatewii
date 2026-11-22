@@ -139,8 +139,12 @@ content second.
   three-line collision with the elevation raise, breadcrumb avoidance, the drop predictor, framing yaw
   and dutch roll, the lens's field of view for the TV's aspect; flatground's own shots and choice without
   the disc; the reset fade drawn
-- [ ] Camera, next: free look, camera shake, slow motion on long airs, the high camera, off-board shots
-  beyond run-outs and hippie jumps
+- [ ] Camera, next: free look, camera shake, slow motion on long airs, the high camera
+- [x] Off the board (docs/graph-runner.md "Off the board"): Y gets off and on, timed by Skate 3's dismount
+  and mount clips; walking, running and the sprint burst on Skate 3's biped controller and curves; the
+  jump with MatchAirTime; the graphs' `LocoState`, slope and air states; the off-board camera conditions
+- [ ] Off the board, next: dropping, throwing and picking up the board; stairs' own walk cycles; jumping
+  onto the board from the air; obstacle steering; foot IK
 - [x] Body flips and their upside-down bails (phase 8, docs/graph-runner.md "The air"): front and back
   flips from the left stick with a grab, Skate 3's start, speed and grab rules, landing off the flip or
   falling upside down without the grab bails

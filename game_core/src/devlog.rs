@@ -118,6 +118,12 @@ impl DevLog {
         }
         for e in events {
             match e {
+                Event::SteppedOff => out.push(format!(
+                    "off the board at {:.1} m/s, facing {:.0} deg",
+                    s.biped.speed,
+                    s.biped.heading.to_degrees()
+                )),
+                Event::SteppedOn => out.push(format!("on the board at {:.1} m/s", s.speed)),
                 Event::Popped(f) => out.push(format!(
                     "pop: {}{} at {:.1} m/s, up {:.2} m/s",
                     if f.nollie { "nollie " } else { "" },
@@ -274,6 +280,8 @@ impl DevLog {
             Mode::Bailed { .. } => "bailed",
             Mode::Runout { .. } => "runout",
             Mode::Grind => "grind",
+            Mode::Walk if s.biped.air.is_some() => "walk (air)",
+            Mode::Walk => "walk",
         };
         let line = format!(
             "status: {mode} at ({:.1}, {:.1}, {:.1}) heading {:.0} deg, {:.1} m/s, {:?}{}{} | cam {:.1} m, {} pull-ins | \

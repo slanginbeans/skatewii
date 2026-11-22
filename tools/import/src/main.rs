@@ -45,6 +45,8 @@ const USAGE: &str = "usage:
   fg_import big      <disc.iso> <file.big>        list the entries of a BIG archive on the disc
   fg_import rx2      <disc.iso> <asset>           list the sections and textures of an RW4 arena
   fg_import cat      <disc.iso> <asset> <out>     copy one asset off the disc (for format research)
+  fg_import values   <disc.iso> <path>...         print tuning values (`class/collection/field`, a field
+                                                  may be `Hash_XXXXXXXXXXXXXXXX`; for format research)
   fg_import textures <disc.iso> [options]         convert textures into a Wii pack
       --from <prefix>   disc path or BIG to scan (repeatable; default: data/content/global_locators)
       --out <dir>       output directory (default: imported)
@@ -191,6 +193,12 @@ fn run(args: &[String]) -> Res<()> {
         "cat" => {
             let bytes = read_asset(&mut disc, arg(1)?)?;
             std::fs::write(arg(2)?, bytes)?;
+        }
+        "values" => {
+            let db = rules::database(&mut disc)?;
+            for path in &rest[1..] {
+                println!("{path}: {:?}", db.values(path));
+            }
         }
         "textures" => textures(&mut disc, &rest[1..])?,
         "anims" => anims(&mut disc, &rest[1..])?,

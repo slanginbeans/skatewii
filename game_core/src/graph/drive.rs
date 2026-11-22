@@ -30,6 +30,8 @@ struct Clips {
     /// fakie-to-switch clips `R_SWITCH_RIDE_*`, just after they start).
     mirrored: Option<NameId>,
     switch: Option<NameId>,
+    /// Off-board clips' `OB_TRAJ`: Skate 3's physics walks the rider while it is on.
+    ob_traj: Option<NameId>,
 }
 
 pub struct Driver {
@@ -87,6 +89,7 @@ impl Driver {
                 danger: db.name_id("DANGERZONE"),
                 mirrored: db.name_id("MIRRORED"),
                 switch: db.name_id("SWITCH"),
+                ob_traj: db.name_id("OB_TRAJ"),
             },
             jumping: false,
             last_path: String::new(),
@@ -110,11 +113,13 @@ impl Driver {
             Mode::Air { .. } => phys::AIR,
             Mode::Grind => phys::GRIND,
             Mode::Bailed { .. } | Mode::Runout { .. } => phys::WIPEOUT,
+            Mode::Walk if s.biped.air.is_some() => phys::OFFBOARD_AIR,
+            Mode::Walk => phys::OFFBOARD,
         };
         let up = s.normal;
         let surface = libm::acosf(up.y.clamp(-1.0, 1.0)) * (180.0 / crate::math::PI);
         let along = libm::asinf(s.fwd.y.clamp(-1.0, 1.0)) * (180.0 / crate::math::PI);
-        World {
+        let mut w = World {
             phys,
             speed: s.vel.length(),
             forward_speed: s.speed,
@@ -215,8 +220,13 @@ impl Driver {
                 }
                 _ => [0.0; 2],
             },
+            toggling_board: s.board_toggle.is_some(),
             ..World::default()
+        };
+        if s.mode == Mode::Walk {
+            walking(&mut w, s);
         }
+        w
     }
 
     /// One tick: pad -> action-graph intents, both graphs, animation. `clock`: a microsecond clock.
@@ -235,7 +245,9 @@ impl Driver {
             .produce(&r.pack, pad, gates, dt, &mut r.s.ag, &mut self.recognised);
         // Back on the board after a wipeout or runout (flatground's physics decides when): start the
         // graphs over, as Skate 3 does after a teleport.
+        // (Not while Y is getting off the board: the dismount clips play on the rolling board.)
         let off = matches!(world.phys, phys::GROUND | phys::AIR)
+            && !world.toggling_board
             && matches!(r.mg_state_root(), Some("WipeOut" | "Dismount" | "Default"));
         if off {
             r.reset(Some(db));
@@ -269,6 +281,10 @@ impl Driver {
                 .and_then(|n| r.attribute(db, n))
                 .is_some_and(|a| a.value() >= 0.5),
             kickturn: r.s.kickturn,
+            // Off the board: the clips walking the rider (`OB_TRAJ`), getting off or on.
+            ob_traj: has(self.clips.ob_traj),
+            dismounting: r.mg_state_root() == Some("Dismount"),
+            mounting: r.mg_state_root() == Some("Mount"),
             ..GraphControl::default()
         };
         if path.contains("/Manual/") {
@@ -511,4 +527,37 @@ fn darkslide_out(s: &Skater, g: &crate::skater::Grind) -> u8 {
     }
     let across = (s.pos - g.point).horizontal();
     if across.dot(s.fwd) > 0.0 { 1 } else { 2 }
+}
+
+/// What the graphs read of the rider on foot (Skate 3's biped publication): the locomotion state, the
+/// board in hand, the air, the slope along the facing, and the velocity in the facing's frame.
+fn walking(w: &mut World, s: &Skater) {
+    let b = &s.biped;
+    let f = b.forward();
+    let n = b.normal;
+    let dir = (f - n * f.dot(n)).normalize_or(f);
+    let slope = libm::asinf(dir.y.clamp(-1.0, 1.0)) * (180.0 / crate::math::PI);
+    let side = Vec3::UP.cross(f);
+    w.loco = b.loco as u8;
+    w.holding_board = true;
+    w.biped_air = b.air.is_some();
+    // In the air with ground to come down on (flatground has no jumps into walls), and not onto the
+    // board: flatground's walker never lands on it (Skate 3's `CanLandOnBoard` needs the board under
+    // the feet).
+    w.can_biped_land = b.air.is_some();
+    w.can_land = false;
+    w.biped_slope = super::ops::slope::biped(slope, false);
+    w.speed = b.speed;
+    w.forward_speed = b.vel.dot(f);
+    w.com_vel = [b.vel.dot(side), b.vel.y, b.vel.dot(f)];
+    w.apex = b.air.is_some() && b.vel.y <= 0.0;
+    w.surface_slope = libm::acosf(n.y.clamp(-1.0, 1.0)) * (180.0 / crate::math::PI);
+    w.skate_slope = slope;
+    w.hips = [0.0; 2];
+    if let Some(time) = b.air {
+        w.air_remaining = b.air_remaining;
+        w.air_duration = time + b.air_remaining;
+        let t = b.air_travel;
+        w.air_travel = [t.dot(side), t.y, t.dot(f)];
+    }
 }

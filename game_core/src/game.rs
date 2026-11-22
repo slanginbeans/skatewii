@@ -23,6 +23,8 @@ use crate::skater::{ClipTiming, Event, Mode, Skater, Stance};
 use crate::tuning::Tuning;
 use crate::world::ImportedPark;
 
+/// How long the drawn character takes to move its origin between the deck and the feet (s).
+const FOOT_ORIGIN_BLEND: f32 = 0.2;
 const SKY: u32 = rgb(150, 196, 232);
 /// Imported character space (Skate 3: Y up, travelling along +Z) to board space (+Z nose, Y up).
 const IMPORTED_TO_BOARD: Mat3 = Mat3::IDENTITY;
@@ -168,6 +170,9 @@ pub struct Game {
     pub score: u32,
     popup: Option<Popup>,
     prev_held: u32,
+    /// How far the imported character's origin has moved from the deck's centre (the riding clips') to
+    /// the ground under the feet (the off-board clips': walking, getting off and on), 0..1.
+    foot_origin: f32,
     clock: f32,
     connected: bool,
     /// Events from the last `update` (cleared every frame). Handy for tests and the preview tool.
@@ -245,6 +250,7 @@ impl Game {
             score: 0,
             popup: None,
             prev_held: 0,
+            foot_origin: 0.0,
             clock: 0.0,
             connected: true,
             events: Vec::new(),
@@ -629,8 +635,20 @@ impl Game {
         let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
         let t0 = now(self.timer);
         let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        // On foot the stick is read against the camera (where it looks, seen from above).
+        {
+            let c = self.cam.camera();
+            let look = (c.target - c.eye).horizontal();
+            if look.length() > 1e-3 {
+                self.skater.cam_yaw = crate::math::atan2f(look.x, look.z);
+            }
+        }
         if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
             let s = &self.skater;
+            let walking = s.mode == Mode::Walk;
+            let ob_world = crate::skater::biped::world_stick(pad.stick, s.cam_yaw);
+            let (ob_mag, ob_steer) =
+                crate::skater::biped::read_stick(&s.tuning.biped, s.biped.heading, ob_world);
             // The known landing's time (the trajectory selector), else straight down.
             let land_in = matches!(s.mode, Mode::Air { .. }).then(|| s.time_to_land(ground));
             let mut world = g.world(s, land_in, g.input.idle());
@@ -647,6 +665,10 @@ impl Game {
                 grinding: s.mode == Mode::Grind,
                 grabbing: pad.trig_l > 0.0 || pad.trig_r > 0.0,
                 pushing: pad.held & (crate::input::btn::A | crate::input::btn::B) != 0,
+                off_board: walking,
+                ob_mag,
+                ob_steer,
+                ob_world,
             };
             g.tick(&lib.db, &pad, world, gates, dt, self.timer);
             let mut control = g.control(&lib.db, &self.tuning);
@@ -685,6 +707,15 @@ impl Game {
         let air = self.skater.is_airborne();
         let t_step = now(self.timer);
         self.skater.step(ground, &pad, &flick, dt, &mut events);
+        let off_clips = self.graph.is_some()
+            && (self.skater.mode == Mode::Walk
+                || self
+                    .skater
+                    .graph
+                    .is_some_and(|c| c.mounting || c.dismounting));
+        let step = dt / FOOT_ORIGIN_BLEND;
+        self.foot_origin =
+            (self.foot_origin + if off_clips { step } else { -step }).clamp(0.0, 1.0);
         if air {
             let us = now(self.timer).wrapping_sub(t_step);
             self.times.air_us = us;
@@ -865,8 +896,11 @@ impl Game {
         let height = match (&self.rider, self.skater.mode) {
             (Some(r), Mode::Rolling) => r.board_rest_height() + self.wheel_lift(&base),
             (_, Mode::Air { .. }) => crate::skater::DECK_HEIGHT + self.skater.air_lift,
+            // On foot the off-board clips' origin is on the ground under the feet.
             _ => crate::skater::DECK_HEIGHT,
         };
+        // On foot (and getting off or on) the off-board clips' origin is on the ground under the feet.
+        let height = height * (1.0 - self.foot_origin);
         base.then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
             .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, height, 0.0)))
     }
@@ -920,7 +954,10 @@ impl Game {
         let board = base
             .then(&Xform::new(board_rot, v3(0.0, pivot + lift, 0.0)))
             .then(&Xform::new(Mat3::IDENTITY, v3(0.0, -pivot, 0.0)));
-        gfx.draw_tris(&self.models.board, &board.to_mat34());
+        // (On foot the placeholder rider has no board to carry.)
+        if s.mode != Mode::Walk {
+            gfx.draw_tris(&self.models.board, &board.to_mat34());
+        }
 
         // Rider: tucks with the board, falls over on a bail.
         let (rider_pos, rider_rot) = match s.mode {

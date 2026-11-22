@@ -10,6 +10,7 @@
 
 use alloc::vec::Vec;
 
+pub mod biped;
 pub mod camera;
 pub mod grind;
 pub mod moves;
@@ -43,6 +44,15 @@ impl Curve {
         }
         c.n = i as u8;
         c
+    }
+
+    /// The last point's x (0 for an empty curve).
+    pub fn last_x(&self) -> f32 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.x[self.n as usize - 1]
+        }
     }
 
     pub const fn constant(v: f32) -> Curve {
@@ -460,6 +470,9 @@ pub struct Tuning {
 
     // Body flips, the pump channel, bumps, the powerslide's and the wipeout's pose (`tuning::moves`).
     pub moves: moves::MoveTuning,
+
+    // Walking off the board (`tuning::biped`).
+    pub biped: biped::BipedTuning,
 }
 
 /// What the state graphs' riding behaviours (`graph::riding`, ports of SK8's SetTurning, the physics'
@@ -726,6 +739,7 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .chain(grind::PATHS.iter())
         .chain(camera::PATHS.iter())
         .chain(moves::PATHS.iter())
+        .chain(biped::PATHS.iter())
         .copied()
 }
 
@@ -1311,6 +1325,7 @@ impl Tuning {
         grind: GrindTuning::BUILT_IN,
         cam: CamTuning::BUILT_IN,
         moves: moves::MoveTuning::BUILT_IN,
+        biped: biped::BipedTuning::BUILT_IN,
     };
 
     /// Takes over every value a `rules/tuning` entry carries. Unknown names and malformed values are
@@ -1661,6 +1676,7 @@ impl Tuning {
                     || self.anim.set(name, f, c(), v)
                     || self.cam.set(name, f, c())
                     || self.moves.set(name, f, c())
+                    || self.biped.set(name, f, c())
             }
         }
     }

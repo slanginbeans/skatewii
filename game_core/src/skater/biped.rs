@@ -1,0 +1,386 @@
+//! Walking off the board: Skate 3's biped controller as SK8-ENGINE/skate-3-rust-engine reads it
+//! (GPL-3.0; skate-core player/offboard: ground_input.rs, movement_intent.rs, movement_velocity.rs,
+//! cadence.rs, air_launch/jump.rs).
+//!
+//! - The stick, turned into the world by the camera, is read against the rider's facing: its angle away
+//!   from straight back (0..1 of pi) gives a move amount (`move_vs_stick_angle`) and a turn
+//!   (`turn_vs_stick_angle`), both scaled by how far it is pushed. Pulled straight back the rider turns
+//!   round on the spot; pushed ahead he walks without turning.
+//! - The move amount is a speed (`speed_vs_input`), blended towards the sprint's while the sprint is
+//!   held, for a burst that fades (`sprint_blend` against the time sprinting).
+//! - The rider always moves along his facing: the velocity chases facing x target speed by at most
+//!   0.2 m/s a tick, slowing by at most 2 m/s^2 while still walking (and as gravity allows uphill); the
+//!   turn rate chases `turn_vs_speed` x turn by at most `turn_delta_vs_speed` a tick.
+//! - Walk, run or sprint by the speed against the halfway points between the clips' own speeds.
+//! - The jump: up at sqrt(2 g height), ahead at the ground speed's forward part x `jump_speed_scalar`.
+//!
+//! flatground keeps the ground simple: the rider stands on the highest surface under him no more than
+//! [`STEP_UP`] above his feet, a wall is anything higher, and a drop of more than [`STEP_DOWN`] is a fall.
+
+use crate::math::{PI, Vec3, clamp, cosf, sinf, sqrtf, v3, wrap_angle};
+use crate::park::Terrain;
+use crate::tuning::biped::BipedTuning;
+use libm::asinf;
+
+/// Skate 3's fixed tick, which the controller's per-tick limits are written for.
+const TICK: f32 = 1.0 / 60.0;
+const DEG: f32 = PI / 180.0;
+/// The most the velocity changes in a tick (m/s), and the most it slows a second while still walking.
+const MAX_DV: f32 = 0.2;
+const MAX_SLOW: f32 = 2.0;
+/// A sprint press keeps counting this long after the button comes up (s).
+const SPRINT_GRACE: f32 = 0.3;
+/// Highest step walked up, deepest walked down (m).
+pub const STEP_UP: f32 = 0.45;
+pub const STEP_DOWN: f32 = 0.35;
+/// The clips' speeds (m/s: walk, run and sprint cycles' travel over their length), for walk / run /
+/// sprint: Skate 3's NB_WALK_FWD_CYC, NB_RUN_FWD_CYC, NB_SPRINT_FWD_CYC.
+pub const CLIP_SPEEDS: [f32; 3] = [1.683_4, 5.369_8, 9.101_9];
+/// Below this (m/s) the rider stands.
+const STAND_SPEED: f32 = 0.01;
+
+/// Skate 3's locomotion states (the motion graph's `LocoState`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Loco {
+    #[default]
+    Stand = 0,
+    Walk = 1,
+    Run = 2,
+    Sprint = 3,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Biped {
+    /// Facing (yaw, rad) and its turn rate (rad/s).
+    pub heading: f32,
+    pub turn: f32,
+    /// Velocity (m/s): along the ground on foot, free in the air.
+    pub vel: Vec3,
+    pub speed: f32,
+    pub air: Option<f32>,
+    pub sprint_time: f32,
+    sprint_grace: f32,
+    pub loco: Loco,
+    /// This tick's stick reading: move amount (0..1), turn (-1..1, + right) and the stick in the
+    /// world (x, z), as the graphs' `OB_SteerMagnitude`, `OB_Steer`, `OB_BipedWorldX/Z` read them.
+    pub mag: f32,
+    pub steer: f32,
+    pub world_stick: [f32; 2],
+    /// The ground's up under the feet.
+    pub normal: Vec3,
+    /// Jumped (rather than walked off something) this time in the air.
+    pub jumped: bool,
+    /// In the air: where it left the ground, and the flight's predicted time left (s) and travel
+    /// (m, world) to the ground under it.
+    pub takeoff: Vec3,
+    pub air_remaining: f32,
+    pub air_travel: Vec3,
+}
+
+/// What the controller reads each tick.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BipedInput {
+    /// The main stick (x right, y forward) and the camera's yaw it is relative to.
+    pub stick: [f32; 2],
+    pub cam_yaw: f32,
+    pub sprint: bool,
+    pub jump: bool,
+}
+
+/// The move amount and turn from the stick in the world against the facing (SK8 ground_input.rs).
+pub fn read_stick(t: &BipedTuning, heading: f32, world: [f32; 2]) -> (f32, f32) {
+    let (fx, fz) = (sinf(heading), cosf(heading));
+    let (rx, rz) = (cosf(heading), -sinf(heading));
+    let (x, z) = (world[0] * rx + world[1] * rz, world[0] * fx + world[1] * fz);
+    let mag = sqrtf(x * x + z * z).min(1.0);
+    if mag <= 0.0 {
+        return (0.0, 0.0);
+    }
+    // 0 straight back, +-1 straight ahead (+ to the right).
+    let angle = crate::math::atan2f(x, -z) / PI;
+    let sign = if angle >= 0.0 { 1.0 } else { -1.0 };
+    let a = angle.abs();
+    (
+        t.move_vs_stick_angle.eval(a) * mag,
+        t.turn_vs_stick_angle.eval(a) * mag * sign,
+    )
+}
+
+/// The stick turned into the world by the camera's yaw (x, z).
+pub fn world_stick(stick: [f32; 2], cam_yaw: f32) -> [f32; 2] {
+    let (fx, fz) = (sinf(cam_yaw), cosf(cam_yaw));
+    let (rx, rz) = (cosf(cam_yaw), -sinf(cam_yaw));
+    [stick[0] * rx + stick[1] * fx, stick[0] * rz + stick[1] * fz]
+}
+
+/// Walk, run or sprint for a speed (SK8 cadence.rs: halfway between the clips' speeds).
+pub fn loco_for(speed: f32) -> Loco {
+    let [walk, run, sprint] = CLIP_SPEEDS;
+    if speed <= STAND_SPEED {
+        Loco::Stand
+    } else if speed <= (walk + run) * 0.5 {
+        Loco::Walk
+    } else if speed <= (run + sprint) * 0.5 {
+        Loco::Run
+    } else {
+        Loco::Sprint
+    }
+}
+
+impl Biped {
+    /// Steps off the board at `pos` facing `heading`, moving at `vel`.
+    pub fn new(heading: f32, vel: Vec3, normal: Vec3) -> Biped {
+        let v = Vec3 { y: 0.0, ..vel };
+        Biped {
+            heading,
+            vel: v,
+            speed: v.length(),
+            normal,
+            loco: loco_for(v.length()),
+            ..Biped::default()
+        }
+    }
+
+    pub fn forward(&self) -> Vec3 {
+        v3(sinf(self.heading), 0.0, cosf(self.heading))
+    }
+
+    /// One tick. Moves `pos` (the feet) over `park`.
+    pub fn step(
+        &mut self,
+        t: &BipedTuning,
+        gravity: f32,
+        park: &dyn Terrain,
+        pos: &mut Vec3,
+        input: BipedInput,
+        dt: f32,
+    ) {
+        let ticks = dt / TICK;
+        self.world_stick = world_stick(input.stick, input.cam_yaw);
+        let (mag, steer) = read_stick(t, self.heading, self.world_stick);
+        self.mag = mag;
+        self.steer = steer;
+        if let Some(time) = self.air {
+            self.fly(gravity, park, pos, time + dt, dt);
+            return;
+        }
+        // The speed the stick asks for (SK8 movement_intent.rs).
+        self.sprint_grace = if input.sprint {
+            SPRINT_GRACE
+        } else {
+            self.sprint_grace - dt
+        };
+        let sprinting = input.sprint || self.sprint_grace > 0.0;
+        self.sprint_time = clamp(
+            self.sprint_time + if sprinting { dt } else { -dt },
+            0.0,
+            t.sprint_time_cap,
+        );
+        let normal_speed = t.speed_vs_input.eval(mag);
+        let blend = if sprinting {
+            t.sprint_blend.eval(self.sprint_time)
+        } else {
+            0.0
+        };
+        let desired = normal_speed + (t.sprint_speed.eval(mag) - normal_speed) * blend;
+
+        // Velocity and turning (SK8 movement_velocity.rs).
+        let f = self.forward();
+        let n = self.normal;
+        let dir = (f - n * f.dot(n)).normalize_or(f);
+        let slope = asinf(clamp(dir.y, -1.0, 1.0)) / DEG;
+        let mut target_speed = t.slope_speed.eval(slope) * desired;
+        if desired > 0.5 && target_speed < self.speed {
+            let uphill = if self.vel.y > 0.0 && dir.y > 0.0 {
+                -gravity * dir.y * dt
+            } else {
+                0.0
+            };
+            let slowing = (target_speed - self.speed).max(-MAX_SLOW) * dt;
+            target_speed = self.speed + slowing.min(uphill);
+        }
+        let target = dir * target_speed;
+        let change = target - self.vel;
+        let most = MAX_DV * ticks;
+        let len = change.length();
+        self.vel = if len > most {
+            self.vel + change * (most / len)
+        } else {
+            target
+        };
+        let turn_error = t.turn_vs_speed.eval(self.speed) * steer * DEG - self.turn;
+        let turn_most = t.turn_delta_vs_speed.eval(self.speed) * DEG * ticks;
+        self.turn += clamp(turn_error, -turn_most, turn_most);
+        self.heading = wrap_angle(self.heading + self.turn * dt);
+
+        if input.jump {
+            self.jump(t, gravity);
+            self.takeoff = *pos;
+            self.fly(gravity, park, pos, 0.0, dt);
+            return;
+        }
+        self.walk(gravity, park, pos, dt);
+        self.speed = self.vel.length();
+        self.loco = loco_for(self.speed);
+    }
+
+    /// Skate 3's jump (SK8 air_launch/jump.rs): up for `jump_height`, ahead with the ground speed's
+    /// forward part (nothing backwards) x `jump_speed_scalar`.
+    fn jump(&mut self, t: &BipedTuning, gravity: f32) {
+        let f = self.forward();
+        let h = Vec3 { y: 0.0, ..self.vel };
+        let ahead = h.dot(f).max(0.0);
+        let side = h - f * h.dot(f);
+        let h = (f * ahead + side) * t.jump_speed_scalar;
+        self.vel = Vec3 {
+            y: sqrtf(2.0 * gravity * t.jump_height.max(0.0)),
+            ..h
+        };
+        self.air = Some(0.0);
+        self.jumped = true;
+    }
+
+    /// On foot: along the ground, up steps, stopped by walls, off edges into the air.
+    fn walk(&mut self, gravity: f32, park: &dyn Terrain, pos: &mut Vec3, dt: f32) {
+        let delta = self.vel * dt;
+        let here = *pos;
+        let ok = |x: f32, z: f32| {
+            let g = park.ground(x, z, here.y + STEP_UP);
+            g.height > f32::MIN / 2.0
+                && g.height <= here.y + STEP_UP
+                && !park.blocked(here, Vec3 { x, y: here.y, z })
+        };
+        let (nx, nz) = (pos.x + delta.x, pos.z + delta.z);
+        if ok(nx, nz) {
+            pos.x = nx;
+            pos.z = nz;
+        } else if ok(nx, pos.z) {
+            pos.x = nx;
+            self.vel.z = 0.0;
+        } else if ok(pos.x, nz) {
+            pos.z = nz;
+            self.vel.x = 0.0;
+        } else {
+            self.vel = Vec3::ZERO;
+        }
+        let g = park.ground(pos.x, pos.z, pos.y + STEP_UP);
+        if g.height < pos.y - STEP_DOWN || g.height <= f32::MIN / 2.0 {
+            // Walked off something: falling, with the walk's speed.
+            self.vel.y = 0.0;
+            self.air = Some(0.0);
+            self.jumped = false;
+            self.takeoff = *pos;
+            self.predict(gravity, park, *pos);
+        } else {
+            pos.y = g.height;
+            self.normal = g.normal;
+        }
+    }
+
+    /// In the air: gravity until the feet meet the ground.
+    fn fly(&mut self, gravity: f32, park: &dyn Terrain, pos: &mut Vec3, time: f32, dt: f32) {
+        self.vel.y -= gravity * dt;
+        let h = Vec3 { y: 0.0, ..self.vel };
+        let here = *pos;
+        let to = here + h * dt;
+        if park.blocked(here, Vec3 { y: here.y, ..to })
+            || park.ground(to.x, to.z, here.y + STEP_UP).height > here.y + STEP_UP
+        {
+            self.vel.x = 0.0;
+            self.vel.z = 0.0;
+        } else {
+            pos.x = to.x;
+            pos.z = to.z;
+        }
+        pos.y += self.vel.y * dt;
+        let g = park.ground(pos.x, pos.z, pos.y + STEP_UP.min(0.1 - self.vel.y * dt));
+        if self.vel.y <= 0.0 && g.height > f32::MIN / 2.0 && pos.y <= g.height {
+            pos.y = g.height;
+            self.normal = g.normal;
+            self.vel.y = 0.0;
+            self.air = None;
+        } else {
+            self.air = Some(time);
+            self.predict(gravity, park, *pos);
+        }
+        self.speed = Vec3 { y: 0.0, ..self.vel }.length();
+        self.loco = loco_for(self.speed);
+    }
+
+    /// The flight's time left and travel to the ground under the feet (a fall straight down to it:
+    /// flatground's own estimate of Skate 3's landing prediction).
+    fn predict(&mut self, gravity: f32, park: &dyn Terrain, pos: Vec3) {
+        let g = park.ground(pos.x, pos.z, pos.y + 0.05);
+        let above = if g.height > f32::MIN / 2.0 {
+            (pos.y - g.height).max(0.0)
+        } else {
+            0.0
+        };
+        self.air_remaining = self.time_to_land(gravity, above).unwrap_or(0.0);
+        let end = pos + Vec3 { y: 0.0, ..self.vel } * self.air_remaining;
+        self.air_travel = v3(end.x, pos.y - above, end.z) - self.takeoff;
+    }
+
+    /// Seconds until the feet meet the ground at this height along a free fall (`None` on foot or
+    /// rising past it).
+    pub fn time_to_land(&self, gravity: f32, above: f32) -> Option<f32> {
+        self.air?;
+        // above + vy t - g t^2 / 2 = 0
+        let (a, b, c) = (0.5 * gravity, -self.vel.y, -above);
+        let d = b * b - 4.0 * a * c;
+        if d < 0.0 || a <= 0.0 {
+            return None;
+        }
+        Some((-b + sqrtf(d)) / (2.0 * a))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const T: BipedTuning = BipedTuning::BUILT_IN;
+
+    #[test]
+    fn the_stick_ahead_moves_without_turning_and_back_turns_hard() {
+        // Facing +z with the stick pushed that way: full move, no turn.
+        let (mag, steer) = read_stick(&T, 0.0, [0.0, 1.0]);
+        assert!(
+            (mag - 1.0).abs() < 1e-4 && steer.abs() < 1e-4,
+            "{mag} {steer}"
+        );
+        // Pulled straight back: no move, Skate 3's hardest turn (1.7).
+        let (mag, steer) = read_stick(&T, 0.0, [0.0, -1.0]);
+        assert!(
+            mag.abs() < 1e-4 && (steer - 1.7).abs() < 1e-3,
+            "{mag} {steer}"
+        );
+        // To the right (+x when facing +z): half a turn's angle, turning right (+).
+        let (mag, steer) = read_stick(&T, 0.0, [1.0, 0.0]);
+        assert!(mag > 0.0 && steer > 0.0, "{mag} {steer}");
+        let (_, left) = read_stick(&T, 0.0, [-1.0, 0.0]);
+        assert!((left + steer).abs() < 1e-4);
+        // Half pushed scales both.
+        let (half, _) = read_stick(&T, 0.0, [0.0, 0.5]);
+        assert!((half - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_stick_is_read_from_the_camera() {
+        // The camera looking along +x: the stick forward is +x in the world.
+        let w = world_stick([0.0, 1.0], core::f32::consts::FRAC_PI_2);
+        assert!((w[0] - 1.0).abs() < 1e-5 && w[1].abs() < 1e-5, "{w:?}");
+        // Its right is -z.
+        let w = world_stick([1.0, 0.0], core::f32::consts::FRAC_PI_2);
+        assert!(w[0].abs() < 1e-5 && (w[1] + 1.0).abs() < 1e-5, "{w:?}");
+    }
+
+    #[test]
+    fn walk_run_and_sprint_are_halfway_between_the_cycles() {
+        assert_eq!(loco_for(0.0), Loco::Stand);
+        assert_eq!(loco_for(2.5), Loco::Walk);
+        assert_eq!(loco_for(3.6), Loco::Run);
+        assert_eq!(loco_for(6.0), Loco::Run);
+        assert_eq!(loco_for(7.3), Loco::Sprint);
+    }
+}

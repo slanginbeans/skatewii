@@ -155,10 +155,12 @@ How the skinning fits together, all checked against the previews:
 
 ### The motion library
 ```bash
-cargo run --release -p fg_import -- motion path/to/skate3.iso [--budget 20] [--list]
+cargo run --release -p fg_import -- motion path/to/skate3.iso [--budget 30] [--list]
 ```
-Writes `imported/motion.fgpak`: what Skate 3's skating animation runs on, from `OnBoard.abin` and the on-board
-motion graph (`data/state/MotionGraph_OnBoard.stategraph`, both in `miscload.big`). The build converts it too.
+Writes `imported/motion.fgpak`: what Skate 3's skating animation runs on, from `OnBoard.abin`, `OffBoard.abin`
+(walking, running, getting off and on: the names `OnBoard.abin` doesn't have) and the motion graph
+(`data/state/MotionGraph_OnBoard.stategraph`, which holds the off-board states too; all in `miscload.big`).
+The build converts it too.
 
 | Entry | What |
 |---|---|
@@ -171,10 +173,12 @@ time step; `tree::Playback` builds and plays a tree as SK8 does: clocks in phase
 queries, the list of poses to blend). The bank's record layouts and the tree semantics come from
 SK8-ENGINE/skate-3-rust-engine.
 
-Poses are taken by area of the graph, in this order, until `--budget` (MiB, default 20) is used: riding,
+Poses are taken by area of the graph, in this order, until `--budget` (MiB, default 30) is used: riding,
 push, brake, anticipation, tricks, manual, landing, kickturn, revert, switch, powerslide, grind, air, grab,
-then the rest (skitching, handplants, getting on and off). The converter prints each area's size and what
-was left out. From the US/EU disc all of it fits: 2,165 clips, about 19 MiB. `--list` prints every graph
+off the board (everything under the `OffBoard` states, and getting off and on), then the rest (skitching,
+handplants). The converter prints each area's size and what was left out. From the US/EU disc all of it
+fits: 2,778 clips, about 27 MiB of poses (the off-board area is about 8 MiB of it; with `--budget 20` it is
+left out and the rider walks in his standing pose). `--list` prints every graph
 reference with its state path and every attribute name with how many clips carry it.
 
 The game loads it at start-up and logs how many clips, poses, trees and attribute records it holds, and

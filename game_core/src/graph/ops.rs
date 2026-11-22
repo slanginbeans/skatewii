@@ -175,6 +175,13 @@ pub enum Cond {
     Bumped,
     /// The physics has finished the wipeout (the rider is back on the board).
     DoneWipingOut,
+    /// Off the board: Skate 3's locomotion state (0 stand, 1 walk, 2 run, 3 sprint).
+    LocoState(u8),
+    /// Off the board with the board in hand (flatground's rider always carries it).
+    HoldingBoard,
+    /// Off the board in the air, and coming down onto ground he can land on.
+    BipedAir,
+    CanBipedLand,
     /// Conditions of systems flatground doesn't have, with the value they take here.
     Fixed(bool),
     Unsupported(Str),
@@ -382,6 +389,10 @@ pub enum Beh {
     WipeoutGestures,
     /// CharacterGesture: the d-pad's gestures on the gesture channels.
     CharacterGesture,
+    /// MatchAirTime (SK8 motion_offboard/match_air_time.rs): off the board in the air, the jump clip
+    /// seeks to where the flight is (so it ends on landing) and its selection reads the flight's
+    /// time and travel (`AnimTime`, `AnimTransX/Y/Z`, `CadenceStartPercent`).
+    MatchAirTime,
     /// BodySpin (SK8 motion_spin.rs): the body spin channels (`IA_BODYSPIN_OLLIE_FS/BS`) over the air
     /// animation, their influence from the `BodySpin` intent.
     BodySpin,
@@ -561,6 +572,39 @@ fn transition(a: &A) -> TransitionDef {
     }
 }
 
+/// `GroundSlopeType`'s off-board slopes: walking, the ground along the facing (Skate 3's stair and ramp
+/// cycles). 0 is flat, as riding.
+pub mod slope {
+    pub const STAIR_UP_SHALLOW: u8 = 4;
+    pub const STAIR_UP_STEEP: u8 = 5;
+    pub const STAIR_DN_SHALLOW: u8 = 6;
+    pub const STAIR_DN_STEEP: u8 = 7;
+    pub const RAMP_UP_SHALLOW: u8 = 8;
+    pub const RAMP_UP_STEEP: u8 = 9;
+    pub const RAMP_DN_SHALLOW: u8 = 10;
+    pub const RAMP_DN_STEEP: u8 = 11;
+
+    /// The walker's slope class: by the slope along the facing (degrees, + uphill), on stairs or not.
+    pub fn biped(degrees: f32, stairs: bool) -> u8 {
+        let a = degrees.abs();
+        if a < 5.0 {
+            return 0;
+        }
+        let up = degrees > 0.0;
+        let steep = a >= if stairs { 30.0 } else { 25.0 };
+        match (stairs, up, steep) {
+            (true, true, false) => STAIR_UP_SHALLOW,
+            (true, true, true) => STAIR_UP_STEEP,
+            (true, false, false) => STAIR_DN_SHALLOW,
+            (true, false, true) => STAIR_DN_STEEP,
+            (false, true, false) => RAMP_UP_SHALLOW,
+            (false, true, true) => RAMP_UP_STEEP,
+            (false, false, false) => RAMP_DN_SHALLOW,
+            (false, false, true) => RAMP_DN_STEEP,
+        }
+    }
+}
+
 /// Conditions that belong to systems flatground leaves out (off-board walking, skitching, hand plants,
 /// water, moving objects, debug), with the value that keeps the graph on the board.
 const FIXED_FALSE: &[&str] = &[
@@ -581,19 +625,15 @@ const FIXED_FALSE: &[&str] = &[
     "IsMovingObject",
     "IsStandingOnMovingObject",
     "IsInDebugAnimationsMode",
-    "IsHoldingSkateboard",
     "IsDroppingSkateboard",
     "IsRetrievingSkateboard",
     "IsHippyHurdling",
-    "IsInBipedAir",
     "IsBipedGroundThin",
     "IsBipedCommittedToMotion",
-    "CanBipedLand",
     "HasNewHandPlantPos",
     "ShouldPlayHandPlantAnim",
     "ShouldPrepareOneFootAirForFootplant",
     "IsArmChannelPlaying",
-    "LocoState",
     "OBTimeToLand",
     "OBTrajTime",
     "MongoPushFootToFar",
@@ -681,8 +721,26 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
             "flat" | "Flat" => 0,
             "up" | "Up" | "uphill" => 1,
             "down" | "Down" | "downhill" => 2,
+            // The off-board slopes (walking: `slope::biped`).
+            "StairUpShallow" => slope::STAIR_UP_SHALLOW,
+            "StairUpSteep" => slope::STAIR_UP_STEEP,
+            "StairDnShallow" => slope::STAIR_DN_SHALLOW,
+            "StairDnSteep" => slope::STAIR_DN_STEEP,
+            "RampUpShallow" => slope::RAMP_UP_SHALLOW,
+            "RampUpSteep" => slope::RAMP_UP_STEEP,
+            "RampDnShallow" => slope::RAMP_DN_SHALLOW,
+            "RampDnSteep" => slope::RAMP_DN_STEEP,
             _ => 3,
         }),
+        "LocoState" => Cond::LocoState(match a.text("locostate").unwrap_or("") {
+            "Walk" => 1,
+            "Run" => 2,
+            "Sprint" => 3,
+            _ => 0,
+        }),
+        "IsHoldingSkateboard" => Cond::HoldingBoard,
+        "IsInBipedAir" => Cond::BipedAir,
+        "CanBipedLand" => Cond::CanBipedLand,
         "AllowedToTrick" => Cond::AllowedToTrick,
         "OkToDoTrickOnStairs" => Cond::OkToTrickOnStairs,
         "IsTricking" => Cond::Tricking,
@@ -725,7 +783,6 @@ const NOTHING: &[&str] = &[
     "SetScoreAugmentation",
     "BipedCadence",
     "MatchCadence",
-    "MatchAirTime",
     "OffboardBodyTweakBlend",
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
@@ -989,6 +1046,7 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         },
         "EnableWipeoutGestures" => Beh::WipeoutGestures,
         "CharacterGesture" => Beh::CharacterGesture,
+        "MatchAirTime" => Beh::MatchAirTime,
         "FakieHeadChannel" => Beh::FakieHead,
         "BodySpin" => Beh::BodySpin,
         "ControlAirLegExtension" => Beh::AirLegExtension(lib("EXTEND").or_else(|| lib("extend"))),

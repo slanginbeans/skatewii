@@ -201,6 +201,8 @@ pub struct TrickTour {
     place: Option<Placement>,
     /// The rail the grind phase uses.
     rail: Option<RailPick>,
+    /// The off-board stop's jump happened.
+    walk_jumped: bool,
 }
 
 /// Where to put the rider: position, heading (yaw), speed along it.
@@ -250,6 +252,8 @@ pub struct Seen {
     pub handrail: bool,
     /// A back flip turned (whole turns, rounded) and landed on the wheels.
     pub backflip: bool,
+    /// Got off the board (Y), walked, jumped, landed on foot and got back on.
+    pub walked: bool,
 }
 
 /// How far short of half a turn the 180's let-go spin may carry it (rad): the landing assist does the
@@ -291,6 +295,7 @@ enum Tour {
     SlideRide,
     SlideAir,
     Gesture,
+    Walk,
     RailFind,
     RailGrind,
     FlipFind,
@@ -323,6 +328,7 @@ impl Tour {
             Tour::CopingFind | Tour::CopingRide => "coping grind off a quarter pipe's deck",
             Tour::SlideFind | Tour::SlideRide | Tour::SlideAir => "ollie into a slide",
             Tour::Gesture => "d-pad gesture",
+            Tour::Walk => "off the board: walk, jump, back on",
             Tour::RailFind | Tour::RailGrind => "handrail grind to its end",
             Tour::FlipFind | Tour::FlipRide | Tour::FlipAir => "back flip off the kicker",
             Tour::BailOllie | Tour::BailAir => "grab held into the landing (bail)",
@@ -1213,6 +1219,30 @@ impl TrickTour {
                     self.seen.gesture = true;
                 }
                 if self.t > 180 {
+                    next(self, Tour::Walk, sw);
+                }
+            }
+            Tour::Walk => {
+                // Y off the board, a short walk ahead and a jump, then Y back on.
+                if (10..13).contains(&self.t) || (260..263).contains(&self.t) {
+                    pad.buttons |= btn::Y;
+                }
+                if (70..170).contains(&self.t) {
+                    pad.stick_y = 60;
+                }
+                if (150..153).contains(&self.t) {
+                    pad.buttons |= btn::B;
+                }
+                if s.mode == Mode::Walk {
+                    self.held += 1;
+                    if s.biped.jumped {
+                        self.walk_jumped = true;
+                    }
+                }
+                if self.t > 263 && s.mode == Mode::Rolling {
+                    self.seen.walked = self.held > 60 && self.walk_jumped;
+                    next(self, Tour::RailFind, sw);
+                } else if self.t > 420 {
                     next(self, Tour::RailFind, sw);
                 }
             }
@@ -1445,7 +1475,7 @@ impl Autoplay {
                 Some(alloc::format!(
                     "autoplay: tour {} done (manual {:.1} s, kick turn {}, revert {}, auto switch {}, \
                      {} flips held, late flip {}, grab variant {}, ledge grind {}, 5-0 {}, coping {}, \
-                     slide {}, gesture {}, handrail {}, back flip {})",
+                     slide {}, gesture {}, handrail {}, back flip {}, walked {})",
                     self.rounds,
                     seen.manual as f32 / 60.0,
                     seen.kick_turn,
@@ -1460,7 +1490,8 @@ impl Autoplay {
                     seen.slide,
                     seen.gesture,
                     seen.handrail,
-                    seen.backflip
+                    seen.backflip,
+                    seen.walked
                 )),
             );
         }

@@ -18,18 +18,22 @@ use std::io::{Read, Seek};
 use std::path::PathBuf;
 
 const BANK: &str = "data/big/miscload.big::data/anim/OnBoard.abin";
+/// Walking, running, getting on and off and carrying the board: the clips the graphs' `OffBoard` states play.
+const OFF_BANK: &str = "data/big/miscload.big::data/anim/OffBoard.abin";
 const GRAPH: &str = "data/big/miscload.big::data/state/MotionGraph_OnBoard.stategraph";
 const ACTION_GRAPH: &str = "data/big/miscload.big::data/state/ActionGraph_OnBoard.stategraph";
 
 /// Default pose budget (MiB). The Wii has 24 MiB MEM1 + 64 MiB MEM2; the park, skater and the game's own
-/// heap need the rest.
-const BUDGET_MIB: f64 = 20.0;
+/// heap need the rest (about 47 MiB was still free with a 20 MiB budget; the off-board clips take ~8.3).
+const BUDGET_MIB: f64 = 30.0;
 
 /// Graph areas in the order they are converted, with keywords for the graph's state names. A reference
 /// belongs to the area of its most specific (deepest) state that has a keyword; references under no
 /// keyword are `other`, last.
 /// The fakie head and torso channel's tree (played by `game_core::graph` while riding fakie).
 pub const FAKIE_CHANNEL: &str = game_core::graph::host::FAKIE_CHANNEL;
+
+const OFF_AREA: &str = "offboard";
 
 pub const AREAS: &[(&str, &[&str])] = &[
     ("riding", &["turning", "riding", "idle"]),
@@ -46,6 +50,9 @@ pub const AREAS: &[(&str, &[&str])] = &[
     ("grind", &["grind"]),
     ("air", &["air"]),
     ("grab", &["grab"]),
+    // Off the board: walking, running, getting off and on (also the on-board states that step off).
+    // Last, so the riding keeps its clips if the budget is ever tight.
+    (OFF_AREA, &["offboard", "mount"]),
 ];
 
 struct Options {
@@ -75,17 +82,20 @@ fn options(args: &[String]) -> Res<Options> {
 
 /// States that are not about skating the board itself (hanging on to cars, handplants, getting on and off,
 /// riding moving objects): `other`, whatever else their names say.
-const OTHER: &[&str] = &[
-    "skitch",
-    "handplant",
-    "mount",
-    "movingobject",
-    "coffin",
-    "teleport",
-];
+const OTHER: &[&str] = &["skitch", "handplant", "movingobject", "coffin", "teleport"];
 
 /// The area of a graph reference from its state path (`Motion/OnBoard/...`).
 pub fn area(path: &str) -> usize {
+    // Everything under an off-board state is off-board, whatever its own name says (`Land`, `InAir`).
+    if path
+        .split('/')
+        .any(|s| s.to_ascii_lowercase().starts_with("offboard"))
+    {
+        return AREAS
+            .iter()
+            .position(|a| a.0 == OFF_AREA)
+            .unwrap_or(AREAS.len());
+    }
     for segment in path.rsplit('/') {
         let segment = segment.to_ascii_lowercase();
         if OTHER.iter().any(|k| segment.contains(k)) {
@@ -185,26 +195,42 @@ fn tree_in(t: &meta::Tree) -> TreeIn {
 }
 
 /// A clip's pose entry: decoded, bind pose composed in, quantised.
-fn encode_pose(bank: &Bank, bind: &[Sqt], name: &str) -> Res<Vec<u8>> {
-    let record = bank
-        .records()
-        .iter()
-        .rev()
-        .find(|r| {
+/// The clip's pose from the first bank that has it (the on-board bank wins a name both have, as in
+/// [`meta::Meta::merge`]), with that bank's bind pose composed in.
+fn encode_pose(banks: &[(Bank, Vec<Sqt>)], name: &str) -> Res<Vec<u8>> {
+    for (bank, bind) in banks {
+        let Some(record) = bank.records().iter().rev().find(|r| {
             r.header.name.eq_ignore_ascii_case(name)
                 && matches!(r.data, anim::abin::RecordData::Clip(_))
-        })
-        .ok_or_else(|| format!("no clip {name}"))?;
-    let mut frames = anim::decode_clip(bank, record)?;
-    anim::add_bind_pose(&mut frames, bind);
-    Ok(anim::encode_clip(&frames))
+        }) else {
+            continue;
+        };
+        let mut frames = anim::decode_clip(bank, record)?;
+        anim::add_bind_pose(&mut frames, bind);
+        return Ok(anim::encode_clip(&frames));
+    }
+    Err(format!("no clip {name}").into())
 }
 
 pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let o = options(args)?;
     let bank = Bank::parse(read_asset(disc, BANK)?)?;
-    let m = meta::Meta::read(&bank)?;
+    let mut m = meta::Meta::read(&bank)?;
     let bind = anim::bind_pose(&bank).ok_or("bank has no RIG_TPOSE bind pose")?;
+    let mut banks = vec![(bank, bind)];
+    // The off-board bank: its animations under the names the on-board bank doesn't use.
+    match read_asset(disc, OFF_BANK)
+        .map_err(|e| e.to_string())
+        .and_then(|b| Bank::parse(b).map_err(|e| e.to_string()))
+    {
+        Ok(off) => {
+            let added = m.merge(meta::Meta::read(&off)?);
+            let off_bind = anim::bind_pose(&off).unwrap_or_else(|| banks[0].1.clone());
+            println!("off-board bank: {} animations added", added.len());
+            banks.push((off, off_bind));
+        }
+        Err(e) => eprintln!("no off-board bank ({e}): walking will use placeholders"),
+    }
     let graph = read_asset(disc, GRAPH)?;
     let attrs = stategraph::attributes(&graph)?;
 
@@ -269,7 +295,7 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let mut poses: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut failed = Vec::new();
     for name in &all_clips {
-        match encode_pose(&bank, &bind, name) {
+        match encode_pose(&banks, name) {
             Ok(data) => {
                 poses.insert(name.clone(), data);
             }
