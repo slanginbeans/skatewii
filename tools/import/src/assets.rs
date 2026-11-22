@@ -78,7 +78,7 @@ fn district_job(name: &str) -> Job {
     }
 }
 
-/// The streamed districts are converted only with `FG_CITY=1` until the game streams them (they are
+/// The streamed districts are converted only with `FG_CITY=1` while streaming is tried on the Wii (they are
 /// about 390 MB).
 fn with_districts() -> bool {
     std::env::var("FG_CITY").is_ok_and(|v| v == "1")
@@ -118,8 +118,29 @@ fn index(dir: &Path, default: &'static str) -> String {
                 name: park::display_name(p),
                 file,
                 bytes,
+                district: false,
             }
         })
+        .chain(crate::city::DISTRICTS.iter().filter_map(|d| {
+            // Converted districts (`FG_CITY=1`): the index and every cell next to it.
+            let file = format!("city/{d}/index.fgpak");
+            dir.join(&file).is_file().then(|| {
+                let bytes = std::fs::read_dir(dir.join("city").join(d))
+                    .map(|it| {
+                        it.filter_map(|e| e.ok()?.metadata().ok())
+                            .map(|m| m.len())
+                            .sum::<u64>()
+                    })
+                    .unwrap_or(0);
+                game_core::menu::Location {
+                    id: (*d).into(),
+                    name: park::display_name(d),
+                    file,
+                    bytes: bytes.min(u32::MAX as u64) as u32,
+                    district: true,
+                }
+            })
+        }))
         .collect();
     game_core::menu::write_index(&list, Some(default))
 }

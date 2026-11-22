@@ -52,7 +52,7 @@ impl KickerRun {
         }
         if !self.flicked && s.mode == Mode::Rolling {
             self.pushed += 1;
-            let (load, flick) = if game.imported_park().is_some() {
+            let (load, flick) = if !game.on_demo_park() {
                 (self.pushed > 150, self.pushed > 175)
             } else {
                 (s.pos.z > -5.0, s.pos.z > -2.8)
@@ -738,7 +738,7 @@ impl TrickTour {
         {
             pad.buttons |= btn::X;
         }
-        if rolling && !busy_stick && game.imported_park().is_none() {
+        if rolling && !busy_stick && game.on_demo_park() {
             // The demo park: back towards the middle when near a wall.
             if s.pos.x.abs() > 6.0 || s.pos.z.abs() > 9.0 {
                 let want = crate::math::atan2f(-s.pos.x, -s.pos.z);
@@ -1289,24 +1289,22 @@ impl TrickTour {
             Tour::FlipFind => {
                 // The demo park's kicker run-in; an imported park has no kicker the tour knows of, so
                 // the rider is launched from its spawn instead.
-                self.place = Some(match game.imported_park() {
-                    None => Placement {
+                self.place = Some(if game.on_demo_park() {
+                    Placement {
                         pos: v3(0.0, 0.0, -16.0),
                         heading: 0.0,
                         speed: 2.0,
                         lift: 0.0,
-                    },
-                    Some(_) => {
-                        // Where the rider is, towards clear, flat ground.
-                        let p = s.pos;
-                        let yaw =
-                            clear_heading(game, s.travel_yaw(), 8.0).unwrap_or(s.travel_yaw());
-                        Placement {
-                            pos: p + Vec3::UP * 0.3,
-                            heading: yaw,
-                            speed: 3.0,
-                            lift: 6.5,
-                        }
+                    }
+                } else {
+                    // Where the rider is, towards clear, flat ground.
+                    let p = s.pos;
+                    let yaw = clear_heading(game, s.travel_yaw(), 8.0).unwrap_or(s.travel_yaw());
+                    Placement {
+                        pos: p + Vec3::UP * 0.3,
+                        heading: yaw,
+                        speed: 3.0,
+                        lift: 6.5,
                     }
                 });
                 next(self, Tour::FlipRide, sw);

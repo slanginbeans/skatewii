@@ -6,8 +6,10 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 /// A read in progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -128,6 +130,22 @@ impl Reader for MemReader {
         self.live -= 1;
         // Made by Box::leak in `service`.
         drop(unsafe { Box::from_raw(data as *const [u8] as *mut [u8]) });
+    }
+}
+
+/// A reader shared with whoever drives it (a test servicing a [`MemReader`] the game owns too).
+impl<R: Reader> Reader for Rc<RefCell<R>> {
+    fn start(&mut self, path: &str) -> Option<Ticket> {
+        self.borrow_mut().start(path)
+    }
+    fn poll(&mut self, ticket: Ticket) -> Poll {
+        self.borrow_mut().poll(ticket)
+    }
+    fn cancel(&mut self, ticket: Ticket) {
+        self.borrow_mut().cancel(ticket)
+    }
+    unsafe fn free(&mut self, data: &'static [u8]) {
+        unsafe { self.borrow_mut().free(data) }
     }
 }
 

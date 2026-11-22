@@ -12,7 +12,8 @@ use crate::gfx::{MeshBuilder, SCREEN_H, SCREEN_W, rgb};
 use crate::hud;
 use crate::input::{MAIN_RANGE, PadRaw, btn};
 
-/// One place to ride: an imported park pack, or the built-in demo park (no file).
+/// One place to ride: an imported park pack, a streamed district (its index pack), or the built-in demo
+/// park (no file).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Location {
     /// Short name without spaces (the disc's district name, or `demo`): what the settings file and the
@@ -22,8 +23,11 @@ pub struct Location {
     pub name: String,
     /// The pack, relative to the data folder (`parks/BlackBoxPark.fgpak`); empty for the demo park.
     pub file: String,
-    /// The pack's size in bytes (for the loading message; 0: unknown).
+    /// The pack's size in bytes (for the loading message; 0: unknown). A district's: all its cells.
     pub bytes: u32,
+    /// A district streamed in cells (`game_core::district`): `file` is its index pack
+    /// (`city/DownTown/index.fgpak`), the cells next to it.
+    pub district: bool,
 }
 
 impl Location {
@@ -34,6 +38,7 @@ impl Location {
             name: "Demo park".into(),
             file: String::new(),
             bytes: 0,
+            district: false,
         }
     }
 
@@ -57,6 +62,7 @@ pub struct Index {
 /// ```text
 /// default <id>
 /// park <id> <file> <bytes> <display name ...>
+/// district <id> <index file> <bytes> <display name ...>
 /// ```
 ///
 /// Files must be plain relative paths inside the data folder (no `:`, no `..`, no leading `/`).
@@ -67,7 +73,7 @@ pub fn parse_index(text: &str) -> Index {
         let mut words = line.split_whitespace();
         match words.next() {
             Some("default") => default = words.next().map(|s| s.to_string()),
-            Some("park") => {
+            Some(kind @ ("park" | "district")) => {
                 let (Some(id), Some(file), Some(bytes)) =
                     (words.next(), words.next(), words.next())
                 else {
@@ -86,6 +92,7 @@ pub fn parse_index(text: &str) -> Index {
                     name: if name.is_empty() { id.into() } else { name },
                     file: file.into(),
                     bytes,
+                    district: kind == "district",
                 });
             }
             _ => {}
@@ -102,7 +109,8 @@ pub fn write_index(locations: &[Location], default: Option<&str>) -> String {
         out += &format!("default {d}\n");
     }
     for l in locations.iter().filter(|l| !l.is_demo()) {
-        out += &format!("park {} {} {} {}\n", l.id, l.file, l.bytes, l.name);
+        let kind = if l.district { "district" } else { "park" };
+        out += &format!("{kind} {} {} {} {}\n", l.id, l.file, l.bytes, l.name);
     }
     out
 }
@@ -502,18 +510,27 @@ mod tests {
                 name: "Black Box Park".into(),
                 file: "parks/BlackBoxPark.fgpak".into(),
                 bytes: 1089632,
+                district: false,
             },
             Location {
                 id: "MegaPark".into(),
                 name: "Mega Park".into(),
                 file: "parks/MegaPark.fgpak".into(),
                 bytes: 12,
+                district: false,
+            },
+            Location {
+                id: "DownTown".into(),
+                name: "Downtown".into(),
+                file: "city/DownTown/index.fgpak".into(),
+                bytes: 170_000_000,
+                district: true,
             },
             Location::demo(),
         ];
         let text = write_index(&list, Some("MegaPark"));
         let index = parse_index(&text);
-        assert_eq!(index.locations, list[..2]);
+        assert_eq!(index.locations, list[..3]);
         assert_eq!(index.default, Some(1));
         let messy = "# comment\n\
                      park A a.fgpak 10 Name A\n\
@@ -547,12 +564,14 @@ mod tests {
                 name: "A".into(),
                 file: "a".into(),
                 bytes: 0,
+                district: false,
             },
             Location {
                 id: "B".into(),
                 name: "B".into(),
                 file: "b".into(),
                 bytes: 0,
+                district: false,
             },
             Location::demo(),
         ];

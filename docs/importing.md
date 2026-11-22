@@ -22,7 +22,9 @@ folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg
   old single `data/park.fgpak` from earlier builds is removed (the game still reads one when there is no
   `parks.txt`).
 - with `FG_CITY=1`, also cuts the city districts and Skate School into cell packs (`data/city/<district>/`,
-  below; about 390 MB, 25 s). Off by default until the game streams them.
+  below; about 390 MB, 25 s) and lists them in `parks.txt` (`district <id> city/<id>/index.fgpak <bytes>
+  <name>`), so they are in the location menu. Off by default while the streaming is being tried on the Wii
+  (start spots are still the importer's guesses).
 
 All of it is about 37 MB (the motion library 20 MB, the six parks 12.5 MB). Copy `dist/apps/flatground` to
 the SD card's `apps` folder and the game finds its packs at
@@ -286,6 +288,20 @@ still under the island, so the start spots will be picked by hand. US/EU disc, d
 
 Every cell of all four loads with `world::ImportedPark::parse` (at most 4.6 ms a cell on a PC). One
 University model (`cPres_50_-850`) has meshes without float positions and is left out.
+
+#### Riding a district: streaming
+`game_core::district` rides a district while it streams. Cells within 110 m of the rider (everything drawn,
+and 20 m more) are read in the background (`wii/platform/fg_read.c`), nearest first, two at a time, within a
+budget of pack bytes held (8 MB on the Wii; the parsed cells take about as much again); one finished read is
+parsed per frame. Cells beyond 150 m are dropped, and nearer ones farthest first when a nearer cell needs the
+room. The cells within 30 m of the rider are always read, and the riding waits (the rider held still) until
+they are in; at a new district the loading screen counts them in. As ground the district is all of its loaded
+cells (a triangle near an edge belongs to one cell but reaches into the next); a cell's rails keep their index
+while it is loaded and are replaced by inert ones when it is dropped.
+
+Measured on a PC with a simulated card of 2 MB/s, riding a lap of each district at 10 m/s: Downtown and
+University held the rider 3 to 5 s in all over about 17 minutes, at most 13 cells (10 MB of packs) loaded,
+the heap peaking about 21 MB above the game's own; everything is freed when the district is left.
 
 A district's assets sit in streams inside `worldDIST_<park>.big`: an `ATOC` table
 (`DIST_<park>_<stream>.xst`) and `SFIL` stream files (`c<stream>_*.xsf`, RefPack-compressed sections). The

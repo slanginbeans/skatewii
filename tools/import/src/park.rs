@@ -38,6 +38,7 @@ pub const LOCATIONS: &[&str] = &[
 pub fn display_name(park: &str) -> String {
     match park {
         "DownTownSkatePark" => "Downtown Skate Park".into(),
+        "DownTown" => "Downtown".into(),
         _ => {
             // Words from the CamelCase name.
             let mut out = String::new();

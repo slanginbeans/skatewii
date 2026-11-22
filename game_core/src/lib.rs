@@ -17,6 +17,7 @@ pub mod character;
 pub mod city;
 pub mod collision;
 pub mod devlog;
+pub mod district;
 pub mod flick;
 pub mod game;
 pub mod gesture;

@@ -19,6 +19,7 @@ use core::ptr;
 
 use game_core::autoplay::Autoplay;
 use game_core::character;
+use game_core::district::District;
 use game_core::game::{FrameCost, Game};
 use game_core::gfx::{Camera, Gfx, StaticVerts, TexVertex, Texture, Vertex};
 use game_core::input::PadRaw;
@@ -192,7 +193,6 @@ unsafe fn unload(data: &'static [u8]) {
 }
 
 /// Background whole-file reads (`wii/platform/fg_read.c`), for streaming a district's cells.
-#[allow(dead_code)] // The district streamer is its user.
 struct WiiReader;
 
 impl Reader for WiiReader {
@@ -218,6 +218,33 @@ impl Reader for WiiReader {
     unsafe fn free(&mut self, data: &'static [u8]) {
         unsafe { unload(data) }
     }
+}
+
+/// Pack bytes a district holds at once (its cells' packs; the parsed cells take about as much again).
+const DISTRICT_BUDGET: u32 = 8 << 20;
+
+/// Writes a streamed cell's vertex arrays out of the CPU cache.
+fn flush_range(data: *const u8, len: usize) {
+    unsafe { ffi::fg_flush_range(data, len as u32) }
+}
+
+/// A district from its index pack (`city/<District>/index.fgpak`), its cells read in the background.
+fn open_district(dir: &str, file: &str) -> Result<District, String> {
+    let path = format!("{dir}{file}");
+    let data = load_path(&path).ok_or_else(|| format!("no file {file}"))?;
+    let index = game_core::pack::Pack::parse(data)
+        .ok()
+        .and_then(|p| p.find("city/index"))
+        .map(|e| e.data.to_vec());
+    // SAFETY: only copied from.
+    unsafe { unload(data) };
+    let index = index.ok_or_else(|| format!("{file}: no city/index"))?;
+    let folder = path.rsplit_once('/').map_or("", |(d, _)| d);
+    let mut d = District::new(&index, folder, Box::new(WiiReader), DISTRICT_BUDGET)
+        .map_err(|e| format!("{file}: unreadable index ({e:?})"))?;
+    d.flush = Some(flush_range);
+    d.timer = Some(clock_us);
+    Ok(d)
 }
 
 /// Small text file, or `None`.
@@ -300,6 +327,7 @@ fn find_locations() -> (Option<&'static str>, menu::Index) {
                     name: "Imported park".into(),
                     file: OLD_PARK.into(),
                     bytes,
+                    district: false,
                 }],
                 default: Some(0),
             };
@@ -343,7 +371,31 @@ fn load_location(game: &mut Game, places: &mut Places, i: usize, show: bool) -> 
     let demo = game.locations.len() - 1;
     let mut ok = true;
     let (mut read_ms, mut parse_ms) = (0.0, 0.0);
-    if !loc.is_demo() {
+    if loc.district {
+        match places
+            .data_dir
+            .ok_or_else(|| "no data folder".into())
+            .and_then(|d| open_district(d, &loc.file))
+        {
+            Ok(d) => {
+                log(
+                    false,
+                    &format!(
+                        "district {}: {} cells, start {:?}, budget {} KB",
+                        loc.id,
+                        d.index.cells.len(),
+                        d.index.start,
+                        DISTRICT_BUDGET / 1024
+                    ),
+                );
+                game.load_district(d);
+            }
+            Err(e) => {
+                log(true, &format!("location {}: {e}", loc.id));
+                ok = false;
+            }
+        }
+    } else if !loc.is_demo() {
         let t0 = clock_us();
         let data = places
             .data_dir
@@ -380,6 +432,7 @@ fn load_location(game: &mut Game, places: &mut Places, i: usize, show: bool) -> 
             p.models.len() + p.chunks.len(),
             p.vertex_count()
         ),
+        None if game.district().is_some() => "a district, streaming".into(),
         None => "the demo park".into(),
     };
     log(
