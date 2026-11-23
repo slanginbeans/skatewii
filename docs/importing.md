@@ -25,7 +25,7 @@ folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg
   below; about 325 MB, 60 s) and lists them in `parks.txt`, one line per start spot (`district <id>
   city/<District>/index.fgpak <bytes> <start> <name>`: `DownTown`, `DownTown-2`, ... shown as Downtown,
   Downtown 2, ...), so each start is a location in the menu (which scrolls when the list is long). Off by
-  default while the streaming is being tried on the Wii.
+  default until it has run on a real Wii (it runs in Dolphin: "Riding a district" below).
 
 All of it is about 37 MB (the motion library 20 MB, the six parks 12.5 MB). Copy `dist/apps/flatground` to
 the SD card's `apps` folder and the game finds its packs at
@@ -229,7 +229,7 @@ Other places on the disc: `worldDIST_DownTown.big`, `worldDIST_University.big` a
 by their centre (`c<Sim|Pres|Tex>_<x>_<z>_high.xsf`, centres on odd multiples of 50 m; the `Tex` stream's
 own cells sit on multiples of 100 m and overlap, each repeating the textures its area uses). `worlddmo.big`
 and `worldmisc.big` hold dynamic-object data, not places to ride. `fg_import city` measures them and
-`fg_import district` cuts them into cell packs (below); the game doesn't stream them yet.
+`fg_import district` cuts them into cell packs, which the game streams while riding (below).
 
 #### The city districts' cells
 ```bash
@@ -267,25 +267,16 @@ bound: textures that can hold alpha are counted as RGB5A3):
 ```bash
 cargo run --release -p fg_import -- district path/to/skate3.iso --district DownTown [--max 128] [--cap 3072]
 ```
-Writes `imported/city/<district>/`: `index.fgpak` (`city/index`: the cell edge, the lowest collision height, up to
-four start spots, and each cell's centre, pack size, triangles, vertices and texture bytes; format in `game_core/src/city.rs`) and one
-`c_<x>_<z>.fgpak` per cell with anything in it, named by its centre. A cell pack is an ordinary park pack
+Writes `imported/city/<district>/`: `index.fgpak` (`city/index`: the cell edge, the lowest collision height,
+up to four start spots, and each cell's centre, pack size, triangles, vertices and texture bytes; format in
+`game_core/src/city.rs`) and one `c_<x>_<z>.fgpak` per cell with anything in it, named by its centre. A cell pack is an ordinary park pack
 (`park/collision`, `park/spawn` at the flat face nearest the cell's centre, `park/rails`, `park/mesh/<n>`,
 `park/tex/<n>`) in world space, so the game's park loader reads it as it is. Everything the district has, in
 its cell files and its `Global` files, is placed by position: triangles by their centre, meshes by the
 middle of their bounds, rails by their middle point (classified against the collision of the cell and its
 eight neighbours). So the city districts come out in their own cells, and Skate School, which keeps
 everything in `Global`, is cut up the same way. Each cell carries its own copy of the textures its meshes
-use; a cell over `--cap` KiB has its textures halved until it fits (down to 16 px). The start spots are searched for in the district's collision (`tools/import/src/starts.rs`; the park
-spawn rule put Skate School's start under the island and University's in the air). Every walkable level
-on a 4 m grid is tried (Skate School has a walkable lid over the whole island): a spot must be flat, a
-surface the board rides (not stairs), with 2.5 m of headroom, 3 m clear all round, a straight run of at
-least 20 m somewhere (no wall, step or drop, no steep slope) and at least three rails within 60 m at about
-its own height, which keeps out roofs, the seabed and empty lots. It faces along its longest run. The first
-start is the good spot (within 90% of the best score) with the most rails around it; each next one is the
-good spot farthest from those already picked, at least 200 m away. Every start of the four districts was
-checked by putting the rider down there with the cells streaming in: each loads in under 4 s on a simulated
-2 MB/s card and the rider rolls straight off on the ground. US/EU disc, defaults:
+use; a cell over `--cap` KiB has its textures halved until it fits (down to 16 px). US/EU disc, defaults:
 
 | District | Cells | All packs | Cell p50 / p90 / max | Cells shrunk | Converted in |
 |---|---|---|---|---|---|
@@ -298,23 +289,42 @@ checked by putting the rider down there with the cells streaming in: each loads 
 `world::ImportedPark::parse`. One University model (`cPres_50_-850`) has meshes without float positions
 and is left out.
 
-Cells (and parks) are stored so the Wii reads them where they are loaded instead of copying them. The
-collision is packed (`game_core::collision::encode_packed`): corners quantized to 1/256 m around the cell's
-middle and stored once, three `u16` corner indices a triangle, and the query grid built in (1, 2 or 4 m
-squares: the finest whose grid takes no more bytes than the triangles, since parts of Industrial have
-hundreds of sub-metre triangles in a 4 m square), about 14 bytes a
-triangle against 40 before and 52 once parsed. A cell with more than 65,535 triangles or corners would keep
-the plain form; none has. Mesh entries have a 32-byte header (`"FGM2"`, with the bounding sphere), so their
-vertices are 32-byte aligned in the pack, as the GPU needs, and on the big-endian Wii the vertices and
-indices are used in place. Downtown's packs went from 170 to 139 MB, and what parsing them adds from 167 MB
-to about 5 MB on the Wii (worked out from the PC, which still copies the meshes: 76 MB there; not yet measured on a Wii). Older packs (plain collision, 12-byte mesh
-headers) still load, copied.
+#### Start spots
+The park spawn rule (the flat face nearest the origin on the main floor) put Skate School's start under the
+island and University's in the air, so a district's starts are searched for in its collision
+(`tools/import/src/starts.rs`). Every walkable level on a 4 m grid is tried (Skate School has a walkable lid
+over the whole island). A spot must be flat, a surface the board rides (not stairs), with 2.5 m of headroom,
+3 m clear all round, a straight run of at least 20 m somewhere (no wall, step or drop, no steep slope) and at
+least three rails within 60 m at about its own height, which keeps out roofs, the seabed and empty lots. It
+faces along its longest run. The first start is the good spot (within 90% of the best score) with the most
+rails around it; each next one is the good spot farthest from those already picked, at least 200 m away, up
+to four. Every start of the four districts was checked by putting the rider down there with the cells
+streaming in: each loads in under 4 s on a simulated 2 MB/s card and the rider rolls straight off on the
+ground. Looked at in the preview, most are streets and plazas; University's second is a dirt path beside a
+wall (the picker doesn't know which surfaces are concrete).
+
+#### How cells are stored
+Cells (and parks) are stored so the Wii reads them where they are loaded instead of copying them:
+- **Collision** is packed (`game_core::collision::encode_packed`): corners quantized to 1/256 m around the
+  cell's middle and stored once, three `u16` corner indices a triangle, and the query grid built in, about 14
+  bytes a triangle against 40 plain and 52 once parsed. The grid's squares are 1, 2 or 4 m, the finest whose
+  grid takes no more bytes than the triangles: parts of Industrial have hundreds of sub-metre triangles in a
+  4 m square, and the camera's rays there took 17.7 ms a frame on a 4 m grid. A cell with more than 65,535
+  triangles or corners would keep the plain form; none has.
+- **Meshes** have a 32-byte header (`"FGM2"`, with the bounding sphere), so their vertices are 32-byte
+  aligned in the pack, as the GPU needs; on the big-endian Wii the vertices and indices are used in place (a
+  PC copies them).
+- **Textures** were already read in place.
+
+Downtown's packs went from 170 to 139 MB with this, and what parsing them adds from 167 MB to about 5 MB on
+the Wii. Older packs (plain collision, 12-byte mesh headers) still load, copied. `fg_import`'s source hash
+covers the format files in `game_core` (`tools/import/build.rs`), so a format change converts the packs again.
 
 #### Riding a district: streaming
 `game_core::district` rides a district while it streams. Cells within 110 m of the rider (everything drawn,
 and 20 m more) are read in the background (`wii/platform/fg_read.c`), nearest first, two at a time, within a
-budget of pack bytes held (8 MB on the Wii; the parsed cells take about as much again); one finished read is
-parsed per frame. Cells beyond 150 m are dropped, and nearer ones farthest first when a nearer cell needs the
+budget of pack bytes held (8 MB on the Wii; parsing them adds little, as they are read in place); one
+finished read is parsed per frame. Cells beyond 150 m are dropped, and nearer ones farthest first when a nearer cell needs the
 room. The cells within 30 m of the rider are always read, and the riding waits (the rider held still) until
 they are in; at a new district the loading screen counts them in. As ground the district is all of its loaded
 cells (a triangle near an edge belongs to one cell but reaches into the next); a cell's rails keep their index
@@ -448,12 +458,15 @@ plenty for an offline converter.
   can't blend bone weights). It is checked in the PC preview only, not yet in Dolphin or on hardware, and
   its frame cost on the Wii is unmeasured (the HUD now shows it). Bails are clip-based: Skate 3 plays its
   wipeout clips over a physics ragdoll, which is not ported, so a bail is a step-off and a get-up.
-- Park visuals: lightmaps (the second UV set), display lists, model LOD for districts, and the city
-  districts' streaming cells (a block of cells as a location).
+- Park visuals: lightmaps (the second UV set), display lists, and model LOD for districts (a district draws
+  everything within 90 m at full detail, fogged from 50 m).
+- Districts: not yet run on a real Wii (only in Dolphin), so the SD card's speed and the memory there are
+  unmeasured; water has no collision, so riding off Skate School's island lands on the seabed.
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
 - Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
 - Riding: Skate 3 turns, pumps and wipes out through rigid-body truck and ragdoll physics; flatground keeps
   a simpler board model and uses Skate 3's numbers where they carry over (see `game_core::tuning`). The
   board-sideways, late-flip and finger-flip shapes are converted but not used yet, nor dark catches.
-- Game side: `skater.fgpak`, `rules.fgpak`, `motion.fgpak` and the location packs (`parks/*.fgpak`) are loaded. Texture packs, animation packs and the executable
-  tables are parsed and validated, but nothing uses them yet.
+- Game side: `skater.fgpak`, `rules.fgpak`, `motion.fgpak`, the location packs (`parks/*.fgpak`) and the
+  district cells (`city/<district>/`) are loaded. Texture packs, animation packs and the executable tables are
+  parsed and validated, but nothing uses them yet.

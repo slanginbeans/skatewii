@@ -136,7 +136,7 @@ content second.
   167 MB; districts fade into the sky before the draw distance (fog)
 - [x] Districts run in Dolphin: every start of all four, cells streamed for 16 minutes without an error or a
   dropped frame, memory back to the game's own after each (finer collision grids where triangles are dense)
-- [ ] More locations: the city districts and Skate School streamed in 100 m cells (packs per cell, a
+- [x] More locations: the city districts and Skate School streamed in 100 m cells (packs per cell, a
   background reader on the Wii, collision near the rider and models within the draw distance loaded,
   start spots in the location menu)
 
