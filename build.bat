@@ -31,7 +31,7 @@ rem    FG_ISO=D:\skate3.iso       your Skate 3 disc image (default: the one .iso
 rem                               this folder or one folder down; or iso=<path> in fg_local.txt)
 rem    FG_PARK=MegaPark           which park to convert (default BlackBoxPark)
 rem    FG_NO_ASSETS=1             don't convert anything from the disc
-rem    FG_CITY=1                  also cut the city districts into streaming cells (~330 MB)
+rem    FG_CITY=0                  leave out the city districts (streamed cells, ~330 MB)
 rem    FG_DOLPHIN=C:\...\Dolphin.exe   where Dolphin is, if it isn't found by itself
 rem
 rem  The approach (devkitPro's msys2 shell, Docker fallback) follows modernwiifare's build.bat.

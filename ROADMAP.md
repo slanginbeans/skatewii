@@ -122,13 +122,13 @@ content second.
   the last location remembered on the SD card; park meshes drawn in place (no per-frame vertex copy)
 - [x] The city districts measured cell by cell (`fg_import city`: per-cell sizes and maps; docs/importing.md
   "The city districts' cells")
-- [x] The districts and Skate School cut into 100 m cell packs (`fg_import district`, `FG_CITY=1` in the
+- [x] The districts and Skate School cut into 100 m cell packs (`fg_import district`, on by default in the
   build; `game_core::city` index), every cell loading with the park loader
 - [x] Background file reads on the Wii (`wii/platform/fg_read.c`: a queue worked by a low-priority thread;
   `fg_read_start`/`poll`/`cancel`; `game_core::reader` with an in-memory reader for tests)
 - [x] Districts streamed while riding (`game_core::district`: cells read ahead and dropped behind within a
   memory budget, ground and rails across loaded cells, the rider held where cells aren't in yet; districts in
-  the location menu with `FG_CITY=1`)
+  the location menu)
 - [x] District start spots searched for in the collision (flat, open, a long run, rails around at its level;
   up to four a district, spread out), each its own location in a scrolling menu
 - [x] Cells read in place on the Wii (packed collision with its grid, 32-byte aligned mesh vertices and
