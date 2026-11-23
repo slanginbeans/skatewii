@@ -461,7 +461,16 @@ mod tests {
             out.resize(offsets[i], 0);
             out.extend_from_slice(d);
         }
-        alloc::boxed::Box::leak(out.into_boxed_slice())
+        // 32-byte aligned, as the game loads packs (the Wii's `memalign`), so meshes can be read in place;
+        // a plain Vec's alignment would make that depend on the allocator.
+        let layout = core::alloc::Layout::from_size_align(out.len().max(1), 32).unwrap();
+        // SAFETY: the layout has a non-zero size; the block is filled before it is read and never freed.
+        unsafe {
+            let p = alloc::alloc::alloc(layout);
+            assert!(!p.is_null());
+            core::ptr::copy_nonoverlapping(out.as_ptr(), p, out.len());
+            core::slice::from_raw_parts(p, out.len())
+        }
     }
 
     fn floor() -> Vec<u8> {
