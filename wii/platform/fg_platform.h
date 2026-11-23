@@ -77,8 +77,10 @@ void fg_log_start(const char *argv0);
 // Once a frame: writes buffered log lines out every couple of seconds.
 void fg_log_tick(void);
 void fg_log_stop(void);
-// Seconds per frame: 1/50 on PAL50, else 1/60.
+// Seconds per refresh: 1/50 on PAL50, else 1/60.
 float fg_frame_dt(void);
+// Refreshes the last frame stayed on screen (1 when it was on time, 2 when it ran past a refresh, ...).
+uint32_t fg_frame_refreshes(void);
 void fg_read_pad(FgPadRaw *out);
 
 // ---- Called from Rust ----

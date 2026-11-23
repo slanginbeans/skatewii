@@ -9,8 +9,13 @@ int main(int argc, char **argv) {
     fg_platform_init();
     fg_log_start(argc > 0 ? argv[0] : NULL);
     fg_rust_init();
-    const float dt = fg_frame_dt();
+    const float refresh = fg_frame_dt();
     for (;;) {
+        // A frame covers the time the last one was on screen, so a frame that runs past a refresh doesn't
+        // slow the game down (it runs more fixed steps instead). Capped so a long stall (a load) doesn't
+        // jump the rider ahead.
+        uint32_t n = fg_frame_refreshes();
+        const float dt = refresh * (float)(n < 1 ? 1 : n > 4 ? 4 : n);
         FgPadRaw pad;
         fg_read_pad(&pad);
         if (pad.flags & FG_FLAG_EXIT) {

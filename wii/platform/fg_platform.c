@@ -36,6 +36,8 @@ static int mode = MODE_DIRECT;
 static int alpha_test_on;
 // Last frame's waits, measured in fg_end_frame, and the arena use behind it.
 static u32 gpu_wait_us, vsync_wait_us, last_arena_used, last_retrace, missed;
+// Refreshes the last frame stayed on screen: 1 on time, 2 when it ran past one refresh, ...
+static u32 refreshes = 1;
 // Refreshes so far, counted by the video interrupt.
 static volatile u32 retraces;
 static void on_retrace(u32 count) {
@@ -113,6 +115,10 @@ void fg_platform_init(void) {
     GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
     GX_SetAlphaUpdate(GX_TRUE);
     GX_SetColorUpdate(GX_TRUE);
+}
+
+uint32_t fg_frame_refreshes(void) {
+    return refreshes;
 }
 
 float fg_frame_dt(void) {
@@ -419,13 +425,17 @@ void fg_end_frame(void) {
     GX_CopyDisp(xfb[cur_fb], GX_TRUE);
     VIDEO_SetNextFramebuffer(xfb[cur_fb]);
     VIDEO_Flush();
-    // A frame that ran past a refresh shows up as more than one retrace since the last one.
-    u32 r = retraces;
-    if (last_retrace && r - last_retrace > 1) {
-        missed += r - last_retrace - 1;
-    }
     VIDEO_WaitVSync();
-    last_retrace = retraces;
+    // The refreshes between this frame going up and the last one: one when on time, more when the frame
+    // ran past a refresh (it then waited for the one after). Counted after the wait, so a frame that ends
+    // just after a refresh counts as late too.
+    u32 r = retraces;
+    if (last_retrace) {
+        u32 n = r - last_retrace;
+        refreshes = n ? n : 1;
+        missed += refreshes - 1;
+    }
+    last_retrace = r;
     gpu_wait_us = t1 - t0;
     vsync_wait_us = fg_time_us() - t1;
     last_arena_used = arena_used;

@@ -126,18 +126,29 @@ pub fn write_index(locations: &[Location], default: Option<&str>) -> String {
     out
 }
 
-/// The settings file in the app folder (`settings.txt`): `location <id>`, the last location chosen.
-pub fn parse_settings(text: &str) -> Option<String> {
-    text.lines().find_map(|l| {
-        let mut w = l.split_whitespace();
-        (w.next() == Some("location"))
-            .then(|| w.next().map(|s| s.to_string()))
-            .flatten()
-    })
+/// What the settings file in the app folder (`settings.txt`) remembers: `location <id>`, the last location
+/// chosen, and `draw_distance <m>`, a district's draw distance.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Settings {
+    pub location: Option<String>,
+    pub draw_distance: Option<u16>,
 }
 
-pub fn write_settings(location: &str) -> String {
-    format!("# flatground settings\nlocation {location}\n")
+pub fn parse_settings(text: &str) -> Settings {
+    let mut s = Settings::default();
+    for l in text.lines() {
+        let mut w = l.split_whitespace();
+        match (w.next(), w.next()) {
+            (Some("location"), Some(id)) => s.location = Some(id.to_string()),
+            (Some("draw_distance"), Some(d)) => s.draw_distance = d.parse().ok(),
+            _ => {}
+        }
+    }
+    s
+}
+
+pub fn write_settings(location: &str, draw_distance: u16) -> String {
+    format!("# flatground settings\nlocation {location}\ndraw_distance {draw_distance}\n")
 }
 
 /// The location to start in: the last one chosen (settings), else the index's default, else the first.
@@ -165,6 +176,8 @@ pub enum Choice {
     Resume,
     Respawn,
     Quit,
+    /// The draw distance was changed to this (m); the menu stays open.
+    DrawDistance(u16),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,7 +190,16 @@ pub enum Screen {
     Locations,
 }
 
-pub const PAUSE_ITEMS: [&str; 4] = ["RESUME", "CHANGE LOCATION", "RESPAWN", "QUIT TO LOADER"];
+pub const PAUSE_ITEMS: [&str; 5] = [
+    "RESUME",
+    "CHANGE LOCATION",
+    "DRAW DISTANCE",
+    "RESPAWN",
+    "QUIT TO LOADER",
+];
+/// The pause menu's draw distance row: left and right change it by [`DISTANCE_STEP`].
+const DISTANCE_ROW: usize = 2;
+pub const DISTANCE_STEP: u16 = 10;
 
 /// Holding a direction moves again after this long (s), then every [`REPEAT`].
 const REPEAT_DELAY: f32 = 0.4;
@@ -197,6 +219,9 @@ pub struct Menu {
     /// The direction held last frame (-1 up, 1 down, 0 none) and how long until it repeats.
     dir: i8,
     repeat_in: f32,
+    /// The draw distance shown (m), and whether left or right was held last frame.
+    pub draw_distance: u16,
+    side: i8,
 }
 
 impl Menu {
@@ -209,13 +234,17 @@ impl Menu {
             prev_held: held,
             dir: 0,
             repeat_in: 0.0,
+            draw_distance: crate::world::DRAW_DISTANCE as u16,
+            side: 0,
         }
     }
 
-    pub fn pause(held: u32) -> Menu {
+    /// The pause menu, showing `draw_distance` (m).
+    pub fn pause(held: u32, draw_distance: u16) -> Menu {
         Menu {
             screen: Screen::Pause,
             cursor: 0,
+            draw_distance,
             ..Menu::start(0, held)
         }
     }
@@ -271,6 +300,27 @@ impl Menu {
         let accept = pressed & btn::A != 0;
         let back = pressed & btn::B != 0;
         let start = pressed & btn::START != 0;
+        // Left or right on the draw distance row: one step a press (d-pad or stick).
+        let sx = raw.stick_x as f32 / MAIN_RANGE;
+        let side: i8 = if held & btn::DPAD_LEFT != 0 || sx < -STICK {
+            -1
+        } else if held & btn::DPAD_RIGHT != 0 || sx > STICK {
+            1
+        } else {
+            0
+        };
+        let turned = side != 0 && side != self.side;
+        self.side = side;
+        if self.screen == Screen::Pause && self.cursor == DISTANCE_ROW && turned {
+            let lo = crate::world::MIN_DRAW_DISTANCE as i32;
+            let hi = crate::world::MAX_DRAW_DISTANCE as i32;
+            let d = self.draw_distance as i32 + side as i32 * DISTANCE_STEP as i32;
+            let d = d.clamp(lo, hi) as u16;
+            if d != self.draw_distance {
+                self.draw_distance = d;
+                return Some(Choice::DrawDistance(d));
+            }
+        }
         match self.screen {
             Screen::Start => (accept || start).then_some(Choice::Ride(self.cursor)),
             Screen::Locations if accept => Some(Choice::Ride(self.cursor)),
@@ -289,7 +339,8 @@ impl Menu {
                     self.cursor = current.min(locations.saturating_sub(1));
                     None
                 }
-                2 => Some(Choice::Respawn),
+                DISTANCE_ROW => None,
+                3 => Some(Choice::Respawn),
                 _ => Some(Choice::Quit),
             },
             Screen::Pause => None,
@@ -301,7 +352,17 @@ impl Menu {
         let (title, items): (&str, Vec<String>) = match self.screen {
             Screen::Pause => (
                 "PAUSED",
-                PAUSE_ITEMS.iter().map(|s| s.to_string()).collect(),
+                PAUSE_ITEMS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        if i == DISTANCE_ROW {
+                            format!("< {s} {} M >", self.draw_distance)
+                        } else {
+                            s.to_string()
+                        }
+                    })
+                    .collect(),
             ),
             Screen::Start | Screen::Locations => (
                 "CHOOSE A LOCATION",
@@ -360,6 +421,7 @@ impl Menu {
         }
         let help = match self.screen {
             Screen::Start => "UP/DOWN CHOOSE  A RIDE",
+            Screen::Pause if self.cursor == DISTANCE_ROW => "LEFT/RIGHT CHANGE  B/START RESUME",
             Screen::Pause => "A SELECT  B/START RESUME",
             Screen::Locations => "A RIDE  B BACK",
         };
@@ -504,16 +566,16 @@ mod tests {
 
     #[test]
     fn pause_menu_items_and_the_location_list() {
-        let mut m = Menu::pause(btn::START);
+        let mut m = Menu::pause(btn::START, 90);
         // The START that opened it is still held: nothing.
         assert_eq!(m.update(&pad(btn::START), DT, 4, 2), None);
         assert_eq!(tap(&mut m, btn::A, 4, 2), Some(Choice::Resume));
-        let mut m = Menu::pause(0);
+        let mut m = Menu::pause(0, 90);
         assert_eq!(tap(&mut m, btn::START, 4, 2), Some(Choice::Resume));
-        let mut m = Menu::pause(0);
+        let mut m = Menu::pause(0, 90);
         assert_eq!(tap(&mut m, btn::B, 4, 2), Some(Choice::Resume));
         // Change location: the list opens on the location being ridden; B comes back.
-        let mut m = Menu::pause(0);
+        let mut m = Menu::pause(0, 90);
         tap(&mut m, btn::DPAD_DOWN, 4, 2);
         assert_eq!(tap(&mut m, btn::A, 4, 2), None);
         assert_eq!((m.screen, m.cursor), (Screen::Locations, 2));
@@ -523,13 +585,55 @@ mod tests {
         tap(&mut m, btn::DPAD_UP, 4, 2);
         assert_eq!(tap(&mut m, btn::A, 4, 2), Some(Choice::Ride(1)));
         // Respawn and quit.
-        let mut m = Menu::pause(0);
-        tap(&mut m, btn::DPAD_DOWN, 4, 0);
-        tap(&mut m, btn::DPAD_DOWN, 4, 0);
+        let mut m = Menu::pause(0, 90);
+        for _ in 0..3 {
+            tap(&mut m, btn::DPAD_DOWN, 4, 0);
+        }
         assert_eq!(tap(&mut m, btn::A, 4, 0), Some(Choice::Respawn));
-        let mut m = Menu::pause(0);
+        let mut m = Menu::pause(0, 90);
         tap(&mut m, btn::DPAD_UP, 4, 0);
         assert_eq!(tap(&mut m, btn::A, 4, 0), Some(Choice::Quit));
+    }
+
+    #[test]
+    fn the_draw_distance_row_steps_with_left_and_right() {
+        let mut m = Menu::pause(0, 90);
+        tap(&mut m, btn::DPAD_DOWN, 4, 0);
+        tap(&mut m, btn::DPAD_DOWN, 4, 0);
+        assert_eq!(m.cursor, DISTANCE_ROW);
+        // A does nothing there; right and left step it, once a press, and the menu stays open.
+        assert_eq!(tap(&mut m, btn::A, 4, 0), None);
+        assert_eq!(
+            tap(&mut m, btn::DPAD_RIGHT, 4, 0),
+            Some(Choice::DrawDistance(100))
+        );
+        assert_eq!(
+            m.update(&pad(btn::DPAD_LEFT), DT, 4, 0),
+            Some(Choice::DrawDistance(90))
+        );
+        assert_eq!(
+            m.update(&pad(btn::DPAD_LEFT), DT, 4, 0),
+            None,
+            "held: one step"
+        );
+        let mut left = PadRaw::default();
+        left.stick_x = -90;
+        m.update(&pad(0), DT, 4, 0);
+        assert_eq!(m.update(&left, DT, 4, 0), Some(Choice::DrawDistance(80)));
+        // It stops at the ends of the range.
+        let mut m = Menu::pause(0, crate::world::MAX_DRAW_DISTANCE as u16);
+        m.cursor = DISTANCE_ROW;
+        assert_eq!(tap(&mut m, btn::DPAD_RIGHT, 4, 0), None);
+        // Left and right elsewhere do nothing.
+        let mut m = Menu::pause(0, 90);
+        assert_eq!(tap(&mut m, btn::DPAD_RIGHT, 4, 0), None);
+        assert_eq!(m.draw_distance, 90);
+        // The row shows the distance.
+        let mut mesh = MeshBuilder::new();
+        Menu::pause(0, 70).draw(&mut mesh, &[], 0);
+        let mut other = MeshBuilder::new();
+        Menu::pause(0, 120).draw(&mut other, &[], 0);
+        assert_ne!(mesh.verts, other.verts);
     }
 
     #[test]
@@ -539,7 +643,7 @@ mod tests {
         let start = m.verts.len();
         assert!(start > 0);
         let mut p = MeshBuilder::new();
-        Menu::pause(0).draw(&mut p, &[], 0);
+        Menu::pause(0, 90).draw(&mut p, &[], 0);
         assert!(!p.verts.is_empty());
     }
 
@@ -597,9 +701,17 @@ mod tests {
 
     #[test]
     fn settings_and_the_start_location() {
-        let text = write_settings("MegaPark");
-        assert_eq!(parse_settings(&text).as_deref(), Some("MegaPark"));
-        assert_eq!(parse_settings("garbage\nlocation\n"), None);
+        let text = write_settings("MegaPark", 70);
+        let s = parse_settings(&text);
+        assert_eq!(s.location.as_deref(), Some("MegaPark"));
+        assert_eq!(s.draw_distance, Some(70));
+        assert_eq!(parse_settings("garbage\nlocation\n"), Settings::default());
+        // A file from before the draw distance setting.
+        let old = parse_settings("# flatground settings\nlocation DownTown\n");
+        assert_eq!(
+            (old.location.as_deref(), old.draw_distance),
+            (Some("DownTown"), None)
+        );
         let list = vec![
             Location {
                 id: "A".into(),

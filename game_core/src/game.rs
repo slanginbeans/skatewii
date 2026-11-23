@@ -121,6 +121,8 @@ pub struct SectionTimes {
     pub skin_us: u32,
     /// Building and submitting the frame's draws (not waiting for the GPU).
     pub render_us: u32,
+    /// The part of `render_us` spent on the park or district (choosing what's in sight and sending it).
+    pub world_us: u32,
     /// Park meshes and vertices drawn last frame.
     pub park_draws: u32,
     pub park_verts: u32,
@@ -195,6 +197,11 @@ pub struct Game {
     pub timer: Option<fn() -> u32>,
     pub times: SectionTimes,
     render_times: core::cell::Cell<(u32, u32, u32)>,
+    world_us: core::cell::Cell<u32>,
+    /// How far a district is drawn (m): the pause menu's setting.
+    draw_distance: f32,
+    /// The player changed a setting since the platform last saved them.
+    settings_changed: bool,
     /// Simulated time minus shown time (s): ticks run until the simulation is at or just past the frame.
     ahead: f32,
     /// Ticks run since the start.
@@ -283,6 +290,9 @@ impl Game {
             timer: None,
             times: SectionTimes::default(),
             render_times: core::cell::Cell::new((0, 0, 0)),
+            world_us: core::cell::Cell::new(0),
+            draw_distance: crate::world::DRAW_DISTANCE,
+            settings_changed: false,
             ahead: 0.0,
             ticks: 0,
             prev_view: None,
@@ -348,7 +358,8 @@ impl Game {
     /// Rides a district that streams in as the rider goes ([`District`]): the loading screen shows until
     /// the cells around its start are read, then the rider starts there. Replaces the park or district
     /// ridden before (which is freed: call between frames).
-    pub fn load_district(&mut self, district: District) {
+    pub fn load_district(&mut self, mut district: District) {
+        district.set_draw_distance(self.draw_distance);
         self.world = World::District(Box::new(district));
         self.district_wait = true;
     }
@@ -424,7 +435,28 @@ impl Game {
             Choice::Quit => self.request = Some(Request::Quit),
             Choice::Ride(i) if i == self.location => {}
             Choice::Ride(i) => self.request = Some(Request::Load(i.min(self.locations.len() - 1))),
+            Choice::DrawDistance(d) => self.set_draw_distance(d as f32),
         }
+    }
+
+    /// How far a district is drawn (m, the pause menu's setting): its fog and the cells read follow it.
+    pub fn set_draw_distance(&mut self, d: f32) {
+        self.draw_distance = d.clamp(
+            crate::world::MIN_DRAW_DISTANCE,
+            crate::world::MAX_DRAW_DISTANCE,
+        );
+        if let World::District(dist) = &mut self.world {
+            dist.set_draw_distance(self.draw_distance);
+        }
+    }
+
+    pub fn draw_distance(&self) -> f32 {
+        self.draw_distance
+    }
+
+    /// True once after the player changed a setting (the platform saves them).
+    pub fn take_settings_changed(&mut self) -> bool {
+        core::mem::take(&mut self.settings_changed)
     }
 
     /// Uses a rules pack (`fg_import rules`): Skate 3's tuning values and flick shapes from the player's
@@ -599,8 +631,13 @@ impl Game {
         // A menu freezes the riding and takes the pad (the d-pad moves its cursor, not the rider's
         // gestures).
         if let Some(menu) = &mut self.menu {
-            if let Some(c) = menu.update(raw, dt, self.locations.len(), self.location) {
-                self.choose(c, raw.buttons);
+            match menu.update(raw, dt, self.locations.len(), self.location) {
+                Some(Choice::DrawDistance(d)) => {
+                    self.set_draw_distance(d as f32);
+                    self.settings_changed = true;
+                }
+                Some(c) => self.choose(c, raw.buttons),
+                None => {}
             }
             return;
         }
@@ -608,7 +645,7 @@ impl Game {
             return;
         }
         if pressed & btn::START != 0 {
-            self.menu = Some(Menu::pause(raw.buttons));
+            self.menu = Some(Menu::pause(raw.buttons, self.draw_distance as u16));
             return;
         }
         self.blocked &= raw.buttons;
@@ -657,6 +694,7 @@ impl Game {
         self.times.skin_us = t2.wrapping_sub(t1);
         let (render_us, park_draws, park_verts) = self.render_times.get();
         self.times.render_us = render_us;
+        self.times.world_us = self.world_us.get();
         self.times.park_draws = park_draws;
         self.times.park_verts = park_verts;
 
@@ -912,21 +950,28 @@ impl Game {
         }
         gfx.begin_frame(&cam, SKY);
         // A district is drawn only so far around the rider: it fades into the sky before that.
+        let mut reach = crate::world::DRAW_DISTANCE;
         if let World::District(_) = self.world {
+            reach = self.draw_distance;
+            let (start, end) = crate::world::fog_for(reach);
             gfx.fog(Some(crate::gfx::Fog {
-                start: crate::world::FOG_START,
-                end: crate::world::FOG_END,
+                start,
+                end,
                 rgba: SKY,
             }));
         }
+        // Only what the camera can see is drawn.
+        let sight = crate::world::Sight::of(&cam, self.cam.aspect, reach);
+        let tw = now();
         let (draws, verts) = match &self.world {
-            World::Park(p) => p.draw(gfx, cam.eye),
-            World::District(d) => d.draw(gfx, cam.eye),
+            World::Park(p) => p.draw(gfx, &sight),
+            World::District(d) => d.draw(gfx, &sight),
             World::Demo => {
                 gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34());
                 (1, self.park_mesh.len() as u32)
             }
         };
+        self.world_us.set(now().wrapping_sub(tw));
         self.draw_skater(gfx);
         self.draw_hud(gfx);
         // Before end_frame: that waits for the GPU and the TV, which the platform measures itself.
@@ -1276,6 +1321,26 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_that_ran_long_keeps_the_game_at_full_speed() {
+        // The Wii passes the refreshes the last frame was on screen for: a frame shown for two refreshes
+        // runs two ticks, so the game keeps its speed at 30 fps (it doesn't go into slow motion).
+        let mut g = Game::new();
+        let mut slow = Game::new();
+        for i in 0..60 {
+            g.update(&held(crate::input::btn::A), 1.0 / 60.0);
+            if i % 2 == 1 {
+                let before = slow.ticks;
+                slow.update(&held(crate::input::btn::A), 2.0 / 60.0);
+                assert_eq!(slow.ticks - before, 2);
+            }
+        }
+        assert_eq!((g.ticks, slow.ticks), (60, 60));
+        assert_eq!(g.skater.pos, slow.skater.pos);
+        assert_eq!(g.skater.speed, slow.skater.speed);
+        assert_eq!(slow.blend(), 1.0);
+    }
+
+    #[test]
     fn pal50_draws_between_the_last_two_ticks() {
         let mut g = Game::new();
         let mut seen_between = false;
@@ -1436,6 +1501,29 @@ mod tests {
         let f = seen.0.last().copied().flatten().expect("fog in a district");
         assert!(f.start < f.end && f.end < crate::world::DRAW_DISTANCE);
         assert_eq!(f.rgba, SKY);
+
+        // The pause menu's draw distance: the fog comes in with it, the district reads that far, and the
+        // change is flagged for saving once.
+        g.update(&held(btn::START), 1.0 / 60.0);
+        g.update(&held(0), 1.0 / 60.0);
+        for b in [
+            btn::DPAD_DOWN,
+            btn::DPAD_DOWN,
+            btn::DPAD_LEFT,
+            btn::DPAD_LEFT,
+        ] {
+            g.update(&held(b), 1.0 / 60.0);
+            g.update(&held(0), 1.0 / 60.0);
+        }
+        assert_eq!(g.draw_distance(), 70.0);
+        assert_eq!(g.district().unwrap().draw_distance(), 70.0);
+        assert!(g.take_settings_changed() && !g.take_settings_changed());
+        g.render(&mut seen);
+        let near = seen.0.last().copied().flatten().unwrap();
+        assert!(near.end < f.end && near.end < 70.0, "{near:?}");
+        // Out of range: held to the range.
+        g.set_draw_distance(500.0);
+        assert_eq!(g.draw_distance(), crate::world::MAX_DRAW_DISTANCE);
     }
 
     /// Draws nothing.
