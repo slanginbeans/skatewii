@@ -11,9 +11,10 @@ An original skateboarding game for the Nintendo Wii, written in Rust (see README
    pass. Importer tests use synthetic data built in the test. Format knowledge from public research (notably
    SK8-ENGINE/skate-3-rust-engine, GPL-3.0) is fine, with credit. `fg_import` is GPL-3.0-only. The game must
    still boot and play with its built-in placeholder art when no imported data is present.
-   Simple values are fine: tuning numbers, curve points, thresholds and timings known from the game (or SK8)
-   may be used directly as built-in defaults and constants. The rule is about assets and data files, not
-   individual numbers.
+   Simple values are not assets: built-in defaults and constants should use the game's own tuning numbers,
+   curve points, thresholds and timings (from the disc or SK8) wherever they are known, so the game plays like
+   Skate 3 even without imported data. Invent a value only when the real one isn't known. The rule is about
+   assets and data files, not individual numbers.
 2. **`game_core` stays `no_std` + `alloc`** and platform-free: it draws only through `gfx::Gfx` and reads
    only `input::PadRaw`. Use `libm`, not float intrinsics that need a C math library.
 3. **The C/Rust boundary is `wii/platform/fg_platform.h`.** Change it, `wii/game/src/ffi.rs` and the
