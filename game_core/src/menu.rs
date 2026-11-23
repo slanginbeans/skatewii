@@ -393,6 +393,8 @@ pub fn shown(n: usize, cursor: usize) -> (usize, usize) {
 pub struct LocationTour {
     every: u32,
     frames: u32,
+    /// The location last switched to (the game may be on the demo park instead, when it failed to load).
+    at: Option<usize>,
 }
 
 impl LocationTour {
@@ -413,6 +415,7 @@ impl LocationTour {
         LocationTour {
             every: frames.max(1),
             frames: 0,
+            at: None,
         }
     }
 
@@ -424,7 +427,11 @@ impl LocationTour {
             return None;
         }
         self.frames = 0;
-        Some((current + 1) % count)
+        // On from the location last tried, so one that fails to load (the game falls back to the demo park,
+        // the last) doesn't send the tour back to the first every time.
+        let next = (self.at.unwrap_or(current) + 1) % count;
+        self.at = Some(next);
+        Some(next)
     }
 }
 
@@ -630,6 +637,11 @@ mod tests {
             }
         }
         assert_eq!(seen, [1, 2, 0, 1]);
+        // Location 1 fails to load: the game is on the demo park (2), and the tour goes on to 2, then 0.
+        let mut t = LocationTour::every(1);
+        assert_eq!(t.next(0, 3), Some(1));
+        assert_eq!(t.next(2, 3), Some(2));
+        assert_eq!(t.next(2, 3), Some(0));
         assert_eq!(LocationTour::every(5).next(0, 1), None);
     }
 

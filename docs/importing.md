@@ -300,7 +300,9 @@ and is left out.
 
 Cells (and parks) are stored so the Wii reads them where they are loaded instead of copying them. The
 collision is packed (`game_core::collision::encode_packed`): corners quantized to 1/256 m around the cell's
-middle and stored once, three `u16` corner indices a triangle, and the query grid built in, about 14 bytes a
+middle and stored once, three `u16` corner indices a triangle, and the query grid built in (1, 2 or 4 m
+squares: the finest whose grid takes no more bytes than the triangles, since parts of Industrial have
+hundreds of sub-metre triangles in a 4 m square), about 14 bytes a
 triangle against 40 before and 52 once parsed. A cell with more than 65,535 triangles or corners would keep
 the plain form; none has. Mesh entries have a 32-byte header (`"FGM2"`, with the bounding sphere), so their
 vertices are 32-byte aligned in the pack, as the GPU needs, and on the big-endian Wii the vertices and
@@ -322,6 +324,13 @@ Measured on a PC with a simulated card of 2 MB/s, riding a lap of each district 
 the rider once, for 1.9 s, over about 17 minutes and University never, with at most 13 cells (9 MB of
 packs) loaded and the heap peaking about 13 MB above the game's own (on the Wii, without the mesh copies, an
 estimated 9 MB); everything is freed when the district is left.
+
+In Dolphin (`FG_CITY=1`, `tools\dolphin_test.ps1 -Seconds 960 -SwitchEvery 40`: autoplay at every location in
+turn, 40 s each, all 16 district starts): 4,287 cells read and parsed without an error, at most 10 ms a parse;
+no dropped frames in 640 s of districts (frame CPU at most 15.5 ms, the camera's tick at most 4.9 ms); the heap
+at most 8.2 MB above the game's own and back to it after each district (MEM2's free space drops once, from
+23.6 to 19.3 MB, and stays there: the heap's high-water mark). Before the 1 and 2 m grids, the camera's rays
+took up to 17.7 ms a frame at Industrial's first start and frames dropped.
 
 A district fades into the sky from 50 m to 85 m (`world::FOG_START`, `FOG_END`; `Gfx::fog`, on the Wii
 `fg_set_fog`: GX linear fog with the range adjusted across the screen), so models appearing and vanishing at

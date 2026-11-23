@@ -11,7 +11,8 @@
 //!     flags. Copied into memory when parsed.
 //!   - packed ([`encode_packed`], what the importer writes): read in place, nothing copied. `"FGC2"`, `u32`
 //!     vertex count, `u32` triangle count, `f32` origin x, y, z, `f32` step (m), `f32` min x, y, z, `f32`
-//!     max x, y, z, `u32` grid columns, `u32` grid rows, `u32` grid entries (64 bytes); then per vertex 3
+//!     max x, y, z, `u32` grid columns, `u32` grid rows, `u32` grid entries, `f32` grid square edge (1, 2
+//!     or 4 m: finer where the triangles are small and many) (68 bytes); then per vertex 3
 //!     `i16` (origin + value x step), padded to 4 bytes; per triangle 3 `u16` vertex indices, `u16`
 //!     surface id, `u16` flags; per grid cell (rows x columns, then one more) the `u32` start of its
 //!     entries; the entries, `u16` triangle indices. About 14 bytes a triangle, against 40 plain and 52
@@ -28,15 +29,19 @@ use crate::pack::{Kind, Pack};
 use crate::park::{Hit, Surface, Terrain};
 use crate::rails::{self, Rail};
 
-/// Size of a grid cell (m).
+/// Size of a grid cell (m), unless a packed collision says otherwise.
 pub const CELL: f32 = 4.0;
+/// Grid squares a packed collision may use, finest first.
+const PACKED_CELLS: [f32; 3] = [1.0, 2.0, 4.0];
 /// Triangles whose normal is at least this upward are ground; flatter-to-the-side ones are walls.
 pub const WALKABLE_Y: f32 = 0.35;
 /// Height above the board at which walls are tested (a bit below the knees).
 const WALL_PROBE: f32 = 0.25;
 pub const TRIANGLE_BYTES: usize = 40;
+/// Most samples along a ray or wall test (every half grid square): 1024 covers 512 m on a 1 m grid.
+const MAX_STEPS: usize = 1024;
 const PACKED_MAGIC: &[u8; 4] = b"FGC2";
-const PACKED_HEADER: usize = 64;
+const PACKED_HEADER: usize = 68;
 const PACKED_VERTEX: usize = 6;
 const PACKED_TRI: usize = 10;
 
@@ -61,6 +66,8 @@ pub struct TriMesh {
     pub max: Vec3,
     cols: usize,
     rows: usize,
+    /// The grid square's edge (m).
+    cell: f32,
     grid: Grid,
     spawn: (Vec3, f32),
     /// Grind rails (`park/rails`, optional).
@@ -107,6 +114,51 @@ enum Grid {
         start: usize,
         tris: usize,
     },
+}
+
+/// The triangles as a query reads them.
+enum View<'a> {
+    Owned(&'a [Tri]),
+    Packed {
+        verts: &'a [u8],
+        tris: &'a [u8],
+        origin: Vec3,
+        step: f32,
+    },
+}
+
+impl View<'_> {
+    /// Triangle `i`'s corners.
+    #[inline]
+    fn corners(&self, i: usize) -> [Vec3; 3] {
+        match self {
+            View::Owned(t) => t[i].v,
+            View::Packed {
+                verts,
+                tris,
+                origin,
+                step,
+            } => {
+                let t = &tris[i * PACKED_TRI..i * PACKED_TRI + 6];
+                let corner = |k: usize| {
+                    let at = u16::from_be_bytes([t[2 * k], t[2 * k + 1]]) as usize * PACKED_VERTEX;
+                    let c = &verts[at..at + PACKED_VERTEX];
+                    let q = |j: usize| i16::from_be_bytes([c[2 * j], c[2 * j + 1]]) as f32 * *step;
+                    v3(origin.x + q(0), origin.y + q(1), origin.z + q(2))
+                };
+                [corner(0), corner(1), corner(2)]
+            }
+        }
+    }
+
+    /// Triangle `i`'s unit normal (`v`: its corners).
+    #[inline]
+    fn normal(&self, i: usize, v: &[Vec3; 3]) -> Vec3 {
+        match self {
+            View::Owned(t) => t[i].n,
+            View::Packed { .. } => TriMesh::normal_of(v),
+        }
+    }
 }
 
 /// A grid cell's triangle indices.
@@ -227,7 +279,23 @@ pub fn encode_packed(tris: &[([[f32; 3]; 3], u16, u16)]) -> Option<Vec<u8>> {
             flags: *flags,
         });
     }
-    let m = TriMesh::build(parsed, (Vec3::ZERO, 0.0));
+    // The finest grid whose squares' starts and entries take no more than the triangles and corners
+    // bytes (at least 4 KB): a dense cell's queries then test tens of triangles, not hundreds.
+    let geometry = verts.len() * PACKED_VERTEX + out_tris.len() * PACKED_TRI;
+    let grid_bytes = |m: &TriMesh| match &m.grid {
+        Grid::Owned { start, tris } => start.len() * 4 + tris.len() * 2,
+        Grid::Packed { .. } => usize::MAX,
+    };
+    let mut m = TriMesh::build_with(parsed, (Vec3::ZERO, 0.0), PACKED_CELLS[0]);
+    for &cell in &PACKED_CELLS[1..] {
+        if grid_bytes(&m) <= geometry.max(4096) {
+            break;
+        }
+        let Store::Owned(t) = core::mem::replace(&mut m.tris, Store::Owned(Vec::new())) else {
+            return None;
+        };
+        m = TriMesh::build_with(t, (Vec3::ZERO, 0.0), cell);
+    }
     let Grid::Owned {
         start,
         tris: entries,
@@ -248,6 +316,7 @@ pub fn encode_packed(tris: &[([[f32; 3]; 3], u16, u16)]) -> Option<Vec<u8>> {
     for w in [m.cols as u32, m.rows as u32, entries.len() as u32] {
         out.extend_from_slice(&w.to_be_bytes());
     }
+    out.extend_from_slice(&m.cell.to_be_bytes());
     for c in &verts {
         for v in c {
             out.extend_from_slice(&v.to_be_bytes());
@@ -312,8 +381,14 @@ impl TriMesh {
         let step = f(24);
         let (min, max) = (v3(f(28), f(32), f(36)), v3(f(40), f(44), f(48)));
         let (cols, rows, entries) = (u(52), u(56), u(60));
+        let cell = f(64);
         let cells = cols.checked_mul(rows).ok_or(Error::Bad)?;
-        if nv > 0xffff || nt > 0xffff || cells == 0 || cells > 1 << 24 {
+        if nv > 0xffff
+            || nt > 0xffff
+            || cells == 0
+            || cells > 1 << 24
+            || !PACKED_CELLS.contains(&cell)
+        {
             return Err(Error::Bad);
         }
         let verts_at = PACKED_HEADER;
@@ -352,6 +427,7 @@ impl TriMesh {
             max,
             cols,
             rows,
+            cell,
             grid: Grid::Packed {
                 start,
                 tris: entries_at,
@@ -377,6 +453,28 @@ impl TriMesh {
     pub fn tri(&self, i: usize) -> Tri {
         match &self.tris {
             Store::Owned(t) => t[i],
+            Store::Packed { data, tris_at, .. } => {
+                let v = self.corners(i);
+                let at = tris_at + i * PACKED_TRI;
+                Tri {
+                    v,
+                    n: TriMesh::normal_of(&v),
+                    surface: be16(data, at + 6),
+                    flags: be16(data, at + 8),
+                }
+            }
+        }
+    }
+
+    /// Triangle `i`'s corners: what the queries test first, without working out the normal.
+    fn corners(&self, i: usize) -> [Vec3; 3] {
+        self.view().corners(i)
+    }
+
+    /// The triangles, unpacked once for a query's loop.
+    fn view(&self) -> View<'_> {
+        match &self.tris {
+            Store::Owned(t) => View::Owned(t),
             Store::Packed {
                 data,
                 verts_at,
@@ -384,22 +482,17 @@ impl TriMesh {
                 origin,
                 step,
                 ..
-            } => {
-                let at = tris_at + i * PACKED_TRI;
-                let corner = |k: usize| {
-                    let v = verts_at + be16(data, at + 2 * k) as usize * PACKED_VERTEX;
-                    let c = |j: usize| be16(data, v + 2 * j) as i16 as f32 * step;
-                    *origin + v3(c(0), c(1), c(2))
-                };
-                let v = [corner(0), corner(1), corner(2)];
-                Tri {
-                    v,
-                    n: (v[1] - v[0]).cross(v[2] - v[0]).normalize_or(Vec3::UP),
-                    surface: be16(data, at + 6),
-                    flags: be16(data, at + 8),
-                }
-            }
+            } => View::Packed {
+                verts: &data[*verts_at..*tris_at],
+                tris: &data[*tris_at..],
+                origin: *origin,
+                step: *step,
+            },
         }
+    }
+
+    fn normal_of(v: &[Vec3; 3]) -> Vec3 {
+        (v[1] - v[0]).cross(v[2] - v[0]).normalize_or(Vec3::UP)
     }
 
     /// Every triangle.
@@ -465,6 +558,11 @@ impl TriMesh {
     }
 
     fn build(tris: Vec<Tri>, spawn: (Vec3, f32)) -> TriMesh {
+        TriMesh::build_with(tris, spawn, CELL)
+    }
+
+    /// With grid squares `cell` m across.
+    fn build_with(tris: Vec<Tri>, spawn: (Vec3, f32), cell: f32) -> TriMesh {
         let mut min = v3(f32::MAX, f32::MAX, f32::MAX);
         let mut max = v3(f32::MIN, f32::MIN, f32::MIN);
         for t in &tris {
@@ -477,14 +575,15 @@ impl TriMesh {
             min = Vec3::ZERO;
             max = Vec3::ZERO;
         }
-        let cols = (((max.x - min.x) / CELL) as usize + 1).max(1);
-        let rows = (((max.z - min.z) / CELL) as usize + 1).max(1);
+        let cols = (((max.x - min.x) / cell) as usize + 1).max(1);
+        let rows = (((max.z - min.z) / cell) as usize + 1).max(1);
         let mut m = TriMesh {
             tris: Store::Owned(Vec::new()),
             min,
             max,
             cols,
             rows,
+            cell,
             grid: Grid::Owned {
                 start: Vec::new(),
                 tris: Vec::new(),
@@ -522,8 +621,8 @@ impl TriMesh {
 
     fn cell_of(&self, x: f32, z: f32) -> (isize, isize) {
         (
-            ((x - self.min.x) / CELL) as isize - (x < self.min.x) as isize,
-            ((z - self.min.z) / CELL) as isize - (z < self.min.z) as isize,
+            ((x - self.min.x) / self.cell) as isize - (x < self.min.x) as isize,
+            ((z - self.min.z) / self.cell) as isize - (z < self.min.z) as isize,
         )
     }
 
@@ -566,8 +665,8 @@ impl TriMesh {
     }
 
     /// Height of `t`'s plane at (x, z) if (x, z) is inside it seen from above.
-    fn height_at(t: &Tri, x: f32, z: f32) -> Option<f32> {
-        let [a, b, c] = t.v;
+    fn height_at(v: &[Vec3; 3], x: f32, z: f32) -> Option<f32> {
+        let [a, b, c] = *v;
         let d = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z);
         if d.abs() < 1e-12 {
             return None;
@@ -581,8 +680,9 @@ impl TriMesh {
 
     /// Does the segment p..q cross a wall (a steep triangle)? Checks every cell along the segment.
     pub fn wall_between(&self, p: Vec3, q: Vec3) -> bool {
+        let view = self.view();
         let d = q - p;
-        let steps = ((d.x.abs().max(d.z.abs()) / (CELL * 0.5)) as usize + 1).min(64);
+        let steps = ((d.x.abs().max(d.z.abs()) / (self.cell * 0.5)) as usize + 1).min(MAX_STEPS);
         let mut last = None;
         for s in 0..=steps {
             let at = p + d * (s as f32 / steps as f32);
@@ -592,8 +692,8 @@ impl TriMesh {
             }
             last = Some(cell);
             let hit = self.cell(at.x, at.z).any(|i| {
-                let t = self.tri(i as usize);
-                t.n.y.abs() < WALKABLE_Y && TriMesh::segment_hits(&t, p, q)
+                let v = view.corners(i as usize);
+                TriMesh::segment_hits(&v, p, q) && view.normal(i as usize, &v).y.abs() < WALKABLE_Y
             });
             if hit {
                 return true;
@@ -604,10 +704,11 @@ impl TriMesh {
 
     /// The nearest triangle (either side) a ray from `from` along the unit `dir` meets within `max`.
     pub fn ray(&self, from: Vec3, dir: Vec3, max: f32) -> Option<Hit> {
+        let view = self.view();
         let to = from + dir * max;
-        let steps = (((to.x - from.x).abs().max((to.z - from.z).abs()) / (CELL * 0.5)) as usize
-            + 1)
-        .min(64);
+        let steps =
+            (((to.x - from.x).abs().max((to.z - from.z).abs()) / (self.cell * 0.5)) as usize + 1)
+                .min(MAX_STEPS);
         let mut best: Option<(f32, usize)> = None;
         let mut last = None;
         for s in 0..=steps {
@@ -618,8 +719,8 @@ impl TriMesh {
             }
             last = Some(cell);
             for i in self.cell(at.x, at.z) {
-                let t = self.tri(i as usize);
-                if let Some(k) = TriMesh::segment_t(&t, from, to)
+                let v = view.corners(i as usize);
+                if let Some(k) = TriMesh::segment_t(&v, from, to)
                     && best.is_none_or(|(b, _)| k < b)
                 {
                     best = Some((k, i as usize));
@@ -638,16 +739,16 @@ impl TriMesh {
     }
 
     /// Where along p..q (0..1) the segment crosses triangle t, if it does. (Möller-Trumbore, both sides.)
-    fn segment_t(t: &Tri, p: Vec3, q: Vec3) -> Option<f32> {
+    fn segment_t(t: &[Vec3; 3], p: Vec3, q: Vec3) -> Option<f32> {
         let d = q - p;
-        let (e1, e2) = (t.v[1] - t.v[0], t.v[2] - t.v[0]);
+        let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
         let h = d.cross(e2);
         let a = e1.dot(h);
         if a.abs() < 1e-10 {
             return None;
         }
         let f = 1.0 / a;
-        let s = p - t.v[0];
+        let s = p - t[0];
         let u = f * s.dot(h);
         if !(0.0..=1.0).contains(&u) {
             return None;
@@ -662,16 +763,16 @@ impl TriMesh {
     }
 
     /// Does the segment p..q cross triangle t? (Möller-Trumbore, both sides.)
-    fn segment_hits(t: &Tri, p: Vec3, q: Vec3) -> bool {
+    fn segment_hits(t: &[Vec3; 3], p: Vec3, q: Vec3) -> bool {
         let d = q - p;
-        let (e1, e2) = (t.v[1] - t.v[0], t.v[2] - t.v[0]);
+        let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
         let h = d.cross(e2);
         let a = e1.dot(h);
         if a.abs() < 1e-10 {
             return false;
         }
         let f = 1.0 / a;
-        let s = p - t.v[0];
+        let s = p - t[0];
         let u = f * s.dot(h);
         if !(0.0..=1.0).contains(&u) {
             return false;
@@ -692,17 +793,19 @@ impl Terrain for TriMesh {
             height: f32::MIN,
             normal: Vec3::UP,
         };
+        let view = self.view();
         for i in self.cell(x, z) {
-            let t = &self.tri(i as usize);
-            // Ground faces up; triangles wound the other way are flipped (collision is two-sided).
-            let n = if t.n.y < 0.0 { -t.n } else { t.n };
-            if n.y < WALKABLE_Y {
+            let v = view.corners(i as usize);
+            let Some(h) = TriMesh::height_at(&v, x, z) else {
+                continue;
+            };
+            if h > max || h <= best.height {
                 continue;
             }
-            if let Some(h) = TriMesh::height_at(t, x, z)
-                && h <= max
-                && h > best.height
-            {
+            // Ground faces up; triangles wound the other way are flipped (collision is two-sided).
+            let n = view.normal(i as usize, &v);
+            let n = if n.y < 0.0 { -n } else { n };
+            if n.y >= WALKABLE_Y {
                 best = Surface {
                     height: h,
                     normal: n,
@@ -869,6 +972,60 @@ mod tests {
             TriMesh::parse(data, (Vec3::ZERO, 0.0)).unwrap().len(),
             plain.len()
         );
+    }
+
+    #[test]
+    fn dense_collision_gets_a_finer_grid() {
+        // A 200 m strip of floor in 0.25 m triangles (dense, as some of Industrial is), and a wall at its
+        // far end.
+        let mut tris = Vec::new();
+        for i in 0..800 {
+            for j in 0..8 {
+                let (x, z) = (i as f32 * 0.25, j as f32 * 0.25);
+                tris.push((
+                    [[x, 0.0, z], [x, 0.0, z + 0.25], [x + 0.25, 0.0, z + 0.25]],
+                    1,
+                    0,
+                ));
+                tris.push((
+                    [[x, 0.0, z], [x + 0.25, 0.0, z + 0.25], [x + 0.25, 0.0, z]],
+                    1,
+                    0,
+                ));
+            }
+        }
+        tris.push((
+            [[199.0, 0.0, -1.0], [199.0, 3.0, -1.0], [199.0, 3.0, 3.0]],
+            2,
+            0,
+        ));
+        tris.push((
+            [[199.0, 0.0, -1.0], [199.0, 3.0, 3.0], [199.0, 0.0, 3.0]],
+            2,
+            0,
+        ));
+        let data: &'static [u8] = Box::leak(encode_packed(&tris).unwrap().into_boxed_slice());
+        let packed = TriMesh::parse_static(data, (Vec3::ZERO, 0.0)).unwrap();
+        let plain = TriMesh::parse(&encode(&tris), (Vec3::ZERO, 0.0)).unwrap();
+        assert!(packed.cell < CELL, "a finer grid: {} m", packed.cell);
+        for k in 0..50 {
+            let (x, z) = (k as f32 * 3.9 + 0.1, (k % 7) as f32 * 0.27 + 0.05);
+            assert_eq!(
+                packed.ground(x, z, 1.0),
+                plain.ground(x, z, 1.0),
+                "at {x} {z}"
+            );
+        }
+        // A long ray down the strip reaches the wall through every grid square on the way.
+        let from = v3(1.0, 1.0, 1.0);
+        let (a, b) = (
+            packed.ray(from, v3(1.0, 0.0, 0.0), 250.0).unwrap(),
+            plain.ray(from, v3(1.0, 0.0, 0.0), 250.0).unwrap(),
+        );
+        assert!((a.t - 198.0).abs() < 0.01 && (b.t - 198.0).abs() < 0.01);
+        assert_eq!(a.surface, 2);
+        assert!(packed.blocked(v3(198.5, 0.0, 1.0), v3(199.5, 0.0, 1.0)));
+        assert!(packed.occluded(v3(2.0, 1.0, 1.0), v3(220.0, 1.0, 1.0)));
     }
 
     #[test]
