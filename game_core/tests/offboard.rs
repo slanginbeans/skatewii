@@ -137,9 +137,22 @@ fn the_stick_pulled_back_turns_round_on_the_spot() {
     let mut g = on_foot(LANE, 0.0);
     let start = g.skater.pos;
     let h0 = g.skater.biped.heading;
-    // Back and a little to the side (straight back has no side to turn to: Skate 3 turns right).
-    run(&mut g, 40, [10, -100], 0);
-    let turned = wrap_angle(g.skater.biped.heading - h0).abs();
+    // Back and to the right (straight back has no side to turn to: Skate 3 turns right). The stick is read
+    // against the chase camera, which sits a few degrees to one side after getting off (so the stick's side
+    // has to be clear of that) and follows him round, so he may carry on past facing back: the most he
+    // turned counts.
+    let mut turned: f32 = 0.0;
+    let mut right = 0.0;
+    for _ in 0..40 {
+        run(&mut g, 1, [30, -100], 0);
+        let d = wrap_angle(g.skater.biped.heading - h0);
+        if turned < 0.3 {
+            right = d;
+        }
+        turned = turned.max(d.abs());
+    }
+    // Turning right is towards -x when facing +z: the yaw goes down.
+    assert!(right < 0.0, "turned the wrong way: {right}");
     assert!(turned > 2.5, "turned {:.0} deg", turned.to_degrees());
     let moved = (g.skater.pos - start).horizontal().length();
     // (The stick stays where it points while he turns: towards the end it is ahead and he walks.)

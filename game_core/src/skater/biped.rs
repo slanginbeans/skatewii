@@ -90,7 +90,8 @@ pub struct BipedInput {
 /// The move amount and turn from the stick in the world against the facing (SK8 ground_input.rs).
 pub fn read_stick(t: &BipedTuning, heading: f32, world: [f32; 2]) -> (f32, f32) {
     let (fx, fz) = (sinf(heading), cosf(heading));
-    let (rx, rz) = (cosf(heading), -sinf(heading));
+    // The walker's right (forward x up), as `world_stick`'s.
+    let (rx, rz) = (-cosf(heading), sinf(heading));
     let (x, z) = (world[0] * rx + world[1] * rz, world[0] * fx + world[1] * fz);
     let mag = sqrtf(x * x + z * z).min(1.0);
     if mag <= 0.0 {
@@ -106,10 +107,11 @@ pub fn read_stick(t: &BipedTuning, heading: f32, world: [f32; 2]) -> (f32, f32) 
     )
 }
 
-/// The stick turned into the world by the camera's yaw (x, z).
+/// The stick turned into the world by the camera's yaw (x, z): forward is where the camera looks, right is
+/// the screen's right (forward x up: -x when the camera looks along +z, as Y is up and the axes right-handed).
 pub fn world_stick(stick: [f32; 2], cam_yaw: f32) -> [f32; 2] {
     let (fx, fz) = (sinf(cam_yaw), cosf(cam_yaw));
-    let (rx, rz) = (cosf(cam_yaw), -sinf(cam_yaw));
+    let (rx, rz) = (-cosf(cam_yaw), sinf(cam_yaw));
     [stick[0] * rx + stick[1] * fx, stick[0] * rz + stick[1] * fz]
 }
 
@@ -211,7 +213,8 @@ impl Biped {
         let turn_error = t.turn_vs_speed.eval(self.speed) * steer * DEG - self.turn;
         let turn_most = t.turn_delta_vs_speed.eval(self.speed) * DEG * ticks;
         self.turn += clamp(turn_error, -turn_most, turn_most);
-        self.heading = wrap_angle(self.heading + self.turn * dt);
+        // Turning right (positive) is towards -x when facing +z: the yaw goes down.
+        self.heading = wrap_angle(self.heading - self.turn * dt);
 
         if input.jump {
             self.jump(t, gravity);
@@ -355,10 +358,10 @@ mod tests {
             mag.abs() < 1e-4 && (steer - 1.7).abs() < 1e-3,
             "{mag} {steer}"
         );
-        // To the right (+x when facing +z): half a turn's angle, turning right (+).
-        let (mag, steer) = read_stick(&T, 0.0, [1.0, 0.0]);
+        // To the right (-x when facing +z): half a turn's angle, turning right (+).
+        let (mag, steer) = read_stick(&T, 0.0, [-1.0, 0.0]);
         assert!(mag > 0.0 && steer > 0.0, "{mag} {steer}");
-        let (_, left) = read_stick(&T, 0.0, [-1.0, 0.0]);
+        let (_, left) = read_stick(&T, 0.0, [1.0, 0.0]);
         assert!((left + steer).abs() < 1e-4);
         // Half pushed scales both.
         let (half, _) = read_stick(&T, 0.0, [0.0, 0.5]);
@@ -367,12 +370,27 @@ mod tests {
 
     #[test]
     fn the_stick_is_read_from_the_camera() {
-        // The camera looking along +x: the stick forward is +x in the world.
-        let w = world_stick([0.0, 1.0], core::f32::consts::FRAC_PI_2);
-        assert!((w[0] - 1.0).abs() < 1e-5 && w[1].abs() < 1e-5, "{w:?}");
-        // Its right is -z.
-        let w = world_stick([1.0, 0.0], core::f32::consts::FRAC_PI_2);
-        assert!(w[0].abs() < 1e-5 && (w[1] + 1.0).abs() < 1e-5, "{w:?}");
+        use crate::math::v3;
+        for yaw in [0.0, core::f32::consts::FRAC_PI_2, 2.0, -2.5] {
+            // Forward is where the camera looks.
+            let w = world_stick([0.0, 1.0], yaw);
+            assert!(
+                (w[0] - sinf(yaw)).abs() < 1e-5 && (w[1] - cosf(yaw)).abs() < 1e-5,
+                "{w:?}"
+            );
+            // Right is the screen's right, as the renderer draws it: the view's forward x up.
+            let screen_right = v3(sinf(yaw), 0.0, cosf(yaw)).cross(v3(0.0, 1.0, 0.0));
+            let w = world_stick([1.0, 0.0], yaw);
+            assert!(
+                (w[0] - screen_right.x).abs() < 1e-5 && (w[1] - screen_right.z).abs() < 1e-5,
+                "yaw {yaw}: {w:?} vs {screen_right:?}"
+            );
+        }
+        // The camera behind a walker facing +z: stick right is a right turn (positive), towards -x.
+        let (_, steer) = read_stick(&T, 0.0, world_stick([1.0, 0.3], 0.0));
+        assert!(steer > 0.0, "{steer}");
+        let (_, steer) = read_stick(&T, 0.0, world_stick([-1.0, 0.3], 0.0));
+        assert!(steer < 0.0, "{steer}");
     }
 
     #[test]
