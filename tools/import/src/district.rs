@@ -293,7 +293,8 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
                 (t.v, t.surface, t.flags as u16)
             })
             .collect();
-        game_core::collision::encode(&t)
+        // Packed (read in place by the game), or plain when it is too big for that.
+        game_core::collision::encode_packed(&t).unwrap_or_else(|| game_core::collision::encode(&t))
     };
     let mut cache = TextureCache::new();
     let mut infos = Vec::new();
@@ -487,7 +488,7 @@ mod tests {
         ]);
         let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
         let park = game_core::world::ImportedPark::parse(bytes).unwrap();
-        assert_eq!(park.mesh.tris.len(), 2);
+        assert_eq!(park.mesh.len(), 2);
 
         let dir = std::env::temp_dir().join(format!("fg_district_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

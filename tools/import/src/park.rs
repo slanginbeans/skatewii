@@ -295,7 +295,9 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         .iter()
         .map(|t| (t.v, t.surface, t.flags as u16))
         .collect();
-    let collision = game_core::collision::encode(&encoded);
+    // Packed (read in place by the game), or plain when it is too big for that.
+    let collision = game_core::collision::encode_packed(&encoded)
+        .unwrap_or_else(|| game_core::collision::encode(&encoded));
     // The far probes reach out by the board's deck-centre-to-truck distance (the disc's).
     let far = deck_to_truck(disc).unwrap_or(game_core::rails::FAR_SIDE);
     let classified = classify_rails(&collision, &rails, far)?;

@@ -227,7 +227,7 @@ const STATUS_EVERY: f32 = 1.0;
 enum World {
     /// The built-in demo park (`Game::park`).
     Demo,
-    Park(ImportedPark),
+    Park(Box<ImportedPark>),
     District(Box<District>),
 }
 
@@ -339,7 +339,7 @@ impl Game {
     /// textures in place. On an error the park ridden before stays.
     pub fn load_park(&mut self, pack: &'static [u8]) -> Result<(), collision::Error> {
         let p = ImportedPark::parse(pack)?;
-        self.world = World::Park(p);
+        self.world = World::Park(Box::new(p));
         self.district_wait = false;
         self.start_over();
         Ok(())
@@ -911,6 +911,14 @@ impl Game {
             return;
         }
         gfx.begin_frame(&cam, SKY);
+        // A district is drawn only so far around the rider: it fades into the sky before that.
+        if let World::District(_) = self.world {
+            gfx.fog(Some(crate::gfx::Fog {
+                start: crate::world::FOG_START,
+                end: crate::world::FOG_END,
+                rgba: SKY,
+            }));
+        }
         let (draws, verts) = match &self.world {
             World::Park(p) => p.draw(gfx, cam.eye),
             World::District(d) => d.draw(gfx, cam.eye),
@@ -1342,6 +1350,92 @@ mod tests {
         let (prev, cur) = (g.prev_view.unwrap().cam.eye, g.cam.camera().eye);
         let k = g.blend();
         assert!((g.drawn_camera().eye - prev.lerp(cur, k)).length() < 1e-4);
+    }
+
+    /// Keeps the fog asked for.
+    #[derive(Default)]
+    struct FogSeen(Vec<Option<crate::gfx::Fog>>);
+    impl Gfx for FogSeen {
+        fn begin_frame(&mut self, _cam: &crate::gfx::Camera, _clear: u32) {}
+        fn fog(&mut self, f: Option<crate::gfx::Fog>) {
+            self.0.push(f);
+        }
+        fn draw_tris(&mut self, _v: &[Vertex], _m: &crate::math::Mat34) {}
+        fn draw_indexed(
+            &mut self,
+            _v: &[crate::gfx::TexVertex],
+            _i: &[u16],
+            _t: Option<&crate::gfx::Texture>,
+            _m: &crate::math::Mat34,
+        ) {
+        }
+        fn draw_2d(&mut self, _v: &[Vertex]) {}
+        fn end_frame(&mut self) {}
+    }
+
+    #[test]
+    fn a_district_fades_into_the_sky_before_the_draw_distance() {
+        use crate::city::{CellInfo, Index};
+        use crate::reader::MemReader;
+        use alloc::vec;
+        let mut g = Game::new();
+        let mut seen = FogSeen::default();
+        g.render(&mut seen);
+        assert!(seen.0.is_empty(), "no fog on the demo park");
+        let floor = crate::collision::encode(&[
+            (
+                [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0], [100.0, 0.0, 100.0]],
+                1,
+                0,
+            ),
+            (
+                [[0.0, 0.0, 0.0], [100.0, 0.0, 100.0], [100.0, 0.0, 0.0]],
+                1,
+                0,
+            ),
+        ]);
+        let spawn: Vec<u8> = [50.0f32, 0.0, 50.0, 0.0]
+            .iter()
+            .flat_map(|f| f.to_be_bytes())
+            .collect();
+        let p = crate::pack::encode(&[
+            (
+                "park/collision",
+                crate::pack::Kind::Collision,
+                &floor,
+                0,
+                0,
+                0,
+            ),
+            ("park/spawn", crate::pack::Kind::Data, &spawn, 0, 0, 0),
+        ]);
+        let mut r = MemReader::new();
+        r.add("d/c_50_50.fgpak", p.clone());
+        let index = Index {
+            cell: 100.0,
+            floor: 0.0,
+            starts: vec![(v3(50.0, 0.0, 50.0), 0.0)],
+            cells: vec![CellInfo {
+                x: 50,
+                z: 50,
+                bytes: p.len() as u32,
+                tris: 2,
+                vertices: 0,
+                texture_bytes: 0,
+            }],
+        };
+        let r = alloc::rc::Rc::new(core::cell::RefCell::new(r));
+        let d = crate::district::District::new(&index.encode(), "d", Box::new(r.clone()), 1 << 20)
+            .unwrap();
+        g.load_district(d);
+        while g.district_loading() {
+            r.borrow_mut().service();
+            g.update(&held(0), 1.0 / 60.0);
+        }
+        g.render(&mut seen);
+        let f = seen.0.last().copied().flatten().expect("fog in a district");
+        assert!(f.start < f.end && f.end < crate::world::DRAW_DISTANCE);
+        assert_eq!(f.rgba, SKY);
     }
 
     /// Draws nothing.

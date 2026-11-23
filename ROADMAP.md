@@ -131,6 +131,9 @@ content second.
   the location menu with `FG_CITY=1`)
 - [x] District start spots searched for in the collision (flat, open, a long run, rails around at its level;
   up to four a district, spread out), each its own location in a scrolling menu
+- [x] Cells read in place on the Wii (packed collision with its grid, 32-byte aligned mesh vertices and
+  indices used where loaded): Downtown's packs 170 to 139 MB, parsing them adds about 5 MB instead of
+  167 MB; districts fade into the sky before the draw distance (fog)
 - [ ] More locations: the city districts and Skate School streamed in 100 m cells (packs per cell, a
   background reader on the Wii, collision near the rider and models within the draw distance loaded,
   start spots in the location menu)

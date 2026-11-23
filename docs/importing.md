@@ -22,7 +22,7 @@ folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg
   old single `data/park.fgpak` from earlier builds is removed (the game still reads one when there is no
   `parks.txt`).
 - with `FG_CITY=1`, also cuts the city districts and Skate School into cell packs (`data/city/<district>/`,
-  below; about 390 MB, 40 s) and lists them in `parks.txt`, one line per start spot (`district <id>
+  below; about 325 MB, 60 s) and lists them in `parks.txt`, one line per start spot (`district <id>
   city/<District>/index.fgpak <bytes> <start> <name>`: `DownTown`, `DownTown-2`, ... shown as Downtown,
   Downtown 2, ...), so each start is a location in the menu (which scrolls when the list is long). Off by
   default while the streaming is being tried on the Wii.
@@ -289,13 +289,24 @@ checked by putting the rider down there with the cells streaming in: each loads 
 
 | District | Cells | All packs | Cell p50 / p90 / max | Cells shrunk | Converted in |
 |---|---|---|---|---|---|
-| Downtown | 240 | 170 MB | 167 KB / 2.0 MB / 3.1 MB | 1 | 8.7 s |
-| University | 231 | 124 MB | 183 KB / 1.5 MB / 2.9 MB | 0 | 7.2 s |
-| Industrial | 1,191 | 76 MB | 0 / 32 KB / 2.5 MB | 0 | 5.4 s |
-| Skate School | 94 | 16 MB | 93 KB / 434 KB / 1.0 MB | 0 | 0.4 s |
+| Downtown | 240 | 139 MB | 168 KB / 1.6 MB / 2.7 MB | 0 | 29 s |
+| University | 231 | 101 MB | 173 KB / 1.3 MB / 2.2 MB | 0 | 18 s |
+| Industrial | 1,191 | 68 MB | 6 KB / 32 KB / 1.8 MB | 0 | 14 s |
+| Skate School | 94 | 17 MB | 107 KB / 426 KB / 733 KB | 0 | 2 s |
 
-Every cell of all four loads with `world::ImportedPark::parse` (at most 4.6 ms a cell on a PC). One
-University model (`cPres_50_-850`) has meshes without float positions and is left out.
+(The times include searching for the start spots.) Every cell of all four loads with
+`world::ImportedPark::parse`. One University model (`cPres_50_-850`) has meshes without float positions
+and is left out.
+
+Cells (and parks) are stored so the Wii reads them where they are loaded instead of copying them. The
+collision is packed (`game_core::collision::encode_packed`): corners quantized to 1/256 m around the cell's
+middle and stored once, three `u16` corner indices a triangle, and the query grid built in, about 14 bytes a
+triangle against 40 before and 52 once parsed. A cell with more than 65,535 triangles or corners would keep
+the plain form; none has. Mesh entries have a 32-byte header (`"FGM2"`, with the bounding sphere), so their
+vertices are 32-byte aligned in the pack, as the GPU needs, and on the big-endian Wii the vertices and
+indices are used in place. Downtown's packs went from 170 to 139 MB, and what parsing them adds from 167 MB
+to about 5 MB on the Wii (worked out from the PC, which still copies the meshes: 76 MB there; not yet measured on a Wii). Older packs (plain collision, 12-byte mesh
+headers) still load, copied.
 
 #### Riding a district: streaming
 `game_core::district` rides a district while it streams. Cells within 110 m of the rider (everything drawn,
@@ -307,9 +318,15 @@ they are in; at a new district the loading screen counts them in. As ground the 
 cells (a triangle near an edge belongs to one cell but reaches into the next); a cell's rails keep their index
 while it is loaded and are replaced by inert ones when it is dropped.
 
-Measured on a PC with a simulated card of 2 MB/s, riding a lap of each district at 10 m/s: Downtown and
-University held the rider 3 to 5 s in all over about 17 minutes, at most 13 cells (10 MB of packs) loaded,
-the heap peaking about 21 MB above the game's own; everything is freed when the district is left.
+Measured on a PC with a simulated card of 2 MB/s, riding a lap of each district at 10 m/s: Downtown held
+the rider once, for 1.9 s, over about 17 minutes and University never, with at most 13 cells (9 MB of
+packs) loaded and the heap peaking about 13 MB above the game's own (on the Wii, without the mesh copies, an
+estimated 9 MB); everything is freed when the district is left.
+
+A district fades into the sky from 50 m to 85 m (`world::FOG_START`, `FOG_END`; `Gfx::fog`, on the Wii
+`fg_set_fog`: GX linear fog with the range adjusted across the screen), so models appearing and vanishing at
+the 90 m draw distance aren't seen. Parks aren't fogged. The preview shows a district with
+`cargo run --release -p fg_preview -- out/district --district imported/city/DownTown --start 1`.
 
 A district's assets sit in streams inside `worldDIST_<park>.big`: an `ATOC` table
 (`DIST_<park>_<stream>.xst`) and `SFIL` stream files (`c<stream>_*.xsf`, RefPack-compressed sections). The

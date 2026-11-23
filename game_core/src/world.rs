@@ -20,7 +20,17 @@ use crate::pack::{Kind, Pack};
 const CHUNK: f32 = 16.0;
 /// Chunks further than this from the camera (m, centre to eye, flat) are skipped.
 pub const DRAW_DISTANCE: f32 = 90.0;
-const MESH_HEADER: usize = 12;
+/// A streamed district fades into the sky from here ...
+pub const FOG_START: f32 = 50.0;
+/// ... to here, short of the draw distance, so models never pop in or out in plain sight.
+pub const FOG_END: f32 = DRAW_DISTANCE - 5.0;
+/// The old mesh header (no magic): vertices not aligned, copied when parsed.
+const MESH_HEADER_V1: usize = 12;
+/// `"FGM2"`, `u32` vertex count, `u32` index count, `u16` texture, `u16` flags, `f32` centre x, y, z,
+/// `f32` radius: 32 bytes, so the vertices after it are 32-byte aligned in a pack and the Wii reads them
+/// (and the indices) in place.
+const MESH_HEADER: usize = 32;
+const MESH_MAGIC: &[u8; 4] = b"FGM2";
 const MESH_VERTEX: usize = 24;
 pub const MESH_ALPHA_TEST: u16 = 1;
 
@@ -33,11 +43,72 @@ pub struct Chunk {
 pub struct ParkMesh {
     /// Read in place by the Wii's GPU.
     pub verts: StaticVerts,
-    pub indices: Vec<u16>,
+    pub indices: Indices,
     pub texture: Option<Texture<'static>>,
     /// Bounding sphere for culling.
     pub center: Vec3,
     pub radius: f32,
+}
+
+/// A mesh's indices: a copy, or (on a big-endian machine) a pack's bytes in place.
+pub enum Indices {
+    Owned(Vec<u16>),
+    InPlace(&'static [u16]),
+}
+
+impl core::ops::Deref for Indices {
+    type Target = [u16];
+    fn deref(&self) -> &[u16] {
+        match self {
+            Indices::Owned(v) => v,
+            Indices::InPlace(s) => s,
+        }
+    }
+}
+
+impl Indices {
+    /// `bytes` (big-endian `u16`s) read where they are on a big-endian machine, else copied.
+    fn new(bytes: &'static [u8]) -> Indices {
+        if cfg!(target_endian = "big")
+            && (bytes.as_ptr() as usize).is_multiple_of(2)
+            && bytes.len().is_multiple_of(2)
+        {
+            // SAFETY: big-endian, aligned, whole u16s, living as long as the program.
+            Indices::InPlace(unsafe {
+                core::slice::from_raw_parts(bytes.as_ptr() as *const u16, bytes.len() / 2)
+            })
+        } else {
+            Indices::Owned(bytes.chunks_exact(2).map(|b| be16(b, 0)).collect())
+        }
+    }
+
+    /// Heap bytes the copy takes (0 in place).
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Indices::Owned(v) => v.len() * 2,
+            Indices::InPlace(_) => 0,
+        }
+    }
+}
+
+impl ImportedPark {
+    /// Heap bytes the parsed park takes beyond what it reads in place from its pack.
+    pub fn heap_bytes(&self) -> usize {
+        self.mesh.heap_bytes()
+            + self
+                .models
+                .iter()
+                .map(|m| {
+                    m.verts.heap_bytes() + m.indices.heap_bytes() + core::mem::size_of::<ParkMesh>()
+                })
+                .sum::<usize>()
+            + self
+                .chunks
+                .iter()
+                .map(|c| c.verts.len() * core::mem::size_of::<Vertex>())
+                .sum::<usize>()
+            + self.mesh.rails.len() * core::mem::size_of::<crate::rails::Rail>()
+    }
 }
 
 pub struct ImportedPark {
@@ -55,10 +126,28 @@ pub fn encode_mesh(
     flags: u16,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(MESH_HEADER + verts.len() * MESH_VERTEX + indices.len() * 2);
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for (p, _, _) in verts {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let (center, radius) = if verts.is_empty() {
+        ([0.0; 3], 0.0)
+    } else {
+        let c: [f32; 3] = core::array::from_fn(|k| (lo[k] + hi[k]) * 0.5);
+        let r = libm::sqrtf((0..3).map(|k| (hi[k] - c[k]) * (hi[k] - c[k])).sum());
+        (c, r)
+    };
+    out.extend_from_slice(MESH_MAGIC);
     out.extend_from_slice(&(verts.len() as u32).to_be_bytes());
     out.extend_from_slice(&(indices.len() as u32).to_be_bytes());
     out.extend_from_slice(&texture.unwrap_or(0xffff).to_be_bytes());
     out.extend_from_slice(&flags.to_be_bytes());
+    for f in [center[0], center[1], center[2], radius] {
+        out.extend_from_slice(&f.to_be_bytes());
+    }
     for (p, rgba, uv) in verts {
         for c in p {
             out.extend_from_slice(&c.to_be_bytes());
@@ -83,9 +172,79 @@ fn be16(b: &[u8], at: usize) -> u16 {
 
 /// Parses one `park/mesh/<n>` entry; `texture` looks a texture index up in the pack.
 fn parse_mesh(
+    d: &'static [u8],
+    texture: &dyn Fn(u16) -> Option<Texture<'static>>,
+) -> Result<ParkMesh, collision::Error> {
+    if d.starts_with(MESH_MAGIC) {
+        return parse_mesh_v2(d, texture);
+    }
+    parse_mesh_v1(d, texture)
+}
+
+/// A `"FGM2"` mesh: the vertices and indices read in place where the machine allows.
+fn parse_mesh_v2(
+    d: &'static [u8],
+    texture: &dyn Fn(u16) -> Option<Texture<'static>>,
+) -> Result<ParkMesh, collision::Error> {
+    if d.len() < MESH_HEADER {
+        return Err(collision::Error::Bad);
+    }
+    let (nv, ni) = (be32(d, 4) as usize, be32(d, 8) as usize);
+    let (tex, flags) = (be16(d, 12), be16(d, 14));
+    let f = |at: usize| f32::from_bits(be32(d, at));
+    let (center, radius) = (v3(f(16), f(20), f(24)), f(28));
+    let end = nv
+        .checked_mul(MESH_VERTEX)
+        .and_then(|v| v.checked_add(MESH_HEADER + ni.checked_mul(2)?))
+        .ok_or(collision::Error::Bad)?;
+    if d.len() < end
+        || nv > 0x10000
+        || !(center.x.is_finite() && center.y.is_finite() && center.z.is_finite())
+        || !(radius.is_finite() && radius >= 0.0)
+    {
+        return Err(collision::Error::Bad);
+    }
+    let vb = &d[MESH_HEADER..MESH_HEADER + nv * MESH_VERTEX];
+    let ib = &d[MESH_HEADER + nv * MESH_VERTEX..end];
+    if ib.chunks_exact(2).any(|b| be16(b, 0) as usize >= nv) {
+        return Err(collision::Error::Bad);
+    }
+    let verts = StaticVerts::in_place(vb).unwrap_or_else(|| {
+        let f = |at: usize| f32::from_bits(be32(vb, at));
+        let v: Vec<TexVertex> = (0..nv)
+            .map(|i| {
+                let at = i * MESH_VERTEX;
+                TexVertex {
+                    pos: [f(at), f(at + 4), f(at + 8)],
+                    rgba: be32(vb, at + 12),
+                    uv: [f(at + 16), f(at + 20)],
+                }
+            })
+            .collect();
+        StaticVerts::new(&v)
+    });
+    let texture = (tex != 0xffff)
+        .then(|| texture(tex))
+        .flatten()
+        .map(|mut t| {
+            t.alpha_test = flags & MESH_ALPHA_TEST != 0;
+            t
+        });
+    Ok(ParkMesh {
+        verts,
+        indices: Indices::new(ib),
+        texture,
+        center,
+        radius,
+    })
+}
+
+/// An old mesh (no magic): copied.
+fn parse_mesh_v1(
     d: &[u8],
     texture: &dyn Fn(u16) -> Option<Texture<'static>>,
 ) -> Result<ParkMesh, collision::Error> {
+    const MESH_HEADER: usize = MESH_HEADER_V1;
     if d.len() < MESH_HEADER {
         return Err(collision::Error::Bad);
     }
@@ -134,7 +293,7 @@ fn parse_mesh(
             (hi - center).length()
         },
         verts: StaticVerts::new(&verts),
-        indices,
+        indices: Indices::Owned(indices),
         texture,
         center,
     })
@@ -197,7 +356,7 @@ impl ImportedPark {
                 verts: Vec::new(),
             })
             .collect();
-        for t in &mesh.tris {
+        for t in mesh.tris() {
             let mid = (t.v[0] + t.v[1] + t.v[2]) * (1.0 / 3.0);
             let c = (((mid.x - mesh.min.x) / CHUNK) as usize).min(cols - 1);
             let r = (((mid.z - mesh.min.z) / CHUNK) as usize).min(rows - 1);
@@ -333,14 +492,47 @@ mod tests {
         let m = &park.models[0];
         assert_eq!(m.verts.len(), 4);
         assert_eq!(m.verts[2].uv, [1.0, 1.0]);
-        assert_eq!(m.indices, [0, 1, 2, 0, 2, 3]);
+        assert_eq!(&m.indices[..], [0, 1, 2, 0, 2, 3]);
         let t = m.texture.as_ref().unwrap();
         assert_eq!(
             (t.width, t.height, t.format, t.alpha_test),
             (8, 4, 14, true)
         );
         assert!((m.center - v3(0.5, 0.0, 0.5)).length() < 1e-6);
+        assert!((m.radius - core::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
         assert_eq!(park.vertex_count(), 4);
+        // In place on a big-endian machine (the Wii): nothing copied but the collision's grid.
+        if cfg!(target_endian = "big") {
+            assert!(m.verts.is_in_place());
+            assert_eq!(m.verts.heap_bytes() + m.indices.heap_bytes(), 0);
+        }
+
+        // A pack from before the 32-byte mesh header still loads.
+        let mut old = Vec::new();
+        for w in [4u32, 6] {
+            old.extend_from_slice(&w.to_be_bytes());
+        }
+        old.extend_from_slice(&0u16.to_be_bytes());
+        old.extend_from_slice(&MESH_ALPHA_TEST.to_be_bytes());
+        old.extend_from_slice(&mesh_bytes_after_header(&quad));
+        let p = pack(&[
+            ("park/collision", Kind::Collision, floor(), 0, 0, 0),
+            ("park/spawn", Kind::Data, vec![0; 16], 0, 0, 0),
+            ("park/mesh/0", Kind::Data, old, 0, 0, 0),
+            ("park/tex/0", Kind::Texture, vec![0xab; 32], 8, 4, 14),
+        ]);
+        let park = ImportedPark::parse(p).unwrap();
+        let m = &park.models[0];
+        assert_eq!(m.verts[2].uv, [1.0, 1.0]);
+        assert_eq!(&m.indices[..], [0, 1, 2, 0, 2, 3]);
+        assert!(m.texture.as_ref().unwrap().alpha_test);
+        assert!((m.center - v3(0.5, 0.0, 0.5)).length() < 1e-6);
+    }
+
+    /// The vertices and indices of the quad above, as both mesh forms store them.
+    fn mesh_bytes_after_header(quad: &[([f32; 3], u32, [f32; 2])]) -> Vec<u8> {
+        let new = encode_mesh(quad, &[0, 1, 2, 0, 2, 3], Some(0), 0);
+        new[MESH_HEADER..].to_vec()
     }
 
     #[test]

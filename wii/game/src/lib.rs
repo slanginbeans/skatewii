@@ -21,7 +21,7 @@ use game_core::autoplay::Autoplay;
 use game_core::character;
 use game_core::district::District;
 use game_core::game::{FrameCost, Game};
-use game_core::gfx::{Camera, Gfx, StaticVerts, TexVertex, Texture, Vertex};
+use game_core::gfx::{Camera, Fog, Gfx, StaticVerts, TexVertex, Texture, Vertex};
 use game_core::input::PadRaw;
 use game_core::math::Mat34;
 use game_core::menu::{self, Location, LocationTour, Request};
@@ -48,6 +48,10 @@ impl Gfx for WiiGfx {
                 clear_rgba,
             )
         }
+    }
+    fn fog(&mut self, fog: Option<Fog>) {
+        let (start, end, rgba) = fog.map_or((0.0, 0.0, 0), |f| (f.start, f.end, f.rgba));
+        unsafe { ffi::fg_set_fog(start, end, rgba) }
     }
     fn draw_tris(&mut self, verts: &[Vertex], model: &Mat34) {
         for chunk in verts.chunks(MAX_BATCH) {
@@ -428,7 +432,7 @@ fn load_location(game: &mut Game, places: &mut Places, i: usize, show: bool) -> 
     let park = match game.imported_park() {
         Some(p) => format!(
             "{} collision triangles, {} rails, {} meshes, {} vertices",
-            p.mesh.tris.len(),
+            p.mesh.len(),
             p.mesh.rails.len(),
             p.models.len() + p.chunks.len(),
             p.vertex_count()

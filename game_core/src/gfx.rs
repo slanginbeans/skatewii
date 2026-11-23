@@ -53,9 +53,20 @@ pub struct Camera {
 pub const SCREEN_W: f32 = 640.0;
 pub const SCREEN_H: f32 = 480.0;
 
+/// Distance fog: the 3D scene fades to `rgba` from `start` to `end` metres from the eye (measured across
+/// the screen as well as into it, so the edges fog like the middle).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fog {
+    pub start: f32,
+    pub end: f32,
+    pub rgba: u32,
+}
+
 pub trait Gfx {
-    /// Starts a frame. `clear_rgba` is the sky colour.
+    /// Starts a frame (without fog). `clear_rgba` is the sky colour.
     fn begin_frame(&mut self, cam: &Camera, clear_rgba: u32);
+    /// Fog for this frame's 3D drawing from here on (None: none). The 2D overlay is never fogged.
+    fn fog(&mut self, _fog: Option<Fog>) {}
     /// Triangle list (3 vertices per triangle) in model space, placed by `model`.
     fn draw_tris(&mut self, verts: &[Vertex], model: &Mat34);
     /// Indexed triangle list (3 indices per triangle) in model space, placed by `model`, coloured by the
@@ -228,11 +239,12 @@ const _: () = assert!(core::mem::size_of::<Quad>() == 4 * core::mem::size_of::<T
 
 /// Vertices the Wii's GPU can read where they are: 32-byte aligned (as GX vertex arrays need), and never
 /// written after they are built (the platform flushes them from the CPU cache once, after a park loads).
-/// Reads as a `[TexVertex]`.
+/// Reads as a `[TexVertex]`: a copy, or (on a big-endian machine, the Wii) a pack's bytes in place.
 #[derive(Clone, Default)]
 pub struct StaticVerts {
     blocks: Vec<Quad>,
     len: usize,
+    in_place: Option<&'static [TexVertex]>,
 }
 
 impl StaticVerts {
@@ -244,21 +256,60 @@ impl StaticVerts {
         StaticVerts {
             blocks,
             len: verts.len(),
+            in_place: None,
         }
+    }
+
+    /// `bytes` (big-endian `TexVertex`es, as a pack holds them) read where they are, when this machine
+    /// is big-endian and they are 32-byte aligned; None otherwise (decode and copy them instead).
+    pub fn in_place(bytes: &'static [u8]) -> Option<StaticVerts> {
+        let size = core::mem::size_of::<TexVertex>();
+        if cfg!(target_endian = "little")
+            || !(bytes.as_ptr() as usize).is_multiple_of(32)
+            || !bytes.len().is_multiple_of(size)
+        {
+            return None;
+        }
+        // SAFETY: big-endian, so the bytes are `TexVertex`es as they are (`repr(C)`: three f32, a u32, two
+        // f32, no padding, any bit pattern valid), aligned, and they live as long as the program.
+        let v = unsafe {
+            core::slice::from_raw_parts(bytes.as_ptr() as *const TexVertex, bytes.len() / size)
+        };
+        Some(StaticVerts {
+            blocks: Vec::new(),
+            len: v.len(),
+            in_place: Some(v),
+        })
+    }
+
+    /// True when the vertices are read in place (no copy).
+    pub fn is_in_place(&self) -> bool {
+        self.in_place.is_some()
     }
 
     /// The memory the vertices take (whole blocks), for flushing it from the CPU cache.
     pub fn bytes(&self) -> (*const u8, usize) {
-        (
-            self.blocks.as_ptr() as *const u8,
-            self.blocks.len() * core::mem::size_of::<Quad>(),
-        )
+        match self.in_place {
+            Some(v) => (v.as_ptr() as *const u8, core::mem::size_of_val(v)),
+            None => (
+                self.blocks.as_ptr() as *const u8,
+                self.blocks.len() * core::mem::size_of::<Quad>(),
+            ),
+        }
+    }
+
+    /// Heap bytes the copy takes (0 in place).
+    pub fn heap_bytes(&self) -> usize {
+        self.blocks.len() * core::mem::size_of::<Quad>()
     }
 }
 
 impl core::ops::Deref for StaticVerts {
     type Target = [TexVertex];
     fn deref(&self) -> &[TexVertex] {
+        if let Some(v) = self.in_place {
+            return v;
+        }
         // SAFETY: the blocks are `repr(C)` arrays of `TexVertex` without padding, laid end to end, and
         // hold at least `len` vertices.
         unsafe { core::slice::from_raw_parts(self.blocks.as_ptr() as *const TexVertex, self.len) }
@@ -284,5 +335,56 @@ mod static_tests {
         assert_eq!(p as usize % 32, 0);
         assert_eq!(n, 2 * 96);
         assert!(StaticVerts::new(&[]).is_empty());
+    }
+
+    #[test]
+    fn vertices_in_place_on_a_big_endian_machine() {
+        let v: Vec<TexVertex> = (0..5)
+            .map(|i| TexVertex {
+                pos: [i as f32, 1.5, -2.0],
+                rgba: 0x1122_3300 + i,
+                uv: [0.25, i as f32],
+            })
+            .collect();
+        let be: Vec<u8> = v
+            .iter()
+            .flat_map(|t| {
+                let mut b = Vec::new();
+                for f in t.pos {
+                    b.extend_from_slice(&f.to_be_bytes());
+                }
+                b.extend_from_slice(&t.rgba.to_be_bytes());
+                for f in t.uv {
+                    b.extend_from_slice(&f.to_be_bytes());
+                }
+                b
+            })
+            .collect();
+        // 32-byte aligned, as in a pack.
+        let mut blocks = alloc::vec![Quad::default(); 2];
+        let raw: &'static mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(blocks.as_mut_ptr() as *mut u8, 2 * 96) };
+        core::mem::forget(blocks);
+        raw[..be.len()].copy_from_slice(&be);
+        let raw: &'static [u8] = raw;
+        let s = StaticVerts::in_place(&raw[..be.len()]);
+        assert_eq!(
+            s.is_some(),
+            cfg!(target_endian = "big"),
+            "in place only on the Wii"
+        );
+        if let Some(s) = s {
+            assert!(s.is_in_place() && s.heap_bytes() == 0);
+            assert_eq!(&s[..], &v[..]);
+            assert_eq!(s.bytes(), (raw.as_ptr(), be.len()));
+        }
+        assert!(
+            StaticVerts::in_place(&raw[4..4 + 24]).is_none(),
+            "not aligned"
+        );
+        assert!(
+            StaticVerts::in_place(&raw[..25]).is_none(),
+            "not whole vertices"
+        );
     }
 }

@@ -49,6 +49,7 @@ unsafe extern "C" {
         far: f32,
         clear_rgba: u32,
     );
+    pub fn fg_set_fog(start: f32, end: f32, rgba: u32);
     pub fn fg_draw_tris(verts: *const Vertex, count: u32, model: *const Mat34);
     pub fn fg_draw_indexed(
         verts: *const TexVertex,

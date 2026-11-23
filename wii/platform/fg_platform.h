@@ -86,6 +86,9 @@ void fg_begin_frame(const float eye[3], const float target[3], const float up[3]
                     float far_z, uint32_t clear_rgba);
 // The TV's aspect (width over height: 4/3, or 16/9 when the Wii is set to widescreen).
 float fg_aspect(void);
+// Distance fog for the rest of this frame's 3D drawing (fg_begin_frame turns it off): the scene fades to
+// rgba from start to end metres from the eye. end <= start: off. The 2D overlay is never fogged.
+void fg_set_fog(float start, float end, uint32_t rgba);
 // Triangle list (count is a multiple of 3, at most 65535) placed by a row-major 3x4 model matrix.
 void fg_draw_tris(const FgVertex *verts, uint32_t count, const float model[3][4]);
 // Screen-space triangle list in a 640x480 virtual screen, origin top-left, drawn over the scene.

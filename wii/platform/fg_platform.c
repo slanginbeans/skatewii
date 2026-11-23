@@ -164,6 +164,21 @@ static GXColor unpack(uint32_t rgba) {
     return c;
 }
 
+static float frame_near = 0.1f, frame_far = 1000.0f;
+
+void fg_set_fog(float start, float end, uint32_t rgba) {
+    if (!(end > start)) {
+        GX_SetFog(GX_FOG_NONE, 0, 1, 0.1f, 1, (GXColor){0, 0, 0, 255});
+        GX_SetFogRangeAdj(GX_DISABLE, 0, NULL);
+        return;
+    }
+    // Linear in eye distance, with the range adjusted across the screen so its edges fog like its middle.
+    static GXFogAdjTbl table;
+    GX_InitFogAdjTable(&table, rmode->fbWidth, proj);
+    GX_SetFogRangeAdj(GX_ENABLE, rmode->fbWidth / 2, &table);
+    GX_SetFog(GX_FOG_PERSP_LIN, start, end, frame_near, frame_far, unpack(rgba));
+}
+
 void fg_begin_frame(const float eye[3], const float target[3], const float up_dir[3], float fov_y_deg, float near_z,
                     float far_z, uint32_t clear_rgba) {
     // The copy-clear colour applies when this frame is copied out in fg_end_frame.
@@ -178,6 +193,11 @@ void fg_begin_frame(const float eye[3], const float target[3], const float up_di
     GX_LoadProjectionMtx(proj, GX_PERSPECTIVE);
     GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
     in_2d = 0;
+    frame_near = near_z;
+    frame_far = far_z;
+    // Fog is asked for per frame (fg_set_fog).
+    GX_SetFog(GX_FOG_NONE, 0, 1, 0.1f, 1, (GXColor){0, 0, 0, 255});
+    GX_SetFogRangeAdj(GX_DISABLE, 0, NULL);
     // Last frame finished in fg_end_frame (GX_DrawDone): its vertex copies can be reused.
     arena_used = 0;
     GX_InvalidateTexAll();
@@ -376,6 +396,9 @@ void fg_draw_2d(const FgVertex *verts, uint32_t count) {
         guOrtho(ortho, 0, 479, 0, 639, 0, 10);
         GX_LoadProjectionMtx(ortho, GX_ORTHOGRAPHIC);
         GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+        // The overlay is never fogged.
+        GX_SetFog(GX_FOG_NONE, 0, 1, 0.1f, 1, (GXColor){0, 0, 0, 255});
+        GX_SetFogRangeAdj(GX_DISABLE, 0, NULL);
         in_2d = 1;
     }
     // Push the overlay to z = -1, inside the ortho near/far range.

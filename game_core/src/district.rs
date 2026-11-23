@@ -333,7 +333,7 @@ impl District {
         self.log.push(format!(
             "district: cell {x} {z} in, {} KB, {} triangles, {n} rails, parsed in {} ms ({} cells, {} KB held)",
             data.len() / 1024,
-            park.mesh.tris.len(),
+            park.mesh.len(),
             us / 1000,
             self.cells.len() + 1,
             (self.held() as usize + data.len()) / 1024
