@@ -64,7 +64,14 @@ location (the same list; B goes back), Respawn (back to the park's start), Quit 
 While a menu is open the riding waits and the pad only drives the menu (the d-pad's gestures don't fire, and
 the A that chose an item is not a push until you let go of it). Changing location shows a loading screen
 while the park is read from the SD card (Dolphin reads the biggest, 4.2 MB, in well under a second; a real
-SD card is slower).
+SD card is slower). The list scrolls when it is long.
+
+Built with `FG_CITY=1`, the menu also lists the **city districts** (Downtown, University, Industrial) and
+**Skate School**, each up to four times, once per start spot (Downtown, Downtown 2, ...). A district is far
+bigger than the Wii's memory, so it streams: 100 m cells are read from the SD card in the background as you
+ride, nearest first, and dropped behind you; everything beyond 50 m fades into the sky, and if you outrun the
+card the rider waits where the next cells aren't in yet. It runs in Dolphin; it hasn't been tried on a real
+Wii yet. Details: [docs/importing.md](docs/importing.md), "Riding a district".
 
 Without converted parks there is no start menu: the demo park is ridden straight away.
 
@@ -79,6 +86,11 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
   park.rs          height-field park made of blocks and ramps (placeholder geometry in code)
   game.rs          update + render loop; draws only through gfx::Gfx
   menu.rs          locations (the index the importer writes), start and pause menus
+  collision.rs     imported parks' collision: triangles in a grid (plain, or packed and read in place)
+  world.rs         imported parks: models, textures, drawing within the draw distance
+  city.rs          a district's cell index (cells, start spots)
+  district.rs      a district streamed in cells while riding: what to read, keep and drop
+  reader.rs        background file reads (the Wii's reader thread; an in-memory one for tests)
   character.rs     imported skinned character: pack parsing, clip sampling, CPU skinning
   rider.rs         picks and crossfades the imported skater's clips from the game state
 wii/
@@ -124,7 +136,9 @@ drive; `build.bat` offers to install Rust for you), or Docker Desktop.
 
 Switches combine. Optional settings: `set FG_SD=E:` also copies the app to `E:\apps\flatground`;
 `FG_DEVKITPRO` points at devkitPro if it's somewhere unusual; `FG_ASSUME_YES=1` installs Rust without asking;
-`FG_ISO` picks your disc image; `FG_PARK` the default location (default BlackBoxPark); `FG_NO_ASSETS=1` skips converting;
+`FG_ISO` picks your disc image; `FG_PARK` the default location (default BlackBoxPark); `FG_CITY=1` also
+converts the city districts and Skate School as streamed locations (about 330 MB more); `FG_NO_ASSETS=1`
+skips converting;
 `FG_DOLPHIN` points at `Dolphin.exe`.
 
 On Linux/macOS with Docker: `./build.sh`. No installs at all: download `flatground-sd-card` from the newest

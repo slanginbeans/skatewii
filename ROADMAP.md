@@ -120,8 +120,25 @@ content second.
   a start menu to choose one, a pause menu (resume, change location, respawn, quit) on START, parks
   switched at runtime with the old one freed (heap back to the same value every time, checked in Dolphin),
   the last location remembered on the SD card; park meshes drawn in place (no per-frame vertex copy)
-- [ ] More locations: Skate School needs a spawn on the island and LOD; blocks of the city districts'
-  streaming cells (docs/importing.md "Locations")
+- [x] The city districts measured cell by cell (`fg_import city`: per-cell sizes and maps; docs/importing.md
+  "The city districts' cells")
+- [x] The districts and Skate School cut into 100 m cell packs (`fg_import district`, `FG_CITY=1` in the
+  build; `game_core::city` index), every cell loading with the park loader
+- [x] Background file reads on the Wii (`wii/platform/fg_read.c`: a queue worked by a low-priority thread;
+  `fg_read_start`/`poll`/`cancel`; `game_core::reader` with an in-memory reader for tests)
+- [x] Districts streamed while riding (`game_core::district`: cells read ahead and dropped behind within a
+  memory budget, ground and rails across loaded cells, the rider held where cells aren't in yet; districts in
+  the location menu with `FG_CITY=1`)
+- [x] District start spots searched for in the collision (flat, open, a long run, rails around at its level;
+  up to four a district, spread out), each its own location in a scrolling menu
+- [x] Cells read in place on the Wii (packed collision with its grid, 32-byte aligned mesh vertices and
+  indices used where loaded): Downtown's packs 170 to 139 MB, parsing them adds about 5 MB instead of
+  167 MB; districts fade into the sky before the draw distance (fog)
+- [x] Districts run in Dolphin: every start of all four, cells streamed for 16 minutes without an error or a
+  dropped frame, memory back to the game's own after each (finer collision grids where triangles are dense)
+- [x] More locations: the city districts and Skate School streamed in 100 m cells (packs per cell, a
+  background reader on the Wii, collision near the rider and models within the draw distance loaded,
+  start spots in the location menu)
 
 ## Phase 4: Game
 - [x] Grinds: 50-50 and boardslide on rails (imported parks and the demo ledge)

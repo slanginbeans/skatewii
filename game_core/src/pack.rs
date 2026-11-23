@@ -152,6 +152,50 @@ impl<'a> Pack<'a> {
     }
 }
 
+/// One entry for [`encode`]: name, kind, data, width, height, GX format.
+pub type Item<'a> = (&'a str, Kind, &'a [u8], u16, u16, u8);
+
+/// Writes a pack (the importer has its own writer; this one is for tests and tools built on `game_core`).
+pub fn encode(items: &[Item]) -> alloc::vec::Vec<u8> {
+    use alloc::vec::Vec;
+    let mut strings = Vec::new();
+    let mut name_at = Vec::new();
+    for (n, ..) in items {
+        name_at.push(strings.len() as u32);
+        strings.extend_from_slice(n.as_bytes());
+        strings.push(0);
+    }
+    let strings_at = HEADER_SIZE + ENTRY_SIZE * items.len();
+    let mut data_at = (strings_at + strings.len()).next_multiple_of(DATA_ALIGN);
+    let mut out = MAGIC.to_vec();
+    for x in [VERSION, items.len() as u32, strings_at as u32] {
+        out.extend_from_slice(&x.to_be_bytes());
+    }
+    let mut offsets = Vec::new();
+    for (i, (n, kind, d, w, h, f)) in items.iter().enumerate() {
+        for x in [
+            name_hash(n),
+            name_at[i],
+            *kind as u32,
+            data_at as u32,
+            d.len() as u32,
+        ] {
+            out.extend_from_slice(&x.to_be_bytes());
+        }
+        out.extend_from_slice(&w.to_be_bytes());
+        out.extend_from_slice(&h.to_be_bytes());
+        out.extend_from_slice(&[*f, 0, 0, 0, 0, 0, 0, 0]);
+        offsets.push(data_at);
+        data_at = (data_at + d.len()).next_multiple_of(DATA_ALIGN);
+    }
+    out.extend_from_slice(&strings);
+    for (i, (_, _, d, ..)) in items.iter().enumerate() {
+        out.resize(offsets[i], 0);
+        out.extend_from_slice(d);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -21,6 +21,11 @@ folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg
   menu, ridden at the first start; converted even if it is not in the list); the default is BlackBoxPark. An
   old single `data/park.fgpak` from earlier builds is removed (the game still reads one when there is no
   `parks.txt`).
+- with `FG_CITY=1`, also cuts the city districts and Skate School into cell packs (`data/city/<district>/`,
+  below; about 325 MB, 60 s) and lists them in `parks.txt`, one line per start spot (`district <id>
+  city/<District>/index.fgpak <bytes> <start> <name>`: `DownTown`, `DownTown-2`, ... shown as Downtown,
+  Downtown 2, ...), so each start is a location in the menu (which scrolls when the list is long). Off by
+  default until it has run on a real Wii (it runs in Dolphin: "Riding a district" below).
 
 All of it is about 37 MB (the motion library 20 MB, the six parks 12.5 MB). Copy `dist/apps/flatground` to
 the SD card's `apps` folder and the game finds its packs at
@@ -219,13 +224,128 @@ Left out: **SkateSchool**, an 8.6 MB pack (91,790 collision triangles, 1,105 mes
 district, not a park: the spawn rule lands under the island (y -73), and it takes the longest to read.
 `FG_PARK=SkateSchool` still converts it as the default location.
 
-Other places on the disc: `worldDIST_University.big`, `worldDIST_DownTown.big` and
-`worldDIST_Industrial.big` are the city districts (480 to 840 MB each: 230 to 1,200 `Sim` cells, 150 to
-275 MB of `Pres` cells, 280 to 520 MB of textures). Their stream cells are named by position
-(`cSim_<x>_<z>_high.xsf`), so a block of a few cells around a known spot could be converted like a park
-(roughly 1 MB of collision and 8 MB of models before shrinking textures for a 3 x 3 block), but that needs
-picking cells by position and a spawn inside the block: not done. `worlddmo.big` and `worldmisc.big` hold
-dynamic-object data, not places to ride.
+Other places on the disc: `worldDIST_DownTown.big`, `worldDIST_University.big` and
+`worldDIST_Industrial.big` are the city districts (480 to 840 MB each), kept in 100 m streaming cells named
+by their centre (`c<Sim|Pres|Tex>_<x>_<z>_high.xsf`, centres on odd multiples of 50 m; the `Tex` stream's
+own cells sit on multiples of 100 m and overlap, each repeating the textures its area uses). `worlddmo.big`
+and `worldmisc.big` hold dynamic-object data, not places to ride. `fg_import city` measures them and
+`fg_import district` cuts them into cell packs, which the game streams while riding (below).
+
+#### The city districts' cells
+```bash
+cargo run --release -p fg_import -- city path/to/skate3.iso [--district DownTown] [--max 128] [--no-map]
+```
+Reads every cell of each district (`DownTown`, `University`, `Industrial`, `SkateSchool`; about 15 s for
+all) and writes `imported/city/<district>.csv` (per cell: collision triangles, rails, models, vertices,
+textures, and the bytes each would take in a flatground pack at `--max` pixels) and
+`<district>_map.png` (the collision from above, a pixel a metre, by height, with the 100 m grid and the
+origin's axes in red; +z is down the image). Measured with the US/EU disc, textures at 128 px (an upper
+bound: textures that can hold alpha are counted as RGB5A3):
+
+| District | Area | Cells (with content) | Collision tris | Rails | Meshes | Vertices | Packs, all cells | Cell pack p50 / p90 / max |
+|---|---|---|---|---|---|---|---|---|
+| Downtown | 1.4 x 2.3 km | 240 (240) | 1,545,276 | 8,630 | 13,734 | 2.63 M | 200 MB (collision 61, meshes 71, textures 68) | 220 KB / 2.3 MB / 4.2 MB |
+| University | 1.7 x 2.3 km | 231 (231) | 1,133,649 | 4,201 | 8,531 | 2.07 M | 145 MB (45, 57, 44) | 203 KB / 1.8 MB / 3.4 MB |
+| Industrial | 5.6 x 2.5 km | 1,223 (1,191) | 768,202 | 3,971 | 7,575 | 1.07 M | 88 MB (30, 29, 29) | 0 / 32 KB / 2.9 MB |
+
+- Every collision triangle and mesh belongs to exactly one cell (no asset is in two cell files); about 0.2%
+  of triangles reach more than 1 m past their cell's edge (they belong to the cell holding their centre).
+- Rails are in the cells too (the parks keep theirs in the global stream).
+- Each district also has `Global` stream files: no geometry, but materials and shared textures (`Pres`, about
+  6 MB) that the cells' meshes use. Textures: 2,792 different ones in Downtown (985 in the `Tex` stream,
+  repeated 9,525 times across its overlapping cells, the rest in `Pres`), 409 of them used by more than one
+  cell.
+- **Skate School** has cell files but keeps everything in its `Global` stream (91,790 triangles, 1,105
+  meshes): streaming it means cutting it into cells by position at import time.
+- What a rider would need loaded, from the CSVs (every 10 m inside cells with collision; pack bytes, the Wii
+  heap is more): models and textures of the cells within 90 m are 2.2 MB at the median spot in Downtown,
+  12.4 MB at the 95th percentile and 18.2 MB at the busiest (up to 9 cells); within 60 m, 1.2 / 8.0 / 12.8
+  MB. Collision of the cells within 20 m: 0.1 / 1.8 / 4.2 MB. University peaks at 15.6 MB for both,
+  Industrial at 12.5 MB.
+
+#### Districts as cell packs
+```bash
+cargo run --release -p fg_import -- district path/to/skate3.iso --district DownTown [--max 128] [--cap 3072]
+```
+Writes `imported/city/<district>/`: `index.fgpak` (`city/index`: the cell edge, the lowest collision height,
+up to four start spots, and each cell's centre, pack size, triangles, vertices and texture bytes; format in
+`game_core/src/city.rs`) and one `c_<x>_<z>.fgpak` per cell with anything in it, named by its centre. A cell pack is an ordinary park pack
+(`park/collision`, `park/spawn` at the flat face nearest the cell's centre, `park/rails`, `park/mesh/<n>`,
+`park/tex/<n>`) in world space, so the game's park loader reads it as it is. Everything the district has, in
+its cell files and its `Global` files, is placed by position: triangles by their centre, meshes by the
+middle of their bounds, rails by their middle point (classified against the collision of the cell and its
+eight neighbours). So the city districts come out in their own cells, and Skate School, which keeps
+everything in `Global`, is cut up the same way. Each cell carries its own copy of the textures its meshes
+use; a cell over `--cap` KiB has its textures halved until it fits (down to 16 px). US/EU disc, defaults:
+
+| District | Cells | All packs | Cell p50 / p90 / max | Cells shrunk | Converted in |
+|---|---|---|---|---|---|
+| Downtown | 240 | 139 MB | 168 KB / 1.6 MB / 2.7 MB | 0 | 29 s |
+| University | 231 | 101 MB | 173 KB / 1.3 MB / 2.2 MB | 0 | 18 s |
+| Industrial | 1,191 | 68 MB | 6 KB / 32 KB / 1.8 MB | 0 | 14 s |
+| Skate School | 94 | 17 MB | 107 KB / 426 KB / 733 KB | 0 | 2 s |
+
+(The times include searching for the start spots.) Every cell of all four loads with
+`world::ImportedPark::parse`. One University model (`cPres_50_-850`) has meshes without float positions
+and is left out.
+
+#### Start spots
+The park spawn rule (the flat face nearest the origin on the main floor) put Skate School's start under the
+island and University's in the air, so a district's starts are searched for in its collision
+(`tools/import/src/starts.rs`). Every walkable level on a 4 m grid is tried (Skate School has a walkable lid
+over the whole island). A spot must be flat, a surface the board rides (not stairs), with 2.5 m of headroom,
+3 m clear all round, a straight run of at least 20 m somewhere (no wall, step or drop, no steep slope) and at
+least three rails within 60 m at about its own height, which keeps out roofs, the seabed and empty lots. It
+faces along its longest run. The first start is the good spot (within 90% of the best score) with the most
+rails around it; each next one is the good spot farthest from those already picked, at least 200 m away, up
+to four. Every start of the four districts was checked by putting the rider down there with the cells
+streaming in: each loads in under 4 s on a simulated 2 MB/s card and the rider rolls straight off on the
+ground. Looked at in the preview, most are streets and plazas; University's second is a dirt path beside a
+wall (the picker doesn't know which surfaces are concrete).
+
+#### How cells are stored
+Cells (and parks) are stored so the Wii reads them where they are loaded instead of copying them:
+- **Collision** is packed (`game_core::collision::encode_packed`): corners quantized to 1/256 m around the
+  cell's middle and stored once, three `u16` corner indices a triangle, and the query grid built in, about 14
+  bytes a triangle against 40 plain and 52 once parsed. The grid's squares are 1, 2 or 4 m, the finest whose
+  grid takes no more bytes than the triangles: parts of Industrial have hundreds of sub-metre triangles in a
+  4 m square, and the camera's rays there took 17.7 ms a frame on a 4 m grid. A cell with more than 65,535
+  triangles or corners would keep the plain form; none has.
+- **Meshes** have a 32-byte header (`"FGM2"`, with the bounding sphere), so their vertices are 32-byte
+  aligned in the pack, as the GPU needs; on the big-endian Wii the vertices and indices are used in place (a
+  PC copies them).
+- **Textures** were already read in place.
+
+Downtown's packs went from 170 to 139 MB with this, and what parsing them adds from 167 MB to about 5 MB on
+the Wii. Older packs (plain collision, 12-byte mesh headers) still load, copied. `fg_import`'s source hash
+covers the format files in `game_core` (`tools/import/build.rs`), so a format change converts the packs again.
+
+#### Riding a district: streaming
+`game_core::district` rides a district while it streams. Cells within 110 m of the rider (everything drawn,
+and 20 m more) are read in the background (`wii/platform/fg_read.c`), nearest first, two at a time, within a
+budget of pack bytes held (8 MB on the Wii; parsing them adds little, as they are read in place); one
+finished read is parsed per frame. Cells beyond 150 m are dropped, and nearer ones farthest first when a nearer cell needs the
+room. The cells within 30 m of the rider are always read, and the riding waits (the rider held still) until
+they are in; at a new district the loading screen counts them in. As ground the district is all of its loaded
+cells (a triangle near an edge belongs to one cell but reaches into the next); a cell's rails keep their index
+while it is loaded and are replaced by inert ones when it is dropped.
+
+Measured on a PC with a simulated card of 2 MB/s, riding a lap of each district at 10 m/s: Downtown held
+the rider once, for 1.9 s, over about 17 minutes and University never, with at most 13 cells (9 MB of
+packs) loaded and the heap peaking about 13 MB above the game's own (on the Wii, without the mesh copies, an
+estimated 9 MB); everything is freed when the district is left.
+
+In Dolphin (`FG_CITY=1`, `tools\dolphin_test.ps1 -Seconds 960 -SwitchEvery 40`: autoplay at every location in
+turn, 40 s each, all 16 district starts): 4,287 cells read and parsed without an error, at most 10 ms a parse;
+no dropped frames in 640 s of districts (frame CPU at most 15.5 ms, the camera's tick at most 4.9 ms); the heap
+at most 8.2 MB above the game's own and back to it after each district (MEM2's free space drops once, from
+23.6 to 19.3 MB, and stays there: the heap's high-water mark). Before the 1 and 2 m grids, the camera's rays
+took up to 17.7 ms a frame at Industrial's first start and frames dropped.
+
+A district fades into the sky from 50 m to 85 m (`world::FOG_START`, `FOG_END`; `Gfx::fog`, on the Wii
+`fg_set_fog`: GX linear fog with the range adjusted across the screen), so models appearing and vanishing at
+the 90 m draw distance aren't seen. Parks aren't fogged. The preview shows a district with
+`cargo run --release -p fg_preview -- out/district --district imported/city/DownTown --start 1`.
 
 A district's assets sit in streams inside `worldDIST_<park>.big`: an `ATOC` table
 (`DIST_<park>_<stream>.xst`) and `SFIL` stream files (`c<stream>_*.xsf`, RefPack-compressed sections). The
@@ -338,12 +458,15 @@ plenty for an offline converter.
   can't blend bone weights). It is checked in the PC preview only, not yet in Dolphin or on hardware, and
   its frame cost on the Wii is unmeasured (the HUD now shows it). Bails are clip-based: Skate 3 plays its
   wipeout clips over a physics ragdoll, which is not ported, so a bail is a step-off and a get-up.
-- Park visuals: lightmaps (the second UV set), display lists, model LOD for districts, and the city
-  districts' streaming cells (a block of cells as a location).
+- Park visuals: lightmaps (the second UV set), display lists, and model LOD for districts (a district draws
+  everything within 90 m at full detail, fogged from 50 m).
+- Districts: not yet run on a real Wii (only in Dolphin), so the SD card's speed and the memory there are
+  unmeasured; water has no collision, so riding off Skate School's island lands on the seabed.
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
 - Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
 - Riding: Skate 3 turns, pumps and wipes out through rigid-body truck and ragdoll physics; flatground keeps
   a simpler board model and uses Skate 3's numbers where they carry over (see `game_core::tuning`). The
   board-sideways, late-flip and finger-flip shapes are converted but not used yet, nor dark catches.
-- Game side: `skater.fgpak`, `rules.fgpak`, `motion.fgpak` and the location packs (`parks/*.fgpak`) are loaded. Texture packs, animation packs and the executable
-  tables are parsed and validated, but nothing uses them yet.
+- Game side: `skater.fgpak`, `rules.fgpak`, `motion.fgpak`, the location packs (`parks/*.fgpak`) and the
+  district cells (`city/<district>/`) are loaded. Texture packs, animation packs and the executable tables are
+  parsed and validated, but nothing uses them yet.

@@ -3,9 +3,12 @@
 
 use std::path::Path;
 
-/// `game_core` modules that define pack formats. Add new ones here (world, collision, ...).
+/// `game_core` modules that define pack formats. Add new ones here.
 const FORMATS: &[&str] = &[
     "pack.rs",
+    "collision.rs",
+    "world.rs",
+    "city.rs",
     "anim.rs",
     "skinned.rs",
     "tuning.rs",

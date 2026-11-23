@@ -10,6 +10,8 @@ mod attrib;
 mod big;
 mod cac;
 mod camera;
+mod city;
+mod district;
 mod gx;
 mod mesh;
 mod motion;
@@ -22,6 +24,7 @@ mod rules;
 mod rw4;
 mod skater;
 mod skin;
+mod starts;
 mod stategraph;
 mod texture;
 mod world;
@@ -60,6 +63,18 @@ const USAGE: &str = "usage:
       --max <n>         largest texture edge for the models (default 128; 0: no models)
       --out <dir>       output directory (default: imported)
       --file <name>     the pack's file name inside --out (default park.fgpak)
+  fg_import city     <disc.iso> [options]         measures the city districts' 100 m streaming cells (what
+                                                  each holds, what a pack of it would weigh) and maps them
+      --district <name> DownTown, University, Industrial or SkateSchool (default: all)
+      --max <n>         largest texture edge assumed (default 128)
+      --out <dir>       report directory (default: imported/city): <district>.csv, <district>_map.png
+      --no-map          skip the map
+  fg_import district <disc.iso> --district <name> [options]
+                                                  a district cut into 100 m cells for streaming:
+                                                  <out>/<district>/index.fgpak and c_<x>_<z>.fgpak
+      --max <n>         largest texture edge (default 128)
+      --cap <KiB>       largest cell pack; bigger cells get smaller textures (default 3072)
+      --out <dir>       output directory (default: imported/city)
   fg_import rules    <disc.iso> [--out <dir>]     Skate 3's riding tuning and flick shapes as rules.fgpak
   fg_import skater   <disc.iso> [options]         the default skater as skinned meshes + textures
       --lod <0|2>       model detail (default 0)
@@ -205,6 +220,8 @@ fn run(args: &[String]) -> Res<()> {
         "skater" => skater::run(&mut disc, &rest[1..])?,
         "motion" => motion::run(&mut disc, &rest[1..])?,
         "park" => park::run(&mut disc, &rest[1..])?,
+        "city" => city::run(&mut disc, &rest[1..])?,
+        "district" => district::run(&mut disc, &rest[1..])?,
         "rules" => rules::run(&mut disc, &rest[1..])?,
         _ => return Err(USAGE.into()),
     }
@@ -412,7 +429,7 @@ fn textures<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     Ok(())
 }
 
-fn write_png(path: &Path, img: &texture::Rgba) -> Res<()> {
+pub(crate) fn write_png(path: &Path, img: &texture::Rgba) -> Res<()> {
     let mut enc = png::Encoder::new(
         BufWriter::new(File::create(path)?),
         img.width as u32,

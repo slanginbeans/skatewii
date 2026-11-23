@@ -3,6 +3,7 @@
 //!
 //!     cargo run -p fg_preview -- [out_dir] [--wide] [--skater imported/skater.fgpak] [--every N] [--tour]
 //!         [--rules imported/rules.fgpak] [--regular] [--log]
+//!         [--park imported/parks/MegaPark.fgpak | --district imported/city/DownTown [--start N]]
 //!     cargo run -p fg_preview -- out/poses --poses [--skater ..] [--motion ..] [--rules ..]
 //!     cargo run -p fg_preview -- out/switch --switch [push] [--skater ..] [--motion ..] [--rules ..]
 //!
@@ -10,6 +11,9 @@
 //! from behind and of the board at ground level (`pose_*_wheels.png`: are the wheels on the ground?).
 //! `--switch`: riding fakie until the rider turns round to switch (`push`: pushing from fakie), every
 //! third tick and a contact sheet of the close-ups (`switch_sheet.png`).
+//!
+//! `--district`: ride a streamed district (`fg_import district`) from its start N (1 first), the cells read
+//! from disk as the game asks for them.
 //!
 //! `--log` prints the game's development log (what the Wii build writes to the SD card) as it runs.
 //!
@@ -43,6 +47,7 @@ struct Raster {
     fwd: Vec3,
     focal: f32,
     near: f32,
+    fog: Option<game_core::gfx::Fog>,
     /// Decoded GX textures by data address (pack data lives for the whole run).
     textures: HashMap<usize, Rc<Tex>>,
 }
@@ -84,6 +89,7 @@ impl Raster {
             fwd: v3(0.0, 0.0, 1.0),
             focal: 1.0,
             near: 0.1,
+            fog: None,
             textures: HashMap::new(),
         }
     }
@@ -155,6 +161,16 @@ impl Raster {
                 }
                 if depth_test {
                     self.depth[i] = z;
+                    // Fog by eye distance across the screen (as the Wii's range-adjusted fog).
+                    if let Some(f) = self.fog {
+                        let across = (x as f32 + 0.5 - self.w as f32 / 2.0) / self.focal;
+                        let d = z * (1.0 + across * across).sqrt();
+                        let k = ((d - f.start) / (f.end - f.start)).clamp(0.0, 1.0);
+                        let fc = unpack(f.rgba);
+                        for c in 0..3 {
+                            col[c] = col[c] * (1.0 - k) + fc[c] * k;
+                        }
+                    }
                 }
                 let alpha = col[3];
                 for (dst, src) in self.rgb[i].iter_mut().zip(col) {
@@ -226,6 +242,11 @@ impl Gfx for Raster {
         self.up = self.right.cross(self.fwd);
         self.focal = (self.h as f32 / 2.0) / (cam.fov_y_deg.to_radians() / 2.0).tan();
         self.near = cam.near;
+        self.fog = None;
+    }
+
+    fn fog(&mut self, fog: Option<game_core::gfx::Fog>) {
+        self.fog = fog;
     }
 
     fn draw_tris(&mut self, verts: &[Vertex], m: &Mat34) {
@@ -411,6 +432,37 @@ fn host_us() -> u32 {
         .as_micros() as u32
 }
 
+/// Reads files from disk at once (the preview doesn't simulate a card).
+#[derive(Default)]
+struct Disk {
+    next: i32,
+    done: Vec<(i32, Option<&'static [u8]>)>,
+}
+
+impl game_core::reader::Reader for Disk {
+    fn start(&mut self, path: &str) -> Option<game_core::reader::Ticket> {
+        self.next += 1;
+        let data = fs::read(path).ok().map(|v| &*Vec::leak(v));
+        self.done.push((self.next, data));
+        Some(game_core::reader::Ticket(self.next))
+    }
+    fn poll(&mut self, t: game_core::reader::Ticket) -> game_core::reader::Poll {
+        use game_core::reader::Poll;
+        match self.done.iter().position(|d| d.0 == t.0) {
+            Some(i) => match self.done.swap_remove(i).1 {
+                Some(d) => Poll::Done(d),
+                None => Poll::Failed,
+            },
+            None => Poll::Failed,
+        }
+    }
+    fn cancel(&mut self, t: game_core::reader::Ticket) {
+        self.done.retain(|d| d.0 != t.0);
+    }
+    // The preview's reads are leaked for the run.
+    unsafe fn free(&mut self, _data: &'static [u8]) {}
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let wide = args.iter().any(|a| a == "--wide");
@@ -429,7 +481,13 @@ fn main() {
                 && (*i == 0
                     || !matches!(
                         args[i - 1].as_str(),
-                        "--skater" | "--every" | "--park" | "--rules" | "--motion"
+                        "--skater"
+                            | "--every"
+                            | "--park"
+                            | "--rules"
+                            | "--motion"
+                            | "--district"
+                            | "--start"
                     ))
         })
         .map(|(_, a)| PathBuf::from(a))
@@ -640,7 +698,7 @@ fn main() {
         let p = game.imported_park().expect("loaded");
         println!(
             "using imported park {path}: {} triangles, {} chunks, {} vertices drawn at most",
-            p.mesh.tris.len(),
+            p.mesh.len(),
             p.chunks.len(),
             p.vertex_count()
         );
@@ -675,6 +733,23 @@ fn main() {
         let path = out.join("park_overview.png");
         raster.save(&path);
         println!("        wrote {}", path.display());
+    }
+    // --district: ride a streamed district, its cells read from disk when asked for.
+    let district = value("--district");
+    if let Some(dir) = district {
+        let start: usize = value("--start").map_or(1, |v| v.parse().expect("--start <n>"));
+        let idx = fs::read(Path::new(dir).join("index.fgpak")).expect("read index.fgpak");
+        let pack = game_core::pack::Pack::parse(&idx).expect("index pack");
+        let index = pack.find("city/index").expect("city/index").data;
+        let d = game_core::district::District::new(index, dir, Box::new(Disk::default()), 8 << 20)
+            .expect("district index")
+            .with_start(start.saturating_sub(1));
+        println!(
+            "using district {dir}: {} cells, start {start} at {:?}",
+            d.index.cells.len(),
+            d.index.starts.get(start.saturating_sub(1))
+        );
+        game.load_district(d);
     }
     // --rails: how the park's rails were classified, and what the probes beside each segment meet.
     if args.iter().any(|a| a == "--rails") {
@@ -742,7 +817,7 @@ fn main() {
         60 * 6
     } else if autoplay {
         60 * 150
-    } else if park.is_some() {
+    } else if park.is_some() || district.is_some() {
         60 * 30
     } else if tour {
         60 * 32

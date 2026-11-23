@@ -14,6 +14,7 @@
 #include <time.h>
 
 #include "fg_log.h"
+#include "fg_read.h"
 #include "fg_platform.h"
 
 #define FIFO_SIZE (256 * 1024)
@@ -163,6 +164,21 @@ static GXColor unpack(uint32_t rgba) {
     return c;
 }
 
+static float frame_near = 0.1f, frame_far = 1000.0f;
+
+void fg_set_fog(float start, float end, uint32_t rgba) {
+    if (!(end > start)) {
+        GX_SetFog(GX_FOG_NONE, 0, 1, 0.1f, 1, (GXColor){0, 0, 0, 255});
+        GX_SetFogRangeAdj(GX_DISABLE, 0, NULL);
+        return;
+    }
+    // Linear in eye distance, with the range adjusted across the screen so its edges fog like its middle.
+    static GXFogAdjTbl table;
+    GX_InitFogAdjTable(&table, rmode->fbWidth, proj);
+    GX_SetFogRangeAdj(GX_ENABLE, rmode->fbWidth / 2, &table);
+    GX_SetFog(GX_FOG_PERSP_LIN, start, end, frame_near, frame_far, unpack(rgba));
+}
+
 void fg_begin_frame(const float eye[3], const float target[3], const float up_dir[3], float fov_y_deg, float near_z,
                     float far_z, uint32_t clear_rgba) {
     // The copy-clear colour applies when this frame is copied out in fg_end_frame.
@@ -177,6 +193,11 @@ void fg_begin_frame(const float eye[3], const float target[3], const float up_di
     GX_LoadProjectionMtx(proj, GX_PERSPECTIVE);
     GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
     in_2d = 0;
+    frame_near = near_z;
+    frame_far = far_z;
+    // Fog is asked for per frame (fg_set_fog).
+    GX_SetFog(GX_FOG_NONE, 0, 1, 0.1f, 1, (GXColor){0, 0, 0, 255});
+    GX_SetFogRangeAdj(GX_DISABLE, 0, NULL);
     // Last frame finished in fg_end_frame (GX_DrawDone): its vertex copies can be reused.
     arena_used = 0;
     GX_InvalidateTexAll();
@@ -375,6 +396,9 @@ void fg_draw_2d(const FgVertex *verts, uint32_t count) {
         guOrtho(ortho, 0, 479, 0, 639, 0, 10);
         GX_LoadProjectionMtx(ortho, GX_ORTHOGRAPHIC);
         GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+        // The overlay is never fogged.
+        GX_SetFog(GX_FOG_NONE, 0, 1, 0.1f, 1, (GXColor){0, 0, 0, 255});
+        GX_SetFogRangeAdj(GX_DISABLE, 0, NULL);
         in_2d = 1;
     }
     // Push the overlay to z = -1, inside the ortho near/far range.
@@ -468,6 +492,85 @@ static void stop_writer(void) {
     log_set_writer(NULL, NULL, NULL);
 }
 
+// The background reader (fg_read.h): a low-priority thread doing queued whole-file reads with fg_load_file, so
+// streaming a city cell in never holds up a frame. Started by the first fg_read_start (on the game's thread,
+// which mounts the storage first), stopped with the log.
+static lwp_t reader;
+static mutex_t read_mutex;
+static cond_t read_cond;
+static volatile int reader_on;
+static int read_kicked; // under read_mutex: a read was queued (or the reader stopped) since it last looked
+static void reader_lock(void) {
+    LWP_MutexLock(read_mutex);
+}
+static void reader_unlock(void) {
+    LWP_MutexUnlock(read_mutex);
+}
+static void reader_kick(void) {
+    LWP_MutexLock(read_mutex);
+    read_kicked = 1;
+    LWP_CondSignal(read_cond);
+    LWP_MutexUnlock(read_mutex);
+}
+static void *reader_main(void *arg) {
+    (void)arg;
+    while (reader_on) {
+        if (read_service()) {
+            continue;
+        }
+        // Nothing queued: sleep until kicked (a kick since the last look means look again at once).
+        struct timespec wait = {0, 500 * 1000000};
+        LWP_MutexLock(read_mutex);
+        if (reader_on && !read_kicked) {
+            LWP_CondTimedWait(read_cond, read_mutex, &wait);
+        }
+        read_kicked = 0;
+        LWP_MutexUnlock(read_mutex);
+    }
+    return NULL;
+}
+// 1 if the reader is running (or now started).
+static int start_reader(void) {
+    static int tried;
+    if (reader_on || tried) {
+        return reader_on;
+    }
+    tried = 1;
+    if (!mount() || LWP_MutexInit(&read_mutex, false) < 0 || LWP_CondInit(&read_cond) < 0) {
+        return 0;
+    }
+    read_setup(fg_load_file, fg_free_file, reader_lock, reader_unlock, reader_kick);
+    reader_on = 1;
+    // Below the game's thread (64) and above the log writer (20): it reads while the game waits for the refresh.
+    if (LWP_CreateThread(&reader, reader_main, NULL, NULL, 16 * 1024, 30) < 0) {
+        reader_on = 0;
+        read_setup(NULL, NULL, NULL, NULL, NULL);
+        log_important("background reader: no thread");
+        return 0;
+    }
+    return 1;
+}
+static void stop_reader(void) {
+    if (!reader_on) {
+        return;
+    }
+    reader_on = 0;
+    reader_kick();
+    LWP_JoinThread(reader, NULL);
+}
+
+int32_t fg_read_start(const char *path) {
+    return start_reader() ? read_start(path) : -1;
+}
+
+int32_t fg_read_poll(int32_t ticket, void **data, uint32_t *size) {
+    return read_poll(ticket, data, size);
+}
+
+void fg_read_cancel(int32_t ticket) {
+    read_cancel(ticket);
+}
+
 // Milliseconds since the log was started (the CPU timer counts from 2000, not from power-on).
 static u64 log_epoch;
 static uint32_t boot_ms(void) {
@@ -517,6 +620,7 @@ void fg_log_tick(void) {
 
 void fg_log_stop(void) {
     log_important("session over (quit to the loader)");
+    stop_reader();
     stop_writer();
     log_close();
 }

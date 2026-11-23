@@ -8,6 +8,7 @@ use crate::camera::{CamData, CameraMan};
 use crate::character::{self, Character};
 use crate::collision;
 use crate::devlog::DevLog;
+use crate::district::District;
 use crate::flick::{FlickInput, FlickOut};
 use crate::gesture;
 use crate::gfx::{Gfx, MeshBuilder, SCREEN_H, SCREEN_W, Vertex, rgb};
@@ -22,6 +23,7 @@ use crate::rider::Rider;
 use crate::skater::{ClipTiming, Event, Mode, Skater, Stance};
 use crate::tuning::Tuning;
 use crate::world::ImportedPark;
+use alloc::boxed::Box;
 
 /// How long the drawn character takes to move its origin between the deck and the feet (s).
 const FOOT_ORIGIN_BLEND: f32 = 0.2;
@@ -144,8 +146,11 @@ struct Popup {
 pub struct Game {
     pub park: Park,
     park_mesh: Vec<Vertex>,
-    /// A park imported from the player's disc, ridden and drawn instead of the demo park when loaded.
-    imported_park: Option<ImportedPark>,
+    /// What is ridden and drawn: the demo park, or a park or district imported from the player's disc.
+    world: World,
+    /// A district was loaded and the cells around its start are still being read: the loading screen is
+    /// shown and the rider placed once they are in.
+    district_wait: bool,
     models: Models,
     /// The player's imported skater, drawn instead of the box placeholder when loaded.
     rider: Option<Rider>,
@@ -218,12 +223,21 @@ const LOG_CAP: usize = 512;
 /// Seconds between status lines.
 const STATUS_EVERY: f32 = 1.0;
 
-/// The imported park if there is one, else the demo park (a free function so callers can borrow other
-/// fields of the game at the same time).
-fn terrain<'a>(imported: &'a Option<ImportedPark>, park: &'a Park) -> &'a dyn Terrain {
-    match imported {
-        Some(p) => &p.mesh,
-        None => park,
+/// What is ridden.
+enum World {
+    /// The built-in demo park (`Game::park`).
+    Demo,
+    Park(Box<ImportedPark>),
+    District(Box<District>),
+}
+
+/// What the skater rides on (a free function so callers can borrow other fields of the game at the same
+/// time).
+fn terrain<'a>(world: &'a World, park: &'a Park) -> &'a dyn Terrain {
+    match world {
+        World::Demo => park,
+        World::Park(p) => &p.mesh,
+        World::District(d) => &**d,
     }
 }
 
@@ -261,7 +275,8 @@ impl Game {
             graph: None,
             gesture_sets: Vec::new(),
             pose: Default::default(),
-            imported_park: None,
+            world: World::Demo,
+            district_wait: false,
             log: Vec::new(),
             devlog: DevLog::new(),
             status_timer: 0.0,
@@ -324,15 +339,43 @@ impl Game {
     /// textures in place. On an error the park ridden before stays.
     pub fn load_park(&mut self, pack: &'static [u8]) -> Result<(), collision::Error> {
         let p = ImportedPark::parse(pack)?;
-        self.imported_park = Some(p);
+        self.world = World::Park(Box::new(p));
+        self.district_wait = false;
         self.start_over();
         Ok(())
+    }
+
+    /// Rides a district that streams in as the rider goes ([`District`]): the loading screen shows until
+    /// the cells around its start are read, then the rider starts there. Replaces the park or district
+    /// ridden before (which is freed: call between frames).
+    pub fn load_district(&mut self, district: District) {
+        self.world = World::District(Box::new(district));
+        self.district_wait = true;
+    }
+
+    /// The district being ridden, if one is.
+    pub fn district(&self) -> Option<&District> {
+        match &self.world {
+            World::District(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Is the built-in demo park being ridden (nothing imported)?
+    pub fn on_demo_park(&self) -> bool {
+        matches!(self.world, World::Demo)
+    }
+
+    /// Is a district still reading the cells around its start?
+    pub fn district_loading(&self) -> bool {
+        self.district_wait
     }
 
     /// Drops the imported park (back to the demo park, at its spawn). Afterwards nothing refers to the
     /// pack given to [`Game::load_park`] any more, so the platform may free it.
     pub fn unload_park(&mut self) {
-        self.imported_park = None;
+        self.world = World::Demo;
+        self.district_wait = false;
         self.start_over();
     }
 
@@ -340,7 +383,7 @@ impl Game {
     /// camera cut to it, the flick reader and both state graphs started over, nothing blended from the
     /// last frame, the old park's checkpoints gone.
     fn start_over(&mut self) {
-        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        let ground: &dyn Terrain = terrain(&self.world, &self.park);
         self.skater.reset_to_spawn(ground);
         self.flick.reset();
         self.cam.request_reset();
@@ -466,13 +509,16 @@ impl Game {
     }
 
     pub fn imported_park(&self) -> Option<&ImportedPark> {
-        self.imported_park.as_ref()
+        match &self.world {
+            World::Park(p) => Some(p),
+            _ => None,
+        }
     }
 
     /// What the skater rides on: the imported park if there is one, else the demo park.
     /// Puts the rider back at the park's spawn, a fresh start (scripted runs between tours).
     pub fn restart_at_spawn(&mut self) {
-        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        let ground: &dyn Terrain = terrain(&self.world, &self.park);
         self.skater.reset_to_spawn(ground);
         self.flick.reset();
         self.cam.request_reset();
@@ -495,7 +541,7 @@ impl Game {
     }
 
     pub fn place_rider(&mut self, pos: crate::math::Vec3, heading: f32, speed: f32) {
-        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        let ground: &dyn Terrain = terrain(&self.world, &self.park);
         self.skater.put_at(ground, pos, heading, speed);
         self.flick.reset();
         self.cam.request_reset();
@@ -515,7 +561,7 @@ impl Game {
     }
 
     pub fn terrain(&self) -> &dyn Terrain {
-        terrain(&self.imported_park, &self.park)
+        terrain(&self.world, &self.park)
     }
 
     /// One displayed frame of `dt` seconds (1/60 on NTSC and PAL60, 1/50 on PAL50): runs as many fixed
@@ -526,6 +572,30 @@ impl Game {
         self.events.clear();
         let pressed = raw.buttons & !self.menu_prev;
         self.menu_prev = raw.buttons;
+        // A district reads and drops cells around the rider (or its start, before the rider is placed),
+        // menus open or not. Where the cells under the rider aren't in yet, the riding waits.
+        let mut held = false;
+        if let World::District(d) = &mut self.world {
+            let at = if self.district_wait {
+                d.spawn().0
+            } else {
+                self.skater.pos
+            };
+            d.stream(at);
+            if self.log.len() < LOG_CAP {
+                self.log.append(&mut d.log);
+            } else {
+                d.log.clear();
+            }
+            held = !d.ready(at);
+            if self.district_wait && !held {
+                self.district_wait = false;
+                self.start_over();
+            }
+        }
+        if self.district_wait {
+            return;
+        }
         // A menu freezes the riding and takes the pad (the d-pad moves its cursor, not the rider's
         // gestures).
         if let Some(menu) = &mut self.menu {
@@ -547,6 +617,9 @@ impl Game {
             ..*raw
         };
         let raw = &unblocked;
+        if held {
+            return;
+        }
         self.ahead -= dt;
         // A little slack so float error never runs (or skips) a tick at 60 Hz.
         while self.ahead < -1e-4 {
@@ -568,7 +641,7 @@ impl Game {
         if self.rider.is_some() {
             let rot = self.imported_xform().rot;
             let s = &self.skater;
-            let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+            let ground: &dyn Terrain = terrain(&self.world, &self.park);
             let land_in = s.time_to_land(ground);
             let mut posed = false;
             if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
@@ -634,7 +707,7 @@ impl Game {
         self.flick_out = flick;
         let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
         let t0 = now(self.timer);
-        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        let ground: &dyn Terrain = terrain(&self.world, &self.park);
         // On foot the stick is read against the camera (where it looks, seen from above).
         {
             let c = self.cam.camera();
@@ -816,7 +889,11 @@ impl Game {
         let now = || self.timer.map_or(0, |f| f());
         let t0 = now();
         let cam = self.drawn_camera();
-        if let Some(text) = &self.loading {
+        let streaming = self.district().filter(|_| self.district_wait).map(|d| {
+            let (done, of) = d.progress(d.spawn().0);
+            format!("{done} OF {of}")
+        });
+        if let Some(text) = self.loading.as_ref().or(streaming.as_ref()) {
             gfx.begin_frame(&cam, rgb(0, 0, 0));
             let mut m = MeshBuilder::new();
             m.rect_2d(0.0, 0.0, SCREEN_W, SCREEN_H, rgb(0, 0, 0));
@@ -834,9 +911,18 @@ impl Game {
             return;
         }
         gfx.begin_frame(&cam, SKY);
-        let (draws, verts) = match &self.imported_park {
-            Some(p) => p.draw(gfx, cam.eye),
-            None => {
+        // A district is drawn only so far around the rider: it fades into the sky before that.
+        if let World::District(_) = self.world {
+            gfx.fog(Some(crate::gfx::Fog {
+                start: crate::world::FOG_START,
+                end: crate::world::FOG_END,
+                rgba: SKY,
+            }));
+        }
+        let (draws, verts) = match &self.world {
+            World::Park(p) => p.draw(gfx, cam.eye),
+            World::District(d) => d.draw(gfx, cam.eye),
+            World::Demo => {
                 gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34());
                 (1, self.park_mesh.len() as u32)
             }
@@ -910,7 +996,7 @@ impl Game {
     /// the drawn board's roll follows the smoothed ground normal: on a transition ridden across, a
     /// side's wheels would dip into it. The drawing takes that out, at most `WHEEL_LIFT_MAX`.
     fn wheel_lift(&self, base: &Xform) -> f32 {
-        let ground: &dyn Terrain = terrain(&self.imported_park, &self.park);
+        let ground: &dyn Terrain = terrain(&self.world, &self.park);
         let up = base.rot.cols[1];
         let mut lift: f32 = 0.0;
         // Under each wheel: `wheel_x_distance` (SK8 construction/authored_transforms.rs) each side of
@@ -1264,6 +1350,92 @@ mod tests {
         let (prev, cur) = (g.prev_view.unwrap().cam.eye, g.cam.camera().eye);
         let k = g.blend();
         assert!((g.drawn_camera().eye - prev.lerp(cur, k)).length() < 1e-4);
+    }
+
+    /// Keeps the fog asked for.
+    #[derive(Default)]
+    struct FogSeen(Vec<Option<crate::gfx::Fog>>);
+    impl Gfx for FogSeen {
+        fn begin_frame(&mut self, _cam: &crate::gfx::Camera, _clear: u32) {}
+        fn fog(&mut self, f: Option<crate::gfx::Fog>) {
+            self.0.push(f);
+        }
+        fn draw_tris(&mut self, _v: &[Vertex], _m: &crate::math::Mat34) {}
+        fn draw_indexed(
+            &mut self,
+            _v: &[crate::gfx::TexVertex],
+            _i: &[u16],
+            _t: Option<&crate::gfx::Texture>,
+            _m: &crate::math::Mat34,
+        ) {
+        }
+        fn draw_2d(&mut self, _v: &[Vertex]) {}
+        fn end_frame(&mut self) {}
+    }
+
+    #[test]
+    fn a_district_fades_into_the_sky_before_the_draw_distance() {
+        use crate::city::{CellInfo, Index};
+        use crate::reader::MemReader;
+        use alloc::vec;
+        let mut g = Game::new();
+        let mut seen = FogSeen::default();
+        g.render(&mut seen);
+        assert!(seen.0.is_empty(), "no fog on the demo park");
+        let floor = crate::collision::encode(&[
+            (
+                [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0], [100.0, 0.0, 100.0]],
+                1,
+                0,
+            ),
+            (
+                [[0.0, 0.0, 0.0], [100.0, 0.0, 100.0], [100.0, 0.0, 0.0]],
+                1,
+                0,
+            ),
+        ]);
+        let spawn: Vec<u8> = [50.0f32, 0.0, 50.0, 0.0]
+            .iter()
+            .flat_map(|f| f.to_be_bytes())
+            .collect();
+        let p = crate::pack::encode(&[
+            (
+                "park/collision",
+                crate::pack::Kind::Collision,
+                &floor,
+                0,
+                0,
+                0,
+            ),
+            ("park/spawn", crate::pack::Kind::Data, &spawn, 0, 0, 0),
+        ]);
+        let mut r = MemReader::new();
+        r.add("d/c_50_50.fgpak", p.clone());
+        let index = Index {
+            cell: 100.0,
+            floor: 0.0,
+            starts: vec![(v3(50.0, 0.0, 50.0), 0.0)],
+            cells: vec![CellInfo {
+                x: 50,
+                z: 50,
+                bytes: p.len() as u32,
+                tris: 2,
+                vertices: 0,
+                texture_bytes: 0,
+            }],
+        };
+        let r = alloc::rc::Rc::new(core::cell::RefCell::new(r));
+        let d = crate::district::District::new(&index.encode(), "d", Box::new(r.clone()), 1 << 20)
+            .unwrap();
+        g.load_district(d);
+        while g.district_loading() {
+            r.borrow_mut().service();
+            g.update(&held(0), 1.0 / 60.0);
+        }
+        g.render(&mut seen);
+        let f = seen.0.last().copied().flatten().expect("fog in a district");
+        assert!(f.start < f.end && f.end < crate::world::DRAW_DISTANCE);
+        assert_eq!(f.rgba, SKY);
     }
 
     /// Draws nothing.

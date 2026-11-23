@@ -86,6 +86,9 @@ void fg_begin_frame(const float eye[3], const float target[3], const float up[3]
                     float far_z, uint32_t clear_rgba);
 // The TV's aspect (width over height: 4/3, or 16/9 when the Wii is set to widescreen).
 float fg_aspect(void);
+// Distance fog for the rest of this frame's 3D drawing (fg_begin_frame turns it off): the scene fades to
+// rgba from start to end metres from the eye. end <= start: off. The 2D overlay is never fogged.
+void fg_set_fog(float start, float end, uint32_t rgba);
 // Triangle list (count is a multiple of 3, at most 65535) placed by a row-major 3x4 model matrix.
 void fg_draw_tris(const FgVertex *verts, uint32_t count, const float model[3][4]);
 // Screen-space triangle list in a 640x480 virtual screen, origin top-left, drawn over the scene.
@@ -111,6 +114,16 @@ void *fg_load_file(const char *path, uint32_t *size);
 // Gives back what fg_load_file returned (NULL: nothing). Nothing may use it afterwards, the GPU included: call
 // it after the frame that last drew from it has finished (fg_end_frame waits for that).
 void fg_free_file(void *data);
+// Background whole-file reads (fg_read.h), for streaming: fg_load_file done by a low-priority thread while the
+// game waits for the refresh. Queues a read of `path`: a ticket (>= 0), or -1 (queue full, path too long, no
+// storage).
+int32_t fg_read_start(const char *path);
+// 0: still reading. 1: done, *data / *size are the file, now the caller's (32-byte aligned and flushed, as from
+// fg_load_file; give it back with fg_free_file). -1: failed (no such file, no memory) or not a read in progress.
+// A ticket is finished with after 1 or -1.
+int32_t fg_read_poll(int32_t ticket, void **data, uint32_t *size);
+// The read isn't wanted any more: dropped if not started, freed when it ends otherwise.
+void fg_read_cancel(int32_t ticket);
 // Writes a whole (small) file, replacing it: settings in the app folder. 0 on success, -1 if it couldn't.
 int32_t fg_save_file(const char *path, const void *data, uint32_t size);
 void fg_end_frame(void);

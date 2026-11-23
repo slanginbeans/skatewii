@@ -25,6 +25,10 @@ jobs:
         run: |
           cc -O1 -Wall -Wextra -Werror -Iwii/platform wii/platform/fg_log.c wii/platform/tests/log_test.c -o /tmp/log_test
           /tmp/log_test
+      - name: Background reads (the Wii's C read queue, on the PC)
+        run: |
+          cc -O1 -Wall -Wextra -Werror -Iwii/platform wii/platform/fg_read.c wii/platform/tests/read_test.c -o /tmp/read_test
+          /tmp/read_test
       - name: Preview frames
         run: cargo run --release -p fg_preview -- out/preview
       - uses: actions/upload-artifact@v4
@@ -45,6 +49,10 @@ jobs:
         run: |
           powerpc-linux-gnu-gcc -O1 -static -Wall -Wextra -Werror -Iwii/platform wii/platform/fg_log.c wii/platform/tests/log_test.c -o /tmp/log_test_ppc
           qemu-ppc /tmp/log_test_ppc
+      - name: Background reads, big-endian
+        run: |
+          powerpc-linux-gnu-gcc -O1 -static -Wall -Wextra -Werror -Iwii/platform wii/platform/fg_read.c wii/platform/tests/read_test.c -o /tmp/read_test_ppc
+          qemu-ppc /tmp/read_test_ppc
       - name: Wii staticlib
         run: cargo build --release -p fg_game --target powerpc-unknown-linux-gnu
       - name: Clippy for the Wii target

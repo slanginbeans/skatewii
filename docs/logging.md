@@ -35,7 +35,8 @@ crash screen.
   Autoplay skips the start menu and rides the default location. A line `switch <seconds>` in the file
   (`dolphin_test.ps1 -SwitchEvery <seconds>`) moves on to the next location (the demo park included, then
   round again) every so often, so one run logs each park loading, its memory and its frame cost, and the
-  memory after switching back.
+  memory after switching back. A location that fails to load (the game falls back to the demo park) is
+  skipped, not tried again and again.
 - **On the PC without a Wii:** `cargo run --release -p fg_preview -- out/preview --tour --log` prints the same game
   lines as the preview plays.
 
@@ -59,6 +60,11 @@ While playing:
   what the park holds, and memory before, after the old park was freed, and with the new one loaded (heap
   counts the gap between MEM1 and MEM2 once the heap spills into MEM2, so compare heap figures with each
   other: after the old park is freed it is back to the same value every time). `menu: quit to the loader`.
+  For a district (`FG_CITY=1`) the line says `a district, streaming` and is preceded by `district <id>: <n>
+  cells, start <where>, budget <KB>`.
+- `district: cell <x> <z> in, <KB>, <triangles>, <rails>, parsed in <ms> (<cells> cells, <KB> held)` as each
+  cell of a district arrives, `district: cell <x> <z> out (...)` as one is dropped, and `district: cell <x>
+  <z> could not be read` (it isn't tried again). The `frame:` line's heap shows what the district holds.
 - `status:` once a second: the skater's mode, position, heading, speed, stance (switch, fakie), the camera's
   distance and how often a wall pulled it in, and the range each stick axis and trigger reached (for tuning the
   C-stick, whose range differs between pads).

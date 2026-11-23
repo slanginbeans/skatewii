@@ -49,6 +49,7 @@ unsafe extern "C" {
         far: f32,
         clear_rgba: u32,
     );
+    pub fn fg_set_fog(start: f32, end: f32, rgba: u32);
     pub fn fg_draw_tris(verts: *const Vertex, count: u32, model: *const Mat34);
     pub fn fg_draw_indexed(
         verts: *const TexVertex,
@@ -73,6 +74,9 @@ unsafe extern "C" {
     pub fn fg_time_us() -> u32;
     pub fn fg_load_file(path: *const c_char, size: *mut u32) -> *mut u8;
     pub fn fg_free_file(data: *mut u8);
+    pub fn fg_read_start(path: *const c_char) -> i32;
+    pub fn fg_read_poll(ticket: i32, data: *mut *mut u8, size: *mut u32) -> i32;
+    pub fn fg_read_cancel(ticket: i32);
     pub fn fg_save_file(path: *const c_char, data: *const u8, size: u32) -> i32;
     pub fn fg_panic(msg: *const u8, len: u32) -> !;
     pub fn fg_log(line: *const u8, len: u32, important: i32);

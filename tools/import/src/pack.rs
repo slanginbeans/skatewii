@@ -2,6 +2,7 @@
 
 use game_core::pack::{DATA_ALIGN, ENTRY_SIZE, HEADER_SIZE, Kind, MAGIC, VERSION, name_hash};
 
+#[derive(Clone)]
 pub struct Item {
     pub name: String,
     pub kind: Kind,
