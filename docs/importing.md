@@ -21,11 +21,11 @@ folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg
   menu, ridden at the first start; converted even if it is not in the list); the default is BlackBoxPark. An
   old single `data/park.fgpak` from earlier builds is removed (the game still reads one when there is no
   `parks.txt`).
-- with `FG_CITY=1`, also cuts the city districts and Skate School into cell packs (`data/city/<district>/`,
+- unless `FG_CITY=0`, also cuts the city districts and Skate School into cell packs (`data/city/<district>/`,
   below; about 325 MB, 60 s) and lists them in `parks.txt`, one line per start spot (`district <id>
   city/<District>/index.fgpak <bytes> <start> <name>`: `DownTown`, `DownTown-2`, ... shown as Downtown,
-  Downtown 2, ...), so each start is a location in the menu (which scrolls when the list is long). Off by
-  default until it has run on a real Wii (it runs in Dolphin: "Riding a district" below).
+  Downtown 2, ...), so each start is a location in the menu (which scrolls when the list is long). On by default; it runs in
+  Dolphin but hasn't been tried on a real Wii yet ("Riding a district" below).
 
 All of it is about 37 MB (the motion library 20 MB, the six parks 12.5 MB). Copy `dist/apps/flatground` to
 the SD card's `apps` folder and the game finds its packs at
@@ -335,7 +335,7 @@ the rider once, for 1.9 s, over about 17 minutes and University never, with at m
 packs) loaded and the heap peaking about 13 MB above the game's own (on the Wii, without the mesh copies, an
 estimated 9 MB); everything is freed when the district is left.
 
-In Dolphin (`FG_CITY=1`, `tools\dolphin_test.ps1 -Seconds 960 -SwitchEvery 40`: autoplay at every location in
+In Dolphin (`tools\dolphin_test.ps1 -Seconds 960 -SwitchEvery 40`: autoplay at every location in
 turn, 40 s each, all 16 district starts): 4,287 cells read and parsed without an error, at most 10 ms a parse;
 no dropped frames in 640 s of districts (frame CPU at most 15.5 ms, the camera's tick at most 4.9 ms); the heap
 at most 8.2 MB above the game's own and back to it after each district (MEM2's free space drops once, from

@@ -66,7 +66,7 @@ the A that chose an item is not a push until you let go of it). Changing locatio
 while the park is read from the SD card (Dolphin reads the biggest, 4.2 MB, in well under a second; a real
 SD card is slower). The list scrolls when it is long.
 
-Built with `FG_CITY=1`, the menu also lists the **city districts** (Downtown, University, Industrial) and
+The menu also lists the **city districts** (Downtown, University, Industrial) and
 **Skate School**, each up to four times, once per start spot (Downtown, Downtown 2, ...). A district is far
 bigger than the Wii's memory, so it streams: 100 m cells are read from the SD card in the background as you
 ride, nearest first, and dropped behind you; everything beyond 50 m fades into the sky, and if you outrun the
@@ -136,8 +136,8 @@ drive; `build.bat` offers to install Rust for you), or Docker Desktop.
 
 Switches combine. Optional settings: `set FG_SD=E:` also copies the app to `E:\apps\flatground`;
 `FG_DEVKITPRO` points at devkitPro if it's somewhere unusual; `FG_ASSUME_YES=1` installs Rust without asking;
-`FG_ISO` picks your disc image; `FG_PARK` the default location (default BlackBoxPark); `FG_CITY=1` also
-converts the city districts and Skate School as streamed locations (about 330 MB more); `FG_NO_ASSETS=1`
+`FG_ISO` picks your disc image; `FG_PARK` the default location (default BlackBoxPark); `FG_CITY=0` leaves
+out the city districts and Skate School (streamed locations, about 330 MB); `FG_NO_ASSETS=1`
 skips converting;
 `FG_DOLPHIN` points at `Dolphin.exe`.
 

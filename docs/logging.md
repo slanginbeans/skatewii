@@ -60,7 +60,7 @@ While playing:
   what the park holds, and memory before, after the old park was freed, and with the new one loaded (heap
   counts the gap between MEM1 and MEM2 once the heap spills into MEM2, so compare heap figures with each
   other: after the old park is freed it is back to the same value every time). `menu: quit to the loader`.
-  For a district (`FG_CITY=1`) the line says `a district, streaming` and is preceded by `district <id>: <n>
+  For a district the line says `a district, streaming` and is preceded by `district <id>: <n>
   cells, start <where>, budget <KB>`.
 - `district: cell <x> <z> in, <KB>, <triangles>, <rails>, parsed in <ms> (<cells> cells, <KB> held)` as each
   cell of a district arrives, `district: cell <x> <z> out (...)` as one is dropped, and `district: cell <x>
