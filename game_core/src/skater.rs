@@ -2518,6 +2518,7 @@ impl Skater {
         self.fwd = rotate(self.fwd, self.normal, turn);
         // The legs: the board follows the animated centre of mass's height over it, as fast as the
         // rider's body follows its animation (SK8's physical rider; measured, 0.15 of the gap a tick).
+        let lift_before = self.air_lift;
         if let (Some(c0), Some(d)) = (self.air_com, self.body_com) {
             self.air_lift_rate = (c0 - d - self.air_lift) / dt.max(1e-4);
             self.air_lift = c0 - d;
@@ -2559,16 +2560,19 @@ impl Skater {
         }
         let from = self.pos;
         let delta = self.vel * dt;
-        let len = delta.length();
         let mut moved = false;
         // The board is where the legs hold it off the flight's path (tucked over it, reaching under
         // it for the landing): it meets the ground where it is (SK8: the deck under the flying centre
-        // of mass).
-        let sink = Vec3::UP * self.air_lift;
+        // of mass). It is tested along its own path this tick, from where the legs held it to where
+        // they hold it now: reaching down for a landing moves it a few centimetres a tick on top of
+        // the flight, and a test along the flight alone started under the ground and fell through it.
+        let start = from + Vec3::UP * lift_before;
+        let path = delta + Vec3::UP * (self.air_lift - lift_before);
+        let len = path.length();
         if len > 1e-6 {
-            let dir = delta * (1.0 / len);
-            if let Some(h) = park.raycast(from + sink, dir, len + 0.01)
-                && self.vel.dot(h.normal) < 0.0
+            let dir = path * (1.0 / len);
+            if let Some(h) = park.raycast(start, dir, len + 0.01)
+                && path.dot(h.normal) < 0.0
             {
                 let landable = self.normal.dot(h.normal) > 0.5 || h.normal.y > 0.6;
                 if landable {
@@ -5246,6 +5250,47 @@ mod tests {
         assert!(!ev.contains(&Event::Launched), "{ev:?}");
         assert!(gap < 0.08, "{gap}");
         assert_eq!(s.mode, Mode::Rolling);
+    }
+
+    #[test]
+    fn legs_reaching_for_the_landing_never_push_the_board_through_the_ground() {
+        // Falling slowly onto flat ground while the animation stands the rider up, 10 cm a tick:
+        // the legs push the board down faster than it falls (a nollie's legs reaching for the
+        // landing). Tested along the flight alone, the board started each test under the ground.
+        // Imported parks' triangles, which (unlike the demo park's height field) aren't found from
+        // underneath.
+        let (a, b, c, d) = (
+            [-20.0, 0.0, -20.0],
+            [20.0, 0.0, -20.0],
+            [20.0, 0.0, 20.0],
+            [-20.0, 0.0, 20.0],
+        );
+        let park = crate::collision::TriMesh::parse(
+            &crate::collision::encode(&[([a, d, c], 0, 0), ([a, c, b], 0, 0)]),
+            (v3(0.0, 0.0, 0.0), 0.0),
+        )
+        .unwrap();
+        let mut s = spawn(&park);
+        place(&mut s, v3(0.0, 0.3, 0.0), Vec3::UP, v3(0.0, 0.0, 1.0));
+        s.vel = v3(0.0, -1.0, 0.0);
+        s.mode = Mode::Air { time: 0.5 };
+        s.air_com = Some(0.8);
+        s.body_com = Some(0.8);
+        let mut ev = Vec::new();
+        let mut lowest = f32::MAX;
+        for k in 1..=60 {
+            s.graph = Some(GraphControl {
+                pose_com: Some(0.8 + 0.1 * k as f32),
+                ..Default::default()
+            });
+            s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
+            lowest = lowest.min(s.pos.y);
+            if !matches!(s.mode, Mode::Air { .. }) {
+                break;
+            }
+        }
+        assert_eq!(s.mode, Mode::Rolling, "{ev:?}, lowest {lowest}");
+        assert!(lowest > -0.05, "went under the ground: {lowest}");
     }
 
     #[test]
