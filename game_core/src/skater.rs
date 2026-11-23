@@ -99,6 +99,9 @@ const RUNOUT_TIME: f32 = 1.2;
 const DISMOUNT_MIN_UP: f32 = 0.64;
 /// Y's request lapses if the graphs haven't got off (or on) the board by then (s).
 const TOGGLE_WAIT: f32 = 2.0;
+/// Y pressed in the air off the board gets on the board on landing if it is this recent (s): a whole jump
+/// off the board (about a second), not a long fall.
+const TOGGLE_BUFFER: f32 = 1.5;
 /// How long a landing is remembered (drawn: the landing clip), and how long after it a revert counts
 /// (flatground's own rules; with the state graphs the revert gesture decides).
 const LANDING_SHOW: f32 = 1.5;
@@ -849,6 +852,8 @@ pub struct Skater {
     pub board_toggle: Option<f32>,
     /// The mount clip's `OB_TRAJ` has started (the rider is on the board when it ends).
     mount_traj: bool,
+    /// Y pressed while jumping off the board, seconds ago: it gets on the board on landing.
+    toggle_buffered: Option<f32>,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -1101,6 +1106,7 @@ impl Skater {
             cam_yaw: heading,
             board_toggle: None,
             mount_traj: false,
+            toggle_buffered: None,
         }
     }
 
@@ -1496,21 +1502,29 @@ impl Skater {
     /// the state graphs the clips time it: off once the dismount clip starts walking the rider
     /// (`OB_TRAJ`), on once the mount clip's `OB_TRAJ` is over; without them at once.
     fn toggle_board(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
-        if pad.was_pressed(btn::Y) && self.board_toggle.is_none() {
-            let ok = match self.mode {
-                // SK8 DisableDismount: not on ground steeper than this.
-                Mode::Rolling => self.contact_n.y >= DISMOUNT_MIN_UP,
-                Mode::Walk => self.biped.air.is_none(),
-                _ => false,
-            };
-            if ok {
-                self.board_toggle = Some(0.0);
-                self.mount_traj = false;
-            }
+        // Y in the air off the board waits for the landing.
+        if self.mode == Mode::Walk && self.biped.air.is_some() && pad.was_pressed(btn::Y) {
+            self.toggle_buffered = Some(0.0);
         }
+        if self.toggle_starts(pad) {
+            self.board_toggle = Some(0.0);
+            self.mount_traj = false;
+            self.toggle_buffered = None;
+        }
+        self.toggle_buffered = match self.toggle_buffered {
+            Some(b) if b + dt <= TOGGLE_BUFFER && self.mode == Mode::Walk => Some(b + dt),
+            _ => None,
+        };
         let Some(t) = self.board_toggle else {
             return;
         };
+        // Getting on is for the ground: leaving it (stepping off a ledge mid-mount) calls it off, so the
+        // rider isn't put on the board in the air while the clips have moved on.
+        if self.mode == Mode::Walk && self.biped.air.is_some() {
+            self.board_toggle = None;
+            self.mount_traj = false;
+            return;
+        }
         let t = t + dt;
         self.board_toggle = Some(t);
         let go = match (self.mode, self.graph) {
@@ -1536,6 +1550,32 @@ impl Skater {
         } else if t > TOGGLE_WAIT {
             self.board_toggle = None;
         }
+    }
+
+    /// Whether Y starts getting off or on the board this tick: pressed now (or in the air just before
+    /// landing, off the board), and allowed where the rider is. The graphs hear Y only then
+    /// ([`Skater::board_toggle_intent`]), so they and the physics always agree on it.
+    fn toggle_starts(&self, pad: &Pad) -> bool {
+        if self.board_toggle.is_some()
+            || !(pad.was_pressed(btn::Y) || self.toggle_buffered.is_some())
+        {
+            return false;
+        }
+        match self.mode {
+            // SK8 DisableDismount: not on ground steeper than this.
+            Mode::Rolling => self.contact_n.y >= DISMOUNT_MIN_UP,
+            Mode::Walk => self.biped.air.is_none(),
+            _ => false,
+        }
+    }
+
+    /// Skate 3's `ToggleOffBoardState` and `NewToggleOffBoardState` for the graphs this tick (held, new):
+    /// only while the physics takes Y as a toggle (it starts this tick or is under way), so a Y it turns
+    /// down (in the air, on steep ground) doesn't start the clips without it.
+    pub fn board_toggle_intent(&self, pad: &Pad) -> (bool, bool) {
+        let new = self.toggle_starts(pad);
+        let held = new || (self.board_toggle.is_some() && pad.held & btn::Y != 0);
+        (held, new)
     }
 
     /// Off the board, facing the way it was going (or its nose, standing).

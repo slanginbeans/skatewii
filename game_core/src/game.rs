@@ -765,6 +765,7 @@ impl Game {
             let s = &self.skater;
             let walking = s.mode == Mode::Walk;
             let ob_world = crate::skater::biped::world_stick(pad.stick, s.cam_yaw);
+            let (toggle_board, toggle_board_new) = s.board_toggle_intent(&pad);
             let (ob_mag, ob_steer) =
                 crate::skater::biped::read_stick(&s.tuning.biped, s.biped.heading, ob_world);
             // The known landing's time (the trajectory selector), else straight down.
@@ -787,6 +788,8 @@ impl Game {
                 ob_mag,
                 ob_steer,
                 ob_world,
+                toggle_board,
+                toggle_board_new,
             };
             g.tick(&lib.db, &pad, world, gates, dt, self.timer);
             let mut control = g.control(&lib.db, &self.tuning);

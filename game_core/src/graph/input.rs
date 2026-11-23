@@ -97,6 +97,10 @@ pub struct Gates {
     pub ob_mag: f32,
     pub ob_steer: f32,
     pub ob_world: [f32; 2],
+    /// Y as the physics takes it: getting off or on the board (held, and new this tick)
+    /// (`Skater::board_toggle_intent`).
+    pub toggle_board: bool,
+    pub toggle_board_new: bool,
 }
 
 struct Set {
@@ -208,10 +212,10 @@ impl Intentions {
         }
         // Off the board (SK8 offboard_intentions.rs, by position on the pad): Y gets off and on, B
         // (Skate 3's X) jumps, A without X (Skate 3's A without B) sprints.
-        if held & btn::Y != 0 {
+        if gates.toggle_board {
             put(id.toggle_off_board, 1.0);
         }
-        if new & btn::Y != 0 {
+        if gates.toggle_board_new {
             put(id.new_toggle_off_board, 1.0);
         }
         if new & btn::B != 0 {
