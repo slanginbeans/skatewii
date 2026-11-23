@@ -105,6 +105,13 @@ void fg_draw_indexed(const FgTexVertex *verts, uint32_t vert_count, const uint16
 // Misaligned arrays are skipped.
 void fg_draw_indexed_static(const FgTexVertex *verts, uint32_t vert_count, const uint16_t *indices,
                             uint32_t index_count, const FgTexture *tex, const float model[3][4]);
+// A mesh whose vertices the GPU reads in place (as fg_draw_indexed_static) drawn by a display list: `list` holds
+// the GX commands (triangles in GX_VTXFMT1, each vertex a 16-bit position, colour and texture coordinate index:
+// game_core::gfx::GpuList), 32-byte aligned, `list_size` a multiple of 32, flushed from the CPU cache, and alive
+// until the frame that draws it is done. The CPU only points the GPU at it. Without `tex` the vertex colour is
+// drawn. Misaligned vertices or lists are skipped.
+void fg_draw_list(const FgTexVertex *verts, uint32_t vert_count, const void *list, uint32_t list_size,
+                  const FgTexture *tex, const float model[3][4]);
 // Writes `size` bytes at `data` out of the CPU's data cache, so the GPU sees them.
 void fg_flush_range(const void *data, uint32_t size);
 // Microseconds from a free-running CPU timer (wraps every ~71 minutes; subtract with wrap-around).

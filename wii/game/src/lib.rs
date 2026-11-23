@@ -21,7 +21,7 @@ use game_core::autoplay::Autoplay;
 use game_core::character;
 use game_core::district::District;
 use game_core::game::{FrameCost, Game};
-use game_core::gfx::{Camera, Fog, Gfx, StaticVerts, TexVertex, Texture, Vertex};
+use game_core::gfx::{Camera, Fog, Gfx, GpuList, StaticVerts, TexVertex, Texture, Vertex};
 use game_core::input::PadRaw;
 use game_core::math::Mat34;
 use game_core::menu::{self, Location, LocationTour, Request};
@@ -77,6 +77,28 @@ impl Gfx for WiiGfx {
         // Flushed once when the park loaded (`flush_park`).
         draw(ffi::fg_draw_indexed_static, verts, indices, texture, model);
     }
+    fn draw_list(
+        &mut self,
+        verts: &StaticVerts,
+        _indices: &[u16],
+        list: &GpuList,
+        texture: Option<&Texture>,
+        model: &Mat34,
+    ) {
+        let tex = texture.map(fg_texture);
+        let tex_ptr = tex.as_ref().map_or(ptr::null(), |t| t as *const _);
+        let l = list.bytes();
+        unsafe {
+            ffi::fg_draw_list(
+                verts.as_ptr(),
+                verts.len() as u32,
+                l.as_ptr(),
+                l.len() as u32,
+                tex_ptr,
+                model,
+            )
+        }
+    }
     fn draw_2d(&mut self, verts: &[Vertex]) {
         for chunk in verts.chunks(MAX_BATCH) {
             unsafe { ffi::fg_draw_2d(chunk.as_ptr(), chunk.len() as u32) }
@@ -96,20 +118,24 @@ type DrawFn = unsafe extern "C" fn(
     *const Mat34,
 );
 
-/// An indexed mesh through `f` (copying or in place), in batches one `GX_Begin` takes.
-fn draw(f: DrawFn, verts: &[TexVertex], indices: &[u16], texture: Option<&Texture>, model: &Mat34) {
-    // One GX_Begin takes at most 65535 indices; 16-bit indices reach 65536 vertices.
-    if verts.len() > 0x10000 {
-        return;
-    }
-    let tex = texture.map(|t| ffi::FgTexture {
+fn fg_texture(t: &Texture) -> ffi::FgTexture {
+    ffi::FgTexture {
         data: t.data.as_ptr(),
         width: t.width,
         height: t.height,
         format: t.format,
         alpha_test: t.alpha_test as u8,
         _pad: 0,
-    });
+    }
+}
+
+/// An indexed mesh through `f` (copying or in place), in batches one `GX_Begin` takes.
+fn draw(f: DrawFn, verts: &[TexVertex], indices: &[u16], texture: Option<&Texture>, model: &Mat34) {
+    // One GX_Begin takes at most 65535 indices; 16-bit indices reach 65536 vertices.
+    if verts.len() > 0x10000 {
+        return;
+    }
+    let tex = texture.map(fg_texture);
     let tex_ptr = tex.as_ref().map_or(ptr::null(), |t| t as *const _);
     for chunk in indices.chunks(MAX_BATCH) {
         unsafe {
@@ -125,13 +151,15 @@ fn draw(f: DrawFn, verts: &[TexVertex], indices: &[u16], texture: Option<&Textur
     }
 }
 
-/// Writes a freshly loaded park's vertex arrays out of the CPU cache once: the GPU reads them in place.
-fn flush_park(game: &Game) {
-    if let Some(p) = game.imported_park() {
+/// Writes a freshly loaded park's vertex arrays out of the CPU cache once (the GPU reads them in place),
+/// and builds its meshes' draw commands for the GPU.
+fn flush_park(game: &mut Game) {
+    if let Some(p) = game.imported_park_mut() {
         for m in &p.models {
             let (data, len) = m.verts.bytes();
             unsafe { ffi::fg_flush_range(data, len as u32) };
         }
+        p.build_lists(Some(flush_range));
     }
 }
 
@@ -247,6 +275,7 @@ fn open_district(dir: &str, file: &str) -> Result<District, String> {
     let mut d = District::new(&index, folder, Box::new(WiiReader), DISTRICT_BUDGET)
         .map_err(|e| format!("{file}: unreadable index ({e:?})"))?;
     d.flush = Some(flush_range);
+    d.lists = true;
     d.timer = Some(clock_us);
     Ok(d)
 }

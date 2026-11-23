@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use crate::collision::{self, TriMesh, WALKABLE_Y};
-use crate::gfx::{Gfx, SUN, StaticVerts, TexVertex, Texture, Vertex, rgb, shade};
+use crate::gfx::{Gfx, GpuList, SUN, StaticVerts, TexVertex, Texture, Vertex, rgb, shade};
 use crate::math::{Vec3, Xform, v3};
 use crate::pack::{Kind, Pack};
 
@@ -119,6 +119,8 @@ pub struct ParkMesh {
     /// Bounding sphere for culling.
     pub center: Vec3,
     pub radius: f32,
+    /// Its draw commands built for the GPU ([`ImportedPark::build_lists`]; the Wii only).
+    pub list: Option<GpuList>,
 }
 
 /// A mesh's indices: a copy, or (on a big-endian machine) a pack's bytes in place.
@@ -163,6 +165,24 @@ impl Indices {
 }
 
 impl ImportedPark {
+    /// Builds each model's draw commands for the GPU ([`GpuList`]), for a platform that draws them (the
+    /// Wii), and sorts the models by texture so the same texture is loaded once for a run of them. `flush`
+    /// writes each list out of the CPU cache (the GPU reads it from memory).
+    pub fn build_lists(&mut self, flush: Option<fn(*const u8, usize)>) {
+        for m in &mut self.models {
+            if m.indices.is_empty() || m.indices.len() % 3 != 0 || m.verts.len() > 0x10000 {
+                continue;
+            }
+            let l = GpuList::triangles(&m.indices);
+            if let Some(f) = flush {
+                f(l.bytes().as_ptr(), l.bytes().len());
+            }
+            m.list = Some(l);
+        }
+        self.models
+            .sort_by_key(|m| m.texture.as_ref().map_or(0, |t| t.data.as_ptr() as usize));
+    }
+
     /// Heap bytes the parsed park takes beyond what it reads in place from its pack.
     pub fn heap_bytes(&self) -> usize {
         self.mesh.heap_bytes()
@@ -170,7 +190,10 @@ impl ImportedPark {
                 .models
                 .iter()
                 .map(|m| {
-                    m.verts.heap_bytes() + m.indices.heap_bytes() + core::mem::size_of::<ParkMesh>()
+                    m.verts.heap_bytes()
+                        + m.indices.heap_bytes()
+                        + m.list.as_ref().map_or(0, GpuList::heap_bytes)
+                        + core::mem::size_of::<ParkMesh>()
                 })
                 .sum::<usize>()
             + self
@@ -307,6 +330,7 @@ fn parse_mesh_v2(
         texture,
         center,
         radius,
+        list: None,
     })
 }
 
@@ -367,6 +391,7 @@ fn parse_mesh_v1(
         indices: Indices::Owned(indices),
         texture,
         center,
+        list: None,
     })
 }
 
@@ -462,7 +487,10 @@ impl ImportedPark {
         let (mut draws, mut verts) = (0, 0);
         for p in &self.models {
             if sight.sees(p.center, p.radius) {
-                gfx.draw_indexed_static(&p.verts, &p.indices, p.texture.as_ref(), &m);
+                match &p.list {
+                    Some(l) => gfx.draw_list(&p.verts, &p.indices, l, p.texture.as_ref(), &m),
+                    None => gfx.draw_indexed_static(&p.verts, &p.indices, p.texture.as_ref(), &m),
+                }
                 draws += 1;
                 verts += p.verts.len() as u32;
             }
@@ -623,6 +651,42 @@ mod tests {
         assert_eq!(park.draw(&mut g, &s), (1, 3));
         assert_eq!(g.0, 1);
         assert_eq!(park.draw(&mut Count(0), &Sight::around(cam.eye, 90.0)).0, 3);
+
+        // With the GPU's draw commands built (the Wii), the meshes are drawn through them.
+        struct Lists(u32, u32);
+        impl Gfx for Lists {
+            fn begin_frame(&mut self, _: &crate::gfx::Camera, _: u32) {}
+            fn draw_tris(&mut self, _: &[Vertex], _: &crate::math::Mat34) {}
+            fn draw_2d(&mut self, _: &[Vertex]) {}
+            fn draw_indexed(
+                &mut self,
+                _: &[TexVertex],
+                _: &[u16],
+                _: Option<&Texture>,
+                _: &crate::math::Mat34,
+            ) {
+                self.0 += 1;
+            }
+            fn draw_list(
+                &mut self,
+                _: &StaticVerts,
+                indices: &[u16],
+                list: &GpuList,
+                _: Option<&Texture>,
+                _: &crate::math::Mat34,
+            ) {
+                assert_eq!(list.bytes(), GpuList::triangles(indices).bytes());
+                self.1 += 1;
+            }
+            fn end_frame(&mut self) {}
+        }
+        let mut park = ImportedPark::parse(p).unwrap();
+        park.build_lists(None);
+        assert!(park.models.iter().all(|m| m.list.is_some()));
+        let mut g = Lists(0, 0);
+        park.draw(&mut g, &Sight::around(cam.eye, 90.0));
+        assert_eq!((g.0, g.1), (0, 3));
+        assert!(park.heap_bytes() >= 3 * 32);
     }
 
     #[test]

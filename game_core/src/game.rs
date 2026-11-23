@@ -547,6 +547,13 @@ impl Game {
         }
     }
 
+    pub fn imported_park_mut(&mut self) -> Option<&mut ImportedPark> {
+        match &mut self.world {
+            World::Park(p) => Some(p),
+            _ => None,
+        }
+    }
+
     /// What the skater rides on: the imported park if there is one, else the demo park.
     /// Puts the rider back at the park's spawn, a fresh start (scripted runs between tours).
     pub fn restart_at_spawn(&mut self) {

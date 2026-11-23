@@ -89,6 +89,18 @@ pub trait Gfx {
     ) {
         self.draw_indexed(verts, indices, texture, model)
     }
+    /// [`Gfx::draw_indexed_static`] with the mesh's draw commands already built ([`GpuList`]): the Wii's
+    /// GPU reads them itself instead of the CPU sending every index. Others draw the indices.
+    fn draw_list(
+        &mut self,
+        verts: &StaticVerts,
+        indices: &[u16],
+        _list: &GpuList,
+        texture: Option<&Texture>,
+        model: &Mat34,
+    ) {
+        self.draw_indexed_static(verts, indices, texture, model)
+    }
     /// Triangle list in screen space ([`SCREEN_W`] x [`SCREEN_H`], z ignored), drawn over the 3D scene.
     fn draw_2d(&mut self, verts: &[Vertex]);
     fn end_frame(&mut self);
@@ -230,6 +242,57 @@ mod tests {
     }
 }
 
+/// 32 bytes, 32-byte aligned: what a [`GpuList`] is made of.
+#[repr(C, align(32))]
+#[derive(Clone, Copy, Default)]
+pub struct Line32(pub [u8; 32]);
+
+/// A static mesh's draw commands in the Wii GPU's own format (a GX display list), built once when the mesh
+/// loads: for each run of up to 65,535 indices, `0x91` (triangles, vertex format 1), the count (`u16`,
+/// big-endian), then each index three times (position, colour, texture coordinate: 16-bit indices into the
+/// mesh's vertex array), padded with `0x00` (no-op) to a multiple of 32 bytes, 32-byte aligned, as
+/// `GX_CallDispList` needs. Format: libogc's `gx.h`/`gx.c` and YAGCD chapter 5.
+#[derive(Clone, Default)]
+pub struct GpuList {
+    lines: Vec<Line32>,
+    len: usize,
+}
+
+/// Opcode of a triangle list drawn with vertex format 1 (the indexed, textured one).
+pub const GX_TRIANGLES_VTXFMT1: u8 = 0x90 | 1;
+
+impl GpuList {
+    /// The commands drawing `indices` (a whole number of triangles) as triangles.
+    pub fn triangles(indices: &[u16]) -> GpuList {
+        let mut bytes: Vec<u8> = Vec::with_capacity(indices.len() * 6 + 64);
+        // Runs of whole triangles, each as many as a command's count takes.
+        for run in indices.chunks(65535 - 65535 % 3) {
+            bytes.push(GX_TRIANGLES_VTXFMT1);
+            bytes.extend_from_slice(&(run.len() as u16).to_be_bytes());
+            for &i in run {
+                let b = i.to_be_bytes();
+                bytes.extend_from_slice(&[b[0], b[1], b[0], b[1], b[0], b[1]]);
+            }
+        }
+        let len = bytes.len().next_multiple_of(32);
+        let mut lines = alloc::vec![Line32::default(); len / 32];
+        for (line, chunk) in lines.iter_mut().zip(bytes.chunks(32)) {
+            line.0[..chunk.len()].copy_from_slice(chunk);
+        }
+        GpuList { lines, len }
+    }
+
+    /// The commands (a multiple of 32 bytes, 32-byte aligned).
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY: `Line32` is 32 bytes without padding, laid end to end; `len` is the lines' bytes.
+        unsafe { core::slice::from_raw_parts(self.lines.as_ptr() as *const u8, self.len) }
+    }
+
+    pub fn heap_bytes(&self) -> usize {
+        self.len
+    }
+}
+
 /// Four vertices in 96 bytes, 32-byte aligned (no padding: 96 is three cache lines).
 #[repr(C, align(32))]
 #[derive(Clone, Copy, Default)]
@@ -319,6 +382,31 @@ impl core::ops::Deref for StaticVerts {
 #[cfg(test)]
 mod static_tests {
     use super::*;
+
+    #[test]
+    fn a_gpu_list_is_the_triangle_command_padded_to_32_bytes() {
+        let l = GpuList::triangles(&[0, 1, 2, 0x0102, 2, 3]);
+        let b = l.bytes();
+        assert_eq!(b.as_ptr() as usize % 32, 0);
+        assert_eq!(b.len(), 64, "3 + 6 * 6 = 39 bytes, padded");
+        assert_eq!(&b[..3], &[0x91, 0, 6]);
+        // Each index three times: position, colour, texture coordinate.
+        assert_eq!(&b[3..9], &[0, 0, 0, 0, 0, 0]);
+        assert_eq!(&b[9..15], &[0, 1, 0, 1, 0, 1]);
+        assert_eq!(&b[21..27], &[1, 2, 1, 2, 1, 2]);
+        assert!(b[39..].iter().all(|&x| x == 0), "no-ops after");
+        // Nothing to draw: no commands. More than one command's worth is split into whole triangles.
+        assert_eq!(GpuList::triangles(&[]).bytes().len(), 0);
+        let many: Vec<u16> = (0..70_000u32).map(|i| (i % 3) as u16).collect();
+        let l = GpuList::triangles(&many[..69_999]);
+        let b = l.bytes();
+        let first = u16::from_be_bytes([b[1], b[2]]) as usize;
+        assert_eq!((b[0], first), (0x91, 65_535));
+        let at = 3 + first * 6;
+        let second = u16::from_be_bytes([b[at + 1], b[at + 2]]) as usize;
+        assert_eq!((b[at], first + second), (0x91, 69_999));
+        assert_eq!(l.heap_bytes() % 32, 0);
+    }
 
     #[test]
     fn static_vertices_read_back_and_are_aligned() {

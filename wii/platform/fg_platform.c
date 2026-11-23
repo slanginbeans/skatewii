@@ -31,9 +31,15 @@ static int in_2d;
 static u8 *arena;
 static u32 arena_used;
 // Which vertex/TEV setup is loaded: direct colour, indexed colour, or indexed textured.
-enum { MODE_DIRECT, MODE_INDEXED, MODE_TEXTURED };
+// MODE_LIST: the indexed textured vertex layout (what display lists from fg_draw_list hold) drawn with the
+// vertex colour only, for a mesh without a texture.
+enum { MODE_DIRECT, MODE_INDEXED, MODE_TEXTURED, MODE_LIST };
 static int mode = MODE_DIRECT;
 static int alpha_test_on;
+// The texture in GX_TEXMAP0 (NULL: none known this frame), so a run of meshes with the same texture loads
+// it once.
+static FgTexture loaded_tex_obj;
+static const void *loaded_tex;
 // Last frame's waits, measured in fg_end_frame, and the arena use behind it.
 static u32 gpu_wait_us, vsync_wait_us, last_arena_used, last_retrace, missed;
 // Refreshes the last frame stayed on screen: 1 on time, 2 when it ran past one refresh, ...
@@ -207,6 +213,10 @@ void fg_begin_frame(const float eye[3], const float target[3], const float up_di
     // Last frame finished in fg_end_frame (GX_DrawDone): its vertex copies can be reused.
     arena_used = 0;
     GX_InvalidateTexAll();
+    // Vertex arrays may have moved since (cells freed and others loaded where they were): fg_draw_list
+    // doesn't invalidate the vertex cache each draw, so it is done once here.
+    GX_InvVtxCache();
+    loaded_tex = NULL;
 }
 
 // Switches the vertex descriptors and TEV between direct colour triangles and indexed meshes.
@@ -219,7 +229,7 @@ static void set_mode(int m, int alpha_test) {
         } else {
             GX_SetVtxDesc(GX_VA_POS, GX_INDEX16);
             GX_SetVtxDesc(GX_VA_CLR0, GX_INDEX16);
-            if (m == MODE_TEXTURED) {
+            if (m == MODE_TEXTURED || m == MODE_LIST) {
                 GX_SetVtxDesc(GX_VA_TEX0, GX_INDEX16);
             }
         }
@@ -274,6 +284,19 @@ void fg_draw_tris(const FgVertex *verts, uint32_t count, const float model[3][4]
 
 // Draws an indexed mesh whose vertex array `buf` the GPU reads (32-byte aligned, flushed, alive until the
 // frame is done).
+static void load_tex(const FgTexture *tex) {
+    if (loaded_tex == tex->data && loaded_tex_obj.width == tex->width && loaded_tex_obj.height == tex->height &&
+        loaded_tex_obj.format == tex->format) {
+        return;
+    }
+    GXTexObj obj;
+    GX_InitTexObj(&obj, (void *)tex->data, tex->width, tex->height, tex->format, GX_REPEAT, GX_REPEAT, GX_FALSE);
+    GX_InitTexObjLOD(&obj, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
+    GX_LoadTexObj(&obj, GX_TEXMAP0);
+    loaded_tex = tex->data;
+    loaded_tex_obj = *tex;
+}
+
 static void draw_indexed(const u8 *buf, const uint16_t *indices, uint32_t index_count, const FgTexture *tex,
                          const float model[3][4]) {
     if (in_2d) {
@@ -288,11 +311,7 @@ static void draw_indexed(const u8 *buf, const uint16_t *indices, uint32_t index_
 
     int textured = tex && tex->data;
     if (textured) {
-        GXTexObj obj;
-        GX_InitTexObj(&obj, (void *)tex->data, tex->width, tex->height, tex->format, GX_REPEAT, GX_REPEAT,
-                      GX_FALSE);
-        GX_InitTexObjLOD(&obj, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
-        GX_LoadTexObj(&obj, GX_TEXMAP0);
+        load_tex(tex);
     }
     set_mode(textured ? MODE_TEXTURED : MODE_INDEXED, textured && tex->alpha_test);
     GX_SetArray(GX_VA_POS, (void *)buf, sizeof(FgTexVertex));
@@ -310,6 +329,34 @@ static void draw_indexed(const u8 *buf, const uint16_t *indices, uint32_t index_
         }
     }
     GX_End();
+}
+
+void fg_draw_list(const FgTexVertex *verts, uint32_t vert_count, const void *list, uint32_t list_size,
+                  const FgTexture *tex, const float model[3][4]) {
+    if (vert_count == 0 || vert_count > 0x10000 || list_size == 0 || (list_size & 31) || ((uintptr_t)verts & 31) ||
+        ((uintptr_t)list & 31)) {
+        return;
+    }
+    if (in_2d) {
+        GX_LoadProjectionMtx(proj, GX_PERSPECTIVE);
+        GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+        in_2d = 0;
+    }
+    Mtx m, mv;
+    memcpy(m, model, sizeof(Mtx));
+    guMtxConcat(view, m, mv);
+    GX_LoadPosMtxImm(mv, GX_PNMTX0);
+    int textured = tex && tex->data;
+    if (textured) {
+        load_tex(tex);
+    }
+    set_mode(textured ? MODE_TEXTURED : MODE_LIST, textured && tex->alpha_test);
+    const u8 *buf = (const u8 *)verts;
+    GX_SetArray(GX_VA_POS, (void *)buf, sizeof(FgTexVertex));
+    GX_SetArray(GX_VA_CLR0, (void *)(buf + 12), sizeof(FgTexVertex));
+    GX_SetArray(GX_VA_TEX0, (void *)(buf + 16), sizeof(FgTexVertex));
+    // The GPU reads the commands from memory itself (flushed from the CPU cache when they were built).
+    GX_CallDispList((void *)list, list_size);
 }
 
 static int bad_counts(uint32_t vert_count, uint32_t index_count) {

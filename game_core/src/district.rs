@@ -88,6 +88,8 @@ pub struct District {
     rails: Vec<Rail>,
     /// Writes a parsed cell's vertex arrays out of the CPU cache (the Wii's GPU reads them in place).
     pub flush: Option<fn(*const u8, usize)>,
+    /// Build each cell's draw commands for the GPU as it loads ([`ImportedPark::build_lists`]; the Wii).
+    pub lists: bool,
     /// Microseconds, for the log's parse times.
     pub timer: Option<fn() -> u32>,
     /// What happened (cells loaded, dropped, failed), for the game's log.
@@ -125,6 +127,7 @@ impl District {
             failed: Vec::new(),
             rails: Vec::new(),
             flush: None,
+            lists: false,
             timer: None,
             log: Vec::new(),
             start: 0,
@@ -337,6 +340,9 @@ impl District {
                 let (p, n) = m.verts.bytes();
                 flush(p, n);
             }
+        }
+        if self.lists {
+            park.build_lists(self.flush);
         }
         // Its rails go in the first run of inert rails long enough, else at the end.
         let rails = core::mem::take(&mut park.mesh.rails);
