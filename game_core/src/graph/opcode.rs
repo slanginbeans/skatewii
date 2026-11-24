@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 struct W(Vec<u8>);
 
@@ -695,10 +695,17 @@ fn beh(w: &mut W, b: &Beh) {
             w.u8(19);
             w.u8(group_code(*g));
         }
-        Beh::BoardAdjust { mag, angle } => {
+        Beh::BoardAdjust {
+            mag,
+            angle,
+            angle_filter,
+            negate_on_mirror,
+        } => {
             w.u8(20);
             w.u16(*mag);
             w.u16(*angle);
+            w.u8(*angle_filter);
+            w.b(*negate_on_mirror);
         }
         Beh::Unsupported(s) => {
             w.u8(21);
@@ -921,6 +928,8 @@ fn read_beh(r: &mut R) -> Option<Beh> {
         20 => Beh::BoardAdjust {
             mag: r.u16()?,
             angle: r.u16()?,
+            angle_filter: r.u8()?,
+            negate_on_mirror: r.b()?,
         },
         21 => Beh::Unsupported(r.u16()?),
         22 => Beh::SetTurning {

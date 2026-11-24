@@ -354,9 +354,14 @@ pub enum Beh {
         ag: Str,
     },
     TrickFromGesture(Group),
+    /// BoardAdjust (SK8 action_board_adjust.rs): the C-stick's `BoardAdjustMag`/`BoardAdjustAngle` as
+    /// motion-graph intents every update, the angle through `angleFilter`, negated when mirrored
+    /// (`negateOnMirror`, default on), held on one side of the +-pi seam once it is crossed.
     BoardAdjust {
         mag: Str,
         angle: Str,
+        angle_filter: u8,
+        negate_on_mirror: bool,
     },
     BodyFlippingSignal,
     /// Pumping (SK8 pumping_channel.rs): pump layers (`B_PUMP` on channels) whose weight follows the
@@ -1024,6 +1029,9 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         "BoardAdjust" => Beh::BoardAdjust {
             mag: a.str("MGIntentMag"),
             angle: a.str("MGIntentAngle"),
+            angle_filter: filter(a.text("angleFilter")),
+            // SK8: BoardAdjust82BA2A90 passes true as the constructor default.
+            negate_on_mirror: a.b("negateOnMirror", true),
         },
         "BodyFlippingSignal" => Beh::BodyFlippingSignal,
         "Pumping" => Beh::Pumping,
@@ -1059,10 +1067,18 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
             Beh::GrindCrouch(lib(a.text("driveDistToCom").unwrap_or("disttocog")))
         }
         "CreateGrindAttributes" => Beh::GrindAttributes,
-        "SetDeckPitchAndYaw" => Beh::DeckPitchAndYaw {
-            yaw: a.text("yaw").and_then(lib),
-            pitch: a.text("pitch").and_then(lib),
-        },
+        // SK8 motion_nodes.rs: the `skateyaw`/`skatepitch` attributes, named so by default (Skate 3's
+        // graphs give none); the library spells them `SKATEYAW`/`SKATEPITCH`.
+        "SetDeckPitchAndYaw" => {
+            let name = |k: &str| {
+                let n = a.text(k).unwrap_or(k);
+                lib(n).or_else(|| lib(&n.to_ascii_uppercase()))
+            };
+            Beh::DeckPitchAndYaw {
+                yaw: name("skateyaw"),
+                pitch: name("skatepitch"),
+            }
+        }
         _ if NOTHING.contains(&name) => Beh::Nothing,
         _ if UNSUPPORTED.contains(&name) => Beh::Unsupported(NONE),
         _ => Beh::Unsupported(NONE),

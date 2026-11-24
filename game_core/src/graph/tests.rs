@@ -1415,3 +1415,225 @@ mod phase4 {
         assert!(!air_trick_state("OnBoard/InAir/InAirStatic/Air/Default"));
     }
 }
+
+/// BoardAdjust (SK8 action_board_adjust.rs) publishes the C-stick to the motion graph every update, the
+/// angle filtered, negated when mirrored and held at the +-pi seam; SetDeckPitchAndYaw hands the posed
+/// deck's yaw and pitch to its trees.
+mod board_adjust {
+    use super::*;
+    use crate::graph::host::{AdjustSeam, Runner, deck_angles};
+    use crate::graph::ops::{Beh, Op};
+    use crate::math::{PI, v3};
+
+    fn b(name: &str, extra: &[(&str, &str)]) -> Element {
+        let mut a = vec![("name", name)];
+        a.extend_from_slice(extra);
+        Element::of("behaviour", &a, vec![])
+    }
+
+    fn graphs(extra: &[(&str, &str)]) -> Vec<u8> {
+        let mut a = vec![
+            ("MGIntentMag", "RightBoardAdjustMag"),
+            ("MGIntentAngle", "RightBoardAdjustAngle"),
+        ];
+        a.extend_from_slice(extra);
+        // The pad's intents are graph strings in Skate 3's graphs (conditions read them).
+        let pad = |n: &'static str| {
+            Element::of(
+                "condition",
+                &[("name", "HasIntent"), ("intent", n), ("mask", "always")],
+                vec![],
+            )
+        };
+        let action = st(
+            "Action",
+            &[],
+            vec![
+                b("BoardAdjust", &a),
+                st(
+                    "Stick",
+                    &[],
+                    vec![when(vec![pad("BoardAdjustMag"), pad("BoardAdjustAngle")])],
+                ),
+                st("Rest", &[], vec![]),
+            ],
+        );
+        let adjusting = Element::of(
+            "condition",
+            &[
+                ("name", "HasIntent"),
+                ("intent", "RightBoardAdjustMag"),
+                ("mask", "always"),
+            ],
+            vec![],
+        );
+        let motion = st(
+            "Motion",
+            &[],
+            vec![
+                st(
+                    "Adjust",
+                    &[],
+                    vec![
+                        when(vec![adjusting]),
+                        b(
+                            "SetDeckPitchAndYaw",
+                            &[("skateyaw", "X"), ("skatepitch", "Y")],
+                        ),
+                    ],
+                ),
+                st("Idle", &[], vec![]),
+            ],
+        );
+        compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn the_seam_holds_the_side_the_angle_crossed_from() {
+        let mut s = AdjustSeam::default();
+        let step = |s: &mut AdjustSeam, a: f32| s.update(Some(0.9), Some(a), 0, true, false);
+        assert_eq!(step(&mut s, 3.0), Some((0.9, 3.0)));
+        // Round past straight down (+pi to -pi): held at +pi while the raw angle stays across.
+        assert_eq!(step(&mut s, -3.0), Some((0.9, PI)));
+        assert_eq!(step(&mut s, -2.0), Some((0.9, PI)));
+        // Back across the seam (from the negative side): free again.
+        assert_eq!(step(&mut s, 3.0), Some((0.9, 3.0)));
+        // Through zero (not beyond pi/2) is no seam.
+        assert_eq!(step(&mut s, 0.5), Some((0.9, 0.5)));
+        assert_eq!(step(&mut s, -0.5), Some((0.9, -0.5)));
+        // The other way: held at -pi.
+        assert_eq!(step(&mut s, -3.0), Some((0.9, -3.0)));
+        assert_eq!(step(&mut s, 3.0), Some((0.9, -PI)));
+        // An input gone: nothing published and the state reset.
+        assert_eq!(s.update(None, Some(1.0), 0, true, false), None);
+        assert_eq!(s, AdjustSeam::default());
+        // A present zero is valid.
+        assert_eq!(step(&mut s, 0.0), Some((0.9, 0.0)));
+        // Mirrored: negated (only with negateOnMirror); the angle filter first.
+        let mut m = AdjustSeam::default();
+        assert_eq!(
+            m.update(Some(1.0), Some(1.0), 0, true, true),
+            Some((1.0, -1.0))
+        );
+        let mut m = AdjustSeam::default();
+        assert_eq!(
+            m.update(Some(1.0), Some(1.0), 0, false, true),
+            Some((1.0, 1.0))
+        );
+        let mut m = AdjustSeam::default();
+        let (_, a) = m.update(Some(1.0), Some(1.0), 6, false, false).unwrap();
+        assert!((a - (1.0 - PI / 2.0)).abs() < 1e-6, "angleRot90: {a}");
+    }
+
+    #[test]
+    fn board_adjust_publishes_the_c_stick_to_the_motion_graph() {
+        let bytes = graphs(&[]);
+        let lib = crate::motion::tests::lib();
+        let db = crate::motion::MotionDb::parse(&lib).unwrap();
+        let mut r = Runner::new(Pack::parse(&bytes).unwrap(), Some(&db)).unwrap();
+        let dt = 1.0 / 60.0;
+        let (mag, angle) = (
+            r.pack.find("BoardAdjustMag").unwrap(),
+            r.pack.find("BoardAdjustAngle").unwrap(),
+        );
+        let (mg_mag, mg_angle) = (
+            r.pack.find("RightBoardAdjustMag").unwrap(),
+            r.pack.find("RightBoardAdjustAngle").unwrap(),
+        );
+        r.update(Some(&db), dt);
+        assert_eq!(r.motion_state(), "Idle");
+        assert!(!r.board_adjusting());
+        r.s.world.deck_yaw_pitch = [0.25, -0.5];
+        for a in [1.0, 2.5, -2.5] {
+            r.s.ag.set(mag, 0.9);
+            r.s.ag.set(angle, a);
+            r.update(Some(&db), dt);
+        }
+        assert_eq!(r.s.mg.get(mg_mag), Some(0.9));
+        // 2.5 then -2.5 crossed the seam: held at +pi.
+        assert_eq!(r.s.mg.get(mg_angle), Some(PI));
+        assert!(r.board_adjusting());
+        r.update(Some(&db), dt);
+        assert_eq!(r.motion_state(), "Adjust");
+        // SetDeckPitchAndYaw: the deck's yaw and pitch on entering.
+        let param = |r: &Runner, n: &str| {
+            let n = db.name_id(n).unwrap();
+            r.s.player
+                .params
+                .iter()
+                .find(|p| p.name == n)
+                .map(|p| p.value)
+        };
+        assert_eq!(param(&r, "X"), Some(0.25));
+        assert_eq!(param(&r, "Y"), Some(-0.5));
+        // Let go: both removed, the motion graph leaves the adjust.
+        r.s.ag.clear();
+        r.update(Some(&db), dt);
+        assert_eq!(r.s.mg.get(mg_mag), None);
+        assert_eq!(r.s.mg.get(mg_angle), None);
+        assert!(!r.board_adjusting());
+        r.update(Some(&db), dt);
+        assert_eq!(r.motion_state(), "Idle");
+        // Mirrored (the seam reset by letting go): negated.
+        r.s.world.mirrored = true;
+        r.s.ag.set(mag, 1.0);
+        r.s.ag.set(angle, 1.0);
+        r.update(Some(&db), dt);
+        assert_eq!(r.s.mg.get(mg_angle), Some(-1.0));
+    }
+
+    #[test]
+    fn board_adjust_reads_its_filter_and_mirror_flag_and_survives_the_importer() {
+        let adjust = |o: &Op| match o {
+            Op::Beh(Beh::BoardAdjust {
+                angle_filter,
+                negate_on_mirror,
+                ..
+            }) => Some((*angle_filter, *negate_on_mirror)),
+            _ => None,
+        };
+        let bytes = graphs(&[("angleFilter", "angleRot90"), ("negateOnMirror", "false")]);
+        let pack = Pack::parse(&bytes).unwrap();
+        let typed: Vec<Vec<Op>> = pack
+            .graphs
+            .iter()
+            .map(|g| crate::graph::ops::parse(&pack, g, None))
+            .collect();
+        assert_eq!(typed.iter().flatten().find_map(adjust), Some((6, false)));
+        let code = crate::graph::opcode::encode(bytes.len(), &typed);
+        assert_eq!(
+            crate::graph::opcode::decode(&code, bytes.len()).as_ref(),
+            Some(&typed)
+        );
+        // Default: no filter, negated when mirrored (Skate 3's constructor default).
+        let bytes = graphs(&[]);
+        let pack = Pack::parse(&bytes).unwrap();
+        let ops: Vec<Op> = pack
+            .graphs
+            .iter()
+            .flat_map(|g| crate::graph::ops::parse(&pack, g, None))
+            .collect();
+        assert_eq!(ops.iter().find_map(adjust), Some((0, true)));
+    }
+
+    #[test]
+    fn deck_angles_keep_skate_3s_quadrants_and_pitch_projection() {
+        // SK8 deck_angles_tests.rs.
+        for (x, z, want) in [
+            (1.0, 1.0, PI / 4.0),
+            (-1.0, 1.0, -PI / 4.0),
+            (1.0, -1.0, 3.0 * PI / 4.0),
+            (-1.0, -1.0, -3.0 * PI / 4.0),
+            (0.0, 0.0, PI / 2.0),
+            (-0.0, -0.0, -PI / 2.0),
+        ] {
+            let [yaw, pitch] = deck_angles(v3(x, 0.5, z));
+            assert!((yaw - want).abs() < 1e-5, "({x}, {z}): {yaw}");
+            assert_eq!(pitch, 0.5);
+        }
+    }
+}
