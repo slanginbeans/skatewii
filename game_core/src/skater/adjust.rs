@@ -123,6 +123,10 @@ impl Skater {
             Some(g) if g.board_adjust => g
                 .pose_deck
                 .map_or(stick, |nose| DeckAdjust::from_pose(nose).towards(stick)),
+            // Let go: the deck follows the clips back as they blend out, only ever back towards square.
+            Some(g) if g.adjust_posed => g.pose_deck.map_or(DeckAdjust::NONE, |nose| {
+                DeckAdjust::from_pose(nose).towards(self.deck_adjust)
+            }),
             Some(_) => DeckAdjust::NONE,
             None if self.free_to_adjust() => stick,
             None => DeckAdjust::NONE,

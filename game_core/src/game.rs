@@ -240,8 +240,11 @@ pub struct Game {
     /// How far a district is drawn (m): the pause menu's setting.
     draw_distance: f32,
     /// After a landing: the drawn board's yaw against the way the rider travels, to log the board turning
-    /// under his feet (a player saw it after some tricks; not reproduced off the Wii yet).
+    /// under his feet (a player saw it after landings on a board-adjusted deck; `tests/board_turn.rs`).
     board_watch: Option<BoardWatch>,
+    /// Riding on the ground the drawn rider is turned about the posed board by this (rad, about the
+    /// board's up) so the posed board lies on the physical one ([`Game::ground_alignment`]).
+    board_align: f32,
     /// The player changed a setting since the platform last saved them.
     settings_changed: bool,
     /// Simulated time minus shown time (s): ticks run until the simulation is at or just past the frame.
@@ -367,6 +370,7 @@ impl Game {
             world_us: core::cell::Cell::new(0),
             draw_distance: crate::world::DRAW_DISTANCE,
             board_watch: None,
+            board_align: 0.0,
             settings_changed: false,
             ahead: 0.0,
             period: TICK,
@@ -583,7 +587,9 @@ impl Game {
             return;
         };
         w.frames += 1;
-        if w.frames > BoardWatch::FRAMES {
+        // Off the ground the watch ends (a manual's "landing" comes as it pops): the board turns with
+        // the rider in a spin, and the next landing starts its own watch.
+        if w.frames > BoardWatch::FRAMES || self.skater.is_airborne() {
             return;
         }
         let travel = self.skater.vel.horizontal();
@@ -985,6 +991,7 @@ impl Game {
                 r.set_board_place(place);
                 r.update(&self.skater, self.clock, land_in, pose_dt, rot);
             }
+            self.board_align = self.ground_alignment(posed);
             // The clips' pose as ragdoll points: where a bail starts the body, and in a bail where
             // the drives pull it.
             let points = self
@@ -1488,8 +1495,52 @@ impl Game {
         };
         // On foot (and getting off or on) the off-board clips' origin is on the ground under the feet.
         let height = height * (1.0 - self.foot_origin);
-        base.then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
-            .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, height, 0.0)))
+        let placed = base
+            .then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
+            .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, height, 0.0)));
+        // Turned about the posed board's centre, which stays where it is.
+        let Some(b) = self
+            .rider
+            .as_ref()
+            .and_then(|r| r.board_in_character())
+            .filter(|_| self.board_align != 0.0)
+        else {
+            return placed;
+        };
+        let pivot = v3(b.x, 0.0, b.z);
+        placed
+            .then(&Xform::new(Mat3::IDENTITY, pivot))
+            .then(&Xform::new(Mat3::rot_y(-self.board_align), -pivot))
+    }
+
+    /// The drawn rider's turn about the posed board (rad, about its up; [`Game::board_align`]). Skate 3
+    /// riding on the ground places its animation so the posed board lies on the physical deck, every
+    /// tick (SK8 `SkeletonRootFrames::update`'s heading alignment, which `prepare_ground` re-initialises
+    /// on every Ground update; the reckoning frame it turns follows the deck): a posed board turned
+    /// against the body (the board-adjust clips still blending out after a landing on an adjusted
+    /// deck) turns the rider round the board, never the board under him. In the air, on a rail and
+    /// while the clips move the board (SK8's `GroundAnimation`: a take-off) the turn is kept as it was;
+    /// off the board, and with the built-in clips, there is none.
+    fn ground_alignment(&self, posed: bool) -> f32 {
+        let s = &self.skater;
+        if !posed || s.ragdoll_active() {
+            return 0.0;
+        }
+        match s.mode {
+            Mode::Rolling if !s.graph.is_some_and(|g| g.board_animated) => {}
+            Mode::Rolling | Mode::Air { .. } | Mode::Grind => return self.board_align,
+            Mode::Bailed { .. } | Mode::Runout { .. } | Mode::Walk => return 0.0,
+        }
+        let Some((_, nose)) = self.board_axes_in_character() else {
+            return 0.0;
+        };
+        // The clips are a goofy rider's: mirrored, the posed board's nose points back (`posed_deck`).
+        let nose = if s.mirrored() { -nose } else { nose };
+        // Stood up on an end (a nose or tail stall) its heading is unclear: keep the turn.
+        if nose.x * nose.x + nose.z * nose.z < 0.25 {
+            return self.board_align;
+        }
+        crate::math::atan2f(nose.x, nose.z)
     }
 
     /// How far (m, along the board's up) the drawn board must rise so none of its wheels is in the
