@@ -22,7 +22,7 @@
 use crate::math::{PI, Vec3, atan2f, clamp, cosf, sinf, sqrtf, v3};
 use crate::park::{Terrain, surface_category};
 use crate::rails::{RailClass, upright};
-use crate::tuning::Tuning;
+use crate::tuning::{Curve, Tuning};
 
 /// The wind-up history (ticks).
 pub const SPIN_HISTORY: usize = 30;
@@ -135,9 +135,10 @@ impl BodySpin {
             self.scan_history(t);
         }
         let time = self.time;
-        let accel = t.spin_change.eval(time);
+        let (speed_curve, change, windup) = spin_curves(t);
+        let accel = change.eval(time);
         let auto_accel = t.spin_auto_change.eval(time);
-        let candidate = t.spin_windup.eval(time) * self.derivative;
+        let candidate = windup.eval(time) * self.derivative;
         if candidate.abs() > self.peak.abs() {
             self.peak = candidate;
         }
@@ -149,7 +150,7 @@ impl BodySpin {
         } else {
             self.filtered = self.filtered * (1.0 - FOLLOW) + input * FOLLOW;
         }
-        let prop = t.spin_speed.eval(self.time) * self.input;
+        let prop = speed_curve.eval(self.time) * self.input;
         // A wind-up the other way is lost.
         if prop * self.peak < 0.0 {
             self.peak = 0.0;
@@ -182,12 +183,23 @@ impl BodySpin {
         for k in 0..SPIN_HISTORY - 1 {
             let i = (self.at + SPIN_HISTORY - 1 - k) % SPIN_HISTORY;
             time -= STEP;
-            let c = t.spin_windup.eval(time) * self.history[i];
+            let c = spin_curves(t).2.eval(time) * self.history[i];
             if c.abs() > peak.abs() {
                 peak = c;
             }
         }
         self.peak = peak;
+    }
+}
+
+/// The body spin's speed, change and wind-up curves: the physics mode's easier ones with
+/// `easy_body_spins` (SK8 body_spin.rs `update_air`: a non-zero mode byte reads `physics_bodyspin`'s
+/// first, fourth and sixth curves instead of the second, fifth and seventh).
+fn spin_curves(t: &Tuning) -> (&Curve, &Curve, &Curve) {
+    if t.easy_body_spins {
+        (&t.spin_speed_easy, &t.spin_change_easy, &t.spin_windup_easy)
+    } else {
+        (&t.spin_speed, &t.spin_change, &t.spin_windup)
     }
 }
 
@@ -1003,6 +1015,37 @@ mod tests {
         let before = c.speed;
         c.air(&t, 0.0, 0.0);
         assert!(before - c.speed <= t.spin_reverse_change + 1e-4);
+    }
+
+    #[test]
+    fn easy_body_spins_ride_the_easier_curves() {
+        // SK8 body_spin.rs `update_air`: with the mode's `EasyBodySpins` the spin reads
+        // `physics_bodyspin`'s easier speed, change and wind-up curves. Skate 3's Easy has it.
+        let spun = |t: &Tuning| {
+            let mut b = BodySpin::default();
+            for _ in 0..SPIN_HISTORY + 4 {
+                b.ground(0.0);
+            }
+            b.ground(1.0);
+            (0..12)
+                .map(|_| b.air(t, 1.0, 0.0))
+                .collect::<alloc::vec::Vec<_>>()
+        };
+        let normal = Tuning::BUILT_IN;
+        let mut easy = Tuning::BUILT_IN;
+        easy.set_difficulty(crate::tuning::Difficulty::Easy);
+        assert!(easy.easy_body_spins && !normal.easy_body_spins);
+        let (n, e) = (spun(&normal), spun(&easy));
+        assert_ne!(n, e);
+        // Changing Normal's curves doesn't touch Easy's spin, and the other way round.
+        let mut other = easy;
+        other.spin_speed = Curve::new(&[(0.0, 0.0)]);
+        other.spin_change = Curve::new(&[(0.0, 0.0)]);
+        other.spin_windup = Curve::new(&[(0.0, 0.0)]);
+        assert_eq!(spun(&other), e);
+        let mut other = normal;
+        other.spin_speed_easy = Curve::new(&[(0.0, 0.0)]);
+        assert_eq!(spun(&other), n);
     }
 
     #[test]

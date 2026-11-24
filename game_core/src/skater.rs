@@ -980,6 +980,8 @@ pub struct GraphControl {
     pub brake_contact: bool,
     /// The takeoff clip reached its jump: pop now, as this trick, at this strength (0..1).
     pub pop: Option<(Flick, f32)>,
+    /// The takeoff clip marks the pop as a trick out of a manual (`TrickFromManual`).
+    pub pop_from_manual: bool,
     /// Manualing (nose manual), the stick's lean (0..1) and whether it is dragging to brake.
     pub manual: Option<(bool, f32, bool)>,
     /// Kick-turn steering is on (spin scale).
@@ -2991,7 +2993,13 @@ impl Skater {
 
     fn pop(&mut self, f: Flick, strength: f32, stick: [f32; 2], events: &mut Vec<Event>) {
         self.end_manual(events);
-        let h = self.tuning.jump_height(strength, self.speed);
+        // A trick the clip marks as out of a manual jumps from the mode's manual low end.
+        let low = if self.graph.is_some_and(|g| g.pop_from_manual) {
+            self.tuning.jump_low_manual
+        } else {
+            self.tuning.jump_low
+        };
+        let h = self.tuning.jump_height_from(low, strength, self.speed);
         // Skate 3 pops the centre of mass from where the animation has it at the jump (SK8
         // ground_jump `animation_com_position`): over the deck, which the tail strike has already
         // pitched up off its riding height. Without the imported rider, from `AbsoluteMinHeight`.
@@ -3553,7 +3561,8 @@ impl Skater {
         let target = self.plan.as_ref().map_or(f.speed, |p| {
             flip::BodyFlip::target_speed(&m, p.contact.time)
         });
-        let requested = if grabbing || now < m.flip_min_grab_time {
+        // A perfect body flip (the mode's) turns whatever the grab.
+        let requested = if m.perfect_body_flips || grabbing || now < m.flip_min_grab_time {
             target
         } else {
             0.0
@@ -3561,7 +3570,9 @@ impl Skater {
         f.update(&m, requested, dt);
         self.body_flip = Some(f);
         let landing_up = self.plan.as_ref().map_or(Vec3::UP, |p| p.normal);
-        !grabbing && flip::falling_upside_down(&m, f.apply(self.normal), landing_up)
+        m.upside_down_bail
+            && !grabbing
+            && flip::falling_upside_down(&m, f.apply(self.normal), landing_up)
     }
 
     /// The name and points of the jump so far (without spin and grab), for grinds and landings.
@@ -3956,12 +3967,21 @@ impl Skater {
             None => self.trick.is_some_and(|t| t.progress() < 1.0),
         };
         let stairs = crate::park::surface_category(surface) == crate::park::STAIRS;
-        let max_impact = if stairs {
-            t.land_max_stairs
+        // Skate 3's bad landing (SK8 wipeout/air.rs `bad_landing`): made only where the physics mode
+        // checks it, its limits times the mode's scale.
+        let scale = t.bad_landing_scale;
+        let max_impact = if !t.bad_landing {
+            f32::INFINITY
+        } else if stairs {
+            t.land_max_stairs * scale
         } else {
-            t.land_max_impact
+            t.land_max_impact * scale
         };
-        let limit = t.land_angle.eval(speed);
+        let limit = if t.bad_landing {
+            t.land_angle.eval(speed) * scale
+        } else {
+            f32::INFINITY
+        };
         let tweaked = self.graph.is_none() && self.grab.is_some_and(|g| g.tweak >= GRAB_TWEAK_BAIL);
         let reason = if danger
             && air_time * 60.0 > t.danger_ignore_ticks
@@ -4213,6 +4233,7 @@ fn landed_name(
 mod tests {
     use super::*;
     use crate::flick::FlickOut;
+    use crate::tuning::Difficulty;
     use alloc::vec;
 
     const DT: f32 = 1.0 / 60.0;
@@ -5433,6 +5454,27 @@ mod tests {
     }
 
     #[test]
+    fn a_grinds_pop_is_the_physics_modes_for_its_family() {
+        // SK8 grind/substate.rs: the pop's speed along the launch normal is the mode's blend for the
+        // family (x 1.03), not a ground jump's height. A boardslide pops with its own pair.
+        let park = rail_park(20.0);
+        let pop = |pair: [f32; 2]| {
+            let (mut s, _) = ollie_at_rail(&park, PI / 2.0);
+            assert_eq!(s.grind.as_ref().map(|g| g.family), Some(Family::Boardslide));
+            steps(&mut s, &park, &Pad::default(), None, 20);
+            s.tuning.grind.pop = [[9.0, 9.0], pair, [9.0, 9.0]];
+            steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
+            assert!(s.is_airborne());
+            s.vel.y
+        };
+        let (strong, weak) = (pop([3.0, 3.0]), pop([1.0, 1.0]));
+        assert!(
+            (strong - weak - 2.0 * 1.03).abs() < 0.15,
+            "{strong} vs {weak}: 2 m/s apart along the launch normal"
+        );
+    }
+
+    #[test]
     fn an_angled_board_locks_into_a_one_truck_grind() {
         let park = rail_park(10.0);
         let (s, ev) = ollie_at_rail(&park, 40.0 * PI / 180.0);
@@ -6273,6 +6315,60 @@ mod tests {
         assert!((pumped - plain).abs() < 0.05, "{pumped} vs {plain}");
     }
 
+    #[test]
+    fn hardcore_pumping_over_a_crest_takes_speed() {
+        // SK8 pumping/controller.rs `update`: rising while the ground turns away along the travel (a
+        // crest) is `PumpEffectFactorAbsorption` x the pumping, at most `Hash_09D1AEE3D7D8A4A7` a
+        // second; Skate 3's Hardcore has 9 and 8 m/s², Easy and Normal no absorption at all.
+        let drop = libm::tanf(15.0 * PI / 180.0) * 20.0;
+        let crest = mesh(&[
+            [
+                [-5.0, 0.0, -20.0],
+                [5.0, 0.0, -20.0],
+                [5.0, 0.0, 0.0],
+                [-5.0, 0.0, 0.0],
+            ],
+            [
+                [-5.0, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [5.0, -drop, 20.0],
+                [-5.0, -drop, 20.0],
+            ],
+        ]);
+        let ride = |d: Difficulty, absorb: Option<f32>| {
+            let mut s = spawn(&crest);
+            s.tuning.set_difficulty(d);
+            if let Some(a) = absorb {
+                s.tuning.pump_max_absorption = a;
+            }
+            place(&mut s, v3(0.0, 0.0, -1.0), Vec3::UP, v3(0.0, 0.0, 1.0));
+            s.speed = 4.0;
+            let mut ev = Vec::new();
+            let mut taken = 0.0f32;
+            for i in 0..40 {
+                // Crouched up to the crest, standing up over it.
+                let crouch = if i < 12 { 1.0 } else { 0.0 };
+                let fl = FlickOut {
+                    crouch,
+                    ..FlickOut::default()
+                };
+                s.step(&crest, &Pad::default(), &fl, DT, &mut ev);
+                taken = taken.min(s.pump.dv);
+            }
+            (s.speed, taken)
+        };
+        let (hard, taken) = ride(Difficulty::Hardcore, None);
+        let (free, none) = ride(Difficulty::Hardcore, Some(0.0));
+        assert!(taken < 0.0 && none == 0.0, "{taken} {none}");
+        assert!(
+            taken >= -8.0 * DT - 1e-6,
+            "at most 8 m/s² a second: {taken}"
+        );
+        assert!(hard < free, "{hard} vs {free}");
+        let (_, normal) = ride(Difficulty::Normal, None);
+        assert_eq!(normal, 0.0, "Normal absorbs nothing");
+    }
+
     /// Flat ground towards -z, then a plane rising at `deg` along +z from z = 0, 10 m wide.
     fn bank(deg: f32) -> crate::collision::TriMesh {
         let rise = libm::tanf(deg * PI / 180.0) * 20.0;
@@ -6914,8 +7010,18 @@ mod tests {
     /// A long flight off flat ground with the graphs asking for a body flip; `grab(k)`: the grab held
     /// on air tick `k`.
     fn body_flip_air(front: bool, grab: impl Fn(u32) -> bool) -> (Skater, Vec<Event>, f32) {
+        body_flip_air_in(Difficulty::Normal, front, grab)
+    }
+
+    /// [`body_flip_air`] riding difficulty `d`.
+    fn body_flip_air_in(
+        d: Difficulty,
+        front: bool,
+        grab: impl Fn(u32) -> bool,
+    ) -> (Skater, Vec<Event>, f32) {
         let park = flat();
         let mut s = spawn(&park);
+        s.tuning.set_difficulty(d);
         s.speed = 3.0;
         s.pos.y = 0.05;
         s.vel = v3(0.0, 6.5, 3.0);
@@ -6967,6 +7073,117 @@ mod tests {
         });
         steps(&mut s, &park, &Pad::default(), None, 30);
         assert!(s.body_flip.is_none());
+    }
+
+    #[test]
+    fn easy_body_flips_go_exactly_once_round_without_the_grab_and_never_bail_upside_down() {
+        // Skate 3's Easy: `PerfectBodyFlips` (SK8 known/body.rs: the flip's speed whatever the grab;
+        // body_flip.rs: slowed to end exactly one turn round) and no upside-down falling wipeout
+        // (`Hash_2B913C786BEFF4CD` off). The same grab let go a third of the way round bails on Normal.
+        let (s, ev, most) = body_flip_air_in(Difficulty::Easy, true, |k| k < 25);
+        assert!(most > 5.9 && most <= crate::math::TAU, "turned {most} rad");
+        assert!(!ev.contains(&Event::Bailed), "{ev:?} {:?}", s.bail_reason);
+        assert!(
+            landed(&ev).iter().any(|n| n.contains("FRONTFLIP")),
+            "{ev:?}"
+        );
+        // Held all the way it still stops at one turn (Normal's carries on past it).
+        let (_, _, most) = body_flip_air_in(Difficulty::Easy, false, |_| true);
+        assert!(most <= crate::math::TAU + 1e-4, "turned {most} rad");
+        // The upside-down switch alone: Normal's let-go flip with it off doesn't fall upside down.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.tuning.moves.upside_down_bail = false;
+        s.speed = 3.0;
+        s.pos.y = 0.05;
+        s.vel = v3(0.0, 6.5, 3.0);
+        s.mode = Mode::Air { time: 0.0 };
+        for k in 0..300 {
+            if !matches!(s.mode, Mode::Air { .. }) {
+                break;
+            }
+            s.graph = Some(GraphControl {
+                body_flip: (k < 20).then_some(true),
+                grabbing: k < 25,
+                ..GraphControl::default()
+            });
+            steps(&mut s, &park, &Pad::default(), None, 1);
+        }
+        assert_ne!(s.bail_reason, Some("fell upside down"));
+        // Normal and Hardcore check it and turn the flip only as asked.
+        let mut t = Tuning::BUILT_IN;
+        t.set_difficulty(Difficulty::Easy);
+        assert!(!t.moves.upside_down_bail && t.moves.perfect_body_flips);
+        t.set_difficulty(Difficulty::Hardcore);
+        assert!(t.moves.upside_down_bail && !t.moves.perfect_body_flips);
+    }
+
+    #[test]
+    fn the_bad_landing_check_follows_the_physics_mode() {
+        // Skate 3's `WipeoutCheckForBadLanding` and `Hash_D978550D6DB4E6F7` (SK8 wipeout/air.rs
+        // `bad_landing`): the landing angle and impact limits times the mode's scale, 1.5 on Easy.
+        let t = Tuning::BUILT_IN;
+        let land = |d: Difficulty, deg: f32, speed: f32, down: f32, check: bool| {
+            let park = flat();
+            let mut s = spawn(&park);
+            s.tuning.set_difficulty(d);
+            s.tuning.bad_landing = check;
+            s.take_off(Some(Flick::OLLIE));
+            let a = deg * PI / 180.0;
+            s.fwd = v3(sinf(a), 0.0, cosf(a));
+            s.vel = v3(0.0, -down, speed);
+            let mut ev = Vec::new();
+            s.land(Vec3::UP, 0, 0.6, &mut ev);
+            ev.contains(&Event::Bailed)
+        };
+        let hard = t.land_max_impact + 1.0;
+        assert!(land(Difficulty::Normal, 0.0, 4.0, hard, true));
+        assert!(
+            !land(Difficulty::Easy, 0.0, 4.0, hard, true),
+            "1.5 x the limit"
+        );
+        assert!(land(
+            Difficulty::Easy,
+            0.0,
+            4.0,
+            t.land_max_impact * 1.5 + 0.5,
+            true
+        ));
+        // Too crooked for the speed on Normal, within 1.5 x the angle on Easy.
+        let fast = 25.0;
+        let limit = t.land_angle.eval(fast) * 180.0 / PI;
+        assert!(land(Difficulty::Normal, limit + 5.0, fast, 2.0, true));
+        assert!(!land(Difficulty::Easy, limit + 5.0, fast, 2.0, true));
+        // With the check off neither bails.
+        assert!(!land(Difficulty::Normal, 0.0, 4.0, hard, false));
+        assert!(!land(Difficulty::Normal, limit + 5.0, fast, 2.0, false));
+    }
+
+    #[test]
+    fn a_trick_out_of_a_manual_jumps_from_the_modes_manual_low_end() {
+        // Skate 3's `Hash_BE3F74F978D777E5` (SK8 ground_jump: the clip's `TrickFromManual`): on Easy
+        // the lowest jump out of a manual is 1.53 m, not the 1.71 m of every other jump there.
+        let pop = |d: Difficulty, from_manual: bool| {
+            let park = flat();
+            let mut s = spawn(&park);
+            s.tuning.set_difficulty(d);
+            s.speed = 3.0;
+            s.graph = Some(GraphControl {
+                pop: Some((Flick::OLLIE, 0.0)),
+                pop_from_manual: from_manual,
+                ..GraphControl::default()
+            });
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            assert!(matches!(s.mode, Mode::Air { .. }));
+            s.vel.y
+        };
+        assert!(pop(Difficulty::Easy, true) < pop(Difficulty::Easy, false) - 0.1);
+        // Normal's two low ends are the same (1.33 m).
+        assert!((pop(Difficulty::Normal, true) - pop(Difficulty::Normal, false)).abs() < 1e-4);
+        let mut t = Tuning::BUILT_IN;
+        t.set_difficulty(Difficulty::Easy);
+        assert_eq!((t.jump_low_manual, t.jump_low), (1.53, 1.71));
+        assert!(t.jump_height_from(1.53, 0.0, 3.0) < t.jump_height(0.0, 3.0));
     }
 
     #[test]

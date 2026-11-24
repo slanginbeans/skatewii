@@ -80,10 +80,41 @@ pub struct ModeTuning {
     pub manual_correction_speed: f32,
     /// Ground-impact bail threshold (`Wipeout_GroundXZAcceleration`): `Tuning::wipe_ground_closing`.
     pub wipe_ground_closing: f32,
+    /// The air body spin's easier curves (`EasyBodySpins`, SK8 air/body_spin.rs: the mode byte picks
+    /// `physics_bodyspin`'s other curves): `Tuning::easy_body_spins`.
+    pub easy_body_spins: bool,
+    /// Body flips turned exactly once round over the flight, whatever the grab (`PerfectBodyFlips`,
+    /// SK8 known/trajectory.rs, known/body.rs, body_flip.rs): `MoveTuning::perfect_body_flips`.
+    pub perfect_body_flips: bool,
+    /// A clip's `JumpHeightOverride` may raise the jump (`JumpHeightOverrideEnabled`, SK8 attribute
+    /// finalization): `Tuning::jump_height_override`.
+    pub jump_height_override: bool,
+    /// The lowest jump out of a manual (m, `Hash_BE3F74F978D777E5`: the clip marks it
+    /// `TrickFromManual`; SK8 ground_jump): `Tuning::jump_low_manual`.
+    pub jump_low_manual: f32,
+    /// The pop out of a grind (m/s; its low and high strength ends) for the 50-50, 5-0, backslash and
+    /// darkslide, the boardslide, and the nose and tail slides (`Hash_3097A69281990652` /
+    /// `Hash_FA4CDBAE0DFD1FAD`, `Hash_B2B1170AFFC8AC69` / `Hash_1B3E9F9C836D287D`,
+    /// `Hash_703829BD711E54DE` / `Hash_0F2473E9125079F0`; SK8 grind/substate/settings.rs):
+    /// `GrindTuning::pop`.
+    pub grind_pop: [[f32; 2]; 3],
+    /// Pumping against the ground's turn (`PumpEffectFactorAbsorption`) and its most speed taken a
+    /// second (m/s², `Hash_09D1AEE3D7D8A4A7`; SK8 pumping/controller.rs): `Tuning::pump_absorption`,
+    /// `pump_max_absorption`.
+    pub pump_absorption: f32,
+    pub pump_max_absorption: f32,
+    /// The bad-landing bail check and its scale (`WipeoutCheckForBadLanding`,
+    /// `Hash_D978550D6DB4E6F7`; SK8 wipeout/air.rs `bad_landing`): `Tuning::bad_landing`,
+    /// `bad_landing_scale`.
+    pub bad_landing: bool,
+    pub bad_landing_scale: f32,
+    /// Falling upside down without the grab bails (`Hash_2B913C786BEFF4CD`, SK8 known/post_physics.rs):
+    /// `MoveTuning::upside_down_bail`.
+    pub upside_down_bail: bool,
 }
 
 /// The collection's field names, in [`ModeTuning`]'s order.
-pub const FIELDS: [&str; 14] = [
+pub const FIELDS: [&str; 29] = [
     "MaxPushDVStart",
     "MaxPushDVEnd",
     "PumpEffectFactor",
@@ -98,6 +129,21 @@ pub const FIELDS: [&str; 14] = [
     "Hash_F8CBC0F5FEF2240E",
     "Hash_84CB2F459F3FC811",
     "Wipeout_GroundXZAcceleration",
+    "EasyBodySpins",
+    "PerfectBodyFlips",
+    "JumpHeightOverrideEnabled",
+    "Hash_BE3F74F978D777E5",
+    "Hash_3097A69281990652",
+    "Hash_FA4CDBAE0DFD1FAD",
+    "Hash_B2B1170AFFC8AC69",
+    "Hash_1B3E9F9C836D287D",
+    "Hash_703829BD711E54DE",
+    "Hash_0F2473E9125079F0",
+    "PumpEffectFactorAbsorption",
+    "Hash_09D1AEE3D7D8A4A7",
+    "WipeoutCheckForBadLanding",
+    "Hash_D978550D6DB4E6F7",
+    "Hash_2B913C786BEFF4CD",
 ];
 
 macro_rules! mode_paths {
@@ -117,6 +163,21 @@ macro_rules! mode_paths {
             concat!("physics_mode/", $m, "/Hash_F8CBC0F5FEF2240E"),
             concat!("physics_mode/", $m, "/Hash_84CB2F459F3FC811"),
             concat!("physics_mode/", $m, "/Wipeout_GroundXZAcceleration"),
+            concat!("physics_mode/", $m, "/EasyBodySpins"),
+            concat!("physics_mode/", $m, "/PerfectBodyFlips"),
+            concat!("physics_mode/", $m, "/JumpHeightOverrideEnabled"),
+            concat!("physics_mode/", $m, "/Hash_BE3F74F978D777E5"),
+            concat!("physics_mode/", $m, "/Hash_3097A69281990652"),
+            concat!("physics_mode/", $m, "/Hash_FA4CDBAE0DFD1FAD"),
+            concat!("physics_mode/", $m, "/Hash_B2B1170AFFC8AC69"),
+            concat!("physics_mode/", $m, "/Hash_1B3E9F9C836D287D"),
+            concat!("physics_mode/", $m, "/Hash_703829BD711E54DE"),
+            concat!("physics_mode/", $m, "/Hash_0F2473E9125079F0"),
+            concat!("physics_mode/", $m, "/PumpEffectFactorAbsorption"),
+            concat!("physics_mode/", $m, "/Hash_09D1AEE3D7D8A4A7"),
+            concat!("physics_mode/", $m, "/WipeoutCheckForBadLanding"),
+            concat!("physics_mode/", $m, "/Hash_D978550D6DB4E6F7"),
+            concat!("physics_mode/", $m, "/Hash_2B913C786BEFF4CD"),
         ]
     };
 }
@@ -146,6 +207,16 @@ impl ModeTuning {
         manual_corrective: false,
         manual_correction_speed: 4.0,
         wipe_ground_closing: 9.0,
+        easy_body_spins: true,
+        perfect_body_flips: true,
+        jump_height_override: true,
+        jump_low_manual: 1.53,
+        grind_pop: [[2.5, 2.5], [2.61, 2.61], [2.61, 2.61]],
+        pump_absorption: 1.0,
+        pump_max_absorption: 0.0,
+        bad_landing: true,
+        bad_landing_scale: 1.5,
+        upside_down_bail: false,
     };
 
     /// Skate 3's `physics_mode/normal` (the default).
@@ -164,6 +235,16 @@ impl ModeTuning {
         manual_corrective: true,
         manual_correction_speed: 5.0,
         wipe_ground_closing: 7.1,
+        easy_body_spins: false,
+        perfect_body_flips: false,
+        jump_height_override: true,
+        jump_low_manual: 1.33,
+        grind_pop: [[2.5, 2.5], [2.61, 2.61], [2.61, 2.61]],
+        pump_absorption: 1.0,
+        pump_max_absorption: 0.0,
+        bad_landing: true,
+        bad_landing_scale: 1.0,
+        upside_down_bail: true,
     };
 
     /// Skate 3's `physics_mode/hardcore`.
@@ -182,6 +263,16 @@ impl ModeTuning {
         manual_corrective: true,
         manual_correction_speed: 2.0,
         wipe_ground_closing: 7.1,
+        easy_body_spins: false,
+        perfect_body_flips: false,
+        jump_height_override: false,
+        jump_low_manual: 1.33,
+        grind_pop: [[0.5, 2.0], [1.61, 2.0], [1.0, 2.0]],
+        pump_absorption: 9.0,
+        pump_max_absorption: 8.0,
+        bad_landing: true,
+        bad_landing_scale: 1.0,
+        upside_down_bail: true,
     };
 
     /// Per [`Difficulty`].
@@ -207,11 +298,29 @@ impl ModeTuning {
             "Hash_5B57F2CCCCEEF430" => &mut self.wobble_amplitude,
             "Hash_84CB2F459F3FC811" => &mut self.manual_correction_speed,
             "Wipeout_GroundXZAcceleration" => &mut self.wipe_ground_closing,
-            "Hash_F8CBC0F5FEF2240E" => {
-                self.manual_corrective = f != 0.0;
+            "Hash_BE3F74F978D777E5" => &mut self.jump_low_manual,
+            "Hash_3097A69281990652" => &mut self.grind_pop[0][0],
+            "Hash_FA4CDBAE0DFD1FAD" => &mut self.grind_pop[0][1],
+            "Hash_B2B1170AFFC8AC69" => &mut self.grind_pop[1][0],
+            "Hash_1B3E9F9C836D287D" => &mut self.grind_pop[1][1],
+            "Hash_703829BD711E54DE" => &mut self.grind_pop[2][0],
+            "Hash_0F2473E9125079F0" => &mut self.grind_pop[2][1],
+            "PumpEffectFactorAbsorption" => &mut self.pump_absorption,
+            "Hash_09D1AEE3D7D8A4A7" => &mut self.pump_max_absorption,
+            "Hash_D978550D6DB4E6F7" => &mut self.bad_landing_scale,
+            _ => {
+                let flag = match field {
+                    "Hash_F8CBC0F5FEF2240E" => &mut self.manual_corrective,
+                    "EasyBodySpins" => &mut self.easy_body_spins,
+                    "PerfectBodyFlips" => &mut self.perfect_body_flips,
+                    "JumpHeightOverrideEnabled" => &mut self.jump_height_override,
+                    "WipeoutCheckForBadLanding" => &mut self.bad_landing,
+                    "Hash_2B913C786BEFF4CD" => &mut self.upside_down_bail,
+                    _ => return false,
+                };
+                *flag = f != 0.0;
                 return true;
             }
-            _ => return false,
         };
         *slot = f;
         true
@@ -234,6 +343,16 @@ impl ModeTuning {
             manual_corrective: t.manual_corrective,
             manual_correction_speed: t.manual_correction_speed,
             wipe_ground_closing: t.wipe_ground_closing,
+            easy_body_spins: t.easy_body_spins,
+            perfect_body_flips: t.moves.perfect_body_flips,
+            jump_height_override: t.jump_height_override,
+            jump_low_manual: t.jump_low_manual,
+            grind_pop: t.grind.pop,
+            pump_absorption: t.pump_absorption,
+            pump_max_absorption: t.pump_max_absorption,
+            bad_landing: t.bad_landing,
+            bad_landing_scale: t.bad_landing_scale,
+            upside_down_bail: t.moves.upside_down_bail,
         }
     }
 
@@ -253,6 +372,16 @@ impl ModeTuning {
         t.manual_corrective = self.manual_corrective;
         t.manual_correction_speed = self.manual_correction_speed;
         t.wipe_ground_closing = self.wipe_ground_closing;
+        t.easy_body_spins = self.easy_body_spins;
+        t.moves.perfect_body_flips = self.perfect_body_flips;
+        t.jump_height_override = self.jump_height_override;
+        t.jump_low_manual = self.jump_low_manual;
+        t.grind.pop = self.grind_pop;
+        t.pump_absorption = self.pump_absorption;
+        t.pump_max_absorption = self.pump_max_absorption;
+        t.bad_landing = self.bad_landing;
+        t.bad_landing_scale = self.bad_landing_scale;
+        t.moves.upside_down_bail = self.upside_down_bail;
     }
 }
 
@@ -320,6 +449,55 @@ mod tests {
         normal.set_difficulty(Difficulty::Hardcore);
         normal.set_difficulty(Difficulty::Normal);
         assert_eq!(normal, Tuning::BUILT_IN);
+    }
+
+    #[test]
+    fn the_assist_pop_pump_and_bail_fields_are_read_per_mode() {
+        // Skate 3's Easy, Normal and Hardcore values of the fields added with the grind pops, the
+        // pump absorption, the body spin and flip assists, the jump fields and the bail switches.
+        let e = ModeTuning::EASY;
+        let n = ModeTuning::NORMAL;
+        let h = ModeTuning::HARDCORE;
+        assert!(e.easy_body_spins && !n.easy_body_spins && !h.easy_body_spins);
+        assert!(e.perfect_body_flips && !n.perfect_body_flips && !h.perfect_body_flips);
+        assert!(e.jump_height_override && n.jump_height_override && !h.jump_height_override);
+        assert_eq!(
+            [e.jump_low_manual, n.jump_low_manual, h.jump_low_manual],
+            [1.53, 1.33, 1.33]
+        );
+        assert_eq!(h.grind_pop, [[0.5, 2.0], [1.61, 2.0], [1.0, 2.0]]);
+        assert_eq!(n.grind_pop, e.grind_pop);
+        assert_eq!((h.pump_absorption, h.pump_max_absorption), (9.0, 8.0));
+        assert_eq!(n.pump_max_absorption, 0.0);
+        assert!(e.bad_landing && n.bad_landing && h.bad_landing);
+        assert_eq!([e.bad_landing_scale, n.bad_landing_scale], [1.5, 1.0]);
+        assert!(!e.upside_down_bail && n.upside_down_bail && h.upside_down_bail);
+        // From a rules pack, each to its mode, flags on when non-zero.
+        let data = encode(&[
+            ("physics_mode/hardcore/Hash_0F2473E9125079F0", vec![2.2]),
+            ("physics_mode/hardcore/Hash_09D1AEE3D7D8A4A7", vec![7.0]),
+            ("physics_mode/easy/PerfectBodyFlips", vec![0.0]),
+            ("physics_mode/easy/Hash_2B913C786BEFF4CD", vec![1.0]),
+            ("physics_mode/normal/WipeoutCheckForBadLanding", vec![0.0]),
+            ("physics_mode/normal/Hash_D978550D6DB4E6F7", vec![2.0]),
+            ("physics_mode/normal/Hash_BE3F74F978D777E5", vec![1.0]),
+            ("physics_mode/normal/EasyBodySpins", vec![1.0]),
+            ("physics_mode/normal/JumpHeightOverrideEnabled", vec![0.0]),
+            ("physics_mode/normal/PumpEffectFactorAbsorption", vec![3.0]),
+        ]);
+        let mut t = Tuning::BUILT_IN;
+        assert_eq!(t.apply(&data), 10);
+        // Normal rides: its values are the riding ones.
+        assert!(!t.bad_landing && t.easy_body_spins && !t.jump_height_override);
+        assert_eq!(
+            (t.bad_landing_scale, t.jump_low_manual, t.pump_absorption),
+            (2.0, 1.0, 3.0)
+        );
+        t.set_difficulty(Difficulty::Hardcore);
+        assert_eq!(t.grind.pop[2], [1.0, 2.2]);
+        assert_eq!(t.pump_max_absorption, 7.0);
+        t.set_difficulty(Difficulty::Easy);
+        assert!(!t.moves.perfect_body_flips && t.moves.upside_down_bail);
     }
 
     #[test]

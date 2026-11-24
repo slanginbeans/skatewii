@@ -448,6 +448,9 @@ impl Driver {
                 .map_or(gesture, |p| p.value);
             let over = r.packet(r.names.jump_override).unwrap_or(0.0);
             c.pop = Some((flick, jump_strength(height, over, t)));
+            // The clip marks a trick out of a manual (`TrickFromManual`): its jump's low end is the
+            // mode's manual one.
+            c.pop_from_manual = r.packet_named("TrickFromManual").is_some();
         }
         self.jumping = attr;
         // Foot plants on the ground: the clips' board in hand and their jump off the planted foot (its
@@ -664,7 +667,8 @@ pub fn air_flick(name: &str) -> (Flick, u8) {
 }
 
 /// SK8's jump finalisation (animation attribute finalization): a trick height at or under the low clamp
-/// is the minimum hop, at or over the high clamp full height; a flick-strength override can only raise it.
+/// is the minimum hop, at or over the high clamp full height; a flick-strength override can only raise it,
+/// and only where the physics mode allows it (`JumpHeightOverrideEnabled`: off on Hardcore).
 pub fn jump_strength(height: f32, override_height: f32, t: &Tuning) -> f32 {
     let h = if height <= t.jump_clamp_low {
         0.0
@@ -673,7 +677,12 @@ pub fn jump_strength(height: f32, override_height: f32, t: &Tuning) -> f32 {
     } else {
         height
     };
-    h.max(override_height).clamp(0.0, 1.0)
+    let over = if t.jump_height_override {
+        override_height
+    } else {
+        0.0
+    };
+    h.max(over).clamp(0.0, 1.0)
 }
 
 /// A darkslide's way out for the graph's `GrindTrickOutTypeAllowed` (SK8 grind/contact.rs): 0 for every
