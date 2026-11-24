@@ -94,9 +94,11 @@ With `motion/graph` loaded (`Game::graph`), each tick:
      becomes the trick (its look and flips from the graph's `ScoringTrick`, `Kickflip2`..`4` for held
      multi-flips; the graph's `TimeToLand` thresholds read the physics' landing prediction, below), a
      dark catch rides dark (`SetDark`, the board grip down), and landing while the playing clips are in
-     their `DANGERZONE` (the board not caught; within its last 0.1 s counts as caught) bails when the
-     board comes down faster than Skate 3's danger-zone closing speed (`Wipeout_AirYTrick`), as SK8's
-     wipeout checks do, instead of after a fixed trick time;
+     their `DANGERZONE` (the board not caught; within its last 0.1 s counts as caught) bails on Skate
+     3's closing-velocity check with the trick limits (SK8 wipeout/air.rs `check`, common.rs
+     `closing`): the speed into the surface along its normal, seen in the rider's frame (his up), past
+     `Wipeout_AirYTrick` (0.6 m/s) along his up or `Wipeout_AirXZTrick` (0.1) across it, so coming
+     down tilted against the surface bails at a softer touch; instead of after a fixed trick time;
    - the body spin's input is the graph's `PhysBodySpin` packet (the main stick's x as the graph hands
      it over), and the landing assist only turns the body while the graph's `BodySpin` is 0;
    - grabs are scored by the graph's `ScoringGrabs` name (the variant the C-stick picks; a variant once
@@ -830,8 +832,7 @@ from the push sets' contact time; the manual's deck pitch runs SK8's PID servo (
 `physics_manual` gains) on flatground's kinematic board, so its deck reaches the brake angle in 0.7 s
 where SK8's rigid deck takes 1.1 s (a nose drag from 8.5 m/s takes the corrective drag at 6.4 m/s,
 SK8's at 5.4), and SK8's action graph then runs the rider out (`SS_RUNOUT_GROUND`, through its
-dismount states: no wipeout request is raised) where flatground's plays a bump and rides on; a landing in the danger zone is judged on the speed
-into the ground only (Skate 3's closing-velocity check also has a sideways part); shoves don't run;
+dismount states: no wipeout request is raised) where flatground's plays a bump and rides on; shoves don't run;
 the wipeout's lean and twist come from the drawn bail, not a ragdoll's hips; the d-pad's gestures are
 a fixed set (Skate 3's are the player's pick). The
 turn conditioner reads the physics' smoothed steering and a centripetal lean instead of Skate 3's

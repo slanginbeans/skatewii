@@ -422,9 +422,13 @@ pub struct Tuning {
     pub land_max_impact: f32,
     pub land_max_stairs: f32,
     pub land_max_grind: f32,
-    /// Landing while the clips say the board isn't caught: a bail past this speed into the ground
-    /// (m/s), once the air is older than `danger_ignore_ticks` ticks.
+    /// Landing while the clips say the board isn't caught (Skate 3's closing-velocity check with the
+    /// trick limits): a bail when the speed into the surface, seen from the rider (his up against the
+    /// surface's normal), has more than `danger_max_impact` along his up or `danger_max_side` across it
+    /// (m/s, `Wipeout_AirYTrick`, `Wipeout_AirXZTrick`), once the air is older than
+    /// `danger_ignore_ticks` ticks.
     pub danger_max_impact: f32,
+    pub danger_max_side: f32,
     pub danger_ignore_ticks: f32,
     /// The tangential speed kept on landing, against the surface's normal y (transitions gain).
     pub landing_speed_vs_ny: Curve,
@@ -959,6 +963,7 @@ pub const PATHS: &[&str] = &[
     "physics_wipeout/default/Wipeout_AirMaxSpeedIntoStairs",
     "physics_wipeout/default/Wipeout_AirMaxSpeedIntoCollisionNearGrind",
     "physics_wipeout/default/Wipeout_AirYTrick",
+    "physics_wipeout/default/Wipeout_AirXZTrick",
     "physics_wipeout/default/FramesAtStartOfAirToIgnoreDangerZone",
     "physics_airstates/default/LandingSpeedScalarVsGroundNormalY",
     "physics_animation/default/LandingSketchySideSpeed",
@@ -1350,7 +1355,8 @@ impl Tuning {
         land_max_impact: 11.0,
         land_max_stairs: 5.5,
         land_max_grind: 7.5,
-        danger_max_impact: 0.8,
+        danger_max_impact: 0.6,
+        danger_max_side: 0.1,
         danger_ignore_ticks: 5.0,
         landing_speed_vs_ny: Curve::new(&[(0.4, 1.0), (0.55, 1.12), (0.7, 1.0)]),
         land_sketchy_side: Curve::new(&[(0.0, 0.0), (0.3, 0.3), (0.6, 0.8), (0.9, 1.0)]),
@@ -1688,6 +1694,7 @@ impl Tuning {
                 scalar!(self.land_max_grind)
             }
             "physics_wipeout/default/Wipeout_AirYTrick" => scalar!(self.danger_max_impact),
+            "physics_wipeout/default/Wipeout_AirXZTrick" => scalar!(self.danger_max_side),
             // An integer in the database: a 4-byte one arrives as its bits read as a float.
             "physics_wipeout/default/FramesAtStartOfAirToIgnoreDangerZone" => match f {
                 Some(f) if f.to_bits() < 0x0080_0000 => {

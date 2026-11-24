@@ -3820,6 +3820,14 @@ impl Skater {
         }
         let speed = vt.length();
         let impact = -self.vel.dot(n);
+        // Skate 3's closing velocity (SK8 physics/board_ground.rs: the speed into the surface along its
+        // normal) seen from the rider (wipeout/common.rs `closing`, the animation frame): along his up,
+        // and across it when he comes down tilted against the surface.
+        let rider_up = self.normal.normalize_or(n);
+        let into = impact.max(0.0);
+        let cos = n.dot(rider_up).clamp(-1.0, 1.0);
+        let closing_up = into * cos.abs();
+        let closing_side = into * sqrtf((1.0 - cos * cos).max(0.0));
         let axis = tangent(self.fwd, n);
         let travel = if speed > 0.5 {
             vt * (1.0 / speed)
@@ -3847,22 +3855,24 @@ impl Skater {
         };
         let limit = t.land_angle.eval(speed);
         let tweaked = self.graph.is_none() && self.grab.is_some_and(|g| g.tweak >= GRAB_TWEAK_BAIL);
-        let reason =
-            if danger && air_time * 60.0 > t.danger_ignore_ticks && impact > t.danger_max_impact {
-                Some("landed before the board was caught")
-            } else if crooked > limit {
-                Some("landed too crooked for the speed")
-            } else if impact > max_impact {
-                Some(if stairs {
-                    "hit the stairs too hard"
-                } else {
-                    "hit the ground too hard"
-                })
-            } else if tweaked {
-                Some("landed still tweaking a grab")
+        let reason = if danger
+            && air_time * 60.0 > t.danger_ignore_ticks
+            && (closing_up > t.danger_max_impact || closing_side > t.danger_max_side)
+        {
+            Some("landed before the board was caught")
+        } else if crooked > limit {
+            Some("landed too crooked for the speed")
+        } else if impact > max_impact {
+            Some(if stairs {
+                "hit the stairs too hard"
             } else {
-                None
-            };
+                "hit the ground too hard"
+            })
+        } else if tweaked {
+            Some("landed still tweaking a grab")
+        } else {
+            None
+        };
         self.last_landing = Some(LandingCheck {
             crooked,
             impact,
@@ -6825,6 +6835,36 @@ mod tests {
         });
         steps(&mut s, &park, &Pad::default(), None, 30);
         assert!(s.body_flip.is_none());
+    }
+
+    #[test]
+    fn a_danger_zone_landing_bails_on_the_closing_speed_across_the_rider_too() {
+        // SK8 wipeout/air.rs `check` and common.rs `closing`: in the danger zone the speed into the
+        // surface, seen in the rider's frame, bails past `Wipeout_AirYTrick` (0.6 m/s) along his up or
+        // `Wipeout_AirXZTrick` (0.1) across it. flatground used to check only the speed into the ground.
+        let park = flat();
+        let touch = |tilt: f32, into: f32, danger: bool| {
+            let mut s = spawn(&park);
+            s.mode = Mode::Air { time: 0.5 };
+            s.graph = Some(GraphControl {
+                danger,
+                ..GraphControl::default()
+            });
+            // The rider comes down leaning `tilt` across his travel.
+            s.normal = rotate(Vec3::UP, v3(0.0, 0.0, 1.0), tilt);
+            s.vel = v3(0.0, -into, 3.0);
+            let mut ev = Vec::new();
+            s.land(Vec3::UP, 0, 0.5, &mut ev);
+            matches!(s.mode, Mode::Bailed { .. })
+        };
+        assert!(!touch(0.0, 0.5, true), "upright, 0.5 m/s into the ground");
+        assert!(touch(0.0, 0.7, true), "0.7 m/s along his up");
+        // 20 degrees off: 0.17 m/s across him.
+        assert!(touch(0.35, 0.5, true));
+        // 6 degrees: 0.05 across.
+        assert!(!touch(0.1, 0.5, true));
+        // Caught: no closing check.
+        assert!(!touch(0.35, 0.5, false));
     }
 
     #[test]
