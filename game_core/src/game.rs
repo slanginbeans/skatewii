@@ -163,7 +163,7 @@ struct Popup {
     time: f32,
 }
 
-/// After a landing: the drawn board's yaw against the rider's travel, unwrapped (radians), for the log.
+/// After a landing: the drawn board's yaw against the physical board's, unwrapped (radians), for the log.
 struct BoardWatch {
     trick: String,
     /// The board's speed along its nose at the landing (m/s; negative rolling tail first).
@@ -177,8 +177,9 @@ struct BoardWatch {
 
 impl BoardWatch {
     const FRAMES: u32 = 45;
-    /// More than this (degrees) is the board turning round, not the landing lining up with the travel.
-    const SWING: f32 = 90.0;
+    /// More than this (degrees) is the board turning round under the rider (measured end for end, a
+    /// long axis is at most 90 degrees off another).
+    const SWING: f32 = 45.0;
 }
 
 pub struct Game {
@@ -613,7 +614,7 @@ impl Game {
     }
 
     /// Follows the drawn board for [`BoardWatch::FRAMES`] frames after a landing: its yaw in the world
-    /// against the way the rider travels. Logs once if that swings more than [`BoardWatch::SWING`] degrees
+    /// against the physical board's (which Skate 3 keeps the posed board on). Logs once if that swings more than [`BoardWatch::SWING`] degrees
     /// (the board turning round under his feet), with what the graphs and the stance were doing.
     fn watch_board(&mut self) {
         let Some(mut w) = self.board_watch.take() else {
@@ -625,20 +626,23 @@ impl Game {
         if w.frames > BoardWatch::FRAMES || self.skater.is_airborne() {
             return;
         }
-        let travel = self.skater.vel.horizontal();
+        // Against the physical board's long axis, not the travel: a wall pushes a rider rolling tail
+        // first back nose first (`hit_wall`), turning his travel round with the board as it was. Either
+        // end: pushing out of fakie turns the board's frame end for end (`frame_turned`), not the board.
+        let deck = self.skater.fwd.horizontal();
         let axes = self.board_axes_in_character();
         let Some((_, nose)) =
-            axes.filter(|_| travel.length() >= 1.0 && self.skater.mode == Mode::Rolling)
+            axes.filter(|_| deck.length() >= 0.5 && self.skater.mode == Mode::Rolling)
         else {
             self.board_watch = Some(w);
             return;
         };
         let nose = self.imported_xform().rot.apply(nose);
         let rel = crate::math::wrap_angle(
-            crate::math::atan2f(nose.x, nose.z) - crate::math::atan2f(travel.x, travel.z),
-        );
+            2.0 * (crate::math::atan2f(nose.x, nose.z) - crate::math::atan2f(deck.x, deck.z)),
+        ) * 0.5;
         if let Some(last) = w.last {
-            w.turned += crate::math::wrap_angle(rel - last);
+            w.turned += crate::math::wrap_angle(2.0 * (rel - last)) * 0.5;
             w.lo = w.lo.min(w.turned);
             w.hi = w.hi.max(w.turned);
         }
