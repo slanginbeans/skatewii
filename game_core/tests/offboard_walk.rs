@@ -4,6 +4,8 @@
 //! - Stairs: the ground ahead with steps in it is Skate 3's stairs kinds (`GroundSlopeType`'s
 //!   `StairUp/Dn` `Shallow/Steep`), a slope without them its ramp kinds; with the player's imported data
 //!   the motion graph plays its own stairs walk and run cycles (`Walk_StairUpShallow` ...).
+//! - Obstacles (SK8 movement_intent.rs): walking straight into a wall turns the rider to face it and
+//!   stops him there; walking into it at an angle turns him along it and he walks on.
 
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
@@ -144,6 +146,64 @@ fn a_slope_without_steps_is_a_ramp_kind() {
     assert!(top > 1.1, "up the ramp: {top}");
     assert!(seen[5] > 10, "a shallow ramp up (27 degrees): {seen:?}");
     assert!(seen[1..5].iter().all(|&n| n == 0), "no stairs: {seen:?}");
+}
+
+/// A wall 2 m high across the lane `ahead` of it.
+fn add_wall(g: &mut Game, ahead: f32) -> f32 {
+    let z = LANE.z + ahead;
+    g.park.shapes.push(Shape::Block {
+        min: v3(LANE.x - 12.0, 0.0, z),
+        max: v3(LANE.x + 12.0, 2.0, z + 0.5),
+        rgba: 0x808080ff,
+    });
+    z
+}
+
+#[test]
+fn walking_straight_into_a_wall_faces_it_and_stops() {
+    let mut g = Game::new();
+    let wall = add_wall(&mut g, 4.0);
+    // A little off straight (10 degrees right): still into the wall.
+    let mut g = on_foot(g, LANE, -0.17);
+    run(&mut g, 150, [0, 80], 0);
+    let b = &g.skater.biped;
+    assert!(b.obstacle.is_some() && b.obstacle_centred, "against it");
+    assert!(b.speed < 0.05, "stopped: {}", b.speed);
+    assert!(
+        g.skater.pos.z < wall - game_core::skater::biped::BODY_RADIUS + 0.12,
+        "the body short of the wall: {:?}",
+        g.skater.pos
+    );
+    assert!(
+        game_core::math::wrap_angle(b.heading).abs() < 0.08,
+        "turned to face it square: {}",
+        b.heading
+    );
+}
+
+#[test]
+fn walking_into_a_wall_at_an_angle_turns_along_it() {
+    for along in [1.0f32, -1.0] {
+        let mut g = Game::new();
+        let wall = add_wall(&mut g, 4.0);
+        let mut g = on_foot(g, LANE, along * std::f32::consts::FRAC_PI_4);
+        run(&mut g, 60, [0, 0], 0);
+        // Walking ahead 45 degrees into the wall (+x first, then -x), the camera behind.
+        let x0 = g.skater.pos.x;
+        run(&mut g, 90, [0, 100], 0);
+        let b = &g.skater.biped;
+        assert!(g.skater.pos.z < wall, "{:?}", g.skater.pos);
+        assert!(b.obstacle.is_some(), "along the wall: {:?}", g.skater.pos);
+        assert!(!b.obstacle_centred);
+        // From 45 degrees round towards along it (the turn eases in as he nears the wall's way).
+        let yaw = game_core::math::wrap_angle(b.heading) * along;
+        assert!(
+            yaw > 1.05 && yaw < std::f32::consts::FRAC_PI_2 + 0.1,
+            "turned along the wall ({along}): {yaw}"
+        );
+        assert!(b.speed > 1.5, "walking on: {}", b.speed);
+        assert!((g.skater.pos.x - x0) * along > 2.0, "{:?}", g.skater.pos);
+    }
 }
 
 fn data_dir() -> Option<std::path::PathBuf> {

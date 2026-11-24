@@ -659,6 +659,16 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   points between the walk, run and sprint cycles' own speeds (1.68, 5.37, 9.10 m/s from their
   `ANIMTRANSZ`): 3.53 and 7.24 m/s. The ground is flatground's own: the highest surface no more than
   0.45 m above the feet, a wall above that, a fall below a 0.35 m drop.
+- **Obstacles** (SK8 `movement_intent.rs` TU3 82D7CF50 / 82D7D5A0, `movement_velocity.rs`,
+  `contact_correction.rs`; `Biped::steer_round_obstacle`, `biped::body_contact`). Skate 3 reads its
+  skeleton's collision volumes pushed out of the world; flatground's rider has no body, so a ring of 0.3 m
+  (`BODY_RADIUS`, SK8's biped air sphere radius) round the feet stands in: its points in a wall (or a
+  move to them blocked) give the way out. With somewhere to go, the stick's way within 25 degrees of
+  straight into the wall (55 once in) turns the walker to face it square and stops him; any other way
+  turns him along the wall towards the stick's side (the correction `(side - facing x 2/pi) / 2`), only
+  while he faces it within 90 degrees, merged with the stick's own turn (the other way replaces it, the
+  same way keeps the larger). No velocity goes into the wall. Tests: `biped` unit tests,
+  `tests/offboard_walk.rs` (straight in: faces it and stops; at 45 degrees: turns along it and walks on).
 - **Jumping**: B (`OB_Jump`). Up at sqrt(2 g `JumpHeight`) (0.9 m), ahead at the ground speed's forward part
   x `JumpSpeedScalar` (0.8). In the air the motion graph plays its jump selection (`OBAir/InAir/FromRun`,
   `FromStand`), and `MatchAirTime` seeks the clip to the flight's progress (1 - time left / whole time) and
@@ -742,8 +752,8 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   the landing on deck's query; a body above the board's deck that moves over 0.7 m/s between two queries
   is a hurdle (`IsHippyHurdling`: `OnBoard/HippyJump/HurdleCyc`, the landing on the board held off) until
   0.3 s past the apex. Flatground's world is static, so its hippie jumps never hurdle.
-- **Not done**: moving objects (so nothing to hippie hurdle), standing on cars, the obstacle steering
-  of `movement_intent.rs`, foot IK; the free board has no rigid rotation of its own (it keeps its nose,
+- **Not done**: moving objects (so nothing to hippie hurdle), standing on cars, foot IK, the slide on
+  steep ground and the drop-in edge alignment of `movement_intent.rs`; the free board has no rigid rotation of its own (it keeps its nose,
   pitched only by the throw, and lands on its wheels whatever way it falls) and doesn't collide with the
   rider; the retrieve hands (SK8's hand contact that catches the board early) aren't modelled.
 - **Camera**: walking is `IsOffboard` and the walker's air `IsAirOffboard` (both read by Skate 3's camera

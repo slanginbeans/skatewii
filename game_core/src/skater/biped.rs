@@ -13,6 +13,10 @@
 //!   turn rate chases `turn_vs_speed` x turn by at most `turn_delta_vs_speed` a tick.
 //! - Walk, run or sprint by the speed against the halfway points between the clips' own speeds.
 //! - The jump: up at sqrt(2 g height), ahead at the ground speed's forward part x `jump_speed_scalar`.
+//! - Obstacles (movement_intent.rs, movement_velocity.rs, contact_correction.rs): the body against a
+//!   wall steers the walker. The stick into the wall (within 25 degrees, 55 once there) turns him to
+//!   face it and stops him; otherwise he turns along the wall the way the stick points. Nothing of the
+//!   velocity goes into the wall.
 //!
 //! flatground keeps the ground simple: the rider stands on the highest surface under him no more than
 //! [`STEP_UP`] above his feet, a wall is anything higher, and a drop of more than [`STEP_DOWN`] is a fall.
@@ -38,6 +42,13 @@ pub const STEP_DOWN: f32 = 0.35;
 pub const CLIP_SPEEDS: [f32; 3] = [1.683_4, 5.369_8, 9.101_9];
 /// Those cycles' lengths (s): one step cycle travels its clip speed times this.
 pub const CYCLE_TIMES: [f32; 3] = [56.0 / 60.0, 38.0 / 60.0, 30.0 / 60.0];
+/// The body's reach against walls (m): Skate 3 reads its skeleton's collision volumes being pushed out
+/// of the world (SK8 contact_correction.rs); flatground's rider has no body, so a ring this far round the
+/// feet stands in for it (SK8's biped air sphere radius, `TrajectorySphereRadius` in its tests).
+pub const BODY_RADIUS: f32 = 0.3;
+/// The stick within this of straight into the wall walks into it (deg), and once in, within this.
+const OBSTACLE_CENTRED: f32 = 25.0;
+const OBSTACLE_CENTRED_HELD: f32 = 55.0;
 /// Below this (m/s) the rider stands.
 const STAND_SPEED: f32 = 0.01;
 /// Skate 3's ground profile ahead of the walker (SK8 contact_toolkit generation.rs): a rise or drop over
@@ -91,6 +102,10 @@ pub struct Biped {
     pub slope_kind: u8,
     slope_samples: [u8; 3],
     slope_cursor: u8,
+    /// The body against a wall: the way out of it (horizontal unit; SK8 Biped400, `None` when not
+    /// in contact: Biped708 clear), and whether the stick walks straight into it (Biped712).
+    pub obstacle: Option<Vec3>,
+    pub obstacle_centred: bool,
 }
 
 /// What the controller reads each tick.
@@ -101,6 +116,31 @@ pub struct BipedInput {
     pub cam_yaw: f32,
     pub sprint: bool,
     pub jump: bool,
+}
+
+/// The angle (rad, -pi..pi) from `a` to `b` about the up axis, positive as the yaw goes (towards +x from
+/// +z).
+fn signed_yaw(a: Vec3, b: Vec3) -> f32 {
+    wrap_angle(crate::math::atan2f(b.x, b.z) - crate::math::atan2f(a.x, a.z))
+}
+
+/// The body against a wall at the feet `pos`: the way out of it, from a ring of [`BODY_RADIUS`] round the
+/// feet (the points in a wall, or a move to them blocked, push the body the other way). `None` clear.
+pub fn body_contact(park: &dyn Terrain, pos: Vec3) -> Option<Vec3> {
+    const RING: usize = 8;
+    let mut push = Vec3::ZERO;
+    let mut any = None;
+    for i in 0..RING {
+        let a = i as f32 * (2.0 * PI / RING as f32);
+        let d = v3(sinf(a), 0.0, cosf(a));
+        let p = pos + d * BODY_RADIUS;
+        let g = park.ground(p.x, p.z, pos.y + STEP_UP);
+        if g.height > pos.y + STEP_UP || park.blocked(pos, Vec3 { y: pos.y, ..p }) {
+            push -= d;
+            any.get_or_insert(-d);
+        }
+    }
+    any.map(|first| push.normalize_or(first))
 }
 
 /// The slope classes' bounds, compared with the tangent's rise over its run: `tan` of Skate 3's globals
@@ -249,7 +289,11 @@ impl Biped {
         } else {
             0.0
         };
-        let desired = normal_speed + (t.sprint_speed.eval(mag) - normal_speed) * blend;
+        let mut desired = normal_speed + (t.sprint_speed.eval(mag) - normal_speed) * blend;
+        let mut steer = steer;
+        self.obstacle = body_contact(park, *pos);
+        self.steer_round_obstacle(&mut steer, &mut desired);
+        self.steer = steer;
 
         // Velocity and turning (SK8 movement_velocity.rs).
         let f = self.forward();
@@ -275,6 +319,11 @@ impl Biped {
         } else {
             target
         };
+        // Nothing goes into the wall (SK8 movement_velocity.rs `remove_positive`).
+        if let Some(out) = self.obstacle {
+            let into = -out;
+            self.vel = self.vel - into * self.vel.dot(into).max(0.0);
+        }
         let turn_error = t.turn_vs_speed.eval(self.speed) * steer * DEG - self.turn;
         let turn_most = t.turn_delta_vs_speed.eval(self.speed) * DEG * ticks;
         self.turn += clamp(turn_error, -turn_most, turn_most);
@@ -376,6 +425,47 @@ impl Biped {
             self.normal = g.normal;
             let (slope, stairs) = ground_ahead(park, *pos, self.forward(), self.normal);
             self.classify(slope, stairs);
+        }
+    }
+
+    /// Skate 3's steering at an obstacle (SK8 movement_intent.rs, TU3 82D7CF50): with the body against a
+    /// wall and somewhere to go, the stick's way within 25 degrees of straight into the wall (55 once
+    /// there) turns the walker to face it and stops him; any other way turns him along the wall towards
+    /// the stick's side. Only while he faces the wall (within 90 degrees); the correction is merged with
+    /// the stick's turn (82D7D5A0: the opposite way replaces it, the same way keeps the larger).
+    fn steer_round_obstacle(&mut self, steer: &mut f32, speed: &mut f32) {
+        let Some(out) = self.obstacle.filter(|_| *speed > 0.0) else {
+            self.obstacle_centred = false;
+            return;
+        };
+        let into = -out;
+        let [x, z] = self.world_stick;
+        let stick = v3(x, 0.0, z).normalize_or(self.forward());
+        let desired = signed_yaw(into, stick);
+        let within = if self.obstacle_centred {
+            OBSTACLE_CENTRED_HELD
+        } else {
+            OBSTACLE_CENTRED
+        };
+        self.obstacle_centred = within * DEG > desired.abs();
+        let facing = signed_yaw(into, self.forward());
+        if facing.abs() >= PI * 0.5 {
+            return;
+        }
+        // Towards turning `facing` round to 0 (centred) or to a quarter turn the stick's side; positive
+        // turns the yaw up, which is flatground's left (its steer is + to the right).
+        let side = if desired <= 0.0 { -1.0 } else { 1.0 };
+        let correction = if self.obstacle_centred {
+            -facing * (2.0 / PI) * 0.5
+        } else {
+            (side - facing * (2.0 / PI)) * 0.5
+        };
+        let correction = -clamp(correction, -1.0, 1.0);
+        if *steer * correction < 0.0 || correction.abs() > steer.abs() {
+            *steer = correction;
+        }
+        if self.obstacle_centred {
+            *speed = 0.0;
         }
     }
 
@@ -667,6 +757,70 @@ mod tests {
             ..steep
         };
         assert_eq!(walk_over(&ramp, false, 0.5), (6, 0));
+    }
+
+    #[test]
+    fn an_obstacle_steers_to_face_it_or_along_it() {
+        // A wall ahead along +z (the way out of it -z), the walker 0.3 rad round towards +x.
+        let mut b = Biped {
+            heading: 0.3,
+            obstacle: Some(v3(0.0, 0.0, -1.0)),
+            world_stick: [0.0, 1.0],
+            ..Biped::default()
+        };
+        // The stick straight into it: turn back to face it square (yaw down: flatground's right, +),
+        // and stop.
+        let (mut steer, mut speed) = (0.0, 3.0);
+        b.steer_round_obstacle(&mut steer, &mut speed);
+        assert!(b.obstacle_centred && speed == 0.0);
+        assert!((steer - 0.3 / PI).abs() < 1e-4, "{steer}");
+        // Once in, the stick may wander to 55 degrees and still walks into it; past that, along it.
+        b.world_stick = [sinf(50.0 * DEG), cosf(50.0 * DEG)];
+        let (mut steer, mut speed) = (0.0, 3.0);
+        b.steer_round_obstacle(&mut steer, &mut speed);
+        assert!(b.obstacle_centred && speed == 0.0);
+        b.world_stick = [sinf(60.0 * DEG), cosf(60.0 * DEG)];
+        let (mut steer, mut speed) = (0.0, 3.0);
+        b.steer_round_obstacle(&mut steer, &mut speed);
+        assert!(!b.obstacle_centred && speed == 3.0);
+        // Along it towards +x: the yaw goes up (left, -) to a quarter turn.
+        let want = -(1.0 - 0.3 * 2.0 / PI) * 0.5;
+        assert!((steer - want).abs() < 1e-4, "{steer} vs {want}");
+        // The stick's own turn the same way and larger is kept; the other way is replaced.
+        let (mut steer, mut speed) = (-0.9, 3.0);
+        b.steer_round_obstacle(&mut steer, &mut speed);
+        assert!((steer + 0.9).abs() < 1e-4);
+        let (mut steer, mut speed) = (0.9, 3.0);
+        b.steer_round_obstacle(&mut steer, &mut speed);
+        assert!((steer - want).abs() < 1e-4);
+        // Facing away from it (over 90 degrees) leaves the steering alone; standing, nothing at all.
+        b.heading = 2.0;
+        let (mut steer, mut speed) = (0.0, 3.0);
+        b.steer_round_obstacle(&mut steer, &mut speed);
+        assert_eq!((steer, speed), (0.0, 3.0));
+        let (mut steer, mut speed) = (0.0, 0.0);
+        b.steer_round_obstacle(&mut steer, &mut speed);
+        assert!(!b.obstacle_centred && steer == 0.0);
+    }
+
+    #[test]
+    fn the_body_ring_finds_the_way_out_of_a_wall() {
+        // A wall from z = 0.2 on: the body at the origin is against it, pushed out along -z.
+        struct Wall;
+        impl Terrain for Wall {
+            fn ground(&self, _x: f32, z: f32, _max: f32) -> crate::park::Surface {
+                crate::park::Surface {
+                    height: if z > 0.2 { 2.0 } else { 0.0 },
+                    normal: Vec3::UP,
+                }
+            }
+            fn spawn(&self) -> (Vec3, f32) {
+                (Vec3::ZERO, 0.0)
+            }
+        }
+        let out = body_contact(&Wall, Vec3::ZERO).expect("in contact");
+        assert!((out - v3(0.0, 0.0, -1.0)).length() < 1e-4, "{out:?}");
+        assert!(body_contact(&Wall, v3(0.0, 0.0, -0.2)).is_none());
     }
 
     #[test]
