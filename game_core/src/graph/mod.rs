@@ -38,6 +38,7 @@
 //! ```
 //! Ids are u16; `NONE` (0xFFFF) is "none".
 
+pub mod body_tweak;
 pub mod drive;
 pub mod host;
 pub mod input;

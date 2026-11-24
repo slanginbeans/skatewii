@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 
 struct W(Vec<u8>);
 
@@ -262,7 +262,7 @@ fn read_op(r: &mut R) -> Option<Op> {
 }
 
 /// Conditions without fields, by tag.
-const PLAIN_CONDS: [Cond; 40] = [
+const PLAIN_CONDS: [Cond; 41] = [
     Cond::Mirrored,
     Cond::RidingFakie,
     Cond::RidingGoofy,
@@ -303,6 +303,7 @@ const PLAIN_CONDS: [Cond; 40] = [
     Cond::DroppingIn,
     Cond::DropInFlat,
     Cond::NewHandPlantPos,
+    Cond::HippyHurdling,
 ];
 
 fn cond(w: &mut W, c: &Cond) {
@@ -869,6 +870,12 @@ fn beh(w: &mut W, b: &Beh) {
             w.f(*normal);
             w.f(*late);
         }
+        Beh::OffboardBodyTweak(clips) => {
+            w.u8(41);
+            for c in clips {
+                w.node(*c);
+            }
+        }
         // Every field-less behaviour was written above.
         _ => w.u8(255),
     }
@@ -1056,6 +1063,7 @@ fn read_beh(r: &mut R) -> Option<Beh> {
             normal: r.f()?,
             late: r.f()?,
         },
+        41 => Beh::OffboardBodyTweak([r.node()?, r.node()?, r.node()?, r.node()?]),
         _ => return None,
     })
 }

@@ -14,6 +14,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use super::body_tweak::{self, BodyTweak};
 use super::ops::{self, Beh, Cond, Flag, Group, Hook, Op, PushOp, phys};
 use super::playback::{ChannelSettings, Player, PoseProgram, Tree};
 use super::push::{self, PushCurves, PushSets, PushState};
@@ -94,6 +95,8 @@ pub struct World {
     /// round for the rider (LandOnBoard turns him onto it).
     pub landing_on_board: bool,
     pub landing_turning: bool,
+    /// A hippie jump over a moving obstacle (`IsHippyHurdling`: `skater::hurdle`).
+    pub hippy_hurdling: bool,
     pub biped_air: bool,
     pub can_biped_land: bool,
     pub biped_slope: u8,
@@ -254,6 +257,7 @@ impl Default for World {
             board_returning: false,
             board_angle: 0.0,
             landing_on_board: false,
+            hippy_hurdling: false,
             landing_turning: false,
             biped_air: false,
             can_biped_land: false,
@@ -448,6 +452,10 @@ pub struct Names {
     pump_tree: Option<crate::motion::Node>,
     pub out_distance: [Option<NameId>; 2],
     spin_back: Option<crate::motion::Node>,
+    /// OffboardBodyTweakBlend's intents (`OB_AirBodyTweakX`, `OB_AirBodyTweakY`, `OB_DoAirBodyTweak`)
+    /// and its trees' parameters (`bodytweakx`, `bodytweaky`).
+    body_tweak: [Str; 3],
+    body_tweak_params: [Option<NameId>; 2],
 }
 
 /// Mutable state both graphs share.
@@ -523,6 +531,9 @@ pub struct Shared {
     pub release_now: Option<bool>,
     /// LandOnBoard asked for the board to be taken the other way round (FlipBoardBackwards).
     pub land_backwards: bool,
+    /// OffboardBodyTweakBlend's sequences, by operation, and whether one tweaks this update.
+    pub body_tweak: Vec<(OpId, BodyTweak)>,
+    pub air_tweaking: bool,
 }
 
 impl Shared {
@@ -764,6 +775,8 @@ pub const PUMP_CHANNELS: u16 = 5;
 pub const CHANNEL_GESTURE: u16 = NONE - 20;
 /// ToggleBoard's channel (Skate 3's `RetrieveBoard`).
 pub const CHANNEL_RETRIEVE: u16 = NONE - 30;
+/// OffboardBodyTweakBlend's channel (Skate 3's `AirBodyTweak`).
+pub const CHANNEL_BODY_TWEAK: u16 = NONE - 40;
 pub use super::ops::{GESTURE_STAGES, GESTURES, PUMP_TREE, gesture_clip};
 pub const MOTION: &str = "MotionGraph_OnBoard";
 
@@ -860,6 +873,12 @@ impl<'a> Runner<'a> {
             pump_tree: db.and_then(|d| d.find(PUMP_TREE)),
             out_distance: [lib("OUTDISTANCEX"), lib("OUTDISTANCEY")],
             spin_back: db.and_then(|d| d.find(SPIN_BACK)),
+            body_tweak: [
+                id("OB_AirBodyTweakX"),
+                id("OB_AirBodyTweakY"),
+                id("OB_DoAirBodyTweak"),
+            ],
+            body_tweak_params: [lib("bodytweakx"), lib("bodytweaky")],
         };
         let mut last_sources = Vec::new();
         for o in &mg_ops {
@@ -970,6 +989,8 @@ impl<'a> Runner<'a> {
                 retrieve_pulse: false,
                 release_now: None,
                 land_backwards: false,
+                body_tweak: Vec::new(),
+                air_tweaking: false,
             },
             names,
             gestures,
@@ -1008,6 +1029,7 @@ impl<'a> Runner<'a> {
         self.s.board_dropping = [self.s.board_dropping[1], false];
         self.s.board_retrieving = [self.s.board_retrieving[1], false];
         self.s.retrieve_pulse = false;
+        self.s.air_tweaking = false;
         self.s.release_now = None;
         if !self.s.world.landing_on_board {
             self.s.land_backwards = false;
@@ -1391,6 +1413,7 @@ impl Host<'_, '_> {
             }
             Cond::RetrievingBoard => self.s.board_retrieving[0] || w.board_returning,
             Cond::LandingOnBoard => w.landing_on_board,
+            Cond::HippyHurdling => w.hippy_hurdling,
             Cond::BipedAir => w.biped_air,
             Cond::CanBipedLand => w.can_biped_land,
             Cond::Fixed(v) => v,
@@ -2142,6 +2165,7 @@ impl Host<'_, '_> {
             }
             Beh::CharacterGesture => self.character_gesture(phase),
             Beh::ToggleBoard => self.toggle_board(op, phase),
+            Beh::OffboardBodyTweak(clips) => self.body_tweak(op, phase, clips),
             Beh::LandOnBoard => {
                 // Begin only (SK8: its update and end are empty).
                 if phase == 0 && self.s.world.landing_turning {
@@ -2357,6 +2381,106 @@ impl Host<'_, '_> {
                     self.s.player.set_param(n, v, false);
                 }
             }
+        }
+    }
+
+    /// OffboardBodyTweakBlend (SK8 motion_offboard/body_tweak.rs; the sequence is `graph::body_tweak`):
+    /// the air body tweak's clips on the `AirBodyTweak` channel and its `bodytweakx/y`.
+    fn body_tweak(&mut self, op: OpId, phase: u8, clips: &[Option<crate::motion::Node>; 4]) {
+        let i = match self.s.body_tweak.iter().position(|(o, _)| *o == op) {
+            Some(i) => i,
+            None => {
+                self.s.body_tweak.push((op, BodyTweak::default()));
+                self.s.body_tweak.len() - 1
+            }
+        };
+        match phase {
+            0 => {
+                self.s.body_tweak[i].1.begin();
+                return;
+            }
+            1 => {}
+            // The end fades the channel out from where it is (SK8 `0x82BBB418`).
+            _ => {
+                if self.s.player.has_channel(CHANNEL_BODY_TWEAK) {
+                    self.s
+                        .player
+                        .end_channel_with(CHANNEL_BODY_TWEAK, body_tweak::END_FADE);
+                }
+                return;
+            }
+        }
+        let w = self.s.world;
+        let [nx, ny, nd] = self.n.body_tweak;
+        let get = |n: Str| (n != NONE).then(|| self.s.mg.get(n)).flatten();
+        let input = body_tweak::Input {
+            x: get(nx),
+            y: get(ny),
+            request: nd != NONE && self.s.mg.has(nd),
+            // Off the board the walker's flight; in a hippie jump the board's air.
+            time_to_land: w
+                .time_to_land
+                .unwrap_or(if w.biped_air { w.air_remaining } else { 0.0 }),
+            air_duration: w.air_duration,
+            board_held: w.holding_board,
+            channel: self.s.player.has_channel(CHANNEL_BODY_TWEAK),
+            remaining: self.s.player.channel_remaining(CHANNEL_BODY_TWEAK),
+        };
+        let out = self.s.body_tweak[i].1.update(input);
+        self.s.air_tweaking |= out.tweaking;
+        if let Some(axes) = out.axes {
+            for (n, v) in self.n.body_tweak_params.into_iter().zip(axes) {
+                if let Some(n) = n {
+                    self.s.player.set_param(n, v, false);
+                }
+            }
+        }
+        match out.command {
+            Some(body_tweak::Command::End(seconds)) => {
+                self.s.player.end_channel_with(CHANNEL_BODY_TWEAK, seconds)
+            }
+            Some(body_tweak::Command::Play { clip, cycle }) => {
+                let (Some(db), Some(node)) = (self.db, clips[clip]) else {
+                    return;
+                };
+                let Ok(play) = Playback::build_node(db, node, &Vec::new(), &mut Vec::new()) else {
+                    return;
+                };
+                let tree = Tree {
+                    play,
+                    mirror: w.mirrored,
+                    turned: w.frame_turned,
+                    name: NONE,
+                };
+                // SK8 body_tweak.rs `transition`: the into clip 0.15 s in, the cycle kept alive, 0.5 s in
+                // and 0.3 s out; a cut onto the channel (0.15 s, the cycle 0.1 s).
+                let settings = ChannelSettings {
+                    priority: 0,
+                    keep_alive: cycle,
+                    speed: 1.0,
+                    blend_in: if cycle { 0.5 } else { 0.15 },
+                    hold_in: false,
+                    blend_out: if cycle { 0.3 } else { 0.0 },
+                    hold_out: false,
+                };
+                let blend = ops::TransitionDef {
+                    kind: 1,
+                    seconds: if cycle { 0.1 } else { 0.15 },
+                    under: false,
+                    matching: 0,
+                    channels_from_weights: false,
+                };
+                self.s.player.transition_channel(
+                    db,
+                    CHANNEL_BODY_TWEAK,
+                    tree,
+                    settings,
+                    blend,
+                    false,
+                    true,
+                );
+            }
+            None => {}
         }
     }
 

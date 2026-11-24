@@ -301,6 +301,8 @@ impl Driver {
             w.can_land = reach;
             w.landing_turning = turning;
         }
+        // A hippie jump over a moving obstacle (`skater::hurdle`).
+        w.hippy_hurdling = s.hippie_air() && s.hurdle.hurdling();
         if s.mode == Mode::Walk {
             walking(&mut w, s);
         }

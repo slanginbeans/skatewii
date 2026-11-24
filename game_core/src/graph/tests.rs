@@ -611,6 +611,112 @@ mod runner {
         press(&mut r, 0);
         assert!(!r.s.mg.has(held));
     }
+
+    /// Off the board in the air (SK8 offboard_intentions.rs by position): the C-stick is always
+    /// `OB_AirBodyTweakX/Y`, Z (RB) `OB_DoAirBodyTweak`; the action graph passes them on and
+    /// OffboardBodyTweakBlend tweaks once the stick has been let go, not within 0.1 s of landing. The
+    /// hippie hurdle state is picked by `IsHippyHurdling`.
+    #[test]
+    fn the_c_stick_and_z_tweak_the_body_in_the_air_off_the_board() {
+        use crate::graph::input::{Gates, Intentions};
+        use crate::graph::write::Element;
+        use crate::input::{Pad, btn};
+        let pass = |n: &str| {
+            Element::of(
+                "behaviour",
+                &[
+                    ("name", "CreateMGIntentFromAGIntent"),
+                    ("MGIntent", n),
+                    ("AGIntent", n),
+                ],
+                vec![],
+            )
+        };
+        let action = st(
+            "Action",
+            &[],
+            vec![
+                pass("OB_AirBodyTweakX"),
+                pass("OB_AirBodyTweakY"),
+                pass("OB_DoAirBodyTweak"),
+            ],
+        );
+        let hurdling = |m: &str| {
+            Element::of(
+                "condition",
+                &[("name", "IsHippyHurdling"), ("mask", m)],
+                vec![],
+            )
+        };
+        let motion = st(
+            "Motion",
+            &[],
+            vec![
+                Element::of("behaviour", &[("name", "OffboardBodyTweakBlend")], vec![]),
+                st("HurdleCyc", &[], vec![when(vec![hurdling("always")])]),
+                st(
+                    "Cyc",
+                    &[],
+                    vec![Element::of(
+                        "expression",
+                        &[("op", "not")],
+                        vec![hurdling("always")],
+                    )],
+                ),
+            ],
+        );
+        let bytes = compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap();
+        let pack = Pack::parse(&bytes).unwrap();
+        let mut input = Intentions::new(&pack, Vec::new());
+        let mut r = Runner::new(Pack::parse(&bytes).unwrap(), None).unwrap();
+        let mut rec = Vec::new();
+        let [x, y, z] = ["OB_AirBodyTweakX", "OB_AirBodyTweakY", "OB_DoAirBodyTweak"]
+            .map(|n| r.pack.find(n).unwrap());
+        let mut tick = |r: &mut Runner, flick: [f32; 2], buttons: u32| {
+            let pad = Pad {
+                held: buttons,
+                flick,
+                ..Pad::default()
+            };
+            input.produce(
+                &r.pack,
+                &pad,
+                Gates::default(),
+                1.0 / 60.0,
+                &mut r.s.ag,
+                &mut rec,
+            );
+            r.update(None, 1.0 / 60.0);
+        };
+        r.s.world.time_to_land = Some(0.6);
+        // The stick held from before: published, but no tweak until it is let go.
+        tick(&mut r, [0.0, 0.8], 0);
+        assert_eq!(r.s.mg.get(x), Some(0.0));
+        assert_eq!(r.s.mg.get(y), Some(0.8));
+        assert!(!r.s.mg.has(z) && !r.s.air_tweaking);
+        tick(&mut r, [0.0, 0.0], 0);
+        assert_eq!(r.s.mg.get(x), Some(0.0), "published centred too");
+        assert!(!r.s.air_tweaking);
+        tick(&mut r, [0.7, 0.0], 0);
+        assert!(r.s.air_tweaking, "let go and pushed: tweaks");
+        // About to land: not any more.
+        r.s.world.time_to_land = Some(0.05);
+        tick(&mut r, [0.7, 0.0], 0);
+        assert!(!r.s.air_tweaking);
+        // Z: centred.
+        r.s.world.time_to_land = Some(0.6);
+        tick(&mut r, [0.0, 0.0], btn::Z);
+        assert!(r.s.mg.has(z) && r.s.air_tweaking);
+        // The hippie hurdle picks its state.
+        assert_eq!(r.motion_state(), "Cyc");
+        r.s.world.hippy_hurdling = true;
+        tick(&mut r, [0.0, 0.0], 0);
+        assert_eq!(r.motion_state(), "HurdleCyc");
+    }
 }
 
 /// The motion graph and the physics agree on wipeouts: a grab state shaped like Skate 3's (wiped out when

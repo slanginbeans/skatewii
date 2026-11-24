@@ -29,6 +29,7 @@ pub mod dropin;
 pub mod flip;
 mod grind;
 pub mod handplant;
+pub mod hurdle;
 mod landing;
 pub mod meat;
 pub mod plant;
@@ -909,6 +910,9 @@ pub struct Skater {
     /// (`CanLandOnBoard`): the landing on it starts once the motion graph's `DoLandOnBoard` says so (at
     /// once without the graphs).
     pub deck_assist: bool,
+    /// A hippie jump's landing on deck: something in the way of the landing on the board, and the
+    /// hippie hurdle (`IsHippyHurdling`; `skater::hurdle`).
+    pub hurdle: hurdle::Hurdle,
     /// A foot plant on the ground (`skater::plant`): a boneless, fastplant or no-comply, from the planted
     /// foot to the jump off it.
     pub ground_plant: Option<plant::GroundPlant>,
@@ -1265,6 +1269,7 @@ impl Skater {
             possession: possession::Possession::new(),
             trig_full: [false; 2],
             deck_assist: false,
+            hurdle: hurdle::Hurdle::default(),
             ground_plant: None,
             plant_trick: None,
             footplant: plant::Manager::default(),
@@ -2731,6 +2736,34 @@ impl Skater {
         false
     }
 
+    /// In a hippie jump, the landing on deck's query for something in the way of the landing on the
+    /// board (SK8 landing_deck `update`, `prepare_query`, `sync`; `skater::hurdle`).
+    fn step_hurdle(&mut self, park: &dyn Terrain) {
+        let land_in = self.time_to_land(park);
+        let g = self.tuning.gravity.max(0.1);
+        // Seconds past the apex: the vertical speed against gravity.
+        self.hurdle.update(-self.vel.y / g, land_in);
+        if !self.hurdle.wants_query() {
+            return;
+        }
+        let mut landing = self.pos + self.vel * land_in;
+        landing.y -= 0.5 * g * land_in * land_in;
+        // The board rolls on along the ground under him: where it is when he lands.
+        let floor = park.ground(landing.x, landing.z, self.pos.y + STEP).height;
+        self.hurdle
+            .prepare(crate::math::v3(landing.x, floor.min(landing.y), landing.z));
+        let flight = hurdle::Flight {
+            time_to_land: land_in,
+            landing,
+            descending: self.vel.y < 0.0,
+            height: self.pos.y,
+        };
+        // Flatground's parks and districts are static: nothing a sweep meets moves, so the query meets
+        // no moving body and nothing is hurdled (a still one would only block, which the landing here
+        // doesn't read).
+        self.hurdle.sync(None, &flight);
+    }
+
     /// Both push buttons together wind up a hippie jump; letting go jumps off the board and back on,
     /// along the surface's normal (weaker on steep faces, as a pop is).
     fn update_hippy(&mut self, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
@@ -2751,6 +2784,7 @@ impl Skater {
                 self.pos += self.contact_n * 0.02;
                 self.take_off(None);
                 self.takeoff.hippy = true;
+                self.hurdle.take_off();
                 events.push(Event::Launched);
             }
             None if both
@@ -3284,6 +3318,9 @@ impl Skater {
             return;
         }
         self.update_prediction(park, now);
+        if self.takeoff.hippy {
+            self.step_hurdle(park);
+        }
 
         // Body spin (Skate 3's controller): the stick, its wind-up, a let-go spin carrying on; with a
         // known landing and the stick let go, the assist turns the body towards the landing direction
