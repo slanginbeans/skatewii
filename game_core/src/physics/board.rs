@@ -263,7 +263,7 @@ fn sphere_triangles(
     m: [f32; 3],
     min_up: f32,
 ) -> [Option<ContactInput>; 2] {
-    const MAX: usize = 12;
+    const MAX: usize = 24;
     let mut cand: [Candidate; MAX] = [(0.0, Vec3::ZERO, Vec3::ZERO, false); MAX];
     let mut count = 0;
     for (t, n) in tris {
@@ -287,11 +287,26 @@ fn sphere_triangles(
             d * (1.0 / dist)
         };
         let gap = if face || crossed { d.dot(side) } else { dist };
-        if normal.dot(up) < min_up || count == MAX {
+        // An edge or corner touches only within the sphere's own reach (no fall-speed lead: a fast
+        // sphere's far edges are not what it meets).
+        if normal.dot(up) < min_up || (!face && !crossed && gap > radius + 0.02) {
             continue;
         }
-        cand[count] = (gap, normal, *n, face);
-        count += 1;
+        // Full: the nearest are kept.
+        let slot =
+            if count < MAX {
+                count += 1;
+                count - 1
+            } else {
+                let (worst, w) = cand.iter().enumerate().fold((0, f32::MIN), |b, (i, c)| {
+                    if c.0 > b.1 { (i, c.0) } else { b }
+                });
+                if gap >= w {
+                    continue;
+                }
+                worst
+            };
+        cand[slot] = (gap, normal, *n, face);
     }
     let cand = &cand[..count];
     let mut found: [Option<(f32, Vec3)>; 2] = [None; 2];
