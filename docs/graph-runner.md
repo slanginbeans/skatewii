@@ -198,9 +198,12 @@ else flatground's own):
   nose and up) from the rider's last pose, as `OUTDISTANCEX` / `OUTDISTANCEY`, on begin.
 - `MatchTwistAndLean`, `Wipeout`, `EnableWipeoutGestures` (SK8 twist_lean.rs, motion_wipeout_execute.rs):
   the bail trees' `Twist` and `Lean` follow the body's (rate-limited by `anim_wipeout`'s clamps and
-  blends), and once the stick has been let go to the middle (or after 80 ticks) the main stick steers
-  `WipeoutGestureX` / `Y`. flatground has no ragdoll: the body's lean is the drawn bail's tip and its
-  twist the board's heading against the travel.
+  blends), and once the stick has been let go to the middle (or after 80 ticks, or on a bail request)
+  the C-stick (Skate 3's right stick, `WipeoutGestureX` / `Y`) steers the wipeout gesture, which the
+  physics reads back (`GraphControl::wipe_gesture`) to pick its control profile. The body's lean and
+  twist are the ragdoll's hips against the surface (`Wipeout::hips`, SK8 `output`). `GestureType` is that
+  profile (`Freefall`, `CannonBall`, `JudoKick`, `SwanDive`, `Torpedo`), `WipeoutTimeToLand` and
+  `WipeoutTimeSinceContact` the ragdoll's (below, "Bails").
 - `BodyFlippingSignal`, `IsBodyFlipping` (below, "Body flips").
 
 The graphs start over when the physics puts the rider back on the board after a wipeout or runout.
@@ -288,6 +291,32 @@ the revert and checkpoint classes), else flatground's own.
   its heading and the wheels' grip and straightening take out the sideways part. The landing type
   (`CalcLandingQuality`) uses `LandingSketchySideSpeed` and `LandingSketchyTwistSpin`; a spin landing
   keeps pivoting 0.15 s (flatground's).
+- **Bails** (`skater/ragdoll.rs`, `skater/wipeout.rs`, `skater/meat.rs`, `tuning/wipeout.rs`; SK8
+  `physics/wipeout_states/`, `player/wipeout_state/`, `input/wipeout_intentions.rs`): a bail hands the
+  rider to a ragdoll of 15 point masses (Verlet at the fixed tick, 6 constraint passes of 26 links, 14
+  limits and the knees' and neck's bends), started from the drawn pose (the imported skeleton's bones,
+  else the placeholder's standing pose) at the rider's speed capped at 20 m/s; the board lets go as its
+  own body. Each point is a sphere against the park's ground (one query a tick, from over where it was so
+  a fast fall can't pass through) and walls (one ray when it moves across), with Skate 3's ragdoll
+  friction 0.9 and restitution 0; angular drag 0.5 a second about the centre of mass. As Skate 3's
+  wipeout state: drives pull the points towards the animated pose in the pelvis's frame (the imported
+  clips, else the pose at the bail; a gesture's pose without the clips), weighted by the drives' fade
+  over `TimeToRemoveDrives` (1.5 s, squared), the collision weight (`DynamicDriveWeightVelCollision` 0.1 a
+  tick on contact with the gesture centred) and the controlled weight (`...VelControlled` 0.0075 a tick
+  while controlled); the gesture picks one of `physics_wipeout_control`'s five profiles; in the air
+  (more than 15 ticks off anything, not settled) the profile spins the body towards its sideways and
+  forward spin with the stick (retained by `SpinInertia`, built up by `SpinVsTime`), turns its aligned
+  axis (`AlignAxisEuler`) to the travel by `TorqueDistScalar`, keeps its level axis level, tilts the aim
+  by `Hash_B65276A8CC7FB760` degrees and drifts it (`DriftFactorX/Z`, `DriftMaxSpeed`, its drag); on the
+  ground it rolls along the travel with the hands together (`RollOnGround`) and lines up with it; R going
+  fully in pushes off along the stick (1.25 m/s by the response strength). Settled (Skate 3's `over`,
+  what the reset waits for): the hips and head under `WipeoutOverSpeed` after `WipeoutOverMinTime`, over
+  a second under 2 m/s. `WipeoutTimeToLand` marches the centre of mass's fall to the ground (3 s, 0.3 m
+  round), `WipeoutTimeSinceContact` counts from the last touch. Hall of Meat: every point's impact over
+  3 m/s hurts its part by its momentum over that, 80 N s on a point or 120 N s on a part breaks the bone
+  (SK8's broken-bones mod thresholds; Skate 3's injury model isn't on the disc or in SK8). The imported
+  skeleton: each body part poses its first bone (`HIPS`, `SPINE`, `NECK`, the arms', forearms', thighs'
+  and shins'), the bones under them keep the clips' local pose; 0.1 s in, 0.25 s out.
 - **After a bail** (SK8 recovery and checkpoints): put back automatically once the body has been under
   `WipeoutOverSpeed` for `TeleportMinTimeAfterSettlingForAutoReset` after `TeleportMinTimeForAutoReset`,
   or after `TeleportMaxTime`, after a `TeleportAutoResetFadeOutTime` fade; A or B (Skate 3's push
@@ -697,6 +726,8 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 | C-stick, X, A, B in a hand plant | `HandPlantTweakX/Y`, `HandPlantDismount` (X: Skate 3's B), `HandPlantOneFootRight` (A), `HandPlantOneFootLeft` (B: Skate 3's X) | the hand plant's tweak and its one-foot and no-foot variants (SK8 trick_intentions.rs, by position) |
 | d-pad | `GestureLeft/Right/Up/DownStart`, `...Held` | character gestures (shrug, peace, shaka, surf's up); a d-pad press while Z is held on the ground is the marker / replay chord instead (`game_core::marker::Chord`) and doesn't reach them |
 | L / R | `LeftAirGrab` / `RightAirGrab`, fully in `Left/RightGroundGrab`, `Crouch` | grabs, crouch; with the left stick's flip shape just after take-off, body flips. A GameCube trigger at rest reads 1..7 of 255 and SK8 counts any trigger above 0, so the pad has a dead zone (`input::TRIGGER_DEAD_ZONE`, 0.1 of full, then rescaled); the physics grabs on the same reading |
+| L and R fully in with Z; R fully in; A or B | `WipeOutRequest` (any of the three new: Skate 3's both triggers fully in with both stick clicks); `WipeOutPushOff`; `WipeOutRecover` | bail on purpose; in a bail, push off, and back on the board once settled |
+| C-stick, main stick in a bail | `WipeoutGestureX/Y` (always published), `WipeoutControlX/Y` (off centre) | the wipeout gesture (body tweaks) and steering (above, "Bails") |
 | main stick | `Turn`, `HardTurn`, `HardTurnCrouch`, `KickTurn`, `BodySpin`, `Left/RightSlide`, `Left/RightSlideStart` | steering, kick turns, powerslides, spins |
 | C-stick | `AnticMag`, `AnticAngle`, `Manual`, `ManualBrake`, `TweakX/Y`, `BoardAdjustAngle/Mag` | wind-up (past 0.9), manuals (held below full for 0.2 s), grab variants (past half way) and tweaks; in the air the board adjust (`OnBoard/InAir/BoardAdjusts/*`); on a rail its y tips a 50-50 into a nosegrind (up) or a 5-0 (down) and its x (with the main stick's) turns a 5-0 across the rail (Skate 3's `PhysGrindUpDown`, `PhysGrindTranslation`) |
 | off the board | `OB_Jump` (B pressed: Skate 3's X), `OB_Sprint` (A without X), `OB_Mag`, `OB_Steer` (the walker's move amount and turn), `OB_BipedWorldX/Z`, `OB_BipedStickMag` (the stick; on the board the raw stick, which the dismount reads), `OB_LookAtX/Y` (C-stick) | walking, below |

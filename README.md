@@ -11,7 +11,8 @@ versions), held double and triple kickflips, air spins that reward a wind-up, gr
 The board follows any surface under its trucks: banks, curved transitions and vert (air out over the
 coping, land back in fakie), wallrides across steep faces, pumping, and grinds and slides chosen by how the
 board meets the rail (50-50, 5-0, nosegrind, crooked, willy, feeble, smith, boardslide, lipslide, noseslide,
-tailslide). Bails come from what the board hits: walls, hard or off-axis landings. Tricks score as in
+tailslide). Bails come from what the board hits: walls, hard or off-axis landings, or on purpose (L + R + Z);
+in a bail the rider is a ragdoll you can steer, tuck and push off with, and Hall of Meat counts the damage. Tricks score as in
 Skate 3 (its points, repetition penalty, grind, manual and grab curves, air height and spin), and linked
 tricks build a line with Skate 3's multiplier and line timer (shown under the score); a bail ends the line.
 Session markers (Z + d-pad) take you back to a spot, and a replay plays back the last 30 s. The camera is
@@ -60,6 +61,19 @@ X, Y). The default stance is goofy, as in Skate 3.
 | Z + d-pad left | Replay of the last 30 s (see below) |
 | Z + C-stick | Free look where Skate 3 has it: on foot (see below). On the board it does nothing (no flick, no dark catch); not in a hand plant (Z found the coping, the C-stick tweaks it) |
 | D-pad | Character gestures (with Skate 3's motion graphs) |
+| L and R fully in with Z (any of them last) | Bail on purpose (Skate 3's both triggers with both sticks clicked in; the pad has no stick clicks, so Z takes their place), riding, in the air, on a rail or on foot. In the air L + R is a mute grab and Z the dark catch: with both triggers fully in, Z bails instead |
+
+In a bail the rider is a ragdoll (Skate 3's wipeout body), until he is put back:
+
+| Input | Action |
+|---|---|
+| C-stick | Body tweak (Skate 3's wipeout gesture; let it go to the middle first, or wait a moment): up a cannon ball (tuck), right a judo kick, down a swan dive, left a torpedo, centred free fall |
+| Control stick | Steer the fall (as the camera sees it): spin across or along the travel, tip the body, drift (the cannon ball and swan dive drift most); on the ground, roll along it (cannon ball, torpedo) |
+| R (fully in) | Push off what he lies on, along the control stick (Skate 3's push off) |
+| A or B | Back on the board once the body has settled or after 1.6 s (else automatically after a fade) |
+
+Hall of Meat (top right, under the speed): during a bail and a few seconds after, the damage in dollars and
+the bones broken (impacts over 3 m/s hurt; a hard one breaks the part's bone).
 
 Off the board (Y), with the board in hand:
 

@@ -107,7 +107,7 @@ content second.
 - [ ] Graph runner, next: the air leg's centre-of-mass height, the push speed from the posed clips'
   trajectory, `PhysicsWantsManualExit` (the manual balances on SK8's PID servo, but held manuals never
   tip out), shoves (nobody to shove), a board posed apart
-  from the body (`SetDeckPitchAndYaw`), the wipeout's body from a ragdoll, the player's own gesture picks
+  from the body (`SetDeckPitchAndYaw`), the player's own gesture picks
 - [ ] `fg_import`: lightmaps, RAW-codec animation, skater tints/morphs/outfits
 - [x] Draw the imported skater on the Wii: CPU skinning, clip per state with crossfades, textured indexed
   GX draws (checked in the PC preview; not yet run in Dolphin or on hardware)
@@ -156,7 +156,11 @@ content second.
   coping stalls (axle, 5-0, nose, tail, blunt stalls, rock to fakie, rock and roll, disaster) as the grind
   they are, hand plants (inverts) with Skate 3's hand plant manager, path and points (docs/graph-runner.md
   "Transition")
-- [ ] A light physics fall for bails (Skate 3's ragdoll)
+- [x] A light physics fall for bails (Skate 3's ragdoll): a 15-point Verlet body run as Skate 3's wipeout
+  state (drives, weights, settling, its five gesture profiles' air and ground control, drift, push off),
+  bailing on purpose (L + R + Z), Hall of Meat injuries and broken bones (docs/graph-runner.md "Bails")
+- [ ] Bails, next: Skate 3's 24-body skeleton and joint-limit bank, broken-bone slow motion and shake, Hall
+  of Meat challenges
 - [x] Camera as Skate 3's (phase 7, docs/graph-runner.md "The camera"): the disc's camera graph run on
   the graph runner choosing the disc's shots (blend trees by speed, slope, steering, air time, grind
   speed and incline), sine-eased shot transitions, the movement compass, heading/elevation/pan/tilt
