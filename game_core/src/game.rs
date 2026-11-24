@@ -1018,6 +1018,35 @@ impl Game {
             if let Some(r) = &mut self.rider {
                 r.set_ragdoll(doll, pose_dt);
             }
+            // Off the board, the ground under the toes for the foot placement (SK8's skeleton line
+            // tests from the last pose: 0.33 m over each toe to 1.5 m under it).
+            let feet = (self.skater.mode == Mode::Walk
+                && !self.skater.climbing()
+                && self.foot_origin >= 1.0)
+                .then(|| {
+                    let toes = self.rider.as_ref()?.toes()?;
+                    let at = self.imported_xform_on(self.skater_base());
+                    let ground: &dyn Terrain = terrain(&self.world, &self.park);
+                    let hit = |p: crate::math::Vec3| {
+                        let w = at.point(p);
+                        let top = w.y + crate::foot_ik::LINE_UP;
+                        let g = ground.ground(w.x, w.z, top);
+                        (g.height > f32::MIN / 2.0
+                            && g.height
+                                >= top - crate::foot_ik::LINE_UP - crate::foot_ik::LINE_DOWN)
+                            .then_some((v3(w.x, g.height, w.z), g.normal))
+                    };
+                    Some(crate::foot_ik::Frame {
+                        to_world: at,
+                        ground: toes.map(hit),
+                        air: self.skater.biped.air.is_some(),
+                        vel_y: self.skater.biped.vel.y,
+                    })
+                })
+                .flatten();
+            if let Some(r) = &mut self.rider {
+                r.set_feet(feet);
+            }
             let s = &self.skater;
             let ground: &dyn Terrain = terrain(&self.world, &self.park);
             let land_in = s.time_to_land(ground);
@@ -1176,7 +1205,10 @@ impl Game {
                 self.skater.cam_yaw = crate::math::atan2f(look.x, look.z);
             }
         }
-        if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
+        // Holding a ledge the stock graphs wait where they were (SK8's climb pauses them).
+        if !self.skater.climbing()
+            && let (Some(g), Some(lib)) = (&mut self.graph, &self.motion)
+        {
             let s = &self.skater;
             let walking = s.mode == Mode::Walk;
             let ob_world = crate::skater::biped::world_stick(pad.stick, s.cam_yaw);

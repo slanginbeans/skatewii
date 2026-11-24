@@ -1338,12 +1338,48 @@ impl Tuning {
         jump_y_bonus_max: 1.2,
         jump_adjust_x: 0.15,
         jump_adjust_z: 0.15,
-        spin_speed: Curve::new(&[(0.0, 3.0), (0.4, 7.5), (1.0, 6.0), (2.0, 3.5)]),
-        spin_change: Curve::new(&[(0.0, 1.0), (0.4, 0.5), (1.0, 0.15)]),
+        spin_speed: Curve::new(&[
+            (0.0, 3.15),
+            (0.052_117_26, 6.364_285),
+            (0.127_035_8, 7.778_571),
+            (0.244_299_7, 7.939_286),
+            (0.368_078_2, 7.714_285),
+            (0.563_517_9, 6.975),
+            (0.905_537_5, 5.689_285),
+            (2.0, 3.664_286),
+        ]),
+        spin_change: Curve::new(&[
+            (0.0, 0.992_857),
+            (0.115_635_2, 0.760_714_5),
+            (0.255_700_3, 0.507_143),
+            (0.394_136_8, 0.35),
+            (0.532_573_3, 0.225),
+            (0.677_524_4, 0.171_428_6),
+            (0.877_850_2, 0.157_142_9),
+            (1.0, 0.153_571_4),
+        ]),
         spin_reverse_change: 0.2,
-        spin_windup: Curve::new(&[(-0.5, 0.0), (-0.3, 1.0), (0.1, 1.0), (0.5, 0.3)]),
-        spin_no_windup: 0.45,
-        spin_auto_change: Curve::new(&[(0.0, 0.8), (0.3, 0.55), (1.0, 0.4)]),
+        spin_windup: Curve::new(&[
+            (-0.496_742_7, 0.0),
+            (-0.374_592_8, 0.05),
+            (-0.254_071_7, 1.0),
+            (0.0, 1.0),
+            (0.135_179_2, 1.0),
+            (0.228_013, 0.628_571_5),
+            (0.337_133_5, 0.385_714_3),
+            (0.5, 0.285_714_3),
+        ]),
+        spin_no_windup: 0.4,
+        spin_auto_change: Curve::new(&[
+            (0.0, 1.0),
+            (0.107_491_9, 0.739_285_7),
+            (0.200_325_7, 0.642_857_1),
+            (0.301_302_9, 0.557_142_9),
+            (0.387_622_1, 0.507_142_8),
+            (0.498_371_3, 0.489_285_7),
+            (0.710_097_7, 0.482_142_9),
+            (1.0, 0.475),
+        ]),
         spin_speed_easy: Curve::new(&[
             (0.0, 2.25),
             (0.055_374_59, 5.528_571),
@@ -1979,6 +2015,56 @@ mod tests {
         assert_eq!(t.flick_misses, 4);
         assert_eq!(t.steer_vs_input, Tuning::BUILT_IN.steer_vs_input);
         assert!(parse(&data[..data.len() - 1]).is_none(), "truncated");
+    }
+
+    /// The built-in Normal body spin is the disc's `physics_bodyspin` (read with `fg_import values`) to
+    /// the last digit: the rules pack's copy changes nothing.
+    #[test]
+    fn the_built_in_body_spin_is_the_discs() {
+        let data = encode(&[
+            (
+                "physics_bodyspin/default/PropBodySpinVsTime",
+                vec![
+                    0.0, 0.05211726, 0.1270358, 0.2442997, 0.3680782, 0.5635179, 0.9055375, 2.0,
+                    3.15, 6.364285, 7.778571, 7.939286, 7.714285, 6.975, 5.689285, 3.664286,
+                ],
+            ),
+            (
+                "physics_bodyspin/default/MaxDeltaVsTime",
+                vec![
+                    0.0, 0.1156352, 0.2557003, 0.3941368, 0.5325733, 0.6775244, 0.8778502, 1.0,
+                    0.992857, 0.7607145, 0.507143, 0.35, 0.225, 0.1714286, 0.1571429, 0.1535714,
+                ],
+            ),
+            (
+                "physics_bodyspin/default/DerivativeBodySpinVsTime",
+                vec![
+                    -0.4967427, -0.3745928, -0.2540717, 0.0, 0.1351792, 0.228013, 0.3371335, 0.5,
+                    0.0, 0.05, 1.0, 1.0, 1.0, 0.6285715, 0.3857143, 0.2857143,
+                ],
+            ),
+            (
+                "physics_bodyspin/default/MaxDeltaForAutoVsTime",
+                vec![
+                    0.0, 0.1074919, 0.2003257, 0.3013029, 0.3876221, 0.4983713, 0.7100977, 1.0,
+                    1.0, 0.7392857, 0.6428571, 0.5571429, 0.5071428, 0.4892857, 0.4821429, 0.475,
+                ],
+            ),
+            ("physics_bodyspin/default/MinDerivativeScalar", vec![0.4]),
+            (
+                "physics_bodyspin/default/MaxDeltaOppositeDirection",
+                vec![0.2],
+            ),
+        ]);
+        let mut t = Tuning::BUILT_IN;
+        assert_eq!(t.apply(&data), 6);
+        let b = Tuning::BUILT_IN;
+        assert_eq!(t.spin_speed, b.spin_speed);
+        assert_eq!(t.spin_change, b.spin_change);
+        assert_eq!(t.spin_windup, b.spin_windup);
+        assert_eq!(t.spin_auto_change, b.spin_auto_change);
+        assert_eq!(t.spin_no_windup, b.spin_no_windup);
+        assert_eq!(t.spin_reverse_change, b.spin_reverse_change);
     }
 
     #[test]

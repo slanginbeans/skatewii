@@ -81,9 +81,10 @@ Off the board (Y), with the board in hand:
 
 | Input | Action |
 |---|---|
-| Control stick | Walk and run where the stick points, seen from the camera (pushed fully: run). Pulled back: turn round |
+| Control stick | Walk and run where the stick points, seen from the camera (pushed fully: run). Pulled back: turn round. Walking into a wall he turns to face it and stops; at an angle he turns along it |
 | A (hold) | Sprint: a burst that fades while held |
-| B | Jump |
+| B | Jump. At a wall whose top is 1.25 to 2.75 m over his feet, with room to stand on it, he catches its edge and hangs (climbing: SK8's own addition, not stock Skate 3) |
+| B, hanging from an edge | Pull up onto the top and walk on |
 | C-stick in the air (with Skate 3's motion graphs) | Body tweak (Skate 3's off-board air body tweak; let the C-stick go to the middle first, or wait a moment), following the stick. Also in a hippie jump |
 | Z in the air (with Skate 3's motion graphs) | Body tweak, centred |
 | Y | Back on the board, rolling the way the rider faces at his speed, in the stance he got off in. In the air (after B): he puts the board under his feet and lands on it |

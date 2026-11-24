@@ -19,6 +19,7 @@ pub mod collision;
 pub mod devlog;
 pub mod district;
 pub mod flick;
+pub mod foot_ik;
 pub mod game;
 pub mod gesture;
 pub mod gfx;

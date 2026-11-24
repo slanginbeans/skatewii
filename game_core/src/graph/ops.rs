@@ -664,24 +664,10 @@ pub mod slope {
     pub const RAMP_DN_SHALLOW: u8 = 10;
     pub const RAMP_DN_STEEP: u8 = 11;
 
-    /// The walker's slope class: by the slope along the facing (degrees, + uphill), on stairs or not.
-    pub fn biped(degrees: f32, stairs: bool) -> u8 {
-        let a = degrees.abs();
-        if a < 5.0 {
-            return 0;
-        }
-        let up = degrees > 0.0;
-        let steep = a >= if stairs { 30.0 } else { 25.0 };
-        match (stairs, up, steep) {
-            (true, true, false) => STAIR_UP_SHALLOW,
-            (true, true, true) => STAIR_UP_STEEP,
-            (true, false, false) => STAIR_DN_SHALLOW,
-            (true, false, true) => STAIR_DN_STEEP,
-            (false, true, false) => RAMP_UP_SHALLOW,
-            (false, true, true) => RAMP_UP_STEEP,
-            (false, false, false) => RAMP_DN_SHALLOW,
-            (false, false, true) => RAMP_DN_STEEP,
-        }
+    /// The graph's value for the walker's slope class (Skate 3's off-board ground kind, `Biped::slope_kind`:
+    /// 0 flat, 1..4 stairs up shallow / steep, down shallow / steep, 5..8 the same on a ramp).
+    pub fn biped(kind: u8) -> u8 {
+        if kind == 0 || kind > 8 { 0 } else { kind + 3 }
     }
 }
 
