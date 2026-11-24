@@ -34,6 +34,7 @@ pub mod meat;
 pub mod plant;
 pub mod possession;
 pub mod ragdoll;
+pub mod reckoning;
 pub mod respawn;
 pub mod stall;
 pub mod wipeout;
@@ -343,6 +344,11 @@ pub struct Manual {
     /// and the filtered pitch error.
     pub correction: f32,
     pub filtered_error: f32,
+    /// This tick Skate 3's Normal corrective drag acts at the dragging truck instead of the brake
+    /// (SK8 manual/controller.rs `apply_correction`, `correction_active`).
+    pub correcting: bool,
+    /// How far the deck turned last tick (rad per 1/60 s tick: the derivative's angle change).
+    pub last_step: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -819,6 +825,10 @@ pub struct Skater {
     pub manual_exit: bool,
     /// Skate 3's speed wobble on the ground (`skater::wobble`).
     pub wobble: wobble::SpeedWobble,
+    /// Skate 3's ground reckoning (`skater::reckoning`): the dynamic normal from the board's
+    /// acceleration, the rider's up and his lean into a turn (what the turn conditioner reads).
+    pub dynamic_normal: reckoning::DynamicNormal,
+    pub reckoning: reckoning::Reckoning,
     pub grab: Option<Grab>,
     /// The longest grab of this jump that was let go of (scored on landing).
     grabbed: Option<Grab>,
@@ -994,6 +1004,9 @@ pub struct GraphControl {
     /// The stick's spin as the graph hands it to the physics (`PhysBodySpin`; Skate 3's body spin
     /// controller reads it on the ground and in the air).
     pub body_spin: f32,
+    /// The graph's `Turn` packet (SetTurning's), which Skate 3's physics takes as its processed turn
+    /// (negated: SK8 scalar_attributes.rs).
+    pub turn_packet: Option<f32>,
     /// The playing clips carry `Anticipating` (the ollie wind-up): Skate 3's camera reads it as
     /// `IsPreparingToJump`.
     pub anticipating: bool,
@@ -1208,6 +1221,8 @@ impl Skater {
             manual_lock: false,
             manual_exit: false,
             wobble: wobble::SpeedWobble::default(),
+            dynamic_normal: reckoning::DynamicNormal::default(),
+            reckoning: reckoning::Reckoning::default(),
             grab: None,
             grabbed: None,
             grind: None,
@@ -1657,6 +1672,7 @@ impl Skater {
                 .lerp(self.contact_n, k)
                 .normalize_or(self.contact_n);
             self.vel = self.ground_velocity() + self.contact_n * self.vn;
+            self.update_reckoning(dt);
             // A safe spot to be put back on after a bail.
             self.riding_ticks += 1;
             let at = respawn::Checkpoint {
@@ -1671,10 +1687,70 @@ impl Skater {
             self.approach.ride(pose);
         } else {
             self.riding_ticks = 0;
-            // Off the ground: Skate 3 resets the wobble on entering it again.
+            // Off the ground: Skate 3 resets the wobble on entering it again. Its air, grind and
+            // off-board reckonings clear the lean.
             self.wobble.reset();
+            self.reckoning.lean = 0.0;
         }
         self.sync_heading();
+    }
+
+    /// One tick of Skate 3's ground reckoning (SK8 board_dynamic_normal.rs, ground_orientation.rs,
+    /// reckoning_frames.rs): the dynamic normal from the board's acceleration this tick, then the
+    /// rider's up and lean. The lean is published the way SK8's animation feedback does: negated
+    /// unless the board's frame is turned (Processed2468 bit 20, the effective frame flipped).
+    fn update_reckoning(&mut self, dt: f32) {
+        let t = self.tuning.reckoning;
+        let wheels = if self.vn != 0.0 {
+            0
+        } else if self.manual.is_some() {
+            2
+        } else {
+            4
+        };
+        let accel = if dt > 0.0 {
+            (self.vel - self.prev_vel) * (1.0 / dt)
+        } else {
+            Vec3::ZERO
+        };
+        self.dynamic_normal.update(
+            &t,
+            wheels,
+            accel,
+            self.tuning.gravity,
+            self.prev_vel.length(),
+        );
+        let frame = self.board_frame();
+        // The physical board's nose (its frame turns end for end only in effect).
+        let nose = if self.frame_turned {
+            -frame.cols[2]
+        } else {
+            frame.cols[2]
+        };
+        let speed = self.vel.length();
+        self.reckoning.update(
+            &t,
+            reckoning::ReckoningInput {
+                com_to_deck: -frame.cols[1],
+                ground_normal: self.contact_n,
+                dynamic_up: self.dynamic_normal.normal,
+                speed,
+                wheels,
+                balance: if self.manual.is_some() { 1.0 } else { 0.0 },
+                board_up: frame.cols[1],
+                board_forward: nose,
+                heading: nose,
+            },
+        );
+    }
+
+    /// The lean the turn conditioner reads (SK8 physical_feedback.rs `publish`).
+    pub fn published_lean(&self) -> f32 {
+        if self.frame_turned {
+            self.reckoning.lean
+        } else {
+            -self.reckoning.lean
+        }
     }
 
     fn step_mode(
@@ -2329,6 +2405,7 @@ impl Skater {
             },
             brake,
             manual: self.manual.is_some(),
+            manual_correction: self.manual.is_some_and(|m| m.correcting),
             slide: self
                 .slide
                 .as_ref()
@@ -2774,16 +2851,17 @@ impl Skater {
 
     /// A manual the state graph holds (engaged and left as the graph says): the deck pitch servoes to a
     /// target that grows with the stick's lean (SK8's manual controller aims at (0.25 + 0.75 lean) of
-    /// the most tilt), or to the brake angle while dragging.
+    /// the most tilt), or to the brake angle while dragging (SK8 manual/controller.rs `calculate`).
     ///
-    /// Skate 3 ends a manual only through the graph: the stick let go (or past into a revert or a trick),
-    /// leaving the ground, or `PhysicsWantsManualExit`. The physics raises that one (SK8
-    /// manual/controller.rs `apply_correction`, the `opposing_motion_without_correction` flag) while
-    /// dragging the tail or nose with the board rolling against the manual's balance direction (the
-    /// tail's is -1, the nose's +1, against the speed along the board), and only when the physics mode's
-    /// corrective force is off (Skate 3's Easy; Normal pushes a corrective drag at the dragging truck there instead, which flatground's tail brake stands in for, so a
-    /// Normal manual never tips out). The no-contact torque bleed (`TorqueBleedOffWithNoContact`) needs
-    /// the manual's wheels off the ground, which ends a manual here anyway (`take_off`).
+    /// Skate 3's balance is positive on the tail (the stick pulled back) and negative on the nose. While
+    /// dragging the tail or nose with the board rolling against that direction (a nose drag rolling
+    /// forwards, a tail drag rolling backwards; `apply_correction`), either the physics mode's corrective
+    /// force acts (Normal, Hardcore) or, with it off (Easy), the physics asks the graph to end the manual
+    /// (`PhysicsWantsManualExit`). The corrective force (`correcting`) needs the speed along the board
+    /// over `manual_correction_speed` and the deck within a degree of its target; it then replaces the
+    /// tick's brake and the deck's turn (SK8 grounded/state/ordinary.rs). With the manual's wheels off
+    /// the ground (lifted off a crest while still riding) the correction bleeds off
+    /// (`TorqueBleedOffWithNoContact`) and turns the deck by `TorqueScalarWithNoContact` of it.
     fn graph_manual(
         &mut self,
         want: Option<(bool, f32, bool)>,
@@ -2805,8 +2883,12 @@ impl Skater {
             self.push = None;
             self.brake = None;
         }
-        let balance = if nose { 1.0 } else { -1.0 };
-        self.manual_exit = brake && !self.tuning.manual_corrective && self.speed * balance < 0.0;
+        // Skate 3's balance sign: the tail's positive, the nose's negative.
+        let balance = if nose { -1.0 } else { 1.0 };
+        let opposing = brake && self.speed * balance < 0.0;
+        self.manual_exit = opposing && !self.tuning.manual_corrective;
+        // The manual's wheels on the ground: the board is not lifted off it (`vn`).
+        let contact = self.vn == 0.0;
         let t = &self.tuning;
         let speed = libm::fabsf(self.speed);
         let m = self.manual.as_mut().unwrap();
@@ -2822,16 +2904,34 @@ impl Skater {
             let wobble = libm::sinf(2.0 * PI * t.manual_noise_freq * m.time) * t.manual_noise_scale;
             t.manual_max_tilt * reach * PI / 180.0 + t.manual_noise_vs_speed.eval(speed) * wobble
         };
+        if !started {
+            m.correction = t.manual_start_torque * target;
+        }
         // PID on the deck pitch, per 1/60 s tick (the deck turns by the accumulated correction).
         let ticks = (dt * 60.0).max(0.0);
         let error = (target - m.pitch).clamp(-t.manual_max_error, t.manual_max_error);
         m.filtered_error = 0.95 * m.filtered_error + 0.05 * error;
-        let last_turn = if started { m.correction } else { 0.0 };
+        let last_turn = if started { m.last_step } else { 0.0 };
         let derivative = (last_turn * t.manual_d).clamp(-t.manual_d_limit, t.manual_d_limit);
-        m.correction += derivative + m.filtered_error * t.manual_i + error * t.manual_p;
-        m.pitch += m.correction * ticks;
+        let output = if contact {
+            m.correction += derivative + m.filtered_error * t.manual_i + error * t.manual_p;
+            1.0
+        } else {
+            m.correction *= t.manual_torque_bleed;
+            t.manual_torque_no_contact
+        };
+        m.correcting = opposing
+            && t.manual_corrective
+            && speed > t.manual_correction_speed
+            && libm::fabsf(target - m.pitch) * (180.0 / PI) < 1.0;
+        m.last_step = if m.correcting {
+            0.0
+        } else {
+            m.correction * output
+        };
+        m.pitch += m.last_step * ticks;
         m.balance = 0.0;
-        brake
+        brake && !m.correcting
     }
 
     /// Ends a manual on purpose (stick released, or popped out of): scores it if it was long enough.
@@ -3791,6 +3891,14 @@ impl Skater {
         }
         let speed = vt.length();
         let impact = -self.vel.dot(n);
+        // Skate 3's closing velocity (SK8 physics/board_ground.rs: the speed into the surface along its
+        // normal) seen from the rider (wipeout/common.rs `closing`, the animation frame): along his up,
+        // and across it when he comes down tilted against the surface.
+        let rider_up = self.normal.normalize_or(n);
+        let into = impact.max(0.0);
+        let cos = n.dot(rider_up).clamp(-1.0, 1.0);
+        let closing_up = into * cos.abs();
+        let closing_side = into * sqrtf((1.0 - cos * cos).max(0.0));
         let axis = tangent(self.fwd, n);
         let travel = if speed > 0.5 {
             vt * (1.0 / speed)
@@ -3818,22 +3926,24 @@ impl Skater {
         };
         let limit = t.land_angle.eval(speed);
         let tweaked = self.graph.is_none() && self.grab.is_some_and(|g| g.tweak >= GRAB_TWEAK_BAIL);
-        let reason =
-            if danger && air_time * 60.0 > t.danger_ignore_ticks && impact > t.danger_max_impact {
-                Some("landed before the board was caught")
-            } else if crooked > limit {
-                Some("landed too crooked for the speed")
-            } else if impact > max_impact {
-                Some(if stairs {
-                    "hit the stairs too hard"
-                } else {
-                    "hit the ground too hard"
-                })
-            } else if tweaked {
-                Some("landed still tweaking a grab")
+        let reason = if danger
+            && air_time * 60.0 > t.danger_ignore_ticks
+            && (closing_up > t.danger_max_impact || closing_side > t.danger_max_side)
+        {
+            Some("landed before the board was caught")
+        } else if crooked > limit {
+            Some("landed too crooked for the speed")
+        } else if impact > max_impact {
+            Some(if stairs {
+                "hit the stairs too hard"
             } else {
-                None
-            };
+                "hit the ground too hard"
+            })
+        } else if tweaked {
+            Some("landed still tweaking a grab")
+        } else {
+            None
+        };
         self.last_landing = Some(LandingCheck {
             crooked,
             impact,
@@ -6572,7 +6682,11 @@ mod tests {
     }
 
     #[test]
-    fn a_graph_manual_brake_asks_out_only_without_the_corrective_force() {
+    fn a_graph_manual_drag_against_the_travel_asks_out_only_without_the_corrective_force() {
+        // Skate 3's balance is positive on the tail (SK8's `Balance` packet, negated: the stick pulled
+        // back), so the drag opposes the travel on the nose rolling forwards or the tail rolling
+        // backwards (SK8 manual/controller.rs `apply_correction`; SK8's tail drag at 6.6 m/s never
+        // raises it). flatground used to test the tail rolling forwards.
         let park = flat();
         let drag = |nose: bool, speed: f32, corrective: bool, brake: bool| {
             let mut s = spawn(&park);
@@ -6586,21 +6700,21 @@ mod tests {
             s.manual_exit
         };
         // Skate 3's Normal (corrective force on): dragging never asks the manual to end.
-        assert!(!drag(false, 4.0, true, true));
-        assert!(!drag(true, -4.0, true, true));
-        // Easy (off): the tail dragged rolling forwards, the nose rolling backwards, ask out.
-        assert!(drag(false, 4.0, false, true));
-        assert!(drag(true, -4.0, false, true));
+        assert!(!drag(true, 4.0, true, true));
+        assert!(!drag(false, -4.0, true, true));
+        // Easy (off): the nose dragged rolling forwards, the tail rolling backwards, ask out.
+        assert!(drag(true, 4.0, false, true));
+        assert!(drag(false, -4.0, false, true));
         // Rolling the manual's own way, stopped, or not dragging: no.
-        assert!(!drag(true, 4.0, false, true));
-        assert!(!drag(false, 0.0, false, true));
-        assert!(!drag(false, 4.0, false, false));
+        assert!(!drag(false, 4.0, false, true));
+        assert!(!drag(true, 0.0, false, true));
+        assert!(!drag(true, 4.0, false, false));
         // Off the manual the flag clears.
         let mut s = spawn(&park);
         s.tuning.manual_corrective = false;
         s.speed = 4.0;
         s.graph = Some(GraphControl {
-            manual: Some((false, 1.0, true)),
+            manual: Some((true, 1.0, true)),
             ..GraphControl::default()
         });
         steps(&mut s, &park, &Pad::default(), None, 1);
@@ -6608,6 +6722,91 @@ mod tests {
         s.graph = Some(GraphControl::default());
         steps(&mut s, &park, &Pad::default(), None, 1);
         assert!(!s.manual_exit && s.manual.is_none());
+    }
+
+    /// The speed after each tick of a graph manual drag from `speed` (nose or tail), and whether the
+    /// corrective drag acted.
+    fn drag_run(nose: bool, speed: f32, ticks: usize) -> Vec<(f32, bool)> {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = speed;
+        s.graph = Some(GraphControl {
+            manual: Some((nose, 1.0, true)),
+            ..GraphControl::default()
+        });
+        (0..ticks)
+            .map(|_| {
+                steps(&mut s, &park, &Pad::default(), None, 1);
+                (s.speed, s.manual.is_some_and(|m| m.correcting))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_nose_drag_rolling_forward_fast_takes_the_corrective_drag_as_sk8s() {
+        // SK8 (Normal, nose drag from 8.5 m/s): the nose brake slows the board until its deck is within
+        // a degree of the brake angle; that tick, at 5.43 m/s, the corrective drag (-400 x the
+        // velocity at the truck, in place of the brake) leaves 2.49 m/s.
+        let run = drag_run(true, 7.8, 240);
+        let k = run
+            .iter()
+            .position(|r| r.1)
+            .expect("the corrective drag acts");
+        let (before, after) = (run[k - 1].0, run[k].0);
+        assert!(before > 5.0, "only over the mode's 5 m/s: {before}");
+        let keep = after / before;
+        assert!((keep - 2.4937 / 5.4305).abs() < 0.01, "kept {keep}");
+        // Under 5 m/s the brake drags again.
+        assert!(run[k + 1..].iter().all(|r| !r.1));
+        assert!(run[k + 1].0 < after && run[k + 1].0 > after - 0.2);
+        // The tail dragged rolling forwards (SK8's manual brake) never takes it.
+        assert!(drag_run(false, 7.8, 240).iter().all(|r| !r.1));
+    }
+
+    #[test]
+    fn a_deck_pitched_from_the_riders_up_compresses_the_crouch() {
+        // SK8 ground_runtime/pumping.rs: the physical deck pitched further from the rider's up than
+        // the posed board reports `CompressionVsDeckAngle` of the difference (quarter turns) to the
+        // crouch, and `CompressionDeckScalar` x that as the ground's compression when it outweighs it.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 4.0;
+        steps(&mut s, &park, &Pad::default(), None, 30);
+        assert_eq!(s.pump.deck_absorption, 0.0, "level with the rider's up");
+        // The rider's up leaning back 0.3 rad from the deck's (as over a transition's start).
+        let right = s.reckoning.ground_right();
+        s.reckoning.up = rotate(Vec3::UP, right, 0.3);
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        let t = &s.tuning;
+        let want = t.compression_vs_deck_angle.eval(0.3 * 2.0 / PI);
+        assert!(
+            (s.pump.deck_absorption - want).abs() < 0.02,
+            "{} against {want}",
+            s.pump.deck_absorption
+        );
+        assert!((s.pump.ground_absorption - t.compression_deck_scale * want).abs() < 0.2);
+    }
+
+    #[test]
+    fn a_manual_lifted_off_the_ground_bleeds_its_correction() {
+        // SK8 manual/controller.rs: the manual's wheels off the ground, the correction bleeds by
+        // `TorqueBleedOffWithNoContact` (0.96) a tick and turns the deck by `TorqueScalarWithNoContact`
+        // (0) of it.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 4.0;
+        s.graph = Some(GraphControl {
+            manual: Some((false, 1.0, false)),
+            ..GraphControl::default()
+        });
+        steps(&mut s, &park, &Pad::default(), None, 10);
+        let m = s.manual.unwrap();
+        assert!(m.correction > 0.0);
+        s.vn = 0.5;
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        let lifted = s.manual.unwrap();
+        assert!((lifted.correction - m.correction * 0.96).abs() < 1e-6);
+        assert_eq!(lifted.pitch, m.pitch, "the deck doesn't turn");
     }
 
     #[test]
@@ -6731,6 +6930,36 @@ mod tests {
         });
         steps(&mut s, &park, &Pad::default(), None, 30);
         assert!(s.body_flip.is_none());
+    }
+
+    #[test]
+    fn a_danger_zone_landing_bails_on_the_closing_speed_across_the_rider_too() {
+        // SK8 wipeout/air.rs `check` and common.rs `closing`: in the danger zone the speed into the
+        // surface, seen in the rider's frame, bails past `Wipeout_AirYTrick` (0.6 m/s) along his up or
+        // `Wipeout_AirXZTrick` (0.1) across it. flatground used to check only the speed into the ground.
+        let park = flat();
+        let touch = |tilt: f32, into: f32, danger: bool| {
+            let mut s = spawn(&park);
+            s.mode = Mode::Air { time: 0.5 };
+            s.graph = Some(GraphControl {
+                danger,
+                ..GraphControl::default()
+            });
+            // The rider comes down leaning `tilt` across his travel.
+            s.normal = rotate(Vec3::UP, v3(0.0, 0.0, 1.0), tilt);
+            s.vel = v3(0.0, -into, 3.0);
+            let mut ev = Vec::new();
+            s.land(Vec3::UP, 0, 0.5, &mut ev);
+            matches!(s.mode, Mode::Bailed { .. })
+        };
+        assert!(!touch(0.0, 0.5, true), "upright, 0.5 m/s into the ground");
+        assert!(touch(0.0, 0.7, true), "0.7 m/s along his up");
+        // 20 degrees off: 0.17 m/s across him.
+        assert!(touch(0.35, 0.5, true));
+        // 6 degrees: 0.05 across.
+        assert!(!touch(0.1, 0.5, true));
+        // Caught: no closing check.
+        assert!(!touch(0.35, 0.5, false));
     }
 
     #[test]

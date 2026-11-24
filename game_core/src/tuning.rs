@@ -18,6 +18,7 @@ pub mod handplant;
 pub mod moves;
 pub mod plant;
 pub mod possession;
+pub mod reckoning;
 pub mod wipeout;
 pub mod wobble;
 pub use camera::CamTuning;
@@ -201,6 +202,16 @@ pub struct Tuning {
     /// manual's balance direction asks the graph to end the manual (`PhysicsWantsManualExit`; SK8
     /// manual/controller.rs `apply_correction`).
     pub manual_corrective: bool,
+    /// The corrective drag's least speed along the board (m/s, the physics mode's
+    /// `Hash_84CB2F459F3FC811`: Normal 5, Easy 4, Hardcore 2).
+    pub manual_correction_speed: f32,
+    /// The manual's wheels off the ground (Skate 3's no-contact branch): the controller's correction
+    /// bleeds by `manual_torque_bleed` a tick and turns the deck by `manual_torque_no_contact` of it
+    /// (`TorqueBleedOffWithNoContact`, `TorqueScalarWithNoContact`). `manual_start_torque` seeds the
+    /// correction from the target on a manual's first tick (`StartTorqueScalar`).
+    pub manual_torque_bleed: f32,
+    pub manual_torque_no_contact: f32,
+    pub manual_start_torque: f32,
     /// Pop strength finalisation (state graphs): at or below `jump_clamp_low` a pop is the minimum hop,
     /// at or above `jump_clamp_high` full height.
     pub jump_clamp_low: f32,
@@ -412,9 +423,13 @@ pub struct Tuning {
     pub land_max_impact: f32,
     pub land_max_stairs: f32,
     pub land_max_grind: f32,
-    /// Landing while the clips say the board isn't caught: a bail past this speed into the ground
-    /// (m/s), once the air is older than `danger_ignore_ticks` ticks.
+    /// Landing while the clips say the board isn't caught (Skate 3's closing-velocity check with the
+    /// trick limits): a bail when the speed into the surface, seen from the rider (his up against the
+    /// surface's normal), has more than `danger_max_impact` along his up or `danger_max_side` across it
+    /// (m/s, `Wipeout_AirYTrick`, `Wipeout_AirXZTrick`), once the air is older than
+    /// `danger_ignore_ticks` ticks.
     pub danger_max_impact: f32,
+    pub danger_max_side: f32,
     pub danger_ignore_ticks: f32,
     /// The tangential speed kept on landing, against the surface's normal y (transitions gain).
     pub landing_speed_vs_ny: Curve,
@@ -483,6 +498,8 @@ pub struct Tuning {
     pub moves: moves::MoveTuning,
     /// Speed wobble (`tuning::wobble`).
     pub wobble: wobble::WobbleTuning,
+    /// The ground reckoning: the rider's up and lean (`tuning::reckoning`).
+    pub reckoning: reckoning::ReckoningTuning,
     /// Board adjust in the air (`tuning::adjust`; measured from Skate 3's clips, no rules-pack values).
     pub adjust: adjust::AdjustTuning,
     /// Foot plants: the FootJump launch and the air foot plant (`tuning::plant`).
@@ -763,6 +780,7 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .chain(camera::PATHS.iter())
         .chain(moves::PATHS.iter())
         .chain(wobble::PATHS.iter())
+        .chain(reckoning::PATHS.iter())
         .chain(biped::PATHS.iter())
         .chain(possession::PATHS.iter())
         .chain(plant::PATHS.iter())
@@ -823,6 +841,10 @@ pub const PATHS: &[&str] = &[
     "physics_manual/default/ProceduralNoiseScalar",
     "physics_manual/default/NoiseVsSpeed",
     "physics_mode/normal/Hash_F8CBC0F5FEF2240E",
+    "physics_mode/normal/Hash_84CB2F459F3FC811",
+    "physics_manual/default/TorqueBleedOffWithNoContact",
+    "physics_manual/default/TorqueScalarWithNoContact",
+    "physics_manual/default/StartTorqueScalar",
     "anim_motion/power_slide/slide_speed_threshold",
     "anim_motion/power_slide/slide_min_entry",
     "anim_motion/power_slide/well_into_slide_time",
@@ -945,6 +967,7 @@ pub const PATHS: &[&str] = &[
     "physics_wipeout/default/Wipeout_AirMaxSpeedIntoStairs",
     "physics_wipeout/default/Wipeout_AirMaxSpeedIntoCollisionNearGrind",
     "physics_wipeout/default/Wipeout_AirYTrick",
+    "physics_wipeout/default/Wipeout_AirXZTrick",
     "physics_wipeout/default/FramesAtStartOfAirToIgnoreDangerZone",
     "physics_airstates/default/LandingSpeedScalarVsGroundNormalY",
     "physics_animation/default/LandingSketchySideSpeed",
@@ -1120,19 +1143,33 @@ impl Tuning {
         push_steer_rise: 0.05,
         push_steer_min: 0.5,
         steer_tilt_blend: 0.2,
-        manual_tilt: 0.5,
+        manual_tilt: 0.6,
         manual_brake_tilt: 30.0,
         manual_max_tilt: 24.0,
-        manual_p: 0.06,
-        manual_i: 0.02,
-        manual_d: -0.75,
-        manual_d_limit: 0.05,
-        manual_max_error: 0.12,
-        manual_noise_freq: 1.2,
-        manual_noise_scale: 0.04,
-        manual_noise_vs_speed: Curve::new(&[(0.0, 0.3), (8.0, 1.0)]),
+        // Skate 3's `physics_manual` (the disc's values).
+        manual_p: 0.05,
+        manual_i: 0.03,
+        manual_d: -0.8,
+        manual_d_limit: 0.04,
+        manual_max_error: 0.1,
+        manual_noise_freq: 1.5,
+        manual_noise_scale: 0.05,
+        manual_noise_vs_speed: Curve::new(&[
+            (0.0, 0.292_857_1),
+            (1.319_218, 0.378_571_4),
+            (2.524_43, 0.485_714_3),
+            (3.908_795, 0.617_857_2),
+            (5.358_305, 0.821_428_6),
+            (6.824_105, 0.95),
+            (7.850_163, 1.0),
+            (10.0, 1.0),
+        ]),
         // Skate 3's Normal mode.
         manual_corrective: true,
+        manual_correction_speed: 5.0,
+        manual_torque_bleed: 0.96,
+        manual_torque_no_contact: 0.0,
+        manual_start_torque: 0.0,
         jump_clamp_low: 0.5,
         jump_clamp_high: 0.9,
         side_friction: 60.0,
@@ -1322,7 +1359,8 @@ impl Tuning {
         land_max_impact: 11.0,
         land_max_stairs: 5.5,
         land_max_grind: 7.5,
-        danger_max_impact: 0.8,
+        danger_max_impact: 0.6,
+        danger_max_side: 0.1,
         danger_ignore_ticks: 5.0,
         landing_speed_vs_ny: Curve::new(&[(0.4, 1.0), (0.55, 1.12), (0.7, 1.0)]),
         land_sketchy_side: Curve::new(&[(0.0, 0.0), (0.3, 0.3), (0.6, 0.8), (0.9, 1.0)]),
@@ -1358,6 +1396,7 @@ impl Tuning {
         cam: CamTuning::BUILT_IN,
         moves: moves::MoveTuning::BUILT_IN,
         wobble: wobble::WobbleTuning::BUILT_IN,
+        reckoning: reckoning::ReckoningTuning::BUILT_IN,
         adjust: adjust::AdjustTuning::BUILT_IN,
         plant: plant::PlantTuning::BUILT_IN,
         handplant: handplant::HandPlantTuning::BUILT_IN,
@@ -1466,6 +1505,14 @@ impl Tuning {
                 }
                 None => false,
             },
+            "physics_mode/normal/Hash_84CB2F459F3FC811" => scalar!(self.manual_correction_speed),
+            "physics_manual/default/TorqueBleedOffWithNoContact" => {
+                scalar!(self.manual_torque_bleed)
+            }
+            "physics_manual/default/TorqueScalarWithNoContact" => {
+                scalar!(self.manual_torque_no_contact)
+            }
+            "physics_manual/default/StartTorqueScalar" => scalar!(self.manual_start_torque),
             "anim_motion/jumping/clamp_low_inclusive" => scalar!(self.jump_clamp_low),
             "anim_motion/jumping/clamp_high_inclusive" => scalar!(self.jump_clamp_high),
             "anim_motion/power_slide/slide_speed_threshold" => scalar!(self.slide_speed_threshold),
@@ -1480,7 +1527,10 @@ impl Tuning {
             "physics_airstates/default/NaturalAirMaxDist" => scalar!(self.natural_air_max_dist),
             "physics_airstates/default/NaturalAirMinDist" => scalar!(self.natural_air_min_dist),
             "physics_airstates/default/NaturalAirTime" => scalar!(self.natural_air_time),
-            "physics_reckoning/default/GroundNormalSmoothing" => scalar!(self.ground_normal_blend),
+            "physics_reckoning/default/GroundNormalSmoothing" => {
+                let reckoning = self.reckoning.set(name, f, c(), v);
+                scalar!(self.ground_normal_blend) || reckoning
+            }
             "physics_reckoning/default/VertJumpAlignMaxGroundNormalY" => {
                 scalar!(self.vert_align_max_ny)
             }
@@ -1652,6 +1702,7 @@ impl Tuning {
                 scalar!(self.land_max_grind)
             }
             "physics_wipeout/default/Wipeout_AirYTrick" => scalar!(self.danger_max_impact),
+            "physics_wipeout/default/Wipeout_AirXZTrick" => scalar!(self.danger_max_side),
             // An integer in the database: a 4-byte one arrives as its bits read as a float.
             "physics_wipeout/default/FramesAtStartOfAirToIgnoreDangerZone" => match f {
                 Some(f) if f.to_bits() < 0x0080_0000 => {
@@ -1723,6 +1774,7 @@ impl Tuning {
                     || self.cam.set(name, f, c(), v)
                     || self.moves.set(name, f, c())
                     || self.wobble.set(name, f, c())
+                    || self.reckoning.set(name, f, c(), v)
                     || self.biped.set(name, f, c())
                     || self.possession.set(name, f, c())
                     || self.plant.set(name, f, c(), v)

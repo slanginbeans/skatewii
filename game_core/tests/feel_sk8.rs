@@ -321,3 +321,96 @@ fn the_board_stays_under_the_feet_after_every_landing() {
     }
     assert!(landings > 5, "{landings}");
 }
+
+#[test]
+fn a_carves_lean_is_the_reckonings_as_sk8s() {
+    // SK8 carving with a full stick at 6.5 m/s: the lean the turn conditioner reads (Reckoning's
+    // target lean angle from the dynamic normal, published with the frame's sign) settles at 0.878 rad
+    // and, let go, is 0.363 rad 14 ticks later (the centripetal lean flatground used: 0.18). With half a
+    // stick at 6.65 m/s it settles at 0.279. The processed turn is the graph's `Turn` packet, negated:
+    // 1.0 with the stick held, 0 let go.
+    let Some(mut g) = imported_game("carve lean") else {
+        return;
+    };
+    let carve = |g: &mut Game, x: i8, speed: f32| {
+        g.place_rider(v3(-16.0, 0.0, -17.0), 0.0, speed);
+        for _ in 0..30 {
+            g.update(&held(0), TICK);
+        }
+        let mut lean = Vec::new();
+        for p in 0..160 {
+            let stick_x = if p < 120 { x } else { 0 };
+            g.update(
+                &PadRaw {
+                    flags: flag::CONNECTED,
+                    stick_x,
+                    ..Default::default()
+                },
+                TICK,
+            );
+            lean.push(g.skater.published_lean());
+        }
+        lean
+    };
+    let full = carve(&mut g, -100, 6.6);
+    assert!((full[59].abs() - 0.878).abs() < 0.03, "{:?}", &full[50..70]);
+    assert!(
+        (full[134].abs() - 0.363).abs() < 0.1,
+        "{:?}",
+        &full[120..140]
+    );
+    let packet = g.skater.graph.and_then(|c| c.turn_packet);
+    assert!(packet.is_none(), "let go: no Turn packet ({packet:?})");
+    // Half a stick: the conditioned 0.5 (0.25 + 0.5 x 0.7 of the range past the dead zone).
+    let half = carve(&mut g, -60, 6.75);
+    assert!(
+        (half[100].abs() - 0.279).abs() < 0.02,
+        "{:?}",
+        &half[90..110]
+    );
+}
+
+fn cstick(y: i8) -> PadRaw {
+    PadRaw {
+        flags: flag::CONNECTED,
+        cstick_y: y,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_nose_drag_brakes_then_takes_the_corrective_drag() {
+    // SK8 (Normal) from 8.5 m/s, a nose manual then the stick all the way up: the motion graph drags
+    // the nose (`NoseManual/Holding/Brake`, `S_M_NOSEBRAKE_N_0_CYC`) and the board slows 2.90 m/s^2;
+    // once the deck is within a degree of the brake angle, over 5 m/s, the corrective drag takes 54% of
+    // the speed in one tick. flatground's nose brake used to roll on (its path wasn't read as a brake).
+    let Some(mut g) = imported_game("nose drag") else {
+        return;
+    };
+    g.place_rider(v3(-16.0, 0.0, -17.0), 0.0, 8.4);
+    for _ in 0..60 {
+        g.update(&held(0), TICK);
+    }
+    for _ in 0..40 {
+        g.update(&cstick(47), TICK);
+    }
+    let mut speeds = Vec::new();
+    let mut corrected = None;
+    for i in 0..120 {
+        g.update(&cstick(127), TICK);
+        speeds.push(g.skater.speed);
+        if corrected.is_none() && g.skater.manual.is_some_and(|m| m.correcting) {
+            corrected = Some(i);
+        }
+    }
+    let k = corrected.expect("the corrective drag acts");
+    assert!(k > 30, "after the brake has slowed it ({k} ticks)");
+    let end = 40.min(k - 1);
+    let decel = (speeds[10] - speeds[end]) / ((end - 10) as f32 * TICK);
+    assert!((decel - 2.90).abs() < 0.25, "{decel} m/s^2 (SK8 2.90)");
+    let keep = speeds[k] / speeds[k - 1];
+    assert!(
+        speeds[k - 1] > 5.0 && (keep - 0.459).abs() < 0.02,
+        "{speeds:?}"
+    );
+}

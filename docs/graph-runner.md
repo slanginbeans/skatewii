@@ -77,18 +77,28 @@ With `motion/graph` loaded (`Game::graph`), each tick:
      out), as Skate 3's do: a held stick holds a manual as long as it is held; the deck pitch servoes
      (SK8's PID) to (0.25 + 0.75 lean) of the most tilt, or to the brake angle. `PhysicsWantsManualExit`
      is the physics' `Skater::manual_exit` (SK8 manual/controller.rs `apply_correction`): set while
-     dragging the tail or nose with the board rolling against the manual's balance direction (tail -1,
-     nose +1, against the speed along the board) and the physics mode's corrective force
+     dragging the tail or nose with the board rolling against the manual's balance direction (Skate 3's
+     balance is +1 on the tail, -1 on the nose, against the speed along the board: a nose drag rolling
+     forwards, a tail drag rolling backwards) and the physics mode's corrective force
      (`physics_mode/normal/Hash_F8CBC0F5FEF2240E`) off. Skate 3's Normal and Hardcore have it on (Easy
-     off), so with the stock rules a Normal manual drags its tail and never tips out; with it off the
-     graph's `Brake` and `Cycle` states let go of the manual (scripted in `tests/manual_wobble.rs`);
+     off): there the same drag, over the mode's speed (`Hash_84CB2F459F3FC811`, Normal 5 m/s) and with
+     the deck within a degree of the brake angle, takes the corrective drag instead (-400 N s/m of the
+     velocity at the dragging truck, in place of that tick's brake and the deck's turn; on flatground's
+     one-body board it moves 12.3 kg, so the tick keeps 46% of the speed as SK8's deck does). With the
+     manual's wheels off the ground while still riding (lifted over a crest) the controller's correction
+     bleeds by `TorqueBleedOffWithNoContact` (0.96) a tick and turns the deck by
+     `TorqueScalarWithNoContact` (0) of it. With it off the graph's `Brake` and `Cycle` states let go
+     of the manual (scripted in `tests/manual_wobble.rs`). The nose's brake state is
+     `NoseManual/Holding/Brake` (it used to be missed, so a nose drag rolled on unbraked);
    - in the air the board does what the clips do: a late flip, finger flip, under flip or dark catch
      becomes the trick (its look and flips from the graph's `ScoringTrick`, `Kickflip2`..`4` for held
      multi-flips; the graph's `TimeToLand` thresholds read the physics' landing prediction, below), a
      dark catch rides dark (`SetDark`, the board grip down), and landing while the playing clips are in
-     their `DANGERZONE` (the board not caught; within its last 0.1 s counts as caught) bails when the
-     board comes down faster than Skate 3's danger-zone closing speed (`Wipeout_AirYTrick`), as SK8's
-     wipeout checks do, instead of after a fixed trick time;
+     their `DANGERZONE` (the board not caught; within its last 0.1 s counts as caught) bails on Skate
+     3's closing-velocity check with the trick limits (SK8 wipeout/air.rs `check`, common.rs
+     `closing`): the speed into the surface along its normal, seen in the rider's frame (his up), past
+     `Wipeout_AirYTrick` (0.6 m/s) along his up or `Wipeout_AirXZTrick` (0.1) across it, so coming
+     down tilted against the surface bails at a softer touch; instead of after a fixed trick time;
    - the body spin's input is the graph's `PhysBodySpin` packet (the main stick's x as the graph hands
      it over), and the landing assist only turns the body while the graph's `BodySpin` is 0;
    - grabs are scored by the graph's `ScoringGrabs` name (the variant the C-stick picks; a variant once
@@ -122,10 +132,18 @@ With `motion/graph` loaded (`Game::graph`), each tick:
 4. The riding behaviours set the riding trees' parameters (`graph/riding.rs`; disc tuning
    `anim_carving`, `physics_animation`, `anim_motion/crouching`, `auto_pump`, `body_tilt` and `manual`
    through the rules pack, else flatground's own values):
-   - the physics' animation turn conditioner (SK8 turn_conditioner.rs) runs once a tick on the
-     physics' turn (`Skater::steer`, positive to the left as Skate 3's) and its lean into the turn
-     (the angle balancing the turn's centripetal pull): three filters, quickness from how much the
-     stick moves, holding from how still the lean stays;
+   - the physics' animation turn conditioner (SK8 turn_conditioner.rs) runs once a tick on Skate 3's
+     processed turn (the graph's last `Turn` packet, negated: SK8 scalar_attributes.rs, positive to
+     the left) and the ground reckoning's lean (`skater/reckoning.rs`, below): three filters,
+     quickness from how much the stick moves, holding from how still the lean stays. The reckoning
+     ports SK8 board_dynamic_normal.rs, ground_orientation.rs and reckoning_frames.rs with the disc's
+     `physics_reckoning` values: the dynamic normal follows the direction of the board's acceleration
+     against gravity (damped, at most `DynamicSpeedMaxDelta` x its curve a tick), the rider's up
+     filters towards the ground's normal and the deck's pitch, and the lean is the angle from that up
+     to the dynamic normal about the rider's heading, published negated unless the board's frame is
+     turned (Processed2468 bit 20); off the ground it is 0. It used to be the smoothed steering and
+     the centripetal lean `atan(yaw rate x speed / g)`, which leaned in two to three times faster than
+     SK8's and let go twice as fast;
    - `SetTurning` (SK8 set_turning.rs, turn_remap.rs): `angle` (the lean, through the quick and slow
      remaps mixed by quickness, eased in by `blend_lean_in`, at most `clamp_curr_lean` an update,
      fully to the side in a powerslide), `dir`, `quickness`, `holding`, `speedtuck` past
@@ -816,20 +834,27 @@ Unsupported, logged once when reached: `EnterSkitchingBehaviour`, `SkitchingBeha
 `SkitchShimmyingBehaviour`, `GestureType` (the wipeout body tweaks: cannonball, judo kick ...; no
 ragdoll to tweak).
 
-Approximations to revisit: the push speed is where the push coefficients' blended clips end, not the
-trajectory bone's speed sampled from the posed clips; how long the push foot stays down still comes
-from the push sets' contact time; the manual's deck pitch runs SK8's PID servo (with the rules pack's
-`physics_manual` gains), but on flatground's kinematic board, without the corrective drag Normal
-pushes at the dragging truck (the tail brake stands in) or the no-contact torque bleed (the manual
-ends on leaving the ground instead); a landing in the danger zone is judged on the speed
-into the ground only (Skate 3's closing-velocity check also has a sideways part); shoves don't run;
+Approximations to revisit: the board and rider are one kinematic body (a velocity, and an orientation
+set from the ground and eased), where Skate 3's board is a jointed rigid assembly (deck, trucks, wheels
+and its hook) solved together with the physical rider's skeleton in one constraint solve, every ground
+behaviour (steering, speed model, pushes, brakes, the manual, pumping) handing it queued point forces
+and angular displacements (SK8 physics/board_step.rs, solver.rs, the joint, contact and drive solvers,
+rigid_body.rs, mass.rs, world_contact/ and skeleton_body/: some ten thousand lines). Porting it
+replaces the ground model and every calibration marked "ours" here, so it is not attempted piecemeal;
+the measured effects are listed under "Measured against SK8" (left). The pushes chase the posed
+clips' trajectory speed while their `PUSHCONTACT` is on ("Measured against SK8", Pushes; the push
+sets' end speed only without a posed rider); the manual's deck pitch runs SK8's PID servo (with the rules pack's
+`physics_manual` gains) on flatground's kinematic board, so its deck reaches the brake angle in 0.7 s
+where SK8's rigid deck takes 1.1 s (a nose drag from 8.5 m/s takes the corrective drag at 6.4 m/s,
+SK8's at 5.4), and SK8's action graph then runs the rider out (`SS_RUNOUT_GROUND`, through its
+dismount states: no wipeout request is raised) where flatground's plays a bump and rides on; shoves don't run;
 the wipeout's lean and twist come from the drawn bail, not a ragdoll's hips; the d-pad's gestures are
 a fixed set (Skate 3's are the player's pick). The
-turn conditioner reads the physics' smoothed steering and a centripetal lean instead of Skate 3's
-processed turn and reckoning lean, and the speed wobble's amplitude (`World::wobble`, Skate 3's
-`SpeedWobble` from `skater/wobble.rs`); Crouching has no board or ground absorption
-force (only its restoring force) and no deck-angle crouch; the powerslide's side for SetTurning is the
-physics' slide.
+turn conditioner's lean comes from the kinematic board's acceleration, so a full carve's lean builds
+faster than SK8's rigid board lets it (0.64 against 0.44 rad 9 ticks in, both 0.88 steady); the
+deck-angle crouch reads the kinematic board's pitch (the chord between its trucks' contacts, and a
+manual's), not a rigid deck pivoting over an edge, so a drop-in reports it at other times than SK8's
+(both 0.1 to 0.9 through the transition); the powerslide's side for SetTurning is the physics' slide.
 
 ## The camera (`game_core/src/camera`)
 
@@ -932,6 +957,18 @@ a thin-rail run, and the camera while riding and carving.
 
 Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_sk8.rs`):
 
+- **Turn lean** (`feel-parity`): the turn conditioner's lean is the ground reckoning's (the dynamic
+  normal's angle from the rider's up), its turn the graph's `Turn` packet. Against SK8's lean, tick by
+  tick over a carve and its release: full stick at 6.5 m/s RMS 0.10 rad (was 0.15; release 0.06, was
+  0.15), half a stick at 6.65 m/s RMS 0.009 (was 0.028); steady 0.876 and 0.288 rad (SK8 0.878, 0.279).
+
+- **Manual drags** (`feel-parity`): the nose drag (`NoseManual/Holding/Brake`) brakes at 2.86 m/s^2
+  (SK8 2.90; it rolled on unbraked at 0.5), and over 5 m/s with the deck at the brake angle the Normal
+  corrective drag keeps 46% of the speed for the tick (SK8 5.43 to 2.49 m/s). The drag opposes the
+  travel on the nose rolling forwards (Skate 3's balance is positive on the tail); flatground had it on
+  the tail, so Easy's `PhysicsWantsManualExit` ended a forward tail drag, which SK8's never does. The
+  manual's no-contact bleed runs while the board is lifted. Tail drags are unchanged (2.9 m/s^2).
+
 - **Brake contact**: `BRAKE_CONTACT` is a value (0 in the brake's `INTO` clip, 1 in `CYC`); its presence
   was read as contact, so the foot dragged from the first tick. Now 0.23 s after the press, as SK8, at
   SK8's 4.08 m/s^2 (`brake_scale` calibrated; it was 3.0).
@@ -965,7 +1002,11 @@ Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_
 - **Pumping**: the height the pump watches is the animated COM over the board; the ground's angle
   reports its compression and least crouch to the crouch (`CompressionVsGroundAngle` x
   `CompressionGroundScalar`, `MinCrouchVsGroundAngle`), with the board's absorption and the pumping as
-  its potential; the pumping and compression tuning is the disc's.
+  its potential; the pumping and compression tuning is the disc's. The deck's angle (`feel-parity`,
+  SK8 ground_runtime/pumping.rs): when the board is pitched further from the rider's reckoning up
+  than the posed board, the difference reports `CompressionVsDeckAngle` (the crouch's
+  `MaxCrouchFromDeckAngle` floor) and `CompressionDeckScalar` x it as the ground's compression when
+  that is the larger; it was 0.
 - **Drop-ins**: Skate 3's drop-in depth windows (a tip 0.06 m, a 5-0 0.13 m from the deck's centre), and
   while a board rolled off an edge is still tipping over it, rails are ridden onto, not landed on: a slow
   roll off a half pipe's deck goes into the transition (it was a 0 m/s nose blunt or lipslide).

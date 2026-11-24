@@ -1160,6 +1160,10 @@ mod manual_exit {
     }
 
     fn game(corrective: bool) -> Game {
+        game_at(corrective, 5.0)
+    }
+
+    fn game_at(corrective: bool, speed: f32) -> Game {
         let bytes = crate::motion::tests::pack(&[
             ("motion/db", Kind::MotionDb, crate::motion::tests::lib()),
             ("motion/graph", Kind::StateGraph, graphs()),
@@ -1168,7 +1172,7 @@ mod manual_exit {
         g.load_motion(alloc::boxed::Box::leak(bytes.into_boxed_slice()))
             .unwrap();
         g.skater.tuning.manual_corrective = corrective;
-        g.skater.speed = 5.0;
+        g.skater.speed = speed;
         g
     }
 
@@ -1205,12 +1209,22 @@ mod manual_exit {
     }
 
     #[test]
-    fn without_it_dragging_the_tail_ends_the_manual() {
-        let mut g = game(false);
+    fn without_it_dragging_the_tail_rolling_backwards_ends_the_manual() {
+        // Skate 3's balance is positive on the tail: the drag opposes the travel rolling tail first
+        // (SK8 manual/controller.rs `apply_correction`). flatground used to end it rolling forwards.
+        let mut g = game_at(false, -5.0);
         let (manual, state) = drag(&mut g);
         assert!(!state.contains("Manual"), "{state}");
         assert!(manual <= 3, "manualled {manual} ticks into the drag");
         assert!(g.skater.manual.is_none() && !g.skater.manual_exit);
+    }
+
+    #[test]
+    fn without_it_dragging_the_tail_rolling_forwards_stays_in_the_manual() {
+        let mut g = game(false);
+        let (manual, state) = drag(&mut g);
+        assert!(state.ends_with("TailManual/Brake"), "{state}");
+        assert_eq!(manual, 30);
     }
 }
 
