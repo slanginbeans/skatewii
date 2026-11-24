@@ -14,6 +14,7 @@ pub mod biped;
 pub mod camera;
 pub mod grind;
 pub mod moves;
+pub mod wobble;
 pub use camera::CamTuning;
 pub use grind::GrindTuning;
 
@@ -190,6 +191,11 @@ pub struct Tuning {
     pub manual_noise_freq: f32,
     pub manual_noise_scale: f32,
     pub manual_noise_vs_speed: Curve,
+    /// The physics mode's manual corrective force (`Hash_F8CBC0F5FEF2240E`; on in Skate 3's Normal and
+    /// Hardcore, off in Easy). Off, dragging the tail (or nose) while the board rolls against the
+    /// manual's balance direction asks the graph to end the manual (`PhysicsWantsManualExit`; SK8
+    /// manual/controller.rs `apply_correction`).
+    pub manual_corrective: bool,
     /// Pop strength finalisation (state graphs): at or below `jump_clamp_low` a pop is the minimum hop,
     /// at or above `jump_clamp_high` full height.
     pub jump_clamp_low: f32,
@@ -470,6 +476,8 @@ pub struct Tuning {
 
     // Body flips, the pump channel, bumps, the powerslide's and the wipeout's pose (`tuning::moves`).
     pub moves: moves::MoveTuning,
+    /// Speed wobble (`tuning::wobble`).
+    pub wobble: wobble::WobbleTuning,
 
     // Walking off the board (`tuning::biped`).
     pub biped: biped::BipedTuning,
@@ -739,6 +747,7 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .chain(grind::PATHS.iter())
         .chain(camera::PATHS.iter())
         .chain(moves::PATHS.iter())
+        .chain(wobble::PATHS.iter())
         .chain(biped::PATHS.iter())
         .copied()
 }
@@ -793,6 +802,7 @@ pub const PATHS: &[&str] = &[
     "physics_manual/default/ProceduralNoiseFreq",
     "physics_manual/default/ProceduralNoiseScalar",
     "physics_manual/default/NoiseVsSpeed",
+    "physics_mode/normal/Hash_F8CBC0F5FEF2240E",
     "anim_motion/power_slide/slide_speed_threshold",
     "anim_motion/power_slide/slide_min_entry",
     "anim_motion/power_slide/well_into_slide_time",
@@ -1091,8 +1101,8 @@ impl Tuning {
         push_steer_min: 0.5,
         steer_tilt_blend: 0.2,
         manual_tilt: 0.5,
-        manual_brake_tilt: 25.0,
-        manual_max_tilt: 20.0,
+        manual_brake_tilt: 30.0,
+        manual_max_tilt: 24.0,
         manual_p: 0.06,
         manual_i: 0.02,
         manual_d: -0.75,
@@ -1101,6 +1111,8 @@ impl Tuning {
         manual_noise_freq: 1.2,
         manual_noise_scale: 0.04,
         manual_noise_vs_speed: Curve::new(&[(0.0, 0.3), (8.0, 1.0)]),
+        // Skate 3's Normal mode.
+        manual_corrective: true,
         jump_clamp_low: 0.5,
         jump_clamp_high: 0.9,
         side_friction: 60.0,
@@ -1325,6 +1337,7 @@ impl Tuning {
         grind: GrindTuning::BUILT_IN,
         cam: CamTuning::BUILT_IN,
         moves: moves::MoveTuning::BUILT_IN,
+        wobble: wobble::WobbleTuning::BUILT_IN,
         biped: biped::BipedTuning::BUILT_IN,
     };
 
@@ -1420,6 +1433,14 @@ impl Tuning {
             "physics_manual/default/ProceduralNoiseFreq" => scalar!(self.manual_noise_freq),
             "physics_manual/default/ProceduralNoiseScalar" => scalar!(self.manual_noise_scale),
             "physics_manual/default/NoiseVsSpeed" => curve!(self.manual_noise_vs_speed),
+            // A flag byte: any non-zero value is on.
+            "physics_mode/normal/Hash_F8CBC0F5FEF2240E" => match v.first() {
+                Some(b) => {
+                    self.manual_corrective = *b != 0.0;
+                    true
+                }
+                None => false,
+            },
             "anim_motion/jumping/clamp_low_inclusive" => scalar!(self.jump_clamp_low),
             "anim_motion/jumping/clamp_high_inclusive" => scalar!(self.jump_clamp_high),
             "anim_motion/power_slide/slide_speed_threshold" => scalar!(self.slide_speed_threshold),
@@ -1676,6 +1697,7 @@ impl Tuning {
                     || self.anim.set(name, f, c(), v)
                     || self.cam.set(name, f, c())
                     || self.moves.set(name, f, c())
+                    || self.wobble.set(name, f, c())
                     || self.biped.set(name, f, c())
             }
         }
@@ -1841,6 +1863,31 @@ mod tests {
         assert_eq!(t.anim.cond[11], 12.0);
         assert_eq!(t.anim.auto_pump[2], 0.5);
         assert!((t.anim.crouch_max_height.eval(10.0) - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn speed_wobble_and_the_manual_mode_come_through_the_rules_entry() {
+        let data = encode(&[
+            ("physics_mode/normal/Hash_77AFCE78FE1206CA", vec![12.0]),
+            ("physics_mode/normal/Hash_5B57F2CCCCEEF430", vec![1.0]),
+            ("physics_speed_wobble/default/SpeedRange", vec![9.0]),
+            (
+                "physics_speed_wobble/default/AmplitudeVsSpeed",
+                vec![0.0, 1.0, 0.0, 0.5],
+            ),
+            ("physics_mode/normal/Hash_F8CBC0F5FEF2240E", vec![0.0]),
+        ]);
+        let mut t = Tuning::BUILT_IN;
+        assert!(
+            t.manual_corrective,
+            "Skate 3's Normal has the corrective force on"
+        );
+        assert_eq!(t.apply(&data), 5);
+        assert_eq!(t.wobble.activation, 12.0);
+        assert_eq!(t.wobble.amplitude_scale, 1.0);
+        assert_eq!(t.wobble.speed_range, 9.0);
+        assert_eq!(t.wobble.amplitude_vs_speed.eval(0.5), 0.25);
+        assert!(!t.manual_corrective);
     }
 
     #[test]

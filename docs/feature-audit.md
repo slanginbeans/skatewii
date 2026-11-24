@@ -47,7 +47,7 @@ ways:
 | Carving and turn lean | done | `skater/board.rs` `ride`; `graph/riding.rs` SetTurning | `riding/steering.rs` | – |
 | Kick turns | done | `kickturn_rate`, the graph's `KickTurn` | `animation/kickturn.rs` | – |
 | Pumping | done | `board.rs` `update_pumping`; the graph's `Pumping` | `riding/pumping.rs` | – |
-| Speed wobble | missing | `TurnInput.wobble` is always 0 (`graph/host.rs`); in ROADMAP Phase 1 | `riding/speed_wobble.rs` | S |
+| Speed wobble | done | `skater/wobble.rs` (SK8's `calculate`, Skate 3's `physics_speed_wobble` and Normal onset 15 m/s, strength 0.5 as built-in defaults; `tuning/wobble.rs`), applied to the steering tilt in `board.rs` `ride`; its amplitude feeds the turn conditioner (`World::wobble`); tests `skater::wobble`, `tests/manual_wobble.rs` | `riding/speed_wobble.rs` | – |
 | Fakie, switch, turning round | done (getting on is buggy) | `update_fakie`, `Event::Switched`; switch stance when getting on is a known bug | `animation/riding_fakie.rs` | – |
 | Runouts and wall hits | done | `run_out`, `board.rs` `hit_wall` | `riding/collision_response.rs` | – |
 | Difficulty and tuning presets (Easy/Normal/Hardcore, truck tightness) | missing | Skate 3's tuning is fixed through the rules pack | `skate-game/src/difficulty.rs`, `custom_difficulty.rs` | M |
@@ -85,7 +85,7 @@ ways:
 | Primo | not a Skate 3 grind family | not in SK8's grind families or flatground's grind names | – | – |
 | Lip tricks and coping stalls (rock to fakie, axle stall, blunt) | partial | grinding into coping and the coping hold (`TimeOfGravityRelief...`), blunt from the tip box; no separate stall states | grind admission into coping | M |
 | Inverts and handplants | missing | `IsHandPlanting` and others pinned false; `ScoringHandPlants` and `SetHandPlantAnticLength` no-ops; `HandPlantTweakX/Y` unfed | `physics/handplant.rs` (+ contact, ik, trajectory) | L |
-| Manuals and nose manuals (balance meter) | partial | `update_manual`, `graph_manual`; held manuals never tip out under the graph (`PhysicsWantsManualExit` never fires) | `physics/manual/`, `input/manual_intentions.rs` | S |
+| Manuals and nose manuals (balance meter) | done | `update_manual` (no graphs: flatground's balance meter tips out), `graph_manual` publishes `PhysicsWantsManualExit` (`Skater::manual_exit`) as SK8's `apply_correction` does. Skate 3's graphs end a manual only on the stick, leaving the ground or that flag, which fires only while dragging with the mode's corrective force off (Easy); Normal has it on, so a Normal manual drags and never tips out, as on the disc. Tests: `graph::tests::manual_exit`, `tests/manual_wobble.rs` (Skate 3's own graphs). The corrective drag and no-contact torque bleed are not modelled | `physics/manual/`, `input/manual_intentions.rs` | – |
 | Manual tricks (flicks off the manual) | done | `flick_group` (`Group::Nose`/`Tail`) | same | – |
 | Reverts | done | `update_revert`, `SlideFs180`/`SlideBs180` | `physics/revert_state.rs` | – |
 | Foot plants: boneless, no-comply, fastplant | missing | `IsFootPlanting` and `ShouldPrepareOneFootAirForFootplant` pinned false; `FootPlantAbsorb` no-op; no FootJump state | `physics/boneless.rs` (state 602), `physics/footplant/`, `air/known/footplant.rs` | M |
@@ -150,8 +150,8 @@ Feel of core skating comes first, then the two features the user named, then the
 | # | Work | Why here | Size |
 |---|---|---|---|
 | 1 | Finish the known bugs (hippie jump, mid-air get-on, switch on mount, walk freeze) | everything below builds on mounting and walking | – |
-| 2 | Manual tip-out under the graph (`PhysicsWantsManualExit`) | a manual that never fails breaks the feel of lines | S |
-| 3 | Speed wobble (`TurnInput.wobble`, `riding/speed_wobble.rs`) | core riding feel at speed | S |
+| 2 | ~~Manual tip-out under the graph (`PhysicsWantsManualExit`)~~ done: published as Skate 3 does (it fires only without the corrective force, so Normal manuals never tip out, as in Skate 3) | a manual that never fails breaks the feel of lines | S |
+| 3 | ~~Speed wobble (`TurnInput.wobble`, `riding/speed_wobble.rs`)~~ done | core riding feel at speed | S |
 | 4 | **Board adjust in the air**: publish `BoardAdjust`'s MG intents (seam handling and mirroring as SK8 does), drive `SKATEPITCH`/`SKATEYAW`, and feed the adjusted board yaw and pitch to grind contact and landing | user-named; lines up grinds and landings; the S part (publishing) unblocks the clips at once | M |
 | 5 | **Drop and throw the board** (`OB_DropBoard`/`OB_ThrowBoard`/`OB_RetrieveBoard`, a free board body, `IsDeckFree`/`IsDroppingSkateboard`, `ToggleBoard`) | user-named; also needed for caveman | L |
 | 6 | Caveman and landing on the board from the air (`Mount/Air`, `LandOnBoard`, `IsLandingOnBoard`) | follows from 1 and 5 | M |

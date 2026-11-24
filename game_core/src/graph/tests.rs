@@ -1043,6 +1043,177 @@ mod in_game {
     }
 }
 
+/// The manual's way out through `PhysicsWantsManualExit`, on a synthetic pair of graphs shaped like
+/// Skate 3's tail manual: `Cycle` (entered only without `ManualBrake`, held while the physics doesn't
+/// want out) and `Brake` (only from `Cycle`, held while dragging and the physics doesn't want out).
+mod manual_exit {
+    use super::*;
+    use crate::game::Game;
+    use crate::input::{PadRaw, flag as pad_flag};
+    use crate::pack::Kind;
+
+    fn intent(name: &str, extra: &[(&str, &str)]) -> Element {
+        let mut a = vec![("name", "HasIntent"), ("intent", name)];
+        a.extend_from_slice(extra);
+        Element::of("condition", &a, vec![])
+    }
+
+    fn not(e: Element) -> Element {
+        Element::of("expression", &[("op", "not")], vec![e])
+    }
+
+    fn wants_exit() -> Element {
+        Element::of(
+            "condition",
+            &[("name", "PhysicsWantsManualExit"), ("mask", "always")],
+            vec![],
+        )
+    }
+
+    fn graphs() -> Vec<u8> {
+        let mg = |mg: &str, ag: &str, time: bool| {
+            Element::of(
+                "behaviour",
+                &[
+                    (
+                        "name",
+                        if time {
+                            "CreateMGTimeIntentFromAGIntent"
+                        } else {
+                            "CreateMGIntentFromAGIntent"
+                        },
+                    ),
+                    ("MGIntent", mg),
+                    ("AGIntent", ag),
+                ],
+                vec![],
+            )
+        };
+        let action = st(
+            "Action",
+            &[],
+            vec![
+                mg("Manual", "Manual", false),
+                mg("ManualEngageTime", "Manual", true),
+                mg("ManualBrake", "ManualBrake", false),
+            ],
+        );
+        let cycle = st(
+            "Cycle",
+            &[],
+            vec![
+                when(vec![
+                    not(intent("ManualBrake", &[("mask", "precond")])),
+                    not(wants_exit()),
+                ]),
+                go("Brake", None, vec![intent("ManualBrake", &[])]),
+            ],
+        );
+        let brake = st(
+            "Brake",
+            &[("active", "false"), ("interruptable", "false")],
+            vec![when(vec![
+                intent("ManualBrake", &[("mask", "always")]),
+                not(wants_exit()),
+            ])],
+        );
+        let manual = st(
+            "Manual",
+            &[],
+            vec![
+                when(vec![intent(
+                    "ManualEngageTime",
+                    &[("greater", "0.2"), ("mask", "precond")],
+                )]),
+                st(
+                    "TailManual",
+                    &[],
+                    vec![
+                        when(vec![intent(
+                            "Manual",
+                            &[("less", "0.0"), ("mask", "always")],
+                        )]),
+                        cycle,
+                        brake,
+                    ],
+                ),
+            ],
+        );
+        let motion = st(
+            "Motion",
+            &[],
+            vec![st(
+                "OnBoard",
+                &[],
+                vec![st(
+                    "Riding",
+                    &[],
+                    vec![st("Turning", &[], vec![manual, st("Idle", &[], vec![])])],
+                )],
+            )],
+        );
+        compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap()
+    }
+
+    fn game(corrective: bool) -> Game {
+        let bytes = crate::motion::tests::pack(&[
+            ("motion/db", Kind::MotionDb, crate::motion::tests::lib()),
+            ("motion/graph", Kind::StateGraph, graphs()),
+        ]);
+        let mut g = Game::new();
+        g.load_motion(alloc::boxed::Box::leak(bytes.into_boxed_slice()))
+            .unwrap();
+        g.skater.tuning.manual_corrective = corrective;
+        g.skater.speed = 5.0;
+        g
+    }
+
+    fn cstick(y: i8) -> PadRaw {
+        PadRaw {
+            flags: pad_flag::CONNECTED,
+            cstick_y: y,
+            ..PadRaw::default()
+        }
+    }
+
+    /// Light back into the manual, then all the way back: the tail drags.
+    fn drag(g: &mut Game) -> (u32, String) {
+        for _ in 0..60 {
+            g.update(&cstick(-47), 1.0 / 60.0);
+        }
+        let state = g.graph.as_ref().unwrap().runner.motion_state();
+        assert!(state.ends_with("TailManual/Cycle"), "{state}");
+        let mut manual = 0;
+        for _ in 0..30 {
+            g.update(&cstick(-127), 1.0 / 60.0);
+            manual += g.skater.manual.is_some() as u32;
+        }
+        (manual, g.graph.as_ref().unwrap().runner.motion_state())
+    }
+
+    #[test]
+    fn with_the_corrective_force_the_tail_drags_in_the_manual() {
+        let mut g = game(true);
+        let (manual, state) = drag(&mut g);
+        assert!(state.ends_with("TailManual/Brake"), "{state}");
+        assert_eq!(manual, 30);
+        assert!(g.skater.manual.is_some_and(|m| m.brake > 0.5));
+    }
+
+    #[test]
+    fn without_it_dragging_the_tail_ends_the_manual() {
+        let mut g = game(false);
+        let (manual, state) = drag(&mut g);
+        assert!(!state.contains("Manual"), "{state}");
+        assert!(manual <= 3, "manualled {manual} ticks into the drag");
+        assert!(g.skater.manual.is_none() && !g.skater.manual_exit);
+    }
+}
+
 /// Phase 4: channels, the typed operations, string lookups, gesture order, air tricks.
 mod phase4 {
     use super::*;

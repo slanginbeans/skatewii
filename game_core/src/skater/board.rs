@@ -172,6 +172,16 @@ impl Skater {
         SIDE_GRIP * load.max(0.0)
     }
 
+    /// The rider's centre of mass over the board (m): the posed rider's, else between the riding
+    /// animation's highest (at this speed) and lowest by the crouch (Skate 3's `anim_motion/crouching`).
+    pub fn riding_com(&self) -> f32 {
+        self.body_com.unwrap_or_else(|| {
+            let a = &self.tuning.anim;
+            let high = a.crouch_max_height.eval(self.speed.abs());
+            high - self.crouch.clamp(0.0, 1.0) * (high - a.crouch_min_height)
+        })
+    }
+
     /// One tick of riding on the ground, driven by `d`.
     pub(super) fn ride(&mut self, park: &dyn Terrain, d: &Drive, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
@@ -197,6 +207,16 @@ impl Skater {
         };
         let manual_k = if d.manual { t.manual_tilt } else { 1.0 };
         let want = t.steer_tilt(d.turn, self.speed, d.hard, self.push_steer) * manual_k;
+        // Skate 3's speed wobble shakes the tilt before the trucks take it (SK8 Ground Update).
+        let want = self.wobble.update(
+            &t.wobble,
+            wobble::WobbleInput {
+                tilt: want,
+                speed: self.speed,
+                com_height: self.riding_com(),
+                truck_tightness: t.truck_tightness,
+            },
+        );
         let blend = 1.0 - libm::powf(1.0 - t.steer_tilt_blend.clamp(0.0, 1.0), ticks);
         self.deck_tilt += (want - self.deck_tilt) * blend;
         self.truck_ramp = (self.truck_ramp + dt).min(TRUCK_RAMP);
