@@ -147,8 +147,9 @@ content second.
   park, grind targeting in the landing prediction and the grind air assist, stick pitch and yaw on the
   rail, friction by family and class, lean-off, entry and in-grind wipeouts, pop-outs with energy, every
   grind name the state graphs know (BF_ variants included), the grind trees' twist and height
-- [ ] Grind balance as a rigid board (Skate 3's pins and forces; flatground holds the board on the rail),
-  the in-grind deck closing-speed wipeout, grind grabs, a light physics fall for bails (Skate 3's ragdoll)
+- [x] Grind balance (Skate 3's pins and forces across the rail, falling off or bailing either side), the
+  grind closing-speed wipeout, grind grabs (docs/graph-runner.md "Grinds")
+- [ ] A light physics fall for bails (Skate 3's ragdoll)
 - [x] Camera as Skate 3's (phase 7, docs/graph-runner.md "The camera"): the disc's camera graph run on
   the graph runner choosing the disc's shots (blend trees by speed, slope, steering, air time, grind
   speed and incline), sine-eased shot transitions, the movement compass, heading/elevation/pan/tilt

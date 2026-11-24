@@ -15,9 +15,11 @@
 //!   truck). The velocity across the rail is turned along it (partly, by family, from the air; by
 //!   `VertEngagementHelpVsVelY` riding into it). Too sharp a change, too fast across a thin rail or towards
 //!   a ledge's high side, or a rail more than 60 degrees off the deck from the air, wipes out.
-//! - **On the rail**: the board is held on the rail (a kinematic stand-in for Skate 3's rigid board and
-//!   its pins); gravity along the rail, friction by family and rail class growing over the grind
-//!   (`FrictionVsTime`), riding into coping holds the board up for a while (`TimeOfGravityRelief...`),
+//! - **On the rail**: the board slides along the rail under gravity and friction (by family and rail
+//!   class, growing over the grind: `FrictionVsTime`), and across it under Skate 3's balance forces
+//!   ([`super::balance`]: the pins, the slides' and tip slides' stick pushes, the exit lean), and comes
+//!   off the rail when the rail leaves its box (or wipes out on the closing speed); riding into coping
+//!   holds the board up for a while (`TimeOfGravityRelief...`),
 //!   the stick's pitch tips a 50-50 into a 5-0 or nosegrind and lifts or drops the free end, the sticks'
 //!   x turn a 5-0 across the rail (crooked, overcrook ...); tip slides lean 20 degrees, blunts 42; on
 //!   ledges (and tip slides on anything but a thin rail) the board leans off after a while
@@ -34,6 +36,7 @@
 //! Where Skate 3's value is a force on its rigid board, flatground turns it into an acceleration with an
 //! effective mass of its own ([`GRIND_MASS`]).
 
+use super::balance;
 use super::*;
 use crate::rails::{Rail, RailClass, upright};
 
@@ -139,10 +142,6 @@ const LEAN_DELAY_BELOW: f32 = 0.8;
 const LEAN_DELAY_COPING: f32 = 0.1;
 const LEAN_FORCED: f32 = 28.0;
 const LEAN_FORCED_NO_GROUND: f32 = 15.0;
-/// The lean-off push at full assist (N, SK8 support.rs), through the effective mass; and the most it
-/// adds (m/s, ours).
-const EXIT_PUSH: f32 = 65.0;
-const EXIT_PUSH_MAX: f32 = 2.5;
 /// Leaving by leaning off or stopping: at least this much speed off the low side (m/s, ours).
 const EXIT_MIN_PUSH: f32 = 0.6;
 /// Slower than this along the rail for this long (and not held on coping) steps off (ours).
@@ -181,6 +180,13 @@ pub const GRIND_POINTS: u32 = 150;
 pub const GRIND_POINTS_PER_S: f32 = 200.0;
 /// A grind shorter than this isn't scored.
 const GRIND_MIN_TIME: f32 = 0.15;
+/// A grind grab is named with the grind once held this long (s: the score's 12 ticks, ours).
+const GRAB_MIN_TIME: f32 = 0.2;
+/// Grind grabs score as air grabs do (ours).
+const GRIND_GRAB_POINTS: u32 = 200;
+const GRIND_GRAB_POINTS_PER_S: f32 = 150.0;
+/// Rails near the board looked at for contact (more than this many near at once are rare).
+const NEAR_RAILS: usize = 16;
 
 /// Skate 3's grind families (SK8 `Family`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -322,8 +328,21 @@ pub struct Grind {
     /// Seconds of coping hold left.
     pub relief: f32,
     pub lean: Lean,
-    /// The lean-off's push built up (m/s, off the low side).
-    pub push: f32,
+    /// Across the rail (SK8's rigid board, [`super::balance`]): how far the family's reference point
+    /// (the deck's middle, the truck on the rail, the tip) is off the rail along the segment's across
+    /// axis (`dir x up`, m), and how fast it moves (m/s).
+    pub lateral: f32,
+    pub lateral_vel: f32,
+    /// Ticks left of the tip slide's pull in after riding fast onto the tip.
+    pub tip_hold: u32,
+    /// A pop was wound up on a slide (sticky for the grind, SK8 `preparing_jump`).
+    pub preparing: bool,
+    /// The closing speed the rail stopped this tick (m/s, across the rider's ground plane).
+    pub closing: f32,
+    /// The grind grab held now (`FSGRAB`, `NOSEGRAB` ...) and for how long, and the longest one held
+    /// in this grind (scored with it).
+    pub grab: Option<(&'static str, f32)>,
+    pub grabbed: Option<(&'static str, f32)>,
     /// Seconds slower than the stop speed.
     pub slow: f32,
     pub naming: Naming,
@@ -338,14 +357,28 @@ impl Grind {
         self.naming.anim.unwrap_or("BS_50_50")
     }
 
-    /// The name scored (after it held [`NAME_STABLE`] ticks), as shown: `FS 50-50`, `BS CROOKED GRIND`.
+    /// The name scored (after it held [`NAME_STABLE`] ticks), as shown: `FS 50-50`, `BS CROOKED GRIND`;
+    /// with the grind grab held longest, `FS 5-0 NOSEGRAB`.
     pub fn display(&self) -> String {
-        display_name(
+        let name = display_name(
             self.naming
                 .scoring
                 .or(self.naming.anim)
                 .unwrap_or("BS_50_50"),
-        )
+        );
+        match self.grabbed {
+            Some((grab, t)) if t >= GRAB_MIN_TIME => {
+                format!("{name} {}", balance::grab_display(grab))
+            }
+            _ => name,
+        }
+    }
+
+    /// The graph name's grind without side or `BF_` (`5_O`, `CROOK` ...).
+    pub fn base(&self) -> &'static str {
+        let n = self.graph_name();
+        let n = n.strip_prefix("BF_").unwrap_or(n);
+        n.get(3..).unwrap_or(n)
     }
 
     /// Frontside, from the name.
@@ -877,20 +910,24 @@ impl Skater {
         let t = self.tuning.grind;
         let f = self.frame();
         let rails = park.rails();
-        let near: Vec<usize> = rails
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.near(f.deck, 0.8))
-            .map(|(i, _)| i)
-            .collect();
-        if near.is_empty() {
+        // No allocation: this runs every tick in the air and riding.
+        let mut near_buf = [0usize; NEAR_RAILS];
+        let mut count = 0;
+        for (i, r) in rails.iter().enumerate() {
+            if count < NEAR_RAILS && r.near(f.deck, 0.8) {
+                near_buf[count] = i;
+                count += 1;
+            }
+        }
+        if count == 0 {
             return None;
         }
+        let near = &near_buf[..count];
         let td = t.deck_to_truck;
         // The nearest crossing of a box (to `reference`) over every nearby segment.
         let cross_box = |corner: Vec3, e1: Vec3, e2: Vec3, reference: Vec3| {
             let mut best: Option<(f32, Hit)> = None;
-            for &ri in &near {
+            for &ri in near {
                 let r = &rails[ri];
                 for (si, w) in r.points.windows(2).enumerate() {
                     if r.classes
@@ -1125,6 +1162,32 @@ impl Skater {
     }
 }
 
+/// Where the family's reference point (the deck's middle for a 50-50 and the slides, the truck on the
+/// rail for a 5-0, the rail's place on the deck at entry for the slides) is across the rail from `p`
+/// (m along `across`), for a deck at `deck` with its nose along `fwd`: the inverse of the board's
+/// placement in `slide_rail`.
+#[allow(clippy::too_many_arguments)]
+fn ref_lateral(
+    family: Family,
+    front: bool,
+    along: f32,
+    deck_to_truck: f32,
+    deck: Vec3,
+    fwd: Vec3,
+    p: Vec3,
+    across: Vec3,
+) -> f32 {
+    let off = deck - p;
+    match family {
+        Family::FiftyFifty => off.dot(across),
+        Family::FiveO => {
+            let truck = if front { deck_to_truck } else { -deck_to_truck };
+            (off + fwd * truck).dot(across)
+        }
+        _ => off.dot(across) + along * fwd.dot(across),
+    }
+}
+
 /// The truck the board is on now, in a 5-0.
 fn current_front(s: &Skater, current: Option<Family>) -> Option<bool> {
     match (current, &s.grind) {
@@ -1256,8 +1319,20 @@ impl Skater {
             self.bail("crossed the rail too fast", events);
             return true;
         }
-        // Onto the rail: the speed along it is the entry velocity's (3-D, no minimum).
+        // The closing speed (SK8 post.rs, the board's contact with the rail): the speed into the rail it
+        // stops, across the rider's ground plane. Square to the rail that is straight down the rider's
+        // up; a board rolled or tipped against the rail takes part of it sideways or along.
+        let removed = n * entry_v.dot(n).min(0.0);
+        if balance::closing_xz(removed, f.up, f.fwd) > t.grind.wipeout_xz {
+            self.pos = c.point;
+            self.vel = v * 0.5;
+            self.bail("slammed into the rail", events);
+            return true;
+        }
+        // Onto the rail: the speed along it is the entry velocity's (3-D, no minimum); the speed across
+        // it is what the entry left (the balance forces take it from there).
         let along = entry_v.dot(c.dir);
+        let across_s = c.dir.cross(n).normalize_or(Vec3::ZERO);
         let dir = if along >= 0.0 { 1.0 } else { -1.0 };
         let into = self
             .trick_label()
@@ -1323,7 +1398,29 @@ impl Skater {
                 delay,
                 angle: 0.0,
             },
-            push: 0.0,
+            lateral: ref_lateral(
+                c.family,
+                c.front,
+                along_board.clamp(-0.42, 0.42),
+                t.grind.deck_to_truck,
+                f.deck,
+                f.fwd,
+                c.point,
+                across_s,
+            ),
+            lateral_vel: entry_v.dot(across_s),
+            tip_hold: if c.family == Family::Tipslide
+                && c.entry == Entry::DropIn
+                && v.length() > balance::TIP_HOLD_SPEED
+            {
+                balance::TIP_HOLD_TICKS
+            } else {
+                0
+            },
+            preparing: false,
+            closing: 0.0,
+            grab: None,
+            grabbed: None,
             slow: 0.0,
             naming: Naming::default(),
             backside,
@@ -1373,8 +1470,41 @@ impl Skater {
         g.naming.update(name, first);
     }
 
-    /// One tick on the rail: the controls, the board's pose, gravity and friction along it, the lean-off,
-    /// and leaving it.
+    /// Grind grabs (Skate 3's `OnBoard/Grinding/<grind>/<grind>_<grab>` states, entered from the
+    /// action graph's `LeftGroundGrab` / `RightGroundGrab`): a trigger fully in grabs with that hand, the
+    /// left one the frontside grab and the right one the backside grab (the other way round for the
+    /// mirrored rider), each as this grind has it; both hands the frontside one where there is one. With
+    /// the state graphs, the grab their grind-grab states score.
+    fn grind_grab(&self, g: &mut Grind, pad: &Pad, dt: f32) {
+        let now = match self.graph {
+            Some(gc) => gc.grind_grab,
+            None => {
+                let full = crate::graph::input::TRIGGER_FULL;
+                let (l, r) = (pad.trig_l >= full, pad.trig_r >= full);
+                let (fs, bs) = if self.mirrored() { (r, l) } else { (l, r) };
+                let [fs_grab, bs_grab] = balance::grind_grabs(g.base());
+                match (fs, bs) {
+                    (true, true) => fs_grab.or(bs_grab),
+                    (true, false) => fs_grab,
+                    (false, true) => bs_grab,
+                    (false, false) => None,
+                }
+            }
+        };
+        g.grab = match (g.grab, now) {
+            (Some((a, t)), Some(b)) if a == b => Some((a, t + dt)),
+            (_, Some(b)) => Some((b, 0.0)),
+            (_, None) => None,
+        };
+        if let Some((a, t)) = g.grab
+            && g.grabbed.is_none_or(|(_, longest)| t > longest)
+        {
+            g.grabbed = Some((a, t));
+        }
+    }
+
+    /// One tick on the rail: the controls, gravity and friction along it, the board's pose, the balance
+    /// across it ([`super::balance`]), the lean-off, and leaving it.
     pub(super) fn slide_rail(
         &mut self,
         park: &dyn Terrain,
@@ -1384,12 +1514,13 @@ impl Skater {
         events: &mut Vec<Event>,
     ) {
         let t = self.tuning;
-        let (Some(mut g), Some(rail)) = (
-            self.grind.clone(),
-            self.grind.as_ref().and_then(|g| park.rails().get(g.rail)),
-        ) else {
+        // Taken out for the tick (no clone: the grind owns a string) and put back before naming.
+        let Some(mut g) = self.grind.take() else {
+            self.take_off(None);
+            return;
+        };
+        let Some(rail) = park.rails().get(g.rail) else {
             // The rail went away (a park reload): just drop.
-            self.grind = None;
             self.take_off(None);
             return;
         };
@@ -1397,6 +1528,16 @@ impl Skater {
         let travel = d * g.dir;
         let n = upright(d);
         let ticks = dt * 60.0;
+        let td = t.grind.deck_to_truck;
+        let last = self.frame();
+
+        // Grind grabs, and the 5-0's free end they hold up (`PhysGrindGrabMinHeight`).
+        self.grind_grab(&mut g, pad, dt);
+        let grab_min = match self.graph {
+            Some(gc) => gc.grind_grab_min_height,
+            None if g.grab.is_some() && g.family == Family::FiveO => balance::GRAB_MIN_HEIGHT,
+            None => 0.0,
+        };
 
         // Controls (SK8 control.rs): the stick's pitch, the sticks' yaw.
         let up_down = pad.flick[1];
@@ -1427,6 +1568,9 @@ impl Skater {
                         input.min(0.0)
                     };
                 }
+                if let Some(v) = balance::grab_lift(grab_min, height, lift_sign) {
+                    target = v;
+                }
                 let yaw = (dead(translation) * YAW_STICKS + dead(nudge) * YAW_NUDGE)
                     .clamp(-YAW_STICKS, YAW_STICKS);
                 (yaw * yaw * yaw, target * target * target, target != input)
@@ -1446,11 +1590,21 @@ impl Skater {
         if g.pitch.abs() < 1e-4 {
             g.pitch = 0.0;
         }
-        // 50-50 into 5-0 or nosegrind (ChangeGrind within 24 degrees), and back once level.
+        // 50-50 into 5-0 or nosegrind (ChangeGrind within 24 degrees): tipped by the stick's pitch, or
+        // the sticks pushed fully to the side (a 50-50 needs them under 0.9; then the back truck, or the
+        // front one with the C-stick up, as SK8's investigator picks it), and back once level.
+        let family_was = g.family;
         match g.family {
-            Family::FiftyFifty if g.pitch.abs() > PITCH_TIPS && within(d, self.vel, CHANGE_DEG) => {
+            Family::FiftyFifty
+                if (g.pitch.abs() > PITCH_TIPS || translation.abs() >= FIFTY_BALANCE)
+                    && within(d, self.vel, CHANGE_DEG) =>
+            {
                 g.family = Family::FiveO;
-                g.front = g.pitch > 0.0;
+                g.front = if g.pitch.abs() > PITCH_TIPS {
+                    g.pitch > 0.0
+                } else {
+                    up_down > 0.35
+                };
                 g.tilt = 0.0;
                 g.twist = 0.0;
             }
@@ -1460,9 +1614,10 @@ impl Skater {
                 if g.tilt.abs() < FIFTY_AGAIN
                     && g.pitch.abs() <= PITCH_TIPS
                     && g.twist.abs() < FIFTY_TWIST
+                    && translation.abs() < FIFTY_BALANCE
                     && {
                         let sign = if g.front { -1.0 } else { 1.0 };
-                        let other = g.s + self.fwd.dot(d) * sign * 2.0 * t.grind.deck_to_truck;
+                        let other = g.s + self.fwd.dot(d) * sign * 2.0 * td;
                         (0.0..=rail.length()).contains(&other)
                     } =>
             {
@@ -1472,21 +1627,37 @@ impl Skater {
             }
             _ => {}
         }
+        if g.family != family_was {
+            // The reference point moves (the deck's middle, the truck): where the board is stays.
+            let across = d.cross(n).normalize_or(Vec3::ZERO);
+            g.lateral = ref_lateral(
+                g.family, g.front, g.along, td, last.deck, last.fwd, g.point, across,
+            );
+        }
         if g.family == Family::FiveO {
             g.tilt = (g.tilt + g.pitch * PITCH_RATE * ticks).clamp(-TILT_MAX, TILT_MAX);
             g.twist = (g.twist - g.yaw * PITCH_RATE * ticks).clamp(-TWIST_MAX, TWIST_MAX);
         }
 
-        // Along the rail: gravity, friction by family and class growing over time.
+        // Along the rail: gravity, and friction by family and class growing over time, which damps
+        // the whole velocity in the rail's plane, the speed across it too (SK8 `friction`).
         let friction = friction_decel(&t, g.family, g.class, n.y, g.time);
         let gravity = -t.gravity * travel.y;
         g.speed += gravity * dt;
-        g.speed = approach(g.speed, 0.0, friction * dt);
+        let planar = sqrtf(g.speed * g.speed + g.lateral_vel * g.lateral_vel);
+        if planar > 0.001 {
+            let k = (friction * dt / planar).min(1.0);
+            g.speed -= g.speed * k;
+            g.lateral_vel -= g.lateral_vel * k;
+        }
         if g.speed < 0.0 {
             // Sliding back down the rail.
             g.speed = -g.speed;
             g.dir = -g.dir;
         }
+        let travel_was = d * g.dir;
+        let across_was = d.cross(n).normalize_or(Vec3::ZERO);
+        let v_was = travel_was * g.speed + across_was * g.lateral_vel;
         g.s += g.dir * g.speed * dt;
         g.time += dt;
         g.relief = (g.relief - dt).max(0.0);
@@ -1494,6 +1665,19 @@ impl Skater {
         g.point = p;
         let travel = d * g.dir;
         let n = upright(d);
+        let across_s = d.cross(n).normalize_or(Vec3::ZERO);
+        // Round a bend the rail takes the board with it: the velocity into the rail's new plane is
+        // stopped (its closing speed), the rest goes on along and across it; over a crest the board
+        // follows the rail, keeping its speed.
+        let into = v_was.dot(n);
+        let along = v_was.dot(travel).max(0.0);
+        g.lateral_vel = v_was.dot(across_s);
+        g.speed = if into >= 0.0 {
+            sqrtf(along * along + into * into)
+        } else {
+            along
+        };
+        g.closing = balance::closing_xz(n * into.min(0.0), last.up, last.fwd);
         let (class, high) = rail.class_at(g.s);
         g.class = class;
         if class.is_ledge() {
@@ -1525,11 +1709,6 @@ impl Skater {
                 -side
             }
         };
-        if g.lean.angle > 0.0 {
-            g.push = (g.push
-                + t.grind.exit_assist.eval(g.lean.angle) * EXIT_PUSH / GRIND_MASS * dt)
-                .min(EXIT_PUSH_MAX);
-        }
         let forced = g.lean.angle > LEAN_FORCED
             || (g.lean.angle > LEAN_FORCED_NO_GROUND && {
                 let start = p + low_side * 0.1;
@@ -1540,7 +1719,7 @@ impl Skater {
             });
 
         // The board's pose: the target frame for the family, eased towards (SK8 orientation.rs).
-        let frame = self.frame();
+        let frame = last;
         let (target_up, target_fwd) = match g.family {
             Family::FiftyFifty => {
                 let fwd = if frame.fwd.dot(travel) >= 0.0 {
@@ -1614,17 +1793,88 @@ impl Skater {
         let fwd = tangent(frame.fwd.lerp(target_fwd, k), up);
         // The deck slammed too far from where the rail holds it: a wipeout (SK8 post.rs).
         let error = libm::acosf(up.dot(target_up).clamp(-1.0, 1.0));
+
+        // Across the rail (SK8's rigid board): each family's balance forces on its reference point,
+        // through the effective mass. Forces are along the segment's across axis; the sticks push
+        // along the travel's (its right, as the rider sees the rail ahead).
+        let fwd_a = fwd.dot(across_s);
+        let to_travel = g.dir;
+        let slope = balance::pin_slope(&t.grind, grind_n.dot(n), g.relief);
+        g.preparing |= match self.graph {
+            Some(gc) => gc.anticipating,
+            None => flick.crouch > 0.0,
+        };
+        let mut force = 0.0;
+        let mut stop = false;
+        match g.family {
+            Family::FiftyFifty => {
+                force += balance::pin(balance::PIN_FIFTY, -g.lateral, g.lateral_vel, slope);
+            }
+            Family::FiveO => {
+                force += balance::pin(balance::PIN_FIVE, -g.lateral, g.lateral_vel, slope);
+            }
+            Family::Backslash => {
+                let reach = balance::BLUNT_REACH * g.along.signum();
+                let error = -g.lateral + (g.along - reach) * fwd_a;
+                force += balance::pin(balance::PIN_BLUNT, error, g.lateral_vel, slope);
+            }
+            Family::Boardslide | Family::Darkslide => {
+                let offset = (g.lateral - g.along * fwd_a) * to_travel;
+                let (f, stopped) = balance::slide(
+                    g.family == Family::Darkslide,
+                    offset,
+                    g.lateral_vel * to_travel,
+                    translation,
+                    class.is_ledge(),
+                    g.preparing,
+                );
+                force += f * to_travel;
+                stop = stopped;
+            }
+            Family::Tipslide => {
+                let offset = (g.lateral - g.along * fwd_a) * to_travel;
+                let inward = if offset > 0.0 { -1.0 } else { 1.0 };
+                force += balance::tip(nudge, g.tip_hold > 0, inward) * to_travel;
+            }
+        }
+        g.tip_hold = g.tip_hold.saturating_sub(1);
+        force += low_side.dot(across_s) * balance::exit_lean(&t.grind, g.lean.angle);
+        if stop {
+            g.lateral_vel = 0.0;
+        }
+        g.lateral_vel += force / GRIND_MASS * dt;
+        g.lateral += g.lateral_vel * dt;
+
+        // Still on the rail: it must stay in the box it is in (the truck's width, the deck between the
+        // trucks, the tip); a tip slide pushed in past its truck is a boardslide.
+        let q = g.along - g.lateral * fwd_a;
+        let fell = match g.family {
+            Family::FiftyFifty | Family::FiveO => {
+                g.lateral.abs() > t.grind.truck_to_wheel * up.cross(fwd).dot(across_s).abs()
+            }
+            Family::Boardslide => q.abs() > td,
+            Family::Darkslide => q.abs() > DARK_HALF,
+            Family::Tipslide | Family::Backslash => {
+                let on_tip = q * g.along.signum();
+                if on_tip < td {
+                    g.family = Family::Boardslide;
+                }
+                on_tip > td + TIP_LENGTH
+            }
+        };
+
         self.normal = up;
         self.contact_n = up;
         self.fwd = fwd;
-        // Where the board sits so the truck, tip or deck on the rail stays on it.
+        // Where the board sits so the truck, tip or deck on the rail stays on it, moved across the rail
+        // by the balance.
         let offset = match g.family {
             Family::FiftyFifty => 0.0,
             Family::FiveO => {
                 if g.front {
-                    t.grind.deck_to_truck
+                    td
                 } else {
-                    -t.grind.deck_to_truck
+                    -td
                 }
             }
             _ => g.along,
@@ -1636,16 +1886,26 @@ impl Skater {
             Family::Darkslide => DECK_HEIGHT + DECK_UNDERSIDE,
             _ => DECK_HEIGHT - DECK_UNDERSIDE,
         };
-        self.pos = p - fwd * offset - up * sink;
+        self.pos = p + across_s * g.lateral - fwd * offset - up * sink;
         self.speed = g.speed * if fwd.dot(travel) >= 0.0 { 1.0 } else { -1.0 };
-        self.vel = travel * g.speed;
-        self.grind = Some(g.clone());
+        self.vel = travel * g.speed + across_s * g.lateral_vel;
+        self.grind = Some(g);
         self.name_grind(d, grind_n, false);
-        let Some(g) = self.grind.clone() else { return };
-        if error > t.grind.wipeout_angle && g.time > 0.1 {
-            self.grind = None;
-            self.vel = travel * g.speed;
-            self.bail("the deck slammed off the rail", events);
+        let Some(mut g) = self.grind.take() else {
+            return;
+        };
+        // Wipeouts (SK8 post.rs): the deck slammed too far from where the rail holds it, or the board
+        // hit the rail too hard (its closing speed across the rider's ground plane).
+        let slammed = if error > t.grind.wipeout_angle && g.time > 0.1 {
+            Some("the deck slammed off the rail")
+        } else if g.closing > t.grind.wipeout_xz {
+            Some("slammed into the rail")
+        } else {
+            None
+        };
+        if let Some(reason) = slammed {
+            self.vel = travel * g.speed + across_s * g.lateral_vel;
+            self.bail(reason, events);
             return;
         }
 
@@ -1661,20 +1921,35 @@ impl Skater {
         };
         let off_end = g.s <= 0.0 || g.s >= rail.length();
         let stopped = g.speed < STOP_SPEED && g.relief <= 0.0;
-        let slow = if stopped { g.slow + dt } else { 0.0 };
-        if let Some(gr) = &mut self.grind {
-            gr.slow = slow;
-        }
-        let leaving = pop.is_some() || off_end || forced || slow > STOP_TIME;
+        g.slow = if stopped { g.slow + dt } else { 0.0 };
+        let stalled = g.slow > STOP_TIME;
+        let leaving = pop.is_some() || off_end || forced || stalled || fell;
         if !leaving {
+            self.grind = Some(g);
             return;
         }
+        // A board or dark slide that stalls on a rail (not a ledge) hangs up on it: Skate 3's slides
+        // wipe out there (SK8 involuntary.rs, wipeout 10), where the grinds and ledges step off.
+        if pop.is_none()
+            && stalled
+            && !forced
+            && !off_end
+            && matches!(g.family, Family::Boardslide | Family::Darkslide)
+            && !class.is_ledge()
+        {
+            self.vel = travel * g.speed;
+            self.bail("the slide hung up on the rail", events);
+            return;
+        }
+        let leaned = forced || (fell && g.lean.angle > 0.0);
         self.grind_exit = Some(if pop.is_some() {
             "popped"
-        } else if forced {
+        } else if leaned {
             "leaned off"
         } else if off_end {
             "off the end"
+        } else if fell {
+            "fell off"
         } else {
             "stopped"
         });
@@ -1684,25 +1959,33 @@ impl Skater {
                 Some((tr, _)) => format!("{tr} {}", g.display()),
                 None => g.display(),
             };
+            let grab = g
+                .grabbed
+                .filter(|(_, t)| *t >= GRAB_MIN_TIME)
+                .map_or(0, |(_, t)| {
+                    GRIND_GRAB_POINTS + (t * GRIND_GRAB_POINTS_PER_S) as u32
+                });
             let points = g.into.as_ref().map_or(0, |t| t.1)
                 + GRIND_POINTS
-                + (g.time * GRIND_POINTS_PER_S) as u32;
+                + (g.time * GRIND_POINTS_PER_S) as u32
+                + grab;
             events.push(Event::Landed { name, points });
         }
         let backwards = self.fwd.dot(travel) < 0.0;
         let square = if backwards { -travel } else { travel };
-        let lean_off = forced || (slow > STOP_TIME && pop.is_none());
-        self.grind = None;
+        let lean_off = leaned || (stalled && pop.is_none());
         self.approach.away = 0;
-        let mut vel = travel * g.speed;
-        self.pos = p + Vec3::UP * 0.02;
+        let mut vel = travel * g.speed + across_s * g.lateral_vel;
+        self.pos = p + across_s * g.lateral + Vec3::UP * 0.02;
         if pop.is_none() {
             // Not popped: this rail can't be taken again straight away (the boxes still touch it).
             self.regrind_block = Some((g.rail, LEAN_OFF_BLOCK));
         }
+        // Leaned (or stepped) off: pushed off the low side, at least `EXIT_MIN_PUSH`.
+        let off_low_now = (across_s * g.lateral_vel).dot(low_side);
+        let off_low = off_low_now.max(EXIT_MIN_PUSH);
         if lean_off {
-            // Leaned (or stepped) off: pushed off the low side.
-            vel += low_side * g.push.max(EXIT_MIN_PUSH);
+            vel += low_side * (off_low - off_low_now);
             self.pos += low_side * 0.05;
         } else if off_end && !g.family.is_slide() && pop.is_none() {
             // A grind off the end lifts a little (SK8 release nudge, not for slides).
@@ -1711,7 +1994,7 @@ impl Skater {
         // Squared back up along the rail, nose first or tail first, whichever is nearer; leaning off
         // slower along the rail than off it (a rock on coping), the board stays as it is and turns to
         // the landing in the air.
-        if !(lean_off && g.speed < g.push.max(EXIT_MIN_PUSH)) {
+        if !(lean_off && g.speed < off_low) {
             self.fwd = square;
             self.normal = Vec3::UP;
             self.contact_n = Vec3::UP;

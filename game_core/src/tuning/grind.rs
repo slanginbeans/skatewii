@@ -1,8 +1,8 @@
 //! Grind tuning: the numbers Skate 3's grinds read from its tuning database (`physics_grinds`,
 //! `physics_grinds_air`, the grind fields of `physics_trajectory`, `physics_wipeout` and `physics_mode`,
 //! the board's dimensions in `physicsdeck` / `physicstrucks`, and `anim_motion/grind_twist` /
-//! `grind_height`). The built-in values are flatground's own; the player's disc supplies Skate 3's
-//! through the rules pack (`fg_import rules`).
+//! `grind_height`). The built-in values are Skate 3's own (read off its tuning database); the player's
+//! disc supplies them again through the rules pack (`fg_import rules`).
 
 use super::Curve;
 
@@ -24,6 +24,9 @@ pub struct GrindTuning {
     /// Lean-off: degrees against seconds past the delay, and the push off (0..1) against degrees.
     pub exit_lean: Curve,
     pub exit_assist: Curve,
+    /// The lateral pins' strength (0..1) against the grind normal's up against the rail's upmost
+    /// normal (cosine): a board leaning off the rail is held less (gravity relief holds it fully).
+    pub pin_vs_slope: Curve,
     /// Contact boxes: a truck's half width, the deck centre to a truck, how far above and below the deck
     /// the deck box reaches (m).
     pub truck_to_wheel: f32,
@@ -103,33 +106,65 @@ pub struct GrindTuning {
 }
 
 impl GrindTuning {
-    /// flatground's own values.
+    /// Skate 3's values (its tuning database, as `fg_import values` reads them).
     pub const BUILT_IN: GrindTuning = GrindTuning {
-        friction_vs_time: Curve::new(&[(0.0, 0.65), (1.0, 0.72), (2.2, 0.83), (4.0, 1.0)]),
-        entry_vs_slope: Curve::new(&[(0.0, 0.7), (0.35, 0.84), (0.75, 0.92), (1.0, 1.0)]),
-        vert_help: Curve::new(&[(0.0, 0.0), (0.3, 0.4), (0.6, 0.7), (0.85, 0.95)]),
-        relief_vs_vy: Curve::new(&[(0.0, 0.0), (1.2, 0.9), (3.0, 1.5), (10.0, 2.0)]),
-        relief_vs_speed: Curve::new(&[(0.0, 1.0), (3.5, 1.4), (7.0, 1.8), (10.0, 2.2)]),
+        friction_vs_time: Curve::new(&[
+            (0.0, 0.632_812_5),
+            (0.956_701, 0.718_75),
+            (2.197_938, 0.828_125),
+            (4.0, 1.0),
+        ]),
+        entry_vs_slope: Curve::new(&[
+            (0.0, 0.695_312_5),
+            (0.356_701, 0.835_937_5),
+            (0.744_329_9, 0.921_875),
+            (1.0, 1.0),
+        ]),
+        vert_help: Curve::new(&[
+            (0.0, 0.0),
+            (0.308_247_4, 0.382_812_5),
+            (0.623_711_3, 0.710_937_7),
+            (0.841_237_1, 0.953_125),
+        ]),
+        relief_vs_vy: Curve::new(&[
+            (0.0, 0.0),
+            (1.164_948, 0.906_25),
+            (3.134_021, 1.5),
+            (10.0, 2.0),
+        ]),
+        relief_vs_speed: Curve::new(&[
+            (0.0, 1.0),
+            (3.680_413, 1.375),
+            (7.195_876, 1.828_125),
+            (10.0, 2.203_125),
+        ]),
         exit_lean: Curve::new(&[
             (0.0, 0.0),
-            (0.65, 0.0),
-            (0.9, 5.0),
-            (1.1, 14.0),
-            (1.25, 28.0),
-            (1.35, 29.5),
-            (1.5, 30.0),
+            (0.648_959_5, 0.0),
+            (0.889_175_3, 4.5),
+            (1.082_147, 14.142_86),
+            (1.238_66, 28.285_72),
+            (1.360_825, 29.571_43),
+            (1.450_516, 29.892_86),
+            (1.5, 30.214_28),
         ]),
-        exit_assist: Curve::new(&[(0.0, 0.0), (11.0, 0.0), (56.0, 1.0), (90.0, 1.0)]),
-        truck_to_wheel: 0.1,
-        deck_to_truck: 0.24,
+        exit_assist: Curve::new(&[(0.0, 0.0), (11.319_59, 0.0), (56.319_59, 1.0), (90.0, 1.0)]),
+        pin_vs_slope: Curve::new(&[
+            (0.0, 0.0),
+            (0.762_886_6, 0.0),
+            (0.910_309_3, 0.368_055_6),
+            (1.0, 1.0),
+        ]),
+        truck_to_wheel: 0.095,
+        deck_to_truck: 0.243,
         test_above: 0.03,
         test_below: 0.2,
-        angle_50: 15.0,
-        angle_5o: 60.0,
+        angle_50: 16.0,
+        angle_5o: 65.0,
         angle_board: 30.0,
         angle_tip: 40.0,
         yaw_50: 1.0,
-        yaw_5o: 0.05,
+        yaw_5o: 0.03,
         yaw_board: 0.6,
         yaw_tip: 1.0,
         reach_50: 0.8,
@@ -140,29 +175,32 @@ impl GrindTuning {
         max_offset_step: 0.03,
         max_angle_step: 6.0,
         frames: 8.0,
-        stomp: -18.0,
-        tip_fraction: 0.45,
-        deck_mid_length: 0.6,
-        deck_end_size: 0.12,
-        deck_end_angle: 12.0,
-        truck_z: -0.057,
-        truck_y: -0.055,
-        lock_dist: 0.85,
+        stomp: -20.0,
+        tip_fraction: 0.44,
+        deck_mid_length: 0.59,
+        deck_end_size: 0.13,
+        deck_end_angle: 13.0,
+        truck_z: -0.052,
+        truck_y: -0.0565,
+        lock_dist: 0.9,
         lock_ledge: [0.35, 0.5, 0.65, 1.0],
         max_speed_sq_ledge: 36.0,
         max_speed_sq_rail: 64.0,
         max_speed_down: 7.0,
         tip_scalar: 0.7,
-        adjust_max_angle: 12.0,
+        adjust_max_angle: 11.0,
         offset: -0.2,
         landing_vel_scalar: 0.1,
         landing_max_angle: 20.0,
         score: 1_000_000.0,
         penalty: Curve::new(&[
             (0.0, -1000.0),
-            (0.05, -700.0),
-            (0.15, -400.0),
-            (0.3, -150.0),
+            (0.036_644_98, -764.286),
+            (0.070_846_9, -610.714),
+            (0.127_850_2, -428.571_4),
+            (0.208_469_1, -278.571_4),
+            (0.322_475_4, -142.857_1),
+            (0.424_267_1, -50.000_01),
             (0.5, 0.0),
         ]),
         wipeout_xz: 6.0,
@@ -233,6 +271,7 @@ impl GrindTuning {
             }
             "physics_grinds/default/ExitLeanAngleVsTime" => curve!(self.exit_lean),
             "physics_grinds/default/ExitAssistVsLeanAngle" => curve!(self.exit_assist),
+            "physics_grinds/default/PinVsSlope" => curve!(self.pin_vs_slope),
             "physics_grinds/default/TruckToWheel" => scalar!(self.truck_to_wheel),
             "physics_grinds/default/DeckCenterToTruck" => scalar!(self.deck_to_truck),
             "physics_grinds/default/TestDepthEpsilon" => scalar!(self.test_above),
@@ -323,6 +362,7 @@ pub const PATHS: &[&str] = &[
     "physics_grinds/default/GravityReliefTimeVsLinearSpeed",
     "physics_grinds/default/ExitLeanAngleVsTime",
     "physics_grinds/default/ExitAssistVsLeanAngle",
+    "physics_grinds/default/PinVsSlope",
     "physics_grinds/default/TruckToWheel",
     "physics_grinds/default/DeckCenterToTruck",
     "physics_grinds/default/TestDepthEpsilon",

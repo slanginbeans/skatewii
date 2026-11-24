@@ -341,8 +341,9 @@ After SK8's `physics/grind_contact/*`, `physics/grind_forces/*`, `physics/grind_
 `physics/grind_chromosome*`; every tuning number from the disc through the rules pack (`physics_grinds`,
 `physics_grinds_air`, the grind fields of `physics_trajectory` and `physics_wipeout`,
 `physics_mode/normal/GrindLockDist`, `physicsdeck`, `physicstrucks`, `anim_motion/grind_twist` and
-`grind_height`; `game_core::tuning::grind`), else flatground's own. SK8's code constants (box sizes, the
-family strengths, the launch and energy figures, the 17/24/60-degree windows) are used as SK8 documents them.
+`grind_height`; `game_core::tuning::grind`), whose built-in values are Skate 3's own (read off the disc). SK8's
+code constants (box sizes, the family strengths, the launch and energy figures, the 17/24/60-degree windows,
+the balance forces) are used as SK8 documents them.
 
 - **Rails** carry a class per segment (thin, fat, ledge, curb, blocked) and a high side, found at import by
   probing beside them (docs/importing.md); a version-1 park pack loads with every segment thin. The
@@ -392,8 +393,7 @@ family strengths, the launch and energy figures, the 17/24/60-degree windows) ar
   (`AngleRange*`) is aimed for: the board moves towards the rail by at most `MaxOffsetDeltaPerFrame` a tick
   (`MaxOffsetDist` in all) and turns towards along or across it by at most `MaxAngleDeltaPerFrame` a tick
   (x `AngleYAssist*`). Skate 3 moves its animated board this way; flatground moves the board itself.
-- **On the rail** the board is held on the rail (a kinematic stand-in for Skate 3's rigid board and its
-  pins) and its frame eases (0.1 a tick) to the family's: 50-50 along the rail on its up, 5-0 tipped by
+- **On the rail** the board slides along the rail and its frame eases (0.1 a tick) to the family's: 50-50 along the rail on its up, 5-0 tipped by
   the pitch and turned by the yaw, slides across it, tip slides leaned 20 degrees, blunts 42, darkslides
   upside down; the trucks' hangers (0.064 m under the deck's centre, ours) rest on the rail in 50-50s
   and 5-0s, the deck's underside (its grip in a darkslide) in slides. Gravity acts along the rail; friction = 0.48 x the rail's up y x strength[family][class]
@@ -402,12 +402,46 @@ family strengths, the launch and energy figures, the 17/24/60-degree windows) ar
   grind friction before). The C-stick's y (cubed, smoothed 0.91) tips a 50-50 past 0.12 into a nosegrind
   (up) or a 5-0 (down); in a 5-0 the free end is held up with the stick let go, lifts no more than 0.26
   rad and comes back up below -0.25; both sticks' x (dead zone 0.25, cubed) turn it across the rail;
-  level again with the other truck over the rail it is a 50-50. A deck more than
+  level again with the other truck over the rail it is a 50-50, and both sticks' x at 0.9 or more drop a
+  50-50 onto one truck (SK8's 50-50 needs them under 0.9). A deck more than
   `Wipeout_GrindMaxAngularDeckError` from where the rail holds it wipes out.
+- **Balance** (`skater/balance.rs`; SK8 `grind_forces{,/slide,/support,/post}.rs`, skate-game
+  `physics/grind/contact.rs`): Skate 3's board on a rail is a rigid body its family's forces move;
+  flatground gives the board that freedom across the rail: how far the family's reference point (the
+  deck's middle for 50-50s and slides, the truck on the rail for 5-0s, the tip for blunts) is off the rail
+  and how fast it moves, under Skate 3's forces over the effective mass. Pins pull it back (50-50 800 N/m,
+  5-0 3000 at the truck, blunt 3000 at 0.39 m along the board), damped by 0.133 of their strength and
+  scaled by `PinVsSlope` against the grind normal's up (leaning off weakens them; the coping hold keeps
+  them full). Board and dark slides: the sticks' x push 25 N a unit (darkslides 40 N, fading out 0.16 m
+  off the middle), damped 20 N per m/s inside 0.16 m, pulled back 10 N and stopped past it; on a ledge only
+  the push acts; a wound-up pop pulls them in (201 N past 0.12 m). Tip slides: the main stick's x pushes
+  37 N a unit (pulled in 39 N for 8 ticks after dropping in faster than 1.8 m/s). The exit lean pushes to
+  the low side (`ExitAssistVsLeanAngle` x 65 N) and friction damps the speed across with the speed along.
+  The sticks push to the rider's right of the travel. The grind is lost when the rail leaves its box (the
+  truck's width `TruckToWheel`, the deck between the trucks for a boardslide, 0.3 m for a darkslide, the
+  tip): the board falls off with its speed (`fell off`); a tip slide pushed in past the truck is a
+  boardslide. The speed across a new segment after a bend stays the board's; the speed into the rail it
+  meets (coming onto it, or a dip) is its closing speed, and more than `Wipeout_GrindXZDeck` (6 m/s) of it
+  across the rider's ground plane wipes out (SK8 post.rs; square to the rail it is all along the rider's
+  up). A board or dark slide that stalls on a rail (not a ledge) hangs up and wipes out (SK8
+  involuntary.rs, wipeout 10).
+- **Grind grabs** (Skate 3's `OnBoard/Grinding/<grind>/<grind>_<grab>` states): a trigger fully in is the
+  action graph's `LeftGroundGrab` / `RightGroundGrab`, which its `Grinding` state turns into
+  `WantsLeft/RightGrindGrab` and its `LeftGrab` / `RightGrab` / `DoubleGrab` states into `GrindFSGrab` /
+  `GrindBSGrab` (the other way round mirrored) / `GrindDoubleGrab`; the motion graph's grind-grab states
+  (`Into`, `GrabCycle`, `Out`; `IsCrouchedEnoughForBlendToGrabCycle`, `CurrentGrabType`, `HandBusy`) play
+  them, score `<grind>_<grab>` in the cycle (`ScoringTrick`), and publish `PhysGrindGrabMinHeight` (0.2),
+  which holds a 5-0's free end up (SK8 control.rs). The physics reads the grab from the scored name and the
+  height from the packet (`GraphControl::grind_grab`, `grind_grab_min_height`). Without the graphs, the
+  same table: 50-50s FS/BS grab, 5-0s and salads FS grab/nosegrab, nosegrinds and crooks tailgrab/BS
+  grab, nose slides and noseblunts tailgrab (frontside hand), blunts tailgrab and tailslides nosegrab
+  (backside hand). A grab held 0.2 s or more is scored with the grind (`FS 5-0 NOSEGRAB`, plus 200 points
+  and 150 a second, as air grabs).
 - **Lean-off** (SK8 balance.rs): on ledges (and tip slides on anything but a thin rail) a timer starts on
   entry; after 2 s (0.8 from below, 0.1 into coping) `ExitLeanAngleVsTime` rolls the board off the low
-  side; past 28 degrees, or past 15 with ground under the low side, it is off, pushed by
-  `ExitAssistVsLeanAngle` x 65 N over the effective mass (at least 0.6 m/s, ours).
+  side, the exit lean pushing it there against the weakening pins; past 28 degrees, or past 15 with ground
+  under the low side (or once the rail leaves its box while leaning), it is off, at least 0.6 m/s off the
+  low side (ours).
 - **Leaving**: off the rail's end (grinds lift 0.4 m/s, ours: SK8's release strength comes from its caller),
   leaning off, stopped (under 0.2 m/s for 0.4 s outside the coping hold, ours), or popped. The pop (SK8
   launch.rs): the speed along the rail kept, the jump x 1.03 along the launch normal (tip slides leaned
@@ -430,10 +464,13 @@ family strengths, the launch and energy figures, the 17/24/60-degree windows) ar
   Wipeouts stay with the physics.
 - **The camera** (phase 7, "The camera" below) reads the rail's direction and incline, the ledge's
   high side and the speed along it.
-- Not done: Skate 3's pins and forces on a rigid board (the board is held on the rail; the lateral pins'
-  damping and the in-grind deck closing-speed wipeout have nothing to act on), the grind normal's tilt on
-  ledges from the far probes (the rail's up is used), grind grabs, the 5-0 hang rule on ledges, the
-  trajectory candidates' height preference (`RequiredAngleVsHeight`).
+- Not done: the board's orientation is still eased kinematically and only its motion across the rail is
+  physical (Skate 3 drives the whole rigid body, whose collision with the rail's mesh also supports it:
+  flatground's rails have no mesh, so the support is a constraint, the coping's pin/lift forces and the
+  5-0's truck compensation have nothing to act on, and a tip slide has no restoring force but the stick's);
+  the involuntary exit's release forces (flatground pushes off at once) and the 35-tick wipeout; the
+  orientation noise; the grind normal's tilt on ledges from the far probes (the rail's up is used); the
+  5-0 hang rule on ledges; the trajectory candidates' height preference (`RequiredAngleVsHeight`).
 
 
 ## Off the board (physics: `skater/biped.rs`; `skater.rs` `toggle_board`)

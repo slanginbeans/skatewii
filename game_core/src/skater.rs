@@ -22,6 +22,7 @@
 
 pub mod adjust;
 mod air;
+pub mod balance;
 pub mod biped;
 mod board;
 pub mod flip;
@@ -957,6 +958,10 @@ pub struct GraphControl {
     /// The posed board's nose in the rider's frame (x `up x nose`, y up, z ahead) from the imported
     /// rider's last pose: where the clips have put the deck. `None` without the imported rider.
     pub pose_deck: Option<Vec3>,
+    /// Grinding, the grind grab the motion graph's grind-grab states score (`FS_5_O_FSGRAB`: `FSGRAB`)
+    /// and the 5-0's free end they hold up (`PhysGrindGrabMinHeight`, 0 when none).
+    pub grind_grab: Option<&'static str>,
+    pub grind_grab_min_height: f32,
 }
 
 /// A trick the state graph is animating in the air.
@@ -4808,6 +4813,74 @@ mod tests {
             assert!(g.display().ends_with(name), "{} {ev:?}", g.display());
             assert!(!g.graph_name().starts_with("BF_"));
         }
+    }
+
+    #[test]
+    fn the_sticks_full_to_the_side_drop_a_50_50_onto_one_truck() {
+        // Skate 3's 50-50 needs the sticks' x under 0.9: past it the board is on one truck, which the
+        // sticks then turn across the rail.
+        let park = rail_park(30.0);
+        let (mut s, _) = ollie_at_rail(&park, 0.0);
+        steps(&mut s, &park, &Pad::default(), None, 10);
+        assert_eq!(s.grind.as_ref().map(|g| g.family), Some(Family::FiftyFifty));
+        let pad = Pad {
+            stick: [1.0, 0.0],
+            ..Pad::default()
+        };
+        let ev = steps(&mut s, &park, &pad, None, 30);
+        let g = s.grind.clone().expect("still grinding");
+        assert_eq!(g.family, Family::FiveO, "{ev:?}");
+        assert!(!g.front, "the back truck without the C-stick up");
+        assert!(g.twist.abs() > 0.3, "turned across: {}", g.twist);
+        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
+    }
+
+    #[test]
+    fn a_boardslide_stalling_on_a_rail_hangs_up() {
+        // Across a thin rail at a crawl: it slows to a stop and wipes out (Skate 3's slides do on
+        // rails, SK8 involuntary.rs); the same on a ledge steps off.
+        let (park, mut s) = over_rail(v3(1.0, 0.0, 0.0), 0.0, 0.0, 0.03);
+        s.vel = v3(0.0, -0.5, 0.6);
+        let ev = steps(&mut s, &park, &Pad::default(), None, 1);
+        assert_eq!(
+            s.grind.as_ref().map(|g| g.family),
+            Some(Family::Boardslide),
+            "{ev:?}"
+        );
+        let ev = steps(&mut s, &park, &Pad::default(), None, 120);
+        assert!(ev.contains(&Event::Bailed), "{ev:?}");
+        assert_eq!(s.bail_reason, Some("the slide hung up on the rail"));
+    }
+
+    #[test]
+    fn a_grind_round_a_sharp_bend_falls_off_it() {
+        // A rail turning 60 degrees to the side: the speed across the new segment stays the board's
+        // (the pins catch it, or it falls off): at 5 m/s it goes on straight off the bend. None of it
+        // goes into the rail, so it is no closing speed and no wipeout.
+        let mut park = rail_park(4.0);
+        park.rails[0].points.push(v3(
+            5.0 * libm::sinf(PI / 3.0),
+            0.5,
+            4.0 + 5.0 * libm::cosf(PI / 3.0),
+        ));
+        park.rails[0] = crate::rails::Rail::new(park.rails[0].points.clone());
+        let (mut s, ev) = ollie_at_rail(&park, 0.0);
+        assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+        let mut ev = Vec::new();
+        for _ in 0..90 {
+            ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+            if s.grind.is_none() {
+                break;
+            }
+        }
+        assert_eq!(s.grind_exit, Some("fell off"), "{ev:?}");
+        assert!(s.pos.z > 4.0 && s.pos.z < 4.5, "at the bend: {:?}", s.pos);
+        assert!(
+            s.vel.z > 3.0 && s.vel.x.abs() < 0.5,
+            "straight on: {:?}",
+            s.vel
+        );
+        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
     }
 
     #[test]
