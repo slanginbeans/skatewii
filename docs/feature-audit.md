@@ -60,7 +60,7 @@ ways:
 | Ollie, nollie, fakie and switch pops (flick speed sets height) | done | `pop`, `take_off`, `pop_speed`; `flick.rs` | `input/trick_intentions.rs` | – |
 | Kickflips, heelflips and multi-flips (held, up to 4) | done | `graph/input.rs` `HOLDABLE`; `Skater::follow_graph_trick` | same | – |
 | Shuvs and varials | done | graph gesture sets (`RIGHT_SETS`) | same | – |
-| Body spins (wind-up, carry-on) | done | `spin_input`, `skater/air.rs` `physics_air_spin`, `auto_spin` | `air/body_spin.rs` | – |
+| Body spins (wind-up, carry-on) | done | `spin_input`, `skater/air.rs` `physics_air_spin`, `auto_spin`; the built-in Normal curves (`PropBodySpinVsTime`, `MaxDeltaVsTime`, `DerivativeBodySpinVsTime`, `MaxDeltaForAutoVsTime`, `MinDerivativeScalar` 0.4) are the disc's `physics_bodyspin` at full precision, as the Easy ones are (test `tuning::tests::the_built_in_body_spin_is_the_discs`) | `air/body_spin.rs` | – |
 | Late flips, finger flips, underflips | done | `input.rs` gates (`late_flips_blocked`, `finger_flips_blocked`) | same | – |
 | Body flips (front and back flips) | done | `update_body_flip`, `skater/flip.rs` | `air/body_flip.rs` | – |
 | Dark catch | done | Z → `DarkCatch` | same | – |
