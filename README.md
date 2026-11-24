@@ -84,6 +84,8 @@ Off the board (Y), with the board in hand:
 | Control stick | Walk and run where the stick points, seen from the camera (pushed fully: run). Pulled back: turn round |
 | A (hold) | Sprint: a burst that fades while held |
 | B | Jump |
+| C-stick in the air (with Skate 3's motion graphs) | Body tweak (Skate 3's off-board air body tweak; let the C-stick go to the middle first, or wait a moment), following the stick. Also in a hippie jump |
+| Z in the air (with Skate 3's motion graphs) | Body tweak, centred |
 | Y | Back on the board, rolling the way the rider faces at his speed, in the stance he got off in. In the air (after B): he puts the board under his feet and lands on it |
 | Y held, standing within 1.5 m of a ramp's edge facing it | Drop in: he steps up to the edge and stands on the board with its tail on the coping while Y is held; let go of Y to drop in, or pull the control stick back to step away |
 | Z + C-stick up / down | Free look: the camera rises to look down on him (up) or drops to look up (down), up to Skate 3's 30 degrees; let go and it eases back |

@@ -198,6 +198,10 @@ pub enum Cond {
     /// `IsLandingOnBoard`: the physics is coming down onto the board from the air off it (SK8 physical
     /// state 503, LandingOnDeck).
     LandingOnBoard,
+    /// `IsHippyHurdling` (SK8 `0x82BA5DA0`, OffBoard317): in a hippie jump, the landing on deck's query
+    /// met a moving obstacle on the way down to the board, which isn't in the way of the landing
+    /// (`skater::hurdle`).
+    HippyHurdling,
     /// Off the board in the air, and coming down onto ground he can land on.
     BipedAir,
     CanBipedLand,
@@ -486,6 +490,12 @@ pub enum Beh {
         normal: f32,
         late: f32,
     },
+    /// OffboardBodyTweakBlend (SK8 motion_offboard/body_tweak.rs, TU3 `0x82BBACE0`; the sequence is
+    /// `graph::body_tweak`): off the board in the air, the C-stick's `OB_AirBodyTweakX/Y` (or
+    /// `OB_DoAirBodyTweak`) play the body tweak on the `AirBodyTweak` channel, its `bodytweakx/y`
+    /// following the stick. Its clips (`NbCycAnim`, `NbIntoAnim`, `BrCycAnim`, `BrIntoAnim`: without the
+    /// board, with it in hand).
+    OffboardBodyTweak([Option<Node>; 4]),
     /// Behaviours with nothing to do in flatground (hand services, debug text, off-board helpers).
     Nothing,
     Unsupported(Str),
@@ -690,7 +700,6 @@ const FIXED_FALSE: &[&str] = &[
     "IsMovingObject",
     "IsStandingOnMovingObject",
     "IsInDebugAnimationsMode",
-    "IsHippyHurdling",
     "IsBipedGroundThin",
     "IsBipedCommittedToMotion",
     "IsArmChannelPlaying",
@@ -818,6 +827,7 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
         "IsDroppingSkateboard" => Cond::DroppingBoard,
         "IsRetrievingSkateboard" => Cond::RetrievingBoard,
         "IsLandingOnBoard" => Cond::LandingOnBoard,
+        "IsHippyHurdling" => Cond::HippyHurdling,
         "IsInBipedAir" => Cond::BipedAir,
         "CanBipedLand" => Cond::CanBipedLand,
         "AllowedToTrick" => Cond::AllowedToTrick,
@@ -872,7 +882,6 @@ const NOTHING: &[&str] = &[
     "SetScoreAugmentation",
     "BipedCadence",
     "MatchCadence",
-    "OffboardBodyTweakBlend",
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
     "UpdateIsWeightOnNose",
@@ -1136,6 +1145,16 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         "ToggleBoard" => Beh::ToggleBoard,
         "LandOnBoard" => Beh::LandOnBoard,
         "MatchAirTime" => Beh::MatchAirTime,
+        // SK8 body_tweak.rs `Settings::parse`: the stock clips when an attribute is absent.
+        "OffboardBodyTweakBlend" => Beh::OffboardBodyTweak(
+            [
+                ("NbCycAnim", "B_OBAIR_BODYTWEAK_NB_CYC"),
+                ("NbIntoAnim", "B_OBAIR_BODYTWEAK_NB_INTO"),
+                ("BrCycAnim", "B_OBAIR_BODYTWEAK_BR_CYC"),
+                ("BrIntoAnim", "B_OBAIR_BODYTWEAK_BR_INTO"),
+            ]
+            .map(|(k, d)| db.and_then(|db| db.find(a.text(k).unwrap_or(d)))),
+        ),
         "FakieHeadChannel" => Beh::FakieHead,
         "BodySpin" => Beh::BodySpin,
         "ControlAirLegExtension" => Beh::AirLegExtension(lib("EXTEND").or_else(|| lib("extend"))),

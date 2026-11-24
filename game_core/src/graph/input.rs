@@ -15,6 +15,8 @@
 //! - L / R: grabs (`LeftAirGrab` / `RightAirGrab`; fully in: the ground grabs) and crouch. Off the board
 //!   (Skate 3's LT / RT there), pressed fully in: drop the board (`OB_DropBoard`, L) or throw it down
 //!   ahead (`OB_ThrowBoard`, R), either one `OB_RetrieveBoard` (picks it back up when it isn't in hand).
+//! - Off the board in the air: the C-stick is the body tweak (`OB_AirBodyTweakX/Y`), Z (Skate 3's RB)
+//!   tweaks centred (`OB_DoAirBodyTweak`).
 //! - Left stick: steering, kick turns, powerslides, body spin; its gestures (`skaterls`, `skaterstep`)
 //!   give reverts (SlideFs180 / SlideBs180) and body flips.
 //! - C-stick: wind-up (`AnticMag` / `AnticAngle`), manuals (`Manual`, `ManualBrake`), tweaks, board
@@ -81,6 +83,7 @@ names! {
     ob_jump = "OB_Jump", ob_sprint = "OB_Sprint", ob_mag = "OB_Mag", ob_steer = "OB_Steer",
     ob_world_x = "OB_BipedWorldX", ob_world_z = "OB_BipedWorldZ", ob_stick_mag = "OB_BipedStickMag",
     ob_look_x = "OB_LookAtX", ob_look_y = "OB_LookAtY",
+    ob_tweak_x = "OB_AirBodyTweakX", ob_tweak_y = "OB_AirBodyTweakY", ob_do_tweak = "OB_DoAirBodyTweak",
     ob_drop = "OB_DropBoard", ob_throw = "OB_ThrowBoard", ob_retrieve = "OB_RetrieveBoard",
     hp_tweak_x = "HandPlantTweakX", hp_tweak_y = "HandPlantTweakY",
     hp_dismount = "HandPlantDismount", hp_one_right = "HandPlantOneFootRight",
@@ -353,6 +356,14 @@ impl Intentions {
         if pad.flick != [0.0, 0.0] {
             put(id.ob_look_x, pad.flick[0]);
             put(id.ob_look_y, pad.flick[1]);
+        }
+        // The air body tweak off the board (SK8 offboard_intentions.rs): the right stick's axes, always
+        // published (the C-stick); RB or the right stick's click asks for it centred: Z (RB's place; the
+        // pad has no stick clicks).
+        put(id.ob_tweak_x, pad.flick[0]);
+        put(id.ob_tweak_y, pad.flick[1]);
+        if held & btn::Z != 0 {
+            put(id.ob_do_tweak, 1.0);
         }
         if lx != 0.0 {
             put(id.body_spin, lx);

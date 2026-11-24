@@ -719,7 +719,18 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   speed along it; missing it (`!CanLandOnBoard`: `Dismount/Air/HippyRunout`) he lands on foot; faster than
   `MaxSpeedLandingOnBoard` (11.5 m/s) a bail. Y in the air with the board in hand is still the air mount
   (`Skater::mount_in_air`); with it free, Y fetches it (`OB_Mounting`) and mounts once it is in hand.
-- **Not done**: moving objects, standing on cars, hippie hurdles, stairs' own clips, the obstacle steering
+- **Air body tweak** (SK8 motion_offboard/body_tweak.rs; `graph::body_tweak`). In the air off the board
+  (`OffBoard/OBAir/InAir`, `Dismount/Air`, `OnBoard/HippyJump`, `OnBoard/LandingOnBoard`), the C-stick
+  (`OB_AirBodyTweakX/Y`) past 0.1, once let go at take-off (or after 80 ticks), plays
+  `OffboardBodyTweakBlend`'s into clip and then its cycle on the `AirBodyTweak` channel
+  (`host::CHANNEL_BODY_TWEAK`), `bodytweakx/y` following the stick; Z (`OB_DoAirBodyTweak`) or a flight
+  over 4 s plays it centred. Nothing new starts within 0.1 s of landing; let go, it fades out over at
+  most 0.3 s.
+- **Hippie hurdle** (SK8 landing_deck query.rs / update.rs; `skater::hurdle`). Each hippie jump starts
+  the landing on deck's query; a body above the board's deck that moves over 0.7 m/s between two queries
+  is a hurdle (`IsHippyHurdling`: `OnBoard/HippyJump/HurdleCyc`, the landing on the board held off) until
+  0.3 s past the apex. Flatground's world is static, so its hippie jumps never hurdle.
+- **Not done**: moving objects (so nothing to hippie hurdle), standing on cars, stairs' own clips, the obstacle steering
   of `movement_intent.rs`, foot IK; the free board has no rigid rotation of its own (it keeps its nose,
   pitched only by the throw, and lands on its wheels whatever way it falls) and doesn't collide with the
   rider; the retrieve hands (SK8's hand contact that catches the board early) aren't modelled.
@@ -745,6 +756,7 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 | d-pad | `GestureLeft/Right/Up/DownStart`, `...Held` | character gestures (shrug, peace, shaka, surf's up); a d-pad press while Z is held on the ground is the marker / replay chord instead (`game_core::marker::Chord`) and doesn't reach them |
 | L / R | `LeftAirGrab` / `RightAirGrab`, fully in `Left/RightGroundGrab`, `Crouch` | grabs, crouch; with the left stick's flip shape just after take-off, body flips. A GameCube trigger at rest reads 1..7 of 255 and SK8 counts any trigger above 0, so the pad has a dead zone (`input::TRIGGER_DEAD_ZONE`, 0.1 of full, then rescaled); the physics grabs on the same reading |
 | L and R fully in with Z; R fully in; A or B | `WipeOutRequest` (any of the three new: Skate 3's both triggers fully in with both stick clicks); `WipeOutPushOff`; `WipeOutRecover` | bail on purpose; in a bail, push off, and back on the board once settled |
+| C-stick, Z, off the board | `OB_AirBodyTweakX/Y` (always published), `OB_DoAirBodyTweak` (Z held: Skate 3's RB or right stick click) | the air body tweak (above, "Air body tweak") |
 | C-stick, main stick in a bail | `WipeoutGestureX/Y` (always published), `WipeoutControlX/Y` (off centre) | the wipeout gesture (body tweaks) and steering (above, "Bails") |
 | main stick | `Turn`, `HardTurn`, `HardTurnCrouch`, `KickTurn`, `BodySpin`, `Left/RightSlide`, `Left/RightSlideStart` | steering, kick turns, powerslides, spins |
 | C-stick | `AnticMag`, `AnticAngle`, `Manual`, `ManualBrake`, `TweakX/Y`, `BoardAdjustAngle/Mag` | wind-up (past 0.9), manuals (held below full for 0.2 s), grab variants (past half way) and tweaks; in the air the board adjust (`OnBoard/InAir/BoardAdjusts/*`); on a rail its y tips a 50-50 into a nosegrind (up) or a 5-0 (down) and its x (with the main stick's) turns a 5-0 across the rail (Skate 3's `PhysGrindUpDown`, `PhysGrindTranslation`) |
@@ -813,7 +825,7 @@ Left as no-ops on purpose:
 |---|---|
 | `HandBusy`, `EndGesture` | hand services (hand IK, holding things): on the board flatground's hands are always free; gestures end through CharacterGesture's own stages |
 | `SetScoreAugmentation`, `JuiceHook`, `PrintText2D` | scoring augmentations, effects and debug text: no effect on riding |
-| `BipedCadence`, `MatchCadence`, `MatchAirTime`, `OffboardBodyTweakBlend`, `AirDismounting` | off the board (walking, running, carrying the board). The runner always hands the walker's step cadence (`Biped::phase`) to the animation as `BipedCadence` does, so the phase-controlled walk, run and sprint cycles play at it |
+| `BipedCadence`, `MatchCadence`, `MatchAirTime`, `AirDismounting` | off the board (walking, running, carrying the board). The runner always hands the walker's step cadence (`Biped::phase`) to the animation as `BipedCadence` does, so the phase-controlled walk, run and sprint cycles play at it |
 | `InitMovingObjects`, `MovingObject`, `UpdateStandingOnCar`, `Shove`, `MaintainShove`, `EndShimmy` | moving objects, shoving people, skitching: systems flatground doesn't have |
 | `AddRunoutAttribs`, `HippyJumpAntic` | the physics owns runouts and the hippie jump |
 | `ForcePhysics` | flatground's physics always owns the board (no animation-driven board) |
