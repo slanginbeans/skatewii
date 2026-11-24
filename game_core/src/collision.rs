@@ -715,7 +715,6 @@ impl TriMesh {
                 let x = self.min.x + (col as f32 + 0.5) * self.cell;
                 let z = self.min.z + (row as f32 + 0.5) * self.cell;
                 for i in self.cell(x, z) {
-                    let i = i as u32;
                     if seen.contains(&i) {
                         continue;
                     }

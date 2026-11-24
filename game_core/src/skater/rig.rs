@@ -382,26 +382,19 @@ impl Skater {
         let g = t.gravity;
         let gravity = Vec3::UP * -g + n * (g * n.y);
         let f = tangent(self.fwd, n);
-        let fdir = if v > 0.1 {
-            vel * (self.speed.signum() / v)
-        } else {
-            f
-        };
-        let along = clamp(gravity.dot(fdir), -t.max_slope_accel, t.max_slope_accel);
         let foot_down = d.push_target.is_some() || d.brake > 0.0;
         let mass = pb::total_mass();
-        let mut speed = travel_speed;
         if d.manual_correction {
             // The Normal corrective drag replaces the tick's other board forces.
-            // At the dragging truck, against the velocity there (SK8 `apply_correction`'s
-            // correction points): it brakes the board and turns it about the truck.
+            // At the dragging truck (SK8 `apply_correction`'s correction points: the truck's base
+            // transform, which the step lifts by `DeckForceYOffset` as every queued force), against
+            // the deck's ground velocity (its velocity off the ground's normal, SK8
+            // board_motion_output.rs `ground_velocity`).
             let nose = self.manual.is_some_and(|m| m.nose);
             let z = if nose { pb::TRUCK_Z } else { -pb::TRUCK_Z };
-            let at = v3(0.0, pb::TRUCK_Y - pb::FORCE_Y_OFFSET, z);
+            let at = v3(0.0, pb::TRUCK_Y, z);
             let deck = self.rig.as_ref().map(|r| *r.board.deck());
-            let velocity = deck.map_or(vel + n * self.vn, |b| {
-                b.point_velocity(b.axes.apply(v3(0.0, pb::TRUCK_Y, z)))
-            });
+            let velocity = deck.map_or(vel, |b| b.velocity - n * b.velocity.dot(n));
             input.forces.push((-velocity * MANUAL_CORRECTIVE_DRAG, at));
             self.target_speed = self.speed.abs();
         } else {
@@ -451,7 +444,6 @@ impl Skater {
                 if self.speed.abs() < 2.0 * t.brake_slow_speed {
                     // SK8 braking.rs `calculate_linear_drag`: a brake on a slow board sets the
                     // parts' linear drag to 1 x 60, which stops them.
-                    speed = 0.0;
                     input.linear_drag = 60.0;
                 } else {
                     feet -= self.speed.signum() * d.brake / t.brake_scale.max(1e-6);
@@ -468,7 +460,6 @@ impl Skater {
                 let push = mass * t.speed_general_amount * error / dt;
                 input.forces.push((travel_dir * push, Vec3::ZERO));
             }
-            let _ = (fdir, &mut speed);
             // The feet (SK8 ground_force.rs): against the rider's up, square to the travel, at each
             // foot; the landing's force first.
             let r = self.rig.as_ref().map_or(0.0, |r| r.ground_time);
@@ -563,6 +554,15 @@ impl Skater {
     /// have been off it far or long enough.
     fn read_rig(&mut self, park: &dyn Terrain, d: &Drive, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
+        // The board's volumes met a wall (SK8 collision_response.rs on its collision reports): a
+        // hard hit takes the rider off, a softer one turns the board along it; the solve has
+        // already stopped the board going into it.
+        if let Some((wall, _)) = self.rig.as_ref().and_then(|r| r.board.wall) {
+            let before = self.ground_velocity();
+            if self.hit_wall(wall, before, false, events).is_none() || self.mode != Mode::Rolling {
+                return;
+            }
+        }
         let Some(rig) = &self.rig else { return };
         let board = &rig.board;
         let deck = *board.deck();
@@ -706,13 +706,5 @@ impl Skater {
             return;
         }
         self.update_wallride(park, dt, events);
-    }
-}
-
-fn approach(v: f32, target: f32, by: f32) -> f32 {
-    if v > target {
-        (v - by).max(target)
-    } else {
-        (v + by).min(target)
     }
 }

@@ -174,20 +174,23 @@ const DECK_MATERIAL: [f32; 3] = [0.1, 0.1, 0.0];
 /// between the wheels.
 const TRUCK_RADIUS: f32 = 0.5375 * WHEEL_RADIUS;
 const TRUCK_SPHERE_SPACING: f32 = 0.06;
-/// The deck's underside capsules' radius (half `DeckThickness` 0.015, x 0.9) and spheres along its
-/// middle and edges: the middle part (`DeckMidLength` 0.59, `DeckWidth` 0.24) and the kicked ends
-/// (`DeckBackEndSize` 0.165 at 12.5 and 13 degrees).
-const DECK_RADIUS: f32 = 0.0075 * 0.9;
-const DECK_SPHERES: [Vec3; 9] = [
-    v3(0.0, -0.0075, 0.0),
-    v3(0.0, -0.0075, 0.15),
-    v3(0.0, -0.0075, -0.15),
-    v3(0.11, -0.0075, 0.0),
-    v3(-0.11, -0.0075, 0.0),
-    v3(0.0, -0.0075, 0.295),
-    v3(0.0, -0.0075, -0.295),
-    v3(0.0, 0.0206, 0.42),
-    v3(0.0, 0.0196, -0.42),
+/// The deck's volumes as spheres (centre in the deck's axes, radius), after SK8
+/// construction/deck_geometry.rs: its rounded box and side capsules (`DeckThickness` 0.015 thick,
+/// `DeckWidth` 0.24, `DeckMidLength` 0.59) along its middle and edges, the two 0.035 m spheres under
+/// it at 0.235 m (over the trucks' baseplates), and the kicked ends (`DeckBackEndSize` 0.165 at 12.5
+/// and 13 degrees).
+const DECK_SPHERES: [(Vec3, f32); 11] = [
+    (v3(0.0, 0.0, 0.0), 0.0075),
+    (v3(0.0, 0.0, 0.15), 0.0075),
+    (v3(0.0, 0.0, -0.15), 0.0075),
+    (v3(0.1125, 0.0, 0.0), 0.0075),
+    (v3(-0.1125, 0.0, 0.0), 0.0075),
+    (v3(0.0, 0.0, 0.295), 0.0075),
+    (v3(0.0, 0.0, -0.295), 0.0075),
+    (v3(0.0, -0.02, 0.235), 0.035),
+    (v3(0.0, -0.02, -0.235), 0.035),
+    (v3(0.0, 0.0335, 0.4447), 0.0075),
+    (v3(0.0, 0.0322, -0.4447), 0.0075),
 ];
 const BODY_SPHERES: usize = 6 + DECK_SPHERES.len();
 
@@ -263,7 +266,47 @@ fn segment_crosses(t: &[Vec3; 3], p: Vec3, q: Vec3) -> bool {
     (0.0..=1.0).contains(&u) && v >= 0.0 && u + v <= 1.0 && (0.0..=1.0).contains(&k)
 }
 
-// A candidate contact: gap, normal, the triangle's own normal, inside its face, the closest point,
+/// The box a moving sphere tests the world's triangles against before any contact is made (SK8
+/// board_world/broadphase.rs `volume_query_bounds`, 82777E70): its bounds, unioned with one 1/60 s
+/// step of its motion, scaled by 1.05 about their centre. A triangle whose own (unpadded) box misses
+/// it gives no contact, however near its plane is.
+fn swept_box(c: Vec3, radius: f32, v: Vec3) -> (Vec3, Vec3) {
+    const SCALE: f32 = 1.05;
+    let step = v * (1.0 / 60.0);
+    let lo = c - v3(radius, radius, radius);
+    let hi = c + v3(radius, radius, radius);
+    let min = v3(
+        lo.x.min(lo.x + step.x),
+        lo.y.min(lo.y + step.y),
+        lo.z.min(lo.z + step.z),
+    );
+    let max = v3(
+        hi.x.max(hi.x + step.x),
+        hi.y.max(hi.y + step.y),
+        hi.z.max(hi.z + step.z),
+    );
+    let centre = (min + max) * 0.5;
+    let half = (max - centre) * SCALE;
+    (centre - half, centre + half)
+}
+
+/// Whether the points' box meets `b`.
+fn box_meets(b: (Vec3, Vec3), points: &[Vec3]) -> bool {
+    let mut lo = points[0];
+    let mut hi = points[0];
+    for p in &points[1..] {
+        lo = v3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = v3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+    }
+    lo.x <= b.1.x
+        && hi.x >= b.0.x
+        && lo.y <= b.1.y
+        && hi.y >= b.0.y
+        && lo.z <= b.1.z
+        && hi.z >= b.0.z
+}
+
+/// A candidate contact: gap, normal, the triangle's own normal, inside its face, the closest point,
 /// the triangle.
 type Candidate = (f32, Vec3, Vec3, bool, Vec3, [Vec3; 3]);
 
@@ -292,6 +335,7 @@ fn sphere_triangles(
         [Vec3::ZERO; 3],
     ); MAX];
     let mut count = 0;
+    let swept = swept_box(c, radius, (c - was) * 60.0);
     for (t, n) in tris {
         let (q, face) = closest_on_triangle(c, t);
         let d = c - q;
@@ -352,9 +396,24 @@ fn sphere_triangles(
                 let joint = f.1.dot(normal) > 0.98 && f.0 <= gap;
                 let on_plane = (q - f.4).dot(f.1).abs() < 1e-3;
                 let rises = tri.iter().any(|v| (*v - q).dot(f.1) > 1e-3);
-                coplanar || joint || (on_plane && rises)
+                // An edge on the plane of a face the sphere stands on, whose own triangle falls
+                // away behind it, is a convex corner: its normals lie between the two faces'
+                // outsides. The own face's outside is away from the standing face's triangle; an edge
+                // normal behind it (a wheel on a wall below the deck's edge, reaching up to it) is no
+                // contact of that corner.
+                let behind = on_plane && !rises && {
+                    let far =
+                        f.5.iter()
+                            .map(|v| (*v - q).dot(own))
+                            .fold(0.0f32, |a, d| if d.abs() > a.abs() { d } else { a });
+                    let outside = if far > 0.0 { -own } else { own };
+                    far.abs() > 1e-3 && normal.dot(outside) < -1e-3
+                };
+                coplanar || joint || (on_plane && rises) || behind
             });
-        if inner {
+        // (Every near triangle tells the joints apart; only those the sphere's swept box meets
+        // make contacts.)
+        if inner || !box_meets(swept, &tri) {
             continue;
         }
         if let Some(same) = found.iter_mut().flatten().find(|f| f.1.dot(normal) > 0.999) {
@@ -442,7 +501,12 @@ fn sphere_contacts(
             }
             (d * (1.0 / l), l, hit.point)
         };
-        if gap > reach || gap < -radius || normal.dot(up) < min_up {
+        // (Without the terrain's triangles, the surface point stands for its triangle's box.)
+        if gap > reach
+            || gap < -radius
+            || normal.dot(up) < min_up
+            || !box_meets(swept_box(c, radius, v), &[touch])
+        {
             continue;
         }
         if let Some(same) = found.iter_mut().flatten().find(|f| f.1.dot(normal) > 0.999) {
@@ -515,6 +579,9 @@ pub struct Board {
     pub wheels: [Option<WheelContact>; 4],
     /// The load the trucks and deck carried against the world in the last step (N).
     pub body_load: f32,
+    /// The trucks' or deck's hardest contact with something across the board's up (a wall) in the
+    /// last step: its normal and load (N).
+    pub wall: Option<(Vec3, f32)>,
 }
 
 impl Board {
@@ -530,6 +597,7 @@ impl Board {
             parts,
             wheels: [None; 4],
             body_load: 0.0,
+            wall: None,
         };
         b.place(deck, axes, Vec3::ZERO, Vec3::ZERO);
         b
@@ -608,7 +676,7 @@ impl Board {
                 let z = [-TRUCK_SPHERE_SPACING, 0.0, TRUCK_SPHERE_SPACING][i % 3];
                 (t, v3(0.0, 0.0, z), TRUCK_RADIUS, truck)
             } else {
-                (DECK, DECK_SPHERES[i - 6], DECK_RADIUS, board)
+                (DECK, DECK_SPHERES[i - 6].0, DECK_SPHERES[i - 6].1, board)
             };
             let body = &self.parts[part];
             let at = body.position + body.axes.apply(local);
@@ -732,6 +800,15 @@ impl Board {
             .iter()
             .map(|c| c.normal_force())
             .sum();
+        let up = self.parts[DECK].axes.cols[1];
+        self.wall = contacts[wheel_rows..count]
+            .iter()
+            .filter(|c| c.normal_force() > 0.0 && c.axes[0].dot(up).abs() < 0.5)
+            .map(|c| (c.axes[0], c.normal_force()))
+            .fold(None, |best: Option<(Vec3, f32)>, w| match best {
+                Some(b) if b.1 >= w.1 => Some(b),
+                _ => Some(w),
+            });
         // A wheel on two faces reports their load-weighted normal and point.
         self.wheels = core::array::from_fn(|w| {
             let mut load = 0.0;
@@ -768,14 +845,34 @@ impl Board {
     /// Lifts the board out of the terrain along its up by its wheels' deepest penetration (put down by
     /// a landing or a kinematic move on a curved surface, the wheels between the trucks' touch points
     /// would start inside it, and the solve would throw them out).
+    /// With both trucks' wheels over the surface, the board is pitched to meet it at both (on a
+    /// curving transition the surface under the trucks isn't the plane under the deck's middle).
     pub fn settle(&mut self, park: &dyn Terrain) {
         let mut lift: f32 = 0.0;
+        // The lift each truck's wheels need (negative: clear of the surface by that much).
+        let mut ends = [f32::MIN; 2];
         let world = World::near(park, self.parts[DECK].position, 0.6);
         for (w, cs) in self.wheel_contacts(&world, [0.0, 0.0]).iter().enumerate() {
             for c in cs.iter().flatten() {
                 let gap = (self.parts[w].position - c.point_b).dot(c.normal);
                 lift = lift.max(WHEEL_RADIUS - gap);
+                let end = usize::from(w >= RIGHT_BACK_WHEEL);
+                ends[end] = ends[end].max(WHEEL_RADIUS - gap);
             }
+        }
+        if lift > 0.0 && ends.iter().all(|e| *e > f32::MIN) {
+            // Turned nose up by the ends' difference about the deck's right, and lifted by their
+            // mean, every part as one body (the trucks' steer and the wheels' spin kept).
+            let d = self.parts[DECK];
+            let (right, up) = (d.axes.cols[0], d.axes.cols[1]);
+            let a = libm::atanf((ends[0] - ends[1]) / (2.0 * TRUCK_Z));
+            let turn = Quat::from_axis_angle(right, -a);
+            let rise = up * ((ends[0] + ends[1]) * 0.5);
+            for p in &mut self.parts {
+                p.position = d.position + turn.rotate(p.position - d.position) + rise;
+                p.set_orientation(turn.compose(p.orientation));
+            }
+            return;
         }
         if lift > 0.0 {
             let up = self.parts[DECK].axes.cols[1] * lift;

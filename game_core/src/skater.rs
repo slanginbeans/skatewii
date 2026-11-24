@@ -5999,7 +5999,10 @@ mod tests {
             pose_com: Some(h),
             ..GraphControl::default()
         });
-        steps(&mut s, &park, &Pad::default(), None, 2);
+        // Put down mid-transition with no pitch rate, the board's back wheels lift off the curve for
+        // a few ticks before it rides it (a board riding in from the flat never does).
+        const SETTLE: usize = 4;
+        steps(&mut s, &park, &Pad::default(), None, SETTLE);
         assert!(s.pump.ground_absorption < -1.0, "{:?}", s.pump);
         assert!(s.pump.min_crouch > 0.1, "{:?}", s.pump);
         let plain = {
@@ -6010,7 +6013,7 @@ mod tests {
                 pose_com: Some(h),
                 ..GraphControl::default()
             });
-            steps(&mut p, &park, &Pad::default(), None, 9);
+            steps(&mut p, &park, &Pad::default(), None, SETTLE + 7);
             p.speed
         };
         let mut most = 0.0f32;
@@ -7029,16 +7032,18 @@ mod tests {
         let mut s = spawn(&park);
         let onset = wobble::SpeedWobble::onset(&s.tuning.wobble, s.riding_com(), 0.7);
         s.speed = onset + 4.0;
-        steps(&mut s, &park, &Pad::default(), None, 30);
+        // (The tilt swings through zero: its largest over the run, not one tick's.)
+        let mut most = 0.0f32;
+        for _ in 0..30 {
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            most = most.max(s.deck_tilt.abs());
+        }
         assert!(
             s.wobble.active && s.wobble.amplitude > 0.0,
             "{:?}",
             s.wobble
         );
-        assert!(
-            s.deck_tilt.abs() > 1e-4,
-            "the wobble tilts the deck straight ahead"
-        );
+        assert!(most > 1e-4, "the wobble tilts the deck straight ahead");
         s.speed = onset - 2.0;
         steps(&mut s, &park, &Pad::default(), None, 2);
         assert!(!s.wobble.active && s.wobble.amplitude == 0.0);

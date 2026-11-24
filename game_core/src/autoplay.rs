@@ -1031,15 +1031,17 @@ impl TrickTour {
                 }
             }
             Tour::Powerslide => {
-                // (Pushed only up to 4.5 m/s and sliding from half a second in: the rigid board
-                // leaves the late flip heading for a wall.)
+                // (Pushed only up to 4.5 m/s and sliding from half a second in, once over the
+                // slide's 1.2 m/s, for 40 ticks: the rigid board leaves the late flip heading for a
+                // wall, and from a fakie roll the push turns round first.)
                 if self.t < 30 && s.speed < 4.5 {
                     pad.buttons |= btn::A;
-                } else if self.t >= 30 && self.t < 70 {
+                } else if self.t >= 30 && self.held < 40 && (self.held > 0 || s.speed > 2.0) {
                     // Main stick fully back and to the right.
                     (pad.stick_x, pad.stick_y) = (50, -87);
+                    self.held += 1;
                 }
-                if self.t > 120 {
+                if self.t > 120 && self.held >= 40 {
                     next(self, Tour::Hippie, sw);
                 }
             }
