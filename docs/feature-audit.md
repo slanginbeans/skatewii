@@ -45,7 +45,7 @@ ways:
 | Mongo push | done | `update_push` (B); `MongoPushFootToFar` pinned false (the wind-up shortcut) | same | S (the condition) |
 | Foot, tail and nose brake | done | `update_brake`; the tail brake from `update_manual` | `riding/braking.rs` | – |
 | Powerslide (start, spin, decel, revert out) | done | `update_slide`; `PowerSlideSpin`/`Decel` in the graph; `PowerSlideManualAtt` is a no-op | `input/power_sliding.rs` | S |
-| Carving and turn lean | done | `skater/board.rs` `ride`; `graph/riding.rs` SetTurning | `riding/steering.rs` | – |
+| Carving and turn lean | done | `skater/board.rs` `ride`; `graph/riding.rs` SetTurning; the turn conditioner reads Skate 3's processed turn (the `Turn` packet) and the ground reckoning's lean (`skater/reckoning.rs`: SK8's dynamic normal, ground orientation and dynamic lean with the disc's `physics_reckoning` values; `tuning/reckoning.rs`); tests `skater::reckoning`, `tests/feel_sk8.rs` `a_carves_lean_is_the_reckonings_as_sk8s` | `riding/steering.rs` | – |
 | Kick turns | done | `kickturn_rate`, the graph's `KickTurn` | `animation/kickturn.rs` | – |
 | Pumping | done | `board.rs` `update_pumping`; the graph's `Pumping` | `riding/pumping.rs` | – |
 | Speed wobble | done | `skater/wobble.rs` (SK8's `calculate`, Skate 3's `physics_speed_wobble` and Normal onset 15 m/s, strength 0.5 as built-in defaults; `tuning/wobble.rs`), applied to the steering tilt in `board.rs` `ride`; its amplitude feeds the turn conditioner (`World::wobble`); tests `skater::wobble`, `tests/manual_wobble.rs` | `riding/speed_wobble.rs` | – |

@@ -322,6 +322,54 @@ fn the_board_stays_under_the_feet_after_every_landing() {
     assert!(landings > 5, "{landings}");
 }
 
+#[test]
+fn a_carves_lean_is_the_reckonings_as_sk8s() {
+    // SK8 carving with a full stick at 6.5 m/s: the lean the turn conditioner reads (Reckoning's
+    // target lean angle from the dynamic normal, published with the frame's sign) settles at 0.878 rad
+    // and, let go, is 0.363 rad 14 ticks later (the centripetal lean flatground used: 0.18). With half a
+    // stick at 6.65 m/s it settles at 0.279. The processed turn is the graph's `Turn` packet, negated:
+    // 1.0 with the stick held, 0 let go.
+    let Some(mut g) = imported_game("carve lean") else {
+        return;
+    };
+    let carve = |g: &mut Game, x: i8, speed: f32| {
+        g.place_rider(v3(-16.0, 0.0, -17.0), 0.0, speed);
+        for _ in 0..30 {
+            g.update(&held(0), TICK);
+        }
+        let mut lean = Vec::new();
+        for p in 0..160 {
+            let stick_x = if p < 120 { x } else { 0 };
+            g.update(
+                &PadRaw {
+                    flags: flag::CONNECTED,
+                    stick_x,
+                    ..Default::default()
+                },
+                TICK,
+            );
+            lean.push(g.skater.published_lean());
+        }
+        lean
+    };
+    let full = carve(&mut g, -100, 6.6);
+    assert!((full[59].abs() - 0.878).abs() < 0.03, "{:?}", &full[50..70]);
+    assert!(
+        (full[134].abs() - 0.363).abs() < 0.1,
+        "{:?}",
+        &full[120..140]
+    );
+    let packet = g.skater.graph.and_then(|c| c.turn_packet);
+    assert!(packet.is_none(), "let go: no Turn packet ({packet:?})");
+    // Half a stick: the conditioned 0.5 (0.25 + 0.5 x 0.7 of the range past the dead zone).
+    let half = carve(&mut g, -60, 6.75);
+    assert!(
+        (half[100].abs() - 0.279).abs() < 0.02,
+        "{:?}",
+        &half[90..110]
+    );
+}
+
 fn cstick(y: i8) -> PadRaw {
     PadRaw {
         flags: flag::CONNECTED,

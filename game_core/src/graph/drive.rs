@@ -211,12 +211,12 @@ impl Driver {
             // Only the trucks or the deck (a grind), not the wheels: SK8 TrucksOrDeckInContact reads the
             // truck and deck contacts. Counting the wheels (or nothing) wiped grabs out in the air.
             trucks_or_deck: s.mode == Mode::Grind,
-            // Skate 3's processed turn (and its lean) are positive turning left, the way the board
-            // yaws (`s.steer` is positive to the right): so the rider leans into the turn.
-            turn: -s.steer,
-            // The lean into the turn: the angle that balances the turn's centripetal pull (signed
-            // like the turn, rolling either way).
-            lean: libm::atanf(s.yaw_rate * s.speed / s.tuning.gravity.max(0.1)),
+            // Skate 3's processed turn: the graph's last `Turn` packet, negated (SK8
+            // scalar_attributes.rs; ProcessedPhysIn+2676, what SK8's animation feedback hands the
+            // turn conditioner), 0 without one.
+            turn: s.graph.and_then(|g| g.turn_packet).map_or(0.0, |t| -t),
+            // The reckoning's lean (Reckoning+1576 with the frame's sign, `skater::reckoning`).
+            lean: s.published_lean(),
             ground_speed: s.ground_velocity().length(),
             lateral_up: up.cross(s.fwd).y,
             body_spin: s.spin_rate,
@@ -533,6 +533,7 @@ impl Driver {
         let ty = r.s.filtered.get(r.names.tweak_y).unwrap_or(0.0);
         c.tweak = libm::sqrtf(tx * tx + ty * ty);
         c.body_spin = r.packet(r.names.phys_body_spin).unwrap_or(0.0);
+        c.turn_packet = r.packet_named("Turn");
         if r.s.world.phys == phys::AIR && air_trick_state(&path) {
             let name = r.str(r.s.trick);
             let (flick, flips) = air_flick(name);

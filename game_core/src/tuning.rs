@@ -18,6 +18,7 @@ pub mod handplant;
 pub mod moves;
 pub mod plant;
 pub mod possession;
+pub mod reckoning;
 pub mod wipeout;
 pub mod wobble;
 pub use camera::CamTuning;
@@ -497,6 +498,8 @@ pub struct Tuning {
     pub moves: moves::MoveTuning,
     /// Speed wobble (`tuning::wobble`).
     pub wobble: wobble::WobbleTuning,
+    /// The ground reckoning: the rider's up and lean (`tuning::reckoning`).
+    pub reckoning: reckoning::ReckoningTuning,
     /// Board adjust in the air (`tuning::adjust`; measured from Skate 3's clips, no rules-pack values).
     pub adjust: adjust::AdjustTuning,
     /// Foot plants: the FootJump launch and the air foot plant (`tuning::plant`).
@@ -777,6 +780,7 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .chain(camera::PATHS.iter())
         .chain(moves::PATHS.iter())
         .chain(wobble::PATHS.iter())
+        .chain(reckoning::PATHS.iter())
         .chain(biped::PATHS.iter())
         .chain(possession::PATHS.iter())
         .chain(plant::PATHS.iter())
@@ -1392,6 +1396,7 @@ impl Tuning {
         cam: CamTuning::BUILT_IN,
         moves: moves::MoveTuning::BUILT_IN,
         wobble: wobble::WobbleTuning::BUILT_IN,
+        reckoning: reckoning::ReckoningTuning::BUILT_IN,
         adjust: adjust::AdjustTuning::BUILT_IN,
         plant: plant::PlantTuning::BUILT_IN,
         handplant: handplant::HandPlantTuning::BUILT_IN,
@@ -1522,7 +1527,10 @@ impl Tuning {
             "physics_airstates/default/NaturalAirMaxDist" => scalar!(self.natural_air_max_dist),
             "physics_airstates/default/NaturalAirMinDist" => scalar!(self.natural_air_min_dist),
             "physics_airstates/default/NaturalAirTime" => scalar!(self.natural_air_time),
-            "physics_reckoning/default/GroundNormalSmoothing" => scalar!(self.ground_normal_blend),
+            "physics_reckoning/default/GroundNormalSmoothing" => {
+                let reckoning = self.reckoning.set(name, f, c(), v);
+                scalar!(self.ground_normal_blend) || reckoning
+            }
             "physics_reckoning/default/VertJumpAlignMaxGroundNormalY" => {
                 scalar!(self.vert_align_max_ny)
             }
@@ -1766,6 +1774,7 @@ impl Tuning {
                     || self.cam.set(name, f, c(), v)
                     || self.moves.set(name, f, c())
                     || self.wobble.set(name, f, c())
+                    || self.reckoning.set(name, f, c(), v)
                     || self.biped.set(name, f, c())
                     || self.possession.set(name, f, c())
                     || self.plant.set(name, f, c(), v)

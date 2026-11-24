@@ -34,6 +34,7 @@ pub mod meat;
 pub mod plant;
 pub mod possession;
 pub mod ragdoll;
+pub mod reckoning;
 pub mod respawn;
 pub mod stall;
 pub mod wipeout;
@@ -824,6 +825,10 @@ pub struct Skater {
     pub manual_exit: bool,
     /// Skate 3's speed wobble on the ground (`skater::wobble`).
     pub wobble: wobble::SpeedWobble,
+    /// Skate 3's ground reckoning (`skater::reckoning`): the dynamic normal from the board's
+    /// acceleration, the rider's up and his lean into a turn (what the turn conditioner reads).
+    pub dynamic_normal: reckoning::DynamicNormal,
+    pub reckoning: reckoning::Reckoning,
     pub grab: Option<Grab>,
     /// The longest grab of this jump that was let go of (scored on landing).
     grabbed: Option<Grab>,
@@ -999,6 +1004,9 @@ pub struct GraphControl {
     /// The stick's spin as the graph hands it to the physics (`PhysBodySpin`; Skate 3's body spin
     /// controller reads it on the ground and in the air).
     pub body_spin: f32,
+    /// The graph's `Turn` packet (SetTurning's), which Skate 3's physics takes as its processed turn
+    /// (negated: SK8 scalar_attributes.rs).
+    pub turn_packet: Option<f32>,
     /// The playing clips carry `Anticipating` (the ollie wind-up): Skate 3's camera reads it as
     /// `IsPreparingToJump`.
     pub anticipating: bool,
@@ -1213,6 +1221,8 @@ impl Skater {
             manual_lock: false,
             manual_exit: false,
             wobble: wobble::SpeedWobble::default(),
+            dynamic_normal: reckoning::DynamicNormal::default(),
+            reckoning: reckoning::Reckoning::default(),
             grab: None,
             grabbed: None,
             grind: None,
@@ -1662,6 +1672,7 @@ impl Skater {
                 .lerp(self.contact_n, k)
                 .normalize_or(self.contact_n);
             self.vel = self.ground_velocity() + self.contact_n * self.vn;
+            self.update_reckoning(dt);
             // A safe spot to be put back on after a bail.
             self.riding_ticks += 1;
             let at = respawn::Checkpoint {
@@ -1676,10 +1687,70 @@ impl Skater {
             self.approach.ride(pose);
         } else {
             self.riding_ticks = 0;
-            // Off the ground: Skate 3 resets the wobble on entering it again.
+            // Off the ground: Skate 3 resets the wobble on entering it again. Its air, grind and
+            // off-board reckonings clear the lean.
             self.wobble.reset();
+            self.reckoning.lean = 0.0;
         }
         self.sync_heading();
+    }
+
+    /// One tick of Skate 3's ground reckoning (SK8 board_dynamic_normal.rs, ground_orientation.rs,
+    /// reckoning_frames.rs): the dynamic normal from the board's acceleration this tick, then the
+    /// rider's up and lean. The lean is published the way SK8's animation feedback does: negated
+    /// unless the board's frame is turned (Processed2468 bit 20, the effective frame flipped).
+    fn update_reckoning(&mut self, dt: f32) {
+        let t = self.tuning.reckoning;
+        let wheels = if self.vn != 0.0 {
+            0
+        } else if self.manual.is_some() {
+            2
+        } else {
+            4
+        };
+        let accel = if dt > 0.0 {
+            (self.vel - self.prev_vel) * (1.0 / dt)
+        } else {
+            Vec3::ZERO
+        };
+        self.dynamic_normal.update(
+            &t,
+            wheels,
+            accel,
+            self.tuning.gravity,
+            self.prev_vel.length(),
+        );
+        let frame = self.board_frame();
+        // The physical board's nose (its frame turns end for end only in effect).
+        let nose = if self.frame_turned {
+            -frame.cols[2]
+        } else {
+            frame.cols[2]
+        };
+        let speed = self.vel.length();
+        self.reckoning.update(
+            &t,
+            reckoning::ReckoningInput {
+                com_to_deck: -frame.cols[1],
+                ground_normal: self.contact_n,
+                dynamic_up: self.dynamic_normal.normal,
+                speed,
+                wheels,
+                balance: if self.manual.is_some() { 1.0 } else { 0.0 },
+                board_up: frame.cols[1],
+                board_forward: nose,
+                heading: nose,
+            },
+        );
+    }
+
+    /// The lean the turn conditioner reads (SK8 physical_feedback.rs `publish`).
+    pub fn published_lean(&self) -> f32 {
+        if self.frame_turned {
+            self.reckoning.lean
+        } else {
+            -self.reckoning.lean
+        }
     }
 
     fn step_mode(

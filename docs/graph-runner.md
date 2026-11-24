@@ -132,10 +132,18 @@ With `motion/graph` loaded (`Game::graph`), each tick:
 4. The riding behaviours set the riding trees' parameters (`graph/riding.rs`; disc tuning
    `anim_carving`, `physics_animation`, `anim_motion/crouching`, `auto_pump`, `body_tilt` and `manual`
    through the rules pack, else flatground's own values):
-   - the physics' animation turn conditioner (SK8 turn_conditioner.rs) runs once a tick on the
-     physics' turn (`Skater::steer`, positive to the left as Skate 3's) and its lean into the turn
-     (the angle balancing the turn's centripetal pull): three filters, quickness from how much the
-     stick moves, holding from how still the lean stays;
+   - the physics' animation turn conditioner (SK8 turn_conditioner.rs) runs once a tick on Skate 3's
+     processed turn (the graph's last `Turn` packet, negated: SK8 scalar_attributes.rs, positive to
+     the left) and the ground reckoning's lean (`skater/reckoning.rs`, below): three filters,
+     quickness from how much the stick moves, holding from how still the lean stays. The reckoning
+     ports SK8 board_dynamic_normal.rs, ground_orientation.rs and reckoning_frames.rs with the disc's
+     `physics_reckoning` values: the dynamic normal follows the direction of the board's acceleration
+     against gravity (damped, at most `DynamicSpeedMaxDelta` x its curve a tick), the rider's up
+     filters towards the ground's normal and the deck's pitch, and the lean is the angle from that up
+     to the dynamic normal about the rider's heading, published negated unless the board's frame is
+     turned (Processed2468 bit 20); off the ground it is 0. It used to be the smoothed steering and
+     the centripetal lean `atan(yaw rate x speed / g)`, which leaned in two to three times faster than
+     SK8's and let go twice as fast;
    - `SetTurning` (SK8 set_turning.rs, turn_remap.rs): `angle` (the lean, through the quick and slow
      remaps mixed by quickness, eased in by `blend_lean_in`, at most `clamp_curr_lean` an update,
      fully to the side in a powerslide), `dir`, `quickness`, `holding`, `speedtuck` past
@@ -835,9 +843,8 @@ SK8's at 5.4), and SK8's action graph then runs the rider out (`SS_RUNOUT_GROUND
 dismount states: no wipeout request is raised) where flatground's plays a bump and rides on; shoves don't run;
 the wipeout's lean and twist come from the drawn bail, not a ragdoll's hips; the d-pad's gestures are
 a fixed set (Skate 3's are the player's pick). The
-turn conditioner reads the physics' smoothed steering and a centripetal lean instead of Skate 3's
-processed turn and reckoning lean, and the speed wobble's amplitude (`World::wobble`, Skate 3's
-`SpeedWobble` from `skater/wobble.rs`); Crouching has no board or ground absorption
+turn conditioner's lean comes from the kinematic board's acceleration, so a full carve's lean builds
+faster than SK8's rigid board lets it (0.64 against 0.44 rad 9 ticks in, both 0.88 steady); Crouching has no board or ground absorption
 force (only its restoring force) and no deck-angle crouch; the powerslide's side for SetTurning is the
 physics' slide.
 
@@ -941,6 +948,11 @@ and let-go 180s, manuals and the tail brake, the foot brake, powerslides, a drop
 a thin-rail run, and the camera while riding and carving.
 
 Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_sk8.rs`):
+
+- **Turn lean** (`feel-parity`): the turn conditioner's lean is the ground reckoning's (the dynamic
+  normal's angle from the rider's up), its turn the graph's `Turn` packet. Against SK8's lean, tick by
+  tick over a carve and its release: full stick at 6.5 m/s RMS 0.10 rad (was 0.15; release 0.06, was
+  0.15), half a stick at 6.65 m/s RMS 0.009 (was 0.028); steady 0.876 and 0.288 rad (SK8 0.878, 0.279).
 
 - **Manual drags** (`feel-parity`): the nose drag (`NoseManual/Holding/Brake`) brakes at 2.86 m/s^2
   (SK8 2.90; it rolled on unbraked at 0.5), and over 5 m/s with the deck at the brake angle the Normal
