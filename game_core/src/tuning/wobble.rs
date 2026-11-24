@@ -81,8 +81,8 @@ impl WobbleTuning {
         max_amplitude: 0.3,
         crouch_min: 0.5,
         crouch_max: 0.9,
-        activation: 15.0,
-        amplitude_scale: 0.5,
+        activation: super::ModeTuning::NORMAL.wobble_onset,
+        amplitude_scale: super::ModeTuning::NORMAL.wobble_amplitude,
     };
 
     /// Takes over a value from the rules pack (`class/key/field`). Returns whether it was one of these.
@@ -126,8 +126,6 @@ impl WobbleTuning {
             "physics_speed_wobble/default/MaxAmplitude" => scalar!(self.max_amplitude),
             "physics_speed_wobble/default/CrouchMin" => scalar!(self.crouch_min),
             "physics_speed_wobble/default/CrouchMax" => scalar!(self.crouch_max),
-            "physics_mode/normal/Hash_77AFCE78FE1206CA" => scalar!(self.activation),
-            "physics_mode/normal/Hash_5B57F2CCCCEEF430" => scalar!(self.amplitude_scale),
             _ => false,
         }
     }
@@ -147,6 +145,4 @@ pub const PATHS: &[&str] = &[
     "physics_speed_wobble/default/MaxAmplitude",
     "physics_speed_wobble/default/CrouchMin",
     "physics_speed_wobble/default/CrouchMax",
-    "physics_mode/normal/Hash_77AFCE78FE1206CA",
-    "physics_mode/normal/Hash_5B57F2CCCCEEF430",
 ];

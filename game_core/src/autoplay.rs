@@ -55,7 +55,7 @@ impl KickerRun {
             let (load, flick) = if !game.on_demo_park() {
                 (self.pushed > 150, self.pushed > 175)
             } else {
-                (s.pos.z > -5.0, s.pos.z > -2.8)
+                (s.pos.z > -5.0, s.pos.z > -3.3)
             };
             if flick {
                 (pad.cstick_x, pad.cstick_y) = flick_end(game, "Kickflip", s.mirrored(), UP_RIGHT);

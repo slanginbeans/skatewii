@@ -534,6 +534,8 @@ fn save_settings(game: &Game, places: &Places, id: &str) {
         game.draw_distance() as u16,
         game.camera_angle(),
         game.volume(),
+        game.difficulty(),
+        game.truck_tightness(),
     );
     if !save(&path, text.as_bytes()) {
         log(false, &format!("settings: could not write {path}"));
@@ -685,6 +687,12 @@ pub extern "C" fn fg_rust_init() {
     }
     if let Some(v) = settings.volume {
         game.set_volume(v);
+    }
+    if let Some(d) = settings.difficulty {
+        game.set_difficulty(d);
+    }
+    if let Some(t) = settings.trucks {
+        game.set_truck_tightness(t);
     }
     game.set_locations(index.locations);
     let start = menu::start_location(&game.locations, settings.location.as_deref(), index.default);

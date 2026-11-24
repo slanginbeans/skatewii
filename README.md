@@ -147,14 +147,21 @@ With parks converted from your own disc, the game starts in a **start menu** lis
 skate parks the build converted, then the built-in demo park), with the last one you chose highlighted
 (`settings.txt` in the app folder remembers it; the first time, the build's default). Up/down on the d-pad or
 the control stick moves, A (or START) rides. **START** while riding opens the **pause menu**: Resume, Change
-location (the same list; B goes back), Draw distance, Camera, Volume, Respawn (back to the park's start), Quit to
-loader. B or START resumes. **Draw distance** (left/right, 40 to 120 m in steps of 10, 90 by default) sets how
+location (the same list; B goes back), Draw distance, Camera, Volume, Difficulty, Trucks, Respawn (back to the
+park's start), Quit to loader. B or START resumes. **Draw distance** (left/right, 40 to 120 m in steps of 10, 90 by default) sets how
 far a city district is drawn and read from the card, with the fog following it: shorter runs faster on a
 real Wii. **Camera** (left/right or A) is Skate 3's Camera Angle: **Low** (the default, as Skate 3's camera
 preferences start; close behind the board and nearly level with it) or **High** (Skate 3's high camera,
 about 3 to 4.4 m back and 17 to 30 degrees up). **Volume** (left/right, 0 to 10, 8 by default) is the master
-volume of all sound. `settings.txt` remembers them all (a file from an older build still loads, with the
-default camera and volume).
+volume of all sound. **Difficulty** (left/right, wrapping round as Skate 3's Play Mode row does) is Skate 3's
+**Easy**, **Normal** (the default) or **Hardcore**: each is Skate 3's own physics mode, its values from your
+disc's rules (or Skate 3's built in) and applied at once. Easy pushes harder (1.5 m/s a push tick against 0.6),
+pops its low jumps higher, locks onto grinds from further (1.35 m against 0.9), wobbles later and softer
+(from 22 m/s) and has no manual corrective force, so dragging the nose or tail against a manual ends it;
+Hardcore pushes weaker, barely locks onto grinds (0.15 m), wobbles sooner (12 m/s) and gives no help
+spinning to the landing. **Trucks** (left/right, 0.0 loose to 1.0 tight in steps of 0.1, 0.7 by default) is
+Skate 3's truck tightness: tighter trucks steer less and wobble later. `settings.txt` remembers them all (a
+file from an older build still loads, with the default camera, volume, Normal and 0.7 trucks).
 While a menu is open the riding waits and the pad only drives the menu (the d-pad's gestures don't fire, and
 the A that chose an item is not a push until you let go of it). Changing location shows a loading screen
 while the park is read from the SD card (Dolphin reads the biggest, 4.2 MB, in well under a second; a real
