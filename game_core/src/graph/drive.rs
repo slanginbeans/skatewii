@@ -143,6 +143,13 @@ impl Driver {
             Mode::Walk if s.biped.air.is_some() => phys::OFFBOARD_AIR,
             Mode::Walk => phys::OFFBOARD,
         };
+        // Dropping in on foot: the board's tail held on the coping is Skate 3's tip slide with its
+        // drop-in flag (a grind to the graphs).
+        let phys = if s.drop_in.is_some_and(|d| d.dropping()) {
+            phys::GRIND
+        } else {
+            phys
+        };
         let up = s.normal;
         let surface = libm::acosf(up.y.clamp(-1.0, 1.0)) * (180.0 / crate::math::PI);
         let along = libm::asinf(s.fwd.y.clamp(-1.0, 1.0)) * (180.0 / crate::math::PI);
@@ -259,7 +266,7 @@ impl Driver {
                 }
                 _ => [0.0; 2],
             },
-            toggling_board: s.board_toggle.is_some(),
+            toggling_board: s.board_toggle.is_some() || s.drop_in.is_some(),
             // The board off the feet (`skater::possession`).
             holding_board: s.possession.held(),
             deck_free: s.possession.free(),
@@ -271,6 +278,14 @@ impl Driver {
             footplant_length: s.air_plant.map_or(-1.0, |p| p.length()),
             footplant_contact: s.footplant.published_contact(),
             pose_com: s.body_com,
+            // Dropping in (`skater::dropin`): on foot, or rolling slowly onto the coping on a tip.
+            dropping_in: s.drop_in.is_some_and(|d| d.dropping())
+                || s.grind.as_ref().is_some_and(|g| {
+                    g.entry == crate::skater::Entry::DropIn && g.family == Family::Tipslide
+                }),
+            drop_in_flat: s.drop_in.is_some_and(|d| !d.edge.transition),
+            // The hand plant (`skater::handplant`).
+            handplant: s.handplant_world(),
             ..World::default()
         };
         // Coming down onto the free board (the caveman): `CanLandOnBoard` while the feet will meet its
@@ -438,6 +453,24 @@ impl Driver {
         if path.contains("/PushTrick/") {
             c.plant = crate::skater::plant::PlantKind::from_trick(r.str(r.s.trick));
         }
+        // Hand plants: the world grab the motion graph attaches (Skate 3's RB: the physics looks for a
+        // coping while it is held), its committed hand plant (`AnimCommittedHandPlant`), and the plant's
+        // scored name (its one-foot and no-foot states' ScoringTrick, else ScoringHandPlants').
+        c.grab_world = r.packet_named("GrabWorld").is_some();
+        c.handplant_committed = r.packet_named("AnimCommittedHandPlant").is_some();
+        if path.contains("HandPlantAir/") {
+            let trick = r.str(r.s.trick);
+            c.handplant_name = if trick.get(3..).is_some_and(|t| t.starts_with("handplant")) {
+                Some(trick)
+            } else if r.s.handplant_score != super::NONE {
+                Some(r.pack.str(r.s.handplant_score))
+            } else {
+                None
+            };
+        }
+        // Dropping in on foot: the motion graph standing at the edge (`IntoDropIn/Cycle`).
+        c.drop_in_stand = path.contains("IntoDropIn/Cycle");
+        c.drop_in_grinding = path.contains("Grinding/DroppingIn");
         // In the air: a one-foot grab runs the foot plant manager, its foot plant states reach for it.
         c.one_foot_air = r.packet_named("OneFootAir").is_some();
         c.foot_planting = r.packet_named("FootPlanting").is_some();
@@ -669,6 +702,10 @@ fn walking(w: &mut World, s: &Skater) {
     w.surface_slope = libm::acosf(n.y.clamp(-1.0, 1.0)) * (180.0 / crate::math::PI);
     w.skate_slope = slope;
     w.hips = [0.0; 2];
+    // SK8's off-board edge distance (`DistToEdge`): along the facing to where the ground falls away.
+    w.dist_to_edge = s.drop_in.map_or(s.edge.map_or(10.0, |e| e.dist), |d| {
+        (crate::math::v3(d.edge.point.x, s.pos.y, d.edge.point.z) - s.pos).length()
+    });
     if let Some(time) = b.air {
         w.air_remaining = b.air_remaining;
         w.air_duration = time + b.air_remaining;

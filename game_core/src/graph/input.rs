@@ -7,8 +7,11 @@
 //! - A: push (right foot, `RightPush`), B: mongo push (`LeftPush`); both at once is the hippie jump:
 //!   the graphs see both pushes and wind it up themselves (`OnBoard/HippyJump`), as in Skate 3.
 //! - X: foot brake (`Brake`).
-//! - Z: dark catch (`DarkCatch`) and world grab (`GrabWorld`). Z with the d-pad on the ground is the
-//!   session marker and replay chord (`crate::marker::Chord`): the game hides it from here.
+//! - Z: dark catch (`DarkCatch`) and world grab (`GrabWorld`: held riding up a ramp, a hand plant on its
+//!   coping). Z with the d-pad on the ground is the session marker and replay chord
+//!   (`crate::marker::Chord`): the game hides it from here.
+//! - In a hand plant: the C-stick tweaks it (`HandPlantTweakX/Y`), X takes the feet off
+//!   (`HandPlantDismount`), A and B one foot (`HandPlantOneFootRight`, `HandPlantOneFootLeft`).
 //! - L / R: grabs (`LeftAirGrab` / `RightAirGrab`; fully in: the ground grabs) and crouch. Off the board
 //!   (Skate 3's LT / RT there), pressed fully in: drop the board (`OB_DropBoard`, L) or throw it down
 //!   ahead (`OB_ThrowBoard`, R), either one `OB_RetrieveBoard` (picks it back up when it isn't in hand).
@@ -79,6 +82,9 @@ names! {
     ob_world_x = "OB_BipedWorldX", ob_world_z = "OB_BipedWorldZ", ob_stick_mag = "OB_BipedStickMag",
     ob_look_x = "OB_LookAtX", ob_look_y = "OB_LookAtY",
     ob_drop = "OB_DropBoard", ob_throw = "OB_ThrowBoard", ob_retrieve = "OB_RetrieveBoard",
+    hp_tweak_x = "HandPlantTweakX", hp_tweak_y = "HandPlantTweakY",
+    hp_dismount = "HandPlantDismount", hp_one_right = "HandPlantOneFootRight",
+    hp_one_left = "HandPlantOneFootLeft",
 }
 
 /// A trigger this far in is fully in (Skate 3 reads a trigger at 1.0: a ground grab riding, a drop or a
@@ -383,6 +389,22 @@ impl Intentions {
         }
         if rx != 0.0 {
             put(id.tweak_x, rx);
+            put(id.hp_tweak_x, rx);
+        }
+        if ry != 0.0 {
+            put(id.hp_tweak_y, ry);
+        }
+        // Hand plants (SK8 trick_intentions.rs, by position): Skate 3's B (here X) takes the feet off,
+        // its A (A) and X (B) one foot (`HandPlantOneFootRight`, `Left`); the action graph's hand plant
+        // state passes them on.
+        if held & btn::X != 0 {
+            put(id.hp_dismount, 1.0);
+        }
+        if right {
+            put(id.hp_one_right, 1.0);
+        }
+        if left {
+            put(id.hp_one_left, 1.0);
         }
         if rlen > FULL {
             let b = (rlen - FULL) * 10.0;

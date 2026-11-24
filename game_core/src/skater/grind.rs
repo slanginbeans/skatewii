@@ -344,6 +344,10 @@ pub struct Grind {
     /// The approach was backside (the chest away from the rail) and the rider is turned round from it.
     pub backside: bool,
     pub reversed: bool,
+    /// The rail is a ramp's coping (`skater::stall::is_coping`), and the fastest the board went along it
+    /// (m/s): held still on a coping, the grind is a stall.
+    pub coping: bool,
+    pub top_speed: f32,
 }
 
 impl Grind {
@@ -1443,6 +1447,8 @@ impl Skater {
             naming: Naming::default(),
             backside,
             reversed,
+            coping: class.is_ledge() && super::stall::is_coping(park, c.point, high),
+            top_speed: along.abs(),
         });
         self.grind_exit = None;
         self.name_grind(c.dir, upright(c.dir), true);
@@ -1938,6 +1944,7 @@ impl Skater {
             }),
         };
         let off_end = g.s <= 0.0 || g.s >= rail.length();
+        g.top_speed = g.top_speed.max(g.speed);
         let stopped = g.speed < STOP_SPEED && g.relief <= 0.0;
         g.slow = if stopped { g.slow + dt } else { 0.0 };
         let stalled = g.slow > STOP_TIME;
@@ -1971,22 +1978,37 @@ impl Skater {
         } else {
             "stopped"
         });
+        // Held still on a coping and falling back in: a stall (`skater::stall`), named for the grind it
+        // is; the main stick to the side turns a rock round.
+        let stall = (g.coping && pop.is_none() && g.top_speed < super::stall::STALL_SPEED)
+            .then(|| {
+                let turned = pad.stick[0].abs() > super::stall::ROLL_STICK;
+                super::stall::Stall::of(g.family, g.front, self.fwd, g.high, turned)
+            })
+            .flatten();
         // Leaving the rail: score it, square the board back up along the rail and fly off.
         if g.time >= GRIND_MIN_TIME {
-            let name = match &g.into {
-                Some((tr, _)) => format!("{tr} {}", g.display()),
+            let display = match stall {
+                Some(st) => st.display(g.frontside()),
                 None => g.display(),
             };
+            let name = match &g.into {
+                Some((tr, _)) => format!("{tr} {display}"),
+                None => display,
+            };
+            let base = g.scorable();
             events.push(Event::Landed {
                 name,
                 points: 0,
                 score: crate::scoring::Scored::Grind {
                     into: g.into.as_ref().map(|t| t.1),
-                    id: g.scorable(),
+                    id: stall.and_then(|st| st.id(g.frontside())).or(base),
+                    base,
                     held: g.time,
                 },
             });
         }
+        self.stalled = stall;
         let backwards = self.fwd.dot(travel) < 0.0;
         let square = if backwards { -travel } else { travel };
         let lean_off = leaned || (stalled && pop.is_none());
@@ -2015,6 +2037,14 @@ impl Skater {
             self.normal = Vec3::UP;
             self.contact_n = Vec3::UP;
             self.fakie = backwards;
+        }
+        // Out of a truck stall or a rock and roll the rider turns back down the ramp.
+        if stall.is_some_and(|st| st.turns_down()) {
+            let down = v3(low_side.x, 0.0, low_side.z).normalize_or(self.fwd);
+            self.fwd = down;
+            self.normal = Vec3::UP;
+            self.contact_n = Vec3::UP;
+            self.fakie = false;
         }
         match pop {
             Some((f, strength)) => {

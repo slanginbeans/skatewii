@@ -544,6 +544,22 @@ const BUILT_IN: &[(&str, i32, f32)] = &[
     ("bs_overcrook_bsgrab", 40, 0.2),
     ("bs_darkslide", 50, 0.2),
     ("fs_darkslide", 50, 0.2),
+    ("fs_handplant", 100, 0.2),
+    ("fs_handplant_up", 150, 0.2),
+    ("fs_handplant_right", 150, 0.2),
+    ("fs_handplant_left", 150, 0.2),
+    ("fs_handplant_down", 150, 0.2),
+    ("fs_handplant_onefoot_front", 150, 0.0),
+    ("fs_handplant_onefoot_back", 150, 0.0),
+    ("fs_handplant_nofoot", 150, 0.0),
+    ("bs_handplant", 100, 0.2),
+    ("bs_handplant_up", 150, 0.2),
+    ("bs_handplant_right", 150, 0.2),
+    ("bs_handplant_left", 150, 0.2),
+    ("bs_handplant_down", 150, 0.2),
+    ("bs_handplant_onefoot_front", 150, 0.0),
+    ("bs_handplant_onefoot_back", 150, 0.0),
+    ("bs_handplant_nofoot", 150, 0.0),
 ];
 
 /// A trick's id by its identifier (any case: the state graphs' names are upper case).

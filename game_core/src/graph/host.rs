@@ -199,6 +199,40 @@ pub struct World {
     /// rider's last pose; SK8 PhysOutAnimation's `animation_height`): what
     /// `IsCrouchedEnoughForBlendToGrabCycle` reads. `None` without the imported rider.
     pub pose_com: Option<f32>,
+    /// Dropping in on foot (`skater::dropin`): the board's tail held on the coping (`IsDroppingIn`), and
+    /// no transition under the edge (`IsDropInWithoutTransition`).
+    pub dropping_in: bool,
+    pub drop_in_flat: bool,
+    /// The hand plant (`skater::handplant`, SK8 HandPlantManager and physical state 600).
+    pub handplant: HandPlantWorld,
+}
+
+/// What the hand plant manager publishes to the graphs (SK8 `GameplayConditions`' hand plant fields).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HandPlantWorld {
+    /// A coping to plant on was found riding (flag 31), the physics is in the hand plant (state 600),
+    /// it is frontside (flag 29), and the coping moved since the last one (flag 30).
+    pub found: bool,
+    pub air: bool,
+    pub frontside: bool,
+    pub new_pos: bool,
+    /// Seconds to the hand plant's apex (the manager's phase; `f32::MAX` none).
+    pub time: f32,
+    /// `anim_handplant`'s out, into and antic thresholds (s).
+    pub thresholds: [f32; 3],
+}
+
+impl Default for HandPlantWorld {
+    fn default() -> Self {
+        HandPlantWorld {
+            found: false,
+            air: false,
+            frontside: false,
+            new_pos: false,
+            time: f32::MAX,
+            thresholds: crate::tuning::handplant::HandPlantTuning::BUILT_IN.anim,
+        }
+    }
 }
 
 impl Default for World {
@@ -276,6 +310,9 @@ impl Default for World {
             footplant_length: -1.0,
             footplant_contact: -1.0,
             pose_com: None,
+            dropping_in: false,
+            drop_in_flat: false,
+            handplant: HandPlantWorld::default(),
         }
     }
 }
@@ -418,6 +455,8 @@ pub struct Shared {
     pub grab: Str,
     /// The grab's scored name this tick (ScoringGrabs), or `NONE`.
     pub grab_score: Str,
+    /// The hand plant's scored name this tick (ScoringHandPlants), or `NONE`.
+    pub handplant_score: Str,
     /// The trick being scored (ScoringTrick), or `NONE`.
     pub trick: Str,
     /// Tree construction values: (key, value) as motion-library names (`Trick`, `Random`, ...).
@@ -881,6 +920,7 @@ impl<'a> Runner<'a> {
                 time_since_kickturn: 10.0,
                 grab: NONE,
                 grab_score: NONE,
+                handplant_score: NONE,
                 trick: NONE,
                 construction: Vec::new(),
                 underflip_requested: false,
@@ -961,6 +1001,7 @@ impl<'a> Runner<'a> {
             self.s.land_backwards = false;
         }
         self.s.grab_score = NONE;
+        self.s.handplant_score = NONE;
         self.s.kickturn = None;
         self.s.tricks_disabled = (self.s.tricks_disabled - dt).max(0.0);
         self.s.time_since_kickturn += dt;
@@ -1241,6 +1282,24 @@ impl Host<'_, '_> {
             Cond::WantsManualExit => w.wants_manual_exit,
             // SK8 motion_gameplay_conditions.rs: Air448 with Air212 set, and the contact time's window.
             Cond::FootPlanting => w.foot_planting && w.footplant_length >= 0.0,
+            Cond::DroppingIn => w.dropping_in,
+            Cond::DropInFlat => w.drop_in_flat,
+            // SK8 motion_gameplay_conditions.rs (`0x82BA55A8`, `0x82BBDB98`, `0x82BBDA98`).
+            Cond::HandPlanting { air, dir } => {
+                let h = w.handplant;
+                (if air { h.air } else { h.found })
+                    && match dir {
+                        1 => h.frontside,
+                        0 => !h.frontside,
+                        _ => true,
+                    }
+            }
+            Cond::NewHandPlantPos => w.handplant.new_pos,
+            Cond::PlayHandPlant(phase) => {
+                let h = w.handplant;
+                let t = h.thresholds[(phase as usize).min(2)];
+                h.time - 1.0 / 60.0 < if phase == 0 { -t } else { t }
+            }
             Cond::PrepareFootplant => {
                 let (lo, hi) = crate::skater::plant::PREPARE_WINDOW;
                 (lo..=hi).contains(&w.footplant_contact)
@@ -2111,6 +2170,28 @@ impl Host<'_, '_> {
                 _ => {}
             },
             // SK8 motion_tricks.rs (TU3 `0x82BBE4E0`): the manager's swing time as `absorblength`.
+            // SK8 motion_tricks.rs (`0x82BBF758`): ScoringGrabs' windows on the filtered tweak intents.
+            Beh::ScoringHandPlants(g) => {
+                if phase == 1 {
+                    let x = self.s.filtered.get(g.x).unwrap_or(0.0);
+                    let y = self.s.filtered.get(g.y).unwrap_or(0.0);
+                    let has = g.dirs.map(|d| d != NONE);
+                    self.s.handplant_score =
+                        crate::skater::grab_variant(has, x, y).map_or(g.base, |i| g.dirs[i]);
+                }
+            }
+            // SK8 motion_tricks.rs (`0x82BBE5D0`): how late into the antic the hand plant was found.
+            Beh::HandPlantAntic { attr, normal, late } => {
+                if phase == 0
+                    && let Some(n) = *attr
+                    && *normal > *late
+                {
+                    let h = self.s.world.handplant;
+                    let v = ((normal - (h.thresholds[2] - h.time) - late) / (normal - late))
+                        .clamp(0.0, 1.0);
+                    self.s.player.set_param(n, v, false);
+                }
+            }
             Beh::FootPlantAbsorb(n) => {
                 if let Some(n) = *n
                     && phase < 2
