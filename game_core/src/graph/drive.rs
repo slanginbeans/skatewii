@@ -153,6 +153,15 @@ impl Driver {
             wants_manual_exit: s.manual_exit,
             // The speed wobble's amplitude, what Skate 3's animation turn conditioner reads.
             wobble: s.wobble.amplitude,
+            // The deck against the body (the game puts the imported rider's posed board here instead).
+            deck_yaw_pitch: {
+                let a = s.deck_adjust;
+                super::host::deck_angles(crate::math::v3(
+                    libm::sinf(a.yaw) * libm::cosf(a.pitch),
+                    libm::sinf(a.pitch),
+                    libm::cosf(a.yaw) * libm::cosf(a.pitch),
+                ))
+            },
             grind: s.grind.as_ref().map_or(super::NONE, |g| {
                 let name = g.graph_name();
                 GRAPH_NAMES
@@ -311,6 +320,9 @@ impl Driver {
             ob_traj: has(self.clips.ob_traj),
             dismounting: r.mg_state_root() == Some("Dismount"),
             mounting: r.mg_state_root() == Some("Mount"),
+            // The action graph publishing the stick and the motion graph in its board-adjust states
+            // (until then the take-off's clip still poses the deck).
+            board_adjust: r.board_adjusting() && path.contains("/BoardAdjusts/"),
             ..GraphControl::default()
         };
         if path.contains("/Manual/") {

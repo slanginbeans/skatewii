@@ -869,6 +869,10 @@ impl Game {
             if let Some(f) = self.rider.as_ref().and_then(|r| r.feet()) {
                 world.feet = f;
             }
+            // SetDeckPitchAndYaw reads the completed pose's deck (SK8 Skeleton536/540).
+            if let Some(nose) = posed_deck(self.rider.as_ref(), s.mirrored()) {
+                world.deck_yaw_pitch = crate::graph::host::deck_angles(nose);
+            }
             if matches!(s.mode, Mode::Bailed { .. }) {
                 world.wipe_stick = Some(pad.stick);
             }
@@ -902,6 +906,7 @@ impl Game {
             }
             if let Some(r) = &self.rider {
                 control.pose_com = r.com_above_board();
+                control.pose_deck = posed_deck(Some(r), self.skater.mirrored());
                 control.pose_lift = (r.board_rest_height() - crate::skater::DECK_HEIGHT).max(0.0);
             }
             self.skater.graph = Some(control);
@@ -1191,6 +1196,13 @@ impl Game {
         if s.dark || s.trick.is_some_and(|t| t.dark && t.progress() >= 1.0) {
             board_rot = board_rot.mul(&Mat3::rot_z(PI));
         }
+        // Board adjust in the air: the deck turned and tipped against the rider.
+        let a = s.deck_adjust;
+        if !a.is_none() {
+            board_rot = Mat3::rot_y(a.yaw)
+                .mul(&Mat3::rot_x(-a.pitch))
+                .mul(&board_rot);
+        }
         let pivot = 0.09;
         let board = base
             .then(&Xform::new(board_rot, v3(0.0, pivot + lift, 0.0)))
@@ -1320,6 +1332,14 @@ impl Game {
         }
         gfx.draw_2d(&m.verts);
     }
+}
+
+/// The posed board's nose in the rider's space from the imported rider's last pose, as Skate 3 reads it
+/// for the deck's yaw and pitch: turned round for a mirrored rider, whose clips turn the posed board end
+/// for end (SK8 `publish_deck_angles`' `board_flipped`).
+fn posed_deck(rider: Option<&Rider>, mirrored: bool) -> Option<crate::math::Vec3> {
+    let (_, nose) = rider?.board_axes()?;
+    Some(if mirrored { -nose } else { nose })
 }
 
 #[cfg(test)]

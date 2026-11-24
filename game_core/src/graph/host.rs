@@ -176,6 +176,9 @@ pub struct World {
     pub feet: [[f32; 2]; 2],
     /// The speed wobble's amplitude (0..1; SK8 PhysOut's Wobble+36): the turn conditioner's input.
     pub wobble: f32,
+    /// The posed deck's yaw and pitch against the rider ([`deck_angles`] of the last pose's board nose;
+    /// SK8 Skeleton536/540): what SetDeckPitchAndYaw hands its trees.
+    pub deck_yaw_pitch: [f32; 2],
 }
 
 impl Default for World {
@@ -243,6 +246,7 @@ impl Default for World {
             wipe_stick: None,
             feet: [[0.0; 2]; 2],
             wobble: 0.0,
+            deck_yaw_pitch: [0.0; 2],
         }
     }
 }
@@ -320,6 +324,9 @@ pub struct Names {
     pub phys_body_spin: Str,
     pub pushing: Str,
     pub new_push: Str,
+    /// The C-stick's board adjust (action-graph intents BoardAdjust republishes).
+    pub board_adjust_mag: Str,
+    pub board_adjust_angle: Str,
     /// The push trees' parameters (motion-library names): `HSTR_VEL_B`, `LSTR_VEL_B`, `VEL_E`.
     push_params: [Option<NameId>; 3],
     /// The fakie head and torso channel's tree and its `torso` parameter.
@@ -649,6 +656,8 @@ pub struct Runner<'a> {
     pub names: Names,
     /// Gesture intent ids per group, for HasGestureIntent and CreateTrickIntentFromGesture.
     gestures: Vec<Str>,
+    /// The motion-graph intents the action graph's BoardAdjust behaviours publish (magnitudes).
+    adjust_intents: Vec<Str>,
     scratch: Vec<PoseCommand>,
 }
 
@@ -714,6 +723,8 @@ impl<'a> Runner<'a> {
             phys_body_spin: id("PhysBodySpin"),
             pushing: id("Pushing"),
             new_push: id("NewPush"),
+            board_adjust_mag: id("BoardAdjustMag"),
+            board_adjust_angle: id("BoardAdjustAngle"),
             push_params: ["HSTR_VEL_B", "LSTR_VEL_B", "VEL_E"]
                 .map(|n| lib(n).or_else(|| lib(&n.to_ascii_lowercase()))),
             fakie_tree: db.and_then(|d| d.find(FAKIE_CHANNEL)),
@@ -794,7 +805,17 @@ impl<'a> Runner<'a> {
         let push_sets = [sets(push::REGULAR_CLIPS), sets(push::MONGO_CLIPS)];
         let ag_ctl = Controller::new(&pack.graphs[action]);
         let mg_ctl = Controller::new(&pack.graphs[motion]);
+        let mut adjust_intents: Vec<Str> = ag_ops
+            .iter()
+            .filter_map(|o| match o {
+                Op::Beh(Beh::BoardAdjust { mag, .. }) if *mag != NONE => Some(*mag),
+                _ => None,
+            })
+            .collect();
+        adjust_intents.sort_unstable();
+        adjust_intents.dedup();
         Some(Runner {
+            adjust_intents,
             ag_inst: vec![Inst::default(); ag_ops.len()],
             mg_inst: vec![Inst::default(); mg_ops.len()],
             ag_riding: Vec::new(),
@@ -1020,6 +1041,12 @@ impl<'a> Runner<'a> {
     /// The attribute of the playing clips (active now, or crossed during the last step).
     pub fn attribute(&self, db: &MotionDb, name: NameId) -> Option<Attr> {
         self.s.player.attribute(db, name)
+    }
+
+    /// The action graph is adjusting the board (a BoardAdjust behaviour publishes the C-stick to the
+    /// motion graph): the rider lines the deck up in the air.
+    pub fn board_adjusting(&self) -> bool {
+        self.adjust_intents.iter().any(|&s| self.s.mg.has(s))
     }
 
     /// The motion graph's current state as `Parent/Child/Leaf`.
@@ -1763,8 +1790,28 @@ impl Host<'_, '_> {
                 }
             }
             Beh::TrickFromGesture(group) => self.trick_from_gesture(op, *group, phase),
-            Beh::BoardAdjust { mag, angle } => {
-                if phase == 2 {
+            Beh::BoardAdjust {
+                mag,
+                angle,
+                angle_filter,
+                negate_on_mirror,
+            } => {
+                // SK8 action_board_adjust.rs: Begin resets the seam state (`Inst::default`), Update
+                // publishes both intents (or removes both, resetting it), End removes both.
+                if phase == 1 {
+                    let (m, a) = (self.n.board_adjust_mag, self.n.board_adjust_angle);
+                    let (m, a) = (self.s.ag.get(m), self.s.ag.get(a));
+                    let mirrored = self.s.world.mirrored;
+                    let i = &mut self.inst[op as usize];
+                    let mut seam = AdjustSeam {
+                        wrap: i.n as u8,
+                        previous: i.v,
+                    };
+                    let out = seam.update(m, a, *angle_filter, *negate_on_mirror, mirrored);
+                    (i.n, i.v) = (i32::from(seam.wrap), seam.previous);
+                    self.set_intent(*mag, out.map(|o| o.0));
+                    self.set_intent(*angle, out.map(|o| o.1));
+                } else if phase == 2 {
                     self.set_intent(*mag, None);
                     self.set_intent(*angle, None);
                 }
@@ -1785,10 +1832,14 @@ impl Host<'_, '_> {
                 _ => {}
             },
             Beh::DeckPitchAndYaw { yaw, pitch } => {
-                // flatground's board isn't posed apart from the body: the deck is square to it.
+                // SK8 motion_execute_leaf.rs: Begin copies the completed pose's deck yaw then pitch;
+                // Update and End do nothing.
                 if phase == 0 {
-                    for n in [yaw, pitch].into_iter().flatten() {
-                        self.s.player.set_param(*n, 0.0, false);
+                    let v = self.s.world.deck_yaw_pitch;
+                    for (n, v) in [yaw, pitch].into_iter().zip(v) {
+                        if let Some(n) = n {
+                            self.s.player.set_param(*n, v, false);
+                        }
                     }
                 }
             }
@@ -2886,6 +2937,80 @@ pub fn apply_filter(v: f32, kind: u8) -> f32 {
             if r > PI { r - 2.0 * PI } else { r }
         }
         _ => v,
+    }
+}
+
+/// The deck's yaw and pitch from its nose in the rider's frame (x right of the nose seen from above, y
+/// up, z ahead), as Skate 3 publishes them for SetDeckPitchAndYaw (SK8 pose_output.rs
+/// `publish_deck_angles`, Fill82BE1AE8): the yaw is `atan(x / z)` taken into the back quadrants (so
+/// +-pi/2 straight across, with the sign of x, including zero), the pitch the nose's height (a dot with
+/// up, not an angle). flatground's pose is already in the board's own frame, so no flip is applied.
+pub fn deck_angles(nose: crate::math::Vec3) -> [f32; 2] {
+    use crate::math::PI;
+    let (x, z) = (nose.x, nose.z);
+    let negative = x.is_sign_negative();
+    let (pi, half_pi) = if negative {
+        (-PI, -PI / 2.0)
+    } else {
+        (PI, PI / 2.0)
+    };
+    let yaw = if z == 0.0 {
+        half_pi
+    } else {
+        let basic = libm::atanf(x / z);
+        if z < 0.0 { pi + basic } else { basic }
+    };
+    [yaw, nose.y]
+}
+
+/// BoardAdjust's state (SK8 action_board_adjust.rs, Skate 3's BoardAdjust instance +8/+12): which side of
+/// the +-pi seam the published angle is held on (0 none, 1 at -pi, 2 at +pi) and the last raw angle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AdjustSeam {
+    pub wrap: u8,
+    pub previous: f32,
+}
+
+impl AdjustSeam {
+    /// One update: the (magnitude, angle) to publish, or `None` (both intents removed) without both
+    /// inputs. The angle goes through `filter` (when it is one of the angle filters' range, 0..=7),
+    /// is negated when mirrored with `negate_on_mirror`, and crossing the seam (from beyond +-pi/2 to
+    /// the other sign) holds it at that side's pi until the raw angle crosses back: pushing the C-stick
+    /// round past straight down doesn't swing the board through a whole turn.
+    pub fn update(
+        &mut self,
+        magnitude: Option<f32>,
+        angle: Option<f32>,
+        filter: u8,
+        negate_on_mirror: bool,
+        mirrored: bool,
+    ) -> Option<(f32, f32)> {
+        use crate::math::PI;
+        let (Some(magnitude), Some(mut angle)) = (magnitude, angle) else {
+            *self = AdjustSeam::default();
+            return None;
+        };
+        if filter <= 7 {
+            angle = apply_filter(angle, filter);
+        }
+        if negate_on_mirror && mirrored {
+            angle = -angle;
+        }
+        let crossed = self.previous * angle < 0.0 && self.previous.abs() > PI / 2.0;
+        self.wrap = match self.wrap {
+            0 if crossed && self.previous < 0.0 => 1,
+            0 if crossed && self.previous > 0.0 => 2,
+            1 if crossed && self.previous > 0.0 => 0,
+            2 if crossed && self.previous < 0.0 => 0,
+            w => w,
+        };
+        self.previous = angle;
+        let out = match self.wrap {
+            1 => -PI,
+            2 => PI,
+            _ => angle,
+        };
+        Some((magnitude, out))
     }
 }
 

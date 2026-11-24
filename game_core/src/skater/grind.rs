@@ -771,16 +771,24 @@ fn within(dir: Vec3, v: Vec3, deg: f32) -> bool {
 }
 
 impl Skater {
-    /// The board's frame: right, up, nose and the deck's middle.
+    /// The board's frame: right, up, nose and the deck's middle. In the air the deck is turned and tipped
+    /// against the body by the board adjust (`skater::adjust`) about its middle: the boxes the rails are
+    /// looked for in, and the grind air assist's points, are the adjusted deck's (Skate 3's physical
+    /// board follows its posed one).
     pub fn frame(&self) -> Frame {
-        let up = self.normal.normalize_or(Vec3::UP);
-        let fwd = tangent(self.fwd, up);
+        let body_up = self.normal.normalize_or(Vec3::UP);
+        let body_fwd = tangent(self.fwd, body_up);
+        let (fwd, up) = if self.deck_adjust.is_none() {
+            (body_fwd, body_up)
+        } else {
+            self.deck_adjust.apply(body_fwd, body_up)
+        };
         Frame {
             right: up.cross(fwd),
             up,
             fwd,
             // In the air the legs hold the deck up off the flight's path.
-            deck: self.pos + up * DECK_HEIGHT + Vec3::UP * self.air_lift,
+            deck: self.pos + body_up * DECK_HEIGHT + Vec3::UP * self.air_lift,
         }
     }
 
@@ -1179,6 +1187,8 @@ impl Skater {
         {
             return false;
         }
+        // Onto the rail as the deck was lined up (the family was picked from the adjusted deck).
+        self.bake_deck_adjust();
         self.engage(park, c, category, events)
     }
 
@@ -1959,8 +1969,9 @@ impl Skater {
         }
         a.moved = (offset - a.offset).length();
         a.offset = offset;
-        // Turned towards along or across the rail.
-        let h = heading(self.fwd);
+        // Turned towards along or across the rail: the deck as the rider lined it up (board adjust),
+        // turned with the body.
+        let h = heading(self.frame().fwd);
         let want = if ASSIST_ANGLE[kind] == 0.0 {
             0.0
         } else if h < 0.0 {

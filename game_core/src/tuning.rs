@@ -10,6 +10,7 @@
 
 use alloc::vec::Vec;
 
+pub mod adjust;
 pub mod biped;
 pub mod camera;
 pub mod grind;
@@ -478,6 +479,8 @@ pub struct Tuning {
     pub moves: moves::MoveTuning,
     /// Speed wobble (`tuning::wobble`).
     pub wobble: wobble::WobbleTuning,
+    /// Board adjust in the air (`tuning::adjust`; measured from Skate 3's clips, no rules-pack values).
+    pub adjust: adjust::AdjustTuning,
 
     // Walking off the board (`tuning::biped`).
     pub biped: biped::BipedTuning,
@@ -1338,6 +1341,7 @@ impl Tuning {
         cam: CamTuning::BUILT_IN,
         moves: moves::MoveTuning::BUILT_IN,
         wobble: wobble::WobbleTuning::BUILT_IN,
+        adjust: adjust::AdjustTuning::BUILT_IN,
         biped: biped::BipedTuning::BUILT_IN,
     };
 

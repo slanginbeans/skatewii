@@ -30,11 +30,11 @@ ways:
   Stubbed behaviours: `ToggleBoard`, `LandOnBoard`, `FootPlantAbsorb`, `ScoringHandPlants`, `Shove`,
   `AirDismounting`, `SetScoreAugmentation`. `UNSUPPORTED` holds the three skitching behaviours, and
   `GestureType` (the wipeout body tweaks) is also logged as unsupported.
-- **Board adjust looks fed but is cut off.** `BoardAdjustAngle`/`BoardAdjustMag` are set from the
-  C-stick. But `Beh::BoardAdjust` in `graph/host.rs` (`run`) only clears its motion-graph intents
-  (`MGIntentMag`/`MGIntentAngle`) on exit and never publishes them. SK8 publishes them every update,
-  with seam handling and mirroring (`skate-game/src/graph_host/action_board_adjust.rs`). Also,
-  `SetDeckPitchAndYaw` writes 0, so the board is never posed apart from the body.
+- **Board adjust** (fixed). `Beh::BoardAdjust` (`graph/host.rs` `run`, `AdjustSeam`) now publishes its
+  motion-graph intents every update as SK8 does (`angleFilter`, `negateOnMirror`, the +-pi seam;
+  `skate-game/src/graph_host/action_board_adjust.rs`), so the `BoardAdjusts/Left/Right/Up/Down` states'
+  clips pose the deck, and `SetDeckPitchAndYaw` hands its trees the posed deck's yaw and pitch
+  (`deck_angles`, SK8 `publish_deck_angles`). The physics' deck follows (see the Air row).
 
 ## Riding
 
@@ -66,7 +66,7 @@ ways:
 | Catching the board (danger zone; landing before the catch bails) | done | `GraphControl` danger zone; `land` | `animation/landing_quality.rs` | – |
 | Landing classification and slope match | done | `skater/landing.rs` `classify`; `land` | `physics/skeleton_landing*.rs` | – |
 | Trajectory selector and landing assist | done | `skater/air.rs` (`launch`, `score`, `grind_target`) | `air/trajectory/` | – |
-| **Board adjust in the air** (right stick lines the board up for a grind or landing) | **partial** | Intents fed (`input.rs`), but `Beh::BoardAdjust` never publishes to the motion graph and `SetDeckPitchAndYaw` is 0 (see above). The grind air assist (`grind.rs` `grind_air_assist`, `GrindAdjustMaxAngle`) only steers the flight, not the board's yaw or pitch | `action_board_adjust.rs`; `BoardAdjustLeft/Right/Up` skeleton inputs (`animation/skeleton_input/catalog.rs`) | M |
+| Board adjust in the air (right stick lines the board up for a grind or landing) | done | `Beh::BoardAdjust` publishes the C-stick (`graph/host.rs` `AdjustSeam`) and the graph plays `BoardAdjusts/*`; `SetDeckPitchAndYaw` from the posed deck (`deck_angles`). The physics' deck (`skater/adjust.rs` `DeckAdjust`) follows the posed board while the graph adjusts, else the C-stick at Skate 3's measured angles (`tuning/adjust.rs`: 80/88 degrees across, 20/24 nose down/up); `Skater::frame` turns the grind boxes and the grind air assist's points with it, and a rail or the ground bakes it into the board (`try_grind`, `land`). Tests: `tests/board_adjust.rs` (across a rail: boardslide; lined up: lands straight; imported: the graph's board-adjust states), `graph/tests.rs` `board_adjust`. `GrindAdjustMaxAngle` is the flight's steering limit in Skate 3 too, not the deck's | `action_board_adjust.rs`; `pose_output.rs` `publish_deck_angles` | – |
 | Hippie jump | done (animation buggy) | `update_hippy`, `hippie_air`; the animation is a known bug | `player/offboard/hippy_jump.rs` | – |
 | Hippie hurdle | missing | `IsHippyHurdling` pinned false | selector conditions | S |
 
@@ -152,7 +152,7 @@ Feel of core skating comes first, then the two features the user named, then the
 | 1 | Finish the known bugs (hippie jump, mid-air get-on, switch on mount, walk freeze) | everything below builds on mounting and walking | – |
 | 2 | ~~Manual tip-out under the graph (`PhysicsWantsManualExit`)~~ done: published as Skate 3 does (it fires only without the corrective force, so Normal manuals never tip out, as in Skate 3) | a manual that never fails breaks the feel of lines | S |
 | 3 | ~~Speed wobble (`TurnInput.wobble`, `riding/speed_wobble.rs`)~~ done | core riding feel at speed | S |
-| 4 | **Board adjust in the air**: publish `BoardAdjust`'s MG intents (seam handling and mirroring as SK8 does), drive `SKATEPITCH`/`SKATEYAW`, and feed the adjusted board yaw and pitch to grind contact and landing | user-named; lines up grinds and landings; the S part (publishing) unblocks the clips at once | M |
+| 4 | ~~**Board adjust in the air**: publish `BoardAdjust`'s MG intents (seam handling and mirroring as SK8 does), drive `SKATEPITCH`/`SKATEYAW`, and feed the adjusted board yaw and pitch to grind contact and landing~~ done | user-named; lines up grinds and landings; the S part (publishing) unblocks the clips at once | M |
 | 5 | **Drop and throw the board** (`OB_DropBoard`/`OB_ThrowBoard`/`OB_RetrieveBoard`, a free board body, `IsDeckFree`/`IsDroppingSkateboard`, `ToggleBoard`) | user-named; also needed for caveman | L |
 | 6 | Caveman and landing on the board from the air (`Mount/Air`, `LandOnBoard`, `IsLandingOnBoard`) | follows from 1 and 5 | M |
 | 7 | Grind balance as a rigid board, then grind grabs | grinds are half of street skating | L, then M |

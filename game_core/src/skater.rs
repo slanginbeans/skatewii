@@ -20,6 +20,7 @@
 //! (+ to the board's right). Riding switch means the rider stands with the other foot forward; the drawn
 //! skater is then mirrored.
 
+pub mod adjust;
 mod air;
 pub mod biped;
 mod board;
@@ -858,6 +859,8 @@ pub struct Skater {
     pub board_toggle: Option<f32>,
     /// The mount clip's `OB_TRAJ` has started (the rider is on the board when it ends).
     mount_traj: bool,
+    /// Board adjust (`skater::adjust`): the deck's yaw and pitch against the body, in the air only.
+    pub deck_adjust: adjust::DeckAdjust,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -922,6 +925,12 @@ pub struct GraphControl {
     pub ob_traj: bool,
     pub dismounting: bool,
     pub mounting: bool,
+    /// The action graph is adjusting the board (its BoardAdjust behaviour publishes the C-stick to the
+    /// motion graph's board-adjust clips).
+    pub board_adjust: bool,
+    /// The posed board's nose in the rider's frame (x `up x nose`, y up, z ahead) from the imported
+    /// rider's last pose: where the clips have put the deck. `None` without the imported rider.
+    pub pose_deck: Option<Vec3>,
 }
 
 /// A trick the state graph is animating in the air.
@@ -1112,6 +1121,7 @@ impl Skater {
             cam_yaw: heading,
             board_toggle: None,
             mount_traj: false,
+            deck_adjust: adjust::DeckAdjust::NONE,
         }
     }
 
@@ -1356,6 +1366,10 @@ impl Skater {
         };
         self.crouch += (crouch - self.crouch) * smooth(18.0, dt);
         self.grind_pitch_input = pad.flick[1];
+        // The deck is posed apart from the body only in the air (touching down bakes it in).
+        if !self.is_airborne() {
+            self.deck_adjust = adjust::DeckAdjust::NONE;
+        }
         if dt > 0.0 {
             self.accel = (self.vel - self.prev_vel) * (1.0 / dt);
         }
@@ -2594,6 +2608,8 @@ impl Skater {
         self.spin_rate = spin;
         self.spin += turn;
         self.fwd = rotate(self.fwd, self.normal, turn);
+        // Board adjust: the C-stick lines the deck up against the body.
+        self.update_deck_adjust(pad);
         // The legs: the board follows the animated centre of mass's height over it, as fast as the
         // rider's body follows its animation (SK8's physical rider; measured, 0.15 of the gap a tick).
         let lift_before = self.air_lift;
@@ -2967,6 +2983,8 @@ impl Skater {
     /// surface is kept (gaining on transitions), and the landing is classified as Skate 3 does.
     fn land(&mut self, normal: Vec3, surface: u16, air_time: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
+        // The board lands as the rider lined it up (board adjust): its nose is the landing's.
+        self.bake_deck_adjust();
         self.air_com = None;
         self.air_lift = 0.0;
         let n = normal.normalize_or(Vec3::UP);
