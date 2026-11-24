@@ -13,6 +13,7 @@
 //! correction that only move the body), each constraint row turns its error into an "impulse" in those
 //! units, and `Body::integrate` adds them to the tick's free motion.
 
+pub mod board;
 pub mod body;
 pub mod contact;
 pub mod drive;

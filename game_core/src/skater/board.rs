@@ -29,8 +29,11 @@
 //! - **Wallrides** (`ground_contact_response.rs`): a steep face with a real floor under it; the board
 //!   falls along it in an arc and jumps off when low, slow or after a while.
 //!
-//! Masses, inertia and wheel forces are not simulated; where Skate 3's value is a force, a flatground
-//! calibration turns it into an acceleration (marked "ours").
+//! Rolling, carving, pushing, braking, pumping and manuals now ride Skate 3's rigid board
+//! (`skater::rig`, `physics::board`): `ride` hands those ticks to `ride_rigid`. What follows here is the
+//! older kinematic model, still used for kick turns, reverts and powerslides: masses, inertia and wheel
+//! forces are not simulated there, and where Skate 3's value is a force, a flatground calibration turns
+//! it into an acceleration (marked "ours").
 
 use super::*;
 
@@ -192,6 +195,16 @@ impl Skater {
 
     /// One tick of riding on the ground, driven by `d`.
     pub(super) fn ride(&mut self, park: &dyn Terrain, d: &Drive, dt: f32, events: &mut Vec<Event>) {
+        if Self::rides_rigid(d) {
+            self.ride_rigid(park, d, dt, events);
+        } else {
+            self.ride_kinematic(park, d, dt, events);
+            self.follow_rig();
+        }
+    }
+
+    /// The older ground model: kick turns, reverts and powerslides turn the board kinematically.
+    fn ride_kinematic(&mut self, park: &dyn Terrain, d: &Drive, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
         let ticks = dt * 60.0;
         let n = self.contact_n;
@@ -566,7 +579,7 @@ impl Skater {
 
     /// The board leaves the ground with velocity `v` (a world vector). Rolling off vert without a pop
     /// keeps only part of the speed away from the face.
-    fn leave_ground(&mut self, mut v: Vec3, events: &mut Vec<Event>) {
+    pub(super) fn leave_ground(&mut self, mut v: Vec3, events: &mut Vec<Event>) {
         let t = self.tuning;
         let n = self.contact_n;
         if n.y < t.vert_align_max_ny {
@@ -658,7 +671,7 @@ impl Skater {
     /// the crouch this reports back (`absorption`, `ground_absorption`, `min_crouch`): riding out of a
     /// transition the rider springs up and the pump pays it out, intentional or not. Without the rider,
     /// the stick's crouch.
-    fn update_pumping(&mut self, d: &Drive, dt: f32) {
+    pub(super) fn update_pumping(&mut self, d: &Drive, dt: f32) {
         let t = self.tuning;
         let n = self.contact_n;
         let deck_angle = self.deck_angle();
@@ -781,7 +794,7 @@ impl Skater {
     /// Wallrides (Skate 3's model): a face steeper than 60 degrees with a real floor under it (one that
     /// doesn't curve up into it, as a quarter pipe or bowl does). The board falls along the wall in an
     /// arc and jumps off it when it gets low, slow, or has been on it a while.
-    fn update_wallride(&mut self, park: &dyn Terrain, dt: f32, events: &mut Vec<Event>) {
+    pub(super) fn update_wallride(&mut self, park: &dyn Terrain, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
         let n = self.contact_n;
         let steep = n.y.abs() < 0.5;

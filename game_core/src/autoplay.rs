@@ -46,8 +46,11 @@ impl KickerRun {
             flags: flag::CONNECTED,
             ..Default::default()
         };
-        // Hold A (keep pushing) until near top push speed.
-        if s.mode == Mode::Rolling && s.speed < 6.0 && !self.flicked {
+        // Hold A (keep pushing) until near top push speed, and not once winding up for the pop (the
+        // rigid board loses some speed meeting the kicker; a flick while a push is under way would be
+        // a no-comply).
+        let winding = game.on_demo_park() && s.pos.z > -5.0;
+        if s.mode == Mode::Rolling && s.speed < 6.0 && !self.flicked && !winding {
             pad.buttons |= btn::A;
         }
         if !self.flicked && s.mode == Mode::Rolling {
@@ -709,6 +712,8 @@ impl TrickTour {
                 | Tour::Carve
                 | Tour::KickTurn
                 | Tour::Revert
+                | Tour::TreFlip
+                | Tour::TreAir
                 | Tour::HalfCabAir
                 | Tour::Powerslide
                 | Tour::BailAir
@@ -779,7 +784,8 @@ impl TrickTour {
                     pad.buttons |= btn::X;
                 }
                 let turned = wrap_angle(s.travel_yaw() - PI).abs() < 0.25;
-                pad.stick_x = if self.t < 12 {
+                // (The rigid board's U-turn at this speed is about 5 m across: lean right a while first.)
+                pad.stick_x = if self.t < 30 {
                     85
                 } else if s.pos.z < 9.0 && self.t < 200 {
                     -10
@@ -1025,9 +1031,11 @@ impl TrickTour {
                 }
             }
             Tour::Powerslide => {
-                if self.t < 60 && s.speed < 5.5 {
+                // (Pushed only up to 4.5 m/s and sliding from half a second in: the rigid board
+                // leaves the late flip heading for a wall.)
+                if self.t < 30 && s.speed < 4.5 {
                     pad.buttons |= btn::A;
-                } else if self.t >= 60 && self.t < 100 {
+                } else if self.t >= 30 && self.t < 70 {
                     // Main stick fully back and to the right.
                     (pad.stick_x, pad.stick_y) = (50, -87);
                 }

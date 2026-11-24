@@ -910,7 +910,8 @@ Unsupported, logged once when reached: `EnterSkitchingBehaviour`, `SkitchingBeha
 `SkitchShimmyingBehaviour`, `GestureType` (the wipeout body tweaks: cannonball, judo kick ...; no
 ragdoll to tweak).
 
-Approximations to revisit: the board and rider are one kinematic body (a velocity, and an orientation
+Approximations to revisit: off the rigid board ("The rigid board" below: the air, grinds, slides, kick
+turns, reverts) the board and rider are one kinematic body (a velocity, and an orientation
 set from the ground and eased), where Skate 3's board is a jointed rigid assembly (deck, trucks, wheels
 and its hook) solved together with the physical rider's skeleton in one constraint solve, every ground
 behaviour (steering, speed model, pushes, brakes, the manual, pumping) handing it queued point forces
@@ -997,6 +998,73 @@ acceleration; on the rigid board each becomes the force that gives the board tha
 mass times it), queued at the deck as SK8 queues its forces, and the steering's deck tilt becomes the
 trucks' drive targets (SK8 steering.rs `TruckSteeringState`), so the turn comes from the trucks and the
 wheels' grip instead of a curve with flatground's own follow, lag and grip constants.
+
+**What rides on it** (`skater/rig.rs`, `physics/board.rs`). Rolling, carving, pushing, braking, pumping
+and manuals: every grounded tick that isn't a kick turn, a revert or a powerslide steps the board. The
+riding behaviours become forces at the deck, each as SK8 queues it:
+
+- the speed model, rolling resistance and the slope cap: the force that makes the board's travel speed
+  what Skate 3's model asks, gravity being the solver's;
+- a push: the board's mass times the gap to its target (at most the tick's change), and the foot brake
+  its force (`FootBrakeForce` x the surface, through `brake_scale`): the wheels take their share, so the
+  0.96 "push transfer" flatground measured is now the board's own;
+- the feet (SK8 ground_force.rs): `MinForce` x speed / 8 against the rider's up at each foot
+  (`FootForceOffset`), `MaxLandingForce` for `LandingForceTime` after touching down;
+- sideways friction across the deck (SK8 slide_friction.rs, `SideFriction_Scalar` and its curves);
+- heading, straightening and wall-hit turns as limited deck turns, the manual's controller output as a
+  deck turn (its derivative now reads the physical deck's measured turn), its Normal corrective drag
+  at the dragging truck;
+- a brake on a slow board sets every part's linear drag to 60 a second (SK8 grounded/drag.rs), which
+  stops it;
+- the trucks' drive targets are the steering's deck tilt (with its 0.165 s ramp after landing).
+
+The skater's ground state is read off the board: the speed and slip from its parts' centre of mass, the
+nose from the deck, the surface from the loaded wheels' contacts. Off its wheels for Skate 3's natural-air
+distance or time, the flight starts from the deck as it is (tipped over an edge, pitched); while tipping
+over an edge on its trailing wheels a rail under it is not ridden onto. Kick turns, reverts and
+powerslides still turn the board kinematically, and the rigid board is put where they leave it.
+
+No longer acting while the board is rigid (flatground's own calibrations, "ours"): `TRUCK_FOLLOW`, `TRUCK_YAW_MAX`, `TRUCK_YAW_MAX_PER_SPEED`, `TRUCK_YAW_LAG`, `SIDE_GRIP`,
+`GRIP_OVER`, `MAX_SLIP`, `SIDE_DAMP`, `MANUAL_CORRECTIVE_MASS` and `PUSH_TRANSFER` (the kinematic
+path for kick turns, reverts and slides still uses some of them).
+
+Simplified, beyond the list above:
+
+- The wheels' joint rows run front right, front left, back left, back right. TU3's order (back right
+  before back left) is chiral, and with this port's arithmetic the sequential solve turned a standing
+  board 0.042 rad in ten seconds (SK8's holds still); mirrored, it doesn't turn.
+- The narrow phase casts down the deck's up from each wheel's centre and a wheel radius ahead of and
+  behind it (at most two faces a wheel, so a concave kink is met on both); the deck and trucks don't
+  collide yet.
+- A board slower than 1 mm/s with no foot pushing is at rest (Skate 3 freezes bodies under
+  `FreezingEnergy`; SK8's host never sleeps them).
+
+Measured against SK8 (the harness's 27 scenarios; SK8 / kinematic before / rigid):
+
+| | SK8 | before | rigid |
+|---|---|---|---|
+| Full carve 6.5 m/s: yaw rate, slip, deck roll | 1.746 rad/s, 7.4 deg, -0.288 | 1.767, 2.8, (tilt) | 1.752, 7.4, -0.288 |
+| Full carve 8.3 m/s | 1.832, 8.0, -0.266 | 1.838, 2.9 | 1.823, 8.0, -0.267 |
+| Full carve 4.5 m/s | 1.607, 5.7, -0.295 | 1.688, 2.7 | 1.605, 5.7, -0.295 |
+| Half carve 6.65 / 8.46 m/s | 0.423 / 0.482 | 0.432 / 0.485 | 0.405 / 0.455 |
+| Carve build (63%) full / half | 0.10 / 0.35-0.43 s | 0.08 / 0.33-0.43 | 0.08-0.10 / 0.33-0.43 |
+| Tapped pushes dv | 2.16 1.80 2.03 1.88 | 2.16 1.80 2.04 1.91 | 2.16 1.80 2.03 1.87 |
+| Held push plateaus | 3.22 6.09 8.07 | 3.24 6.05 8.04 | 3.23 6.05 8.03 (2.63 s to 8 m/s, SK8's) |
+| Foot brake from 6.65: stop, distance, decel | 2.48 s, 6.86 m, 4.09 | 2.48, 6.90, 4.08 | 2.47, 6.79, 4.09 |
+| Manual pitch mean/max; brake mean/max | 13.8/16.2; 27.8/30.3 deg | 13.8/15.8; 27.9/30.7 | 13.7/15.7; 27.8/30.7 |
+| Manual brake angle reached (90%) | 0.88 s | 0.92 | 0.85 |
+| Nose drag from 8.5 m/s: corrective drag at | 5.43 m/s, keeps 46% | (from 7.8) | within 0.4 m/s, keeps 44% |
+| Rail run: 50-50 entry, decel | p84 7.0, 0.89 m/s^2 | p84 6.93, 1.04 | p84 6.89, 1.04 |
+| Pipe drop-in bottom speed | 9.19 m/s | 7.22 (via a coping stop) | 6.1 (rolls in) |
+
+Host cost: 27 us a board step (release build, 4 to 8 contact rows, 6 joints, 2 drives, 50
+iterations); at the Wii's 15 to 25 times slower core about 0.4 to 0.7 ms a tick.
+
+Left for the port's later stages: the deck and trucks against the world (the coping pivot on a truck,
+deck scrapes), lips and coping stalls, grinds and slides, landings, kick turns, reverts and powerslides
+on the rigid board, and then removing the kinematic ground model those still use. Known gaps: a built-in
+(no imported data) full carve at 3.3 m/s turns 1.28 rad/s against SK8's 1.71 (the imported graphs'
+steering gives 1.81); the 2.5 m drop-in's bottom speed.
 
 ## The camera (`game_core/src/camera`)
 

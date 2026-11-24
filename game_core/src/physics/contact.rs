@@ -27,7 +27,7 @@ pub fn combine(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 /// A compiled contact row.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ContactRow {
     pub a: Option<usize>,
     pub b: Option<usize>,
