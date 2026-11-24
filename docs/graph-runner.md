@@ -315,6 +315,23 @@ the revert and checkpoint classes), else flatground's own.
   graph's `IsBodyFlipping` reads it (its multi-flip and runout transitions). Drawn about a point 0.85 m
   over the board (ours); scored `BACKFLIP` / `FRONTFLIP` (`2X ...` for two turns). Skate 3's
   `PerfectBodyFlips` assist mode and the flip axis adjustment by the body spin are not run.
+- **Board adjust** (`skater/adjust.rs`, `tuning/adjust.rs`; SK8 action_board_adjust.rs, pose_output.rs):
+  the action graph's `BoardAdjust` hands the C-stick to the motion graph, whose `BoardAdjusts/Left`,
+  `Right`, `Up` and `Down` clips (`BLEND_ADJUST_*`) swing or tip the deck against the body, and Skate
+  3's physical board follows its posed one. flatground keeps the deck's yaw and pitch against the body
+  (`DeckAdjust`): while the graph adjusts (its intents published and the motion graph in
+  `/BoardAdjusts/`) they follow the imported rider's posed board (its nose turned round for a mirrored
+  rider, SK8's `board_flipped`; only the way the stick asks, so the take-off clip's pitch fading under
+  the adjust doesn't count), else the C-stick at the angles measured off Skate 3's clips (full stick:
+  80 degrees right, 88 left for the goofy clips, the other way round mirrored; nose 19.7 down pushed,
+  23.9 up pulled; half the rest of the way a tick, at most 13 degrees), with no trick turning the
+  board, no grab and no body flip. `Skater::frame` turns and tips the deck about its middle by them,
+  so the rail investigation's boxes (the family: across a rail a boardslide) and the grind air
+  assist's points and turn are the adjusted deck's; meeting a rail or the ground bakes them into the
+  board and the body rides it, so the landing's angle is the deck's. Skate 3 has no tuning attribute
+  for it (the angles are its clips'); `GrindAdjustMaxAngle` is the flight's steering limit, not the
+  deck's. With the imported rider, the clips' adjust may show doubled for the few ticks the landing
+  clip takes to blend it out after the bake.
 - Not done: the air leg's centre-of-mass height.
 
 ## Grinds (physics: `skater/grind.rs`, `rails.rs`, grind targeting in `skater/air.rs`)
@@ -480,7 +497,7 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 | d-pad | `GestureLeft/Right/Up/DownStart`, `...Held` | character gestures (shrug, peace, shaka, surf's up) |
 | L / R | `LeftAirGrab` / `RightAirGrab`, fully in `Left/RightGroundGrab`, `Crouch` | grabs, crouch; with the left stick's flip shape just after take-off, body flips. A GameCube trigger at rest reads 1..7 of 255 and SK8 counts any trigger above 0, so the pad has a dead zone (`input::TRIGGER_DEAD_ZONE`, 0.1 of full, then rescaled); the physics grabs on the same reading |
 | main stick | `Turn`, `HardTurn`, `HardTurnCrouch`, `KickTurn`, `BodySpin`, `Left/RightSlide`, `Left/RightSlideStart` | steering, kick turns, powerslides, spins |
-| C-stick | `AnticMag`, `AnticAngle`, `Manual`, `ManualBrake`, `TweakX/Y`, `BoardAdjustAngle/Mag` | wind-up (past 0.9), manuals (held below full for 0.2 s), grab variants (past half way) and tweaks; on a rail its y tips a 50-50 into a nosegrind (up) or a 5-0 (down) and its x (with the main stick's) turns a 5-0 across the rail (Skate 3's `PhysGrindUpDown`, `PhysGrindTranslation`) |
+| C-stick | `AnticMag`, `AnticAngle`, `Manual`, `ManualBrake`, `TweakX/Y`, `BoardAdjustAngle/Mag` | wind-up (past 0.9), manuals (held below full for 0.2 s), grab variants (past half way) and tweaks; in the air the board adjust (`OnBoard/InAir/BoardAdjusts/*`); on a rail its y tips a 50-50 into a nosegrind (up) or a 5-0 (down) and its x (with the main stick's) turns a 5-0 across the rail (Skate 3's `PhysGrindUpDown`, `PhysGrindTranslation`) |
 | off the board | `OB_Jump` (B pressed: Skate 3's X), `OB_Sprint` (A without X), `OB_Mag`, `OB_Steer` (the walker's move amount and turn), `OB_BipedWorldX/Z`, `OB_BipedStickMag` (the stick; on the board the raw stick, which the dismount reads), `OB_LookAtX/Y` (C-stick) | walking, below |
 | gestures | `Trick`, the gesture's name, `GestureSpeed`, `HoldPattern` | right stick: `skater`, `skater90`, `skaterN90`, `skater_air`, `skater_fingerflip`; left stick: `skaterls` (SlideFs180/SlideBs180 reverts), `skaterstep`; all recognised in parallel at 60 Hz |
 
@@ -503,7 +520,10 @@ landings, kick turns, reverts, switch, powerslides, grinds, air and grabs. Among
 `MonitorUnderflip`, `SetDark`, `ChooseRandomLanding`, `KickTurnSteering`, the manual out timer,
 `DisableTricks`, the riding behaviours above (`SetTurning`, `ApplyingBodyTilt`, `SettingBodyTilt`,
 `Crouching`, `SetDistComToBoard`, `StoreLandingData`, `SetLandingData`, `SetManualAngle`); the action
-graph's `CreateMGIntentFromAGIntent` (filters, defaults, scale), `CreateConstMGIntent`,
+graph's `CreateMGIntentFromAGIntent` (filters, defaults, scale), `BoardAdjust` (the C-stick's
+`BoardAdjustMag`/`Angle` published to its `MGIntentMag`/`MGIntentAngle` every update, through
+`angleFilter`, negated mirrored unless `negateOnMirror="false"`, held at +-pi once the angle crosses the
+seam; SK8 action_board_adjust.rs), `CreateConstMGIntent`,
 `CreateMGTimeIntentFromAGIntent`, `CreateTrickIntentFromGesture` (groups, mirror, dark catch,
 underflip, `*Hold` successors for multi-flips); the `OverideNextAnimTransitionHook` and `GrabSlide`
 hooks; and the conditions on intents, clip attributes, clip expiry and time windows, state times, last
@@ -519,8 +539,9 @@ Ported (they set riding tree parameters or decide states): `ScoringGrabs` (the g
 `TweakProject` (`TWEAK_X`, `TWEAK_Y`), `BodySpin` (the `IA_BODYSPIN_OLLIE_FS/BS` channels' influence from
 the spin intent, `anim_motion/body_spin`), `ControlAirLegExtension` (`EXTEND` against seconds coming down,
 `anim_motion/inair_disttocog/lo_air_arm_extend`; its centre-of-mass height part isn't run: the riding
-behaviours keep `disttocog`), `SetDeckPitchAndYaw` (`SKATEPITCH`, `SKATEYAW` at 0: flatground's board isn't
-posed apart from the body), `SetTurning` (3, was a no-op arm),
+behaviours keep `disttocog`), `SetDeckPitchAndYaw` (`SKATEYAW`, `SKATEPITCH` on begin from the imported
+rider's posed deck, `host::deck_angles` after SK8 `publish_deck_angles`; its attributes default to
+`skateyaw`/`skatepitch`, which Skate 3's graphs leave unset), `BoardAdjust` (below), `SetTurning` (3, was a no-op arm),
 `ApplyingBodyTilt` (7), `SettingBodyTilt` (1), `Crouching` (1), `SetDistComToBoard` (31),
 `GrindControlFade` (the grind trees' `twist` from `GrindBalanceX`, `anim_motion/grind_twist`, and their
 `DistToCog` on begin), `ControlGrindCrouch` (`disttocog` between `anim_motion/grind_height`'s heights from
@@ -556,7 +577,6 @@ point or SK8's first child):
 |---|---|---|
 | `PowerSlideManualAtt` | the slide trees' `balance` packet from a negative `Manual` intent | a manual's back stick in a slide (rare) |
 | `FingerFlipOut`, `UpdateIsWeightOnNose` | finger flip out, nose weight | grab and nose-weight feedback from the physics |
-| `SetDeckPitchAndYaw` | `SKATEPITCH`, `SKATEYAW` (set to 0) | a board posed apart from the body (flatground's board is the clips' `SKATEBOARD_ROOT`) |
 | conditions: `MongoPushFootToFar`, `HasTiltToLargeForPreland`, `IsLandingIntoGrind`, `IsGrindApproach`, `WipeoutTimeToLand`, `WipeoutTimeSinceContact`, `IsPushOffEnabled` | (fixed false) | the mongo-push wind-up shortcut, pre-landing tilt, grind approach, wipeout timing (no ragdoll) |
 
 Unsupported, logged once when reached: `EnterSkitchingBehaviour`, `SkitchingBehaviour`,

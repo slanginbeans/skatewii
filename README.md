@@ -36,6 +36,7 @@ X, Y). The default stance is goofy, as in Skate 3.
 | C-stick: push forward, then flick back | Nollie, and the nollie version of each trick |
 | C-stick held lightly back / forward while rolling | Manual / nose manual (keep the balance marker centred; with Skate 3's motion graphs a manual lasts as long as the stick is held, as in Skate 3); fully over drags the tail or nose to brake |
 | L / R in the air | Left-hand / right-hand grab (indy, melon; both: mute) |
+| C-stick held in the air | Board adjust: turns the board across (left / right) or tips its nose down / up (forward / back) to line it up: across a rail it slides (boardslide) instead of grinding, and the landing goes by where the board points |
 | Come down onto a rail | The grind or slide comes from how the board meets it: along it a 50-50 (C-stick held back: 5-0, forward: nosegrind), angled a crooked, willy, feeble or smith, across it a boardslide, lipslide, noseslide or tailslide. Flick to pop off |
 | C-stick held back on a transition, then let go | Pump (gain speed) |
 | Rolling tail first (fakie), push | The rider turns round and pushes switch |
