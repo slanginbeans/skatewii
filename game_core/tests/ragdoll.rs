@@ -396,6 +396,8 @@ fn the_ragdoll_costs_little_per_tick() {
     }
     let per = start.elapsed().as_secs_f64() / n as f64;
     eprintln!("ragdoll: {:.1} us a tick on this host", per * 1e6);
+    // Only bound it on the host: the PowerPC test run is emulated under qemu, far slower than a Wii.
+    #[cfg(not(target_arch = "powerpc"))]
     assert!(per < 1e-3, "{per}");
 }
 
