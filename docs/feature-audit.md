@@ -41,7 +41,7 @@ ways:
 
 | Feature | Status | Evidence | SK8 | Size |
 |---|---|---|---|---|
-| Push (held, tapped, repush timing) | done | `skater.rs` `update_push`, `start_push`, `graph_push`; `graph/push.rs` | `riding/push*.rs` | – |
+| Push (held, tapped, repush timing) | done | `skater.rs` `update_push`, `start_push`, `graph_push`; `graph/push.rs`; with the graphs the foot drives while the clips' `PUSHCONTACT` is on and chases the posed clips' trajectory speed (`playback::PoseProgram::trajectory_speed`, SK8 contact_events.rs `push_speed`); test `tests/feel_sk8.rs` `held_pushes_chase_the_posed_trajectory_speed` | `riding/push*.rs` | – |
 | Mongo push | done | `update_push` (B); `MongoPushFootToFar` pinned false (the wind-up shortcut) | same | S (the condition) |
 | Foot, tail and nose brake | done | `update_brake`; the tail brake from `update_manual` | `riding/braking.rs` | – |
 | Powerslide (start, spin, decel, revert out) | done | `update_slide`; `PowerSlideSpin`/`Decel` in the graph; `PowerSlideManualAtt` is a no-op | `input/power_sliding.rs` | S |

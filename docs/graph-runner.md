@@ -834,9 +834,16 @@ Unsupported, logged once when reached: `EnterSkitchingBehaviour`, `SkitchingBeha
 `SkitchShimmyingBehaviour`, `GestureType` (the wipeout body tweaks: cannonball, judo kick ...; no
 ragdoll to tweak).
 
-Approximations to revisit: the push speed is where the push coefficients' blended clips end, not the
-trajectory bone's speed sampled from the posed clips; how long the push foot stays down still comes
-from the push sets' contact time; the manual's deck pitch runs SK8's PID servo (with the rules pack's
+Approximations to revisit: the board and rider are one kinematic body (a velocity, and an orientation
+set from the ground and eased), where Skate 3's board is a jointed rigid assembly (deck, trucks, wheels
+and its hook) solved together with the physical rider's skeleton in one constraint solve, every ground
+behaviour (steering, speed model, pushes, brakes, the manual, pumping) handing it queued point forces
+and angular displacements (SK8 physics/board_step.rs, solver.rs, the joint, contact and drive solvers,
+rigid_body.rs, mass.rs, world_contact/ and skeleton_body/: some ten thousand lines). Porting it
+replaces the ground model and every calibration marked "ours" here, so it is not attempted piecemeal;
+the measured effects are listed under "Measured against SK8" (left). The pushes chase the posed
+clips' trajectory speed while their `PUSHCONTACT` is on ("Measured against SK8", Pushes; the push
+sets' end speed only without a posed rider); the manual's deck pitch runs SK8's PID servo (with the rules pack's
 `physics_manual` gains) on flatground's kinematic board, so its deck reaches the brake angle in 0.7 s
 where SK8's rigid deck takes 1.1 s (a nose drag from 8.5 m/s takes the corrective drag at 6.4 m/s,
 SK8's at 5.4), and SK8's action graph then runs the rider out (`SS_RUNOUT_GROUND`, through its
