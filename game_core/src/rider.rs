@@ -12,11 +12,78 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::character::{Character, Local};
+use crate::character::{Character, Local, Rows, mul, rigid_inverse};
 use crate::gesture::{Flick, Trick};
 use crate::gfx::SUN;
 use crate::math::{Mat3, PI, Vec3, sqrtf, v3};
+use crate::skater::ragdoll::{PARTS, POINTS};
 use crate::skater::{GrabKind, GrindKind, LandKind, Landing, Mode, Skater};
+
+/// The ragdoll takes the bones over this fast at a bail, and gives them back to the clips this fast
+/// (s, ours: the drives start from the animated pose, so the take-over only covers the tick the pose
+/// lags the body).
+const DOLL_IN: f32 = 0.1;
+const DOLL_OUT: f32 = 0.25;
+/// The bones that place each ragdoll point (`skater::ragdoll`'s order) and that each body part poses
+/// (its first bone; the bones under it follow as the clips have them).
+const DOLL_POINTS: [&[&str]; POINTS] = [
+    &["HIPS"],
+    &["SPINE3", "SPINE2"],
+    &["HEAD", "NECK1"],
+    &["LEFTUPLEG"],
+    &["RIGHTUPLEG"],
+    &["LEFTARM"],
+    &["RIGHTARM"],
+    &["LEFTFOREARM"],
+    &["LEFTHAND"],
+    &["RIGHTFOREARM"],
+    &["RIGHTHAND"],
+    &["LEFTLEG"],
+    &["LEFTFOOT"],
+    &["RIGHTLEG"],
+    &["RIGHTFOOT"],
+];
+const DOLL_PARTS: [&str; PARTS] = [
+    "HIPS",
+    "SPINE",
+    "NECK",
+    "LEFTARM",
+    "LEFTFOREARM",
+    "RIGHTARM",
+    "RIGHTFOREARM",
+    "LEFTUPLEG",
+    "LEFTLEG",
+    "RIGHTUPLEG",
+    "RIGHTLEG",
+];
+
+/// A rigid transform part way to another (rows lerped, then squared up).
+fn blend_rows(a: &Rows, b: &Rows, k: f32) -> Rows {
+    if k >= 1.0 {
+        return *b;
+    }
+    if k <= 0.0 {
+        return *a;
+    }
+    let l = |r: usize| -> Vec3 {
+        v3(
+            a[r][0] + (b[r][0] - a[r][0]) * k,
+            a[r][1] + (b[r][1] - a[r][1]) * k,
+            a[r][2] + (b[r][2] - a[r][2]) * k,
+        )
+    };
+    let y = l(1).normalize_or(v3(0.0, 1.0, 0.0));
+    let z = l(2);
+    let z = (z - y * z.dot(y)).normalize_or(v3(0.0, 0.0, 1.0));
+    let x = y.cross(z);
+    let t = l(3);
+    [
+        [x.x, x.y, x.z],
+        [y.x, y.y, y.z],
+        [z.x, z.y, z.z],
+        [t.x, t.y, t.z],
+    ]
+}
 
 /// Crossfade time between clips (s).
 const FADE: f32 = 0.12;
@@ -470,6 +537,23 @@ pub struct Rider {
     /// `graph::playback::PoseOp`), and a sampled clip's channel weights.
     stack: Vec<(Vec<Local>, Vec<f32>, bool)>,
     weights: Vec<f32>,
+    /// The ragdoll (`skater::ragdoll`) posing the bones in a bail: the bones that seed its points and
+    /// that each body part poses, the parts' frames this frame (character space), the frame's time,
+    /// whether it holds the bones, how much, each part's bone against the part, the last pose it made,
+    /// the pose drawn and the clips' pose under it.
+    doll_points: [Option<usize>; POINTS],
+    doll_parts: [Option<usize>; PARTS],
+    doll: Option<[Rows; PARTS]>,
+    doll_dt: f32,
+    doll_on: bool,
+    doll_weight: f32,
+    doll_offset: [Rows; PARTS],
+    doll_pose: Vec<Rows>,
+    doll_out: Vec<Rows>,
+    anim_world: Vec<Rows>,
+    /// The clips' pose was mirrored at skinning (the ragdoll points are read reflected).
+    anim_mirrored: bool,
+    mirror_scratch: Vec<crate::anim::Sample>,
 }
 
 impl Rider {
@@ -506,7 +590,21 @@ impl Rider {
             .filter_map(|&(name, w, along)| Some((character.bone(name)?, w, along)))
             .collect();
         let board_bone = character.bone("SKATEBOARD_ROOT");
+        let doll_points = DOLL_POINTS.map(|names| names.iter().find_map(|b| character.bone(b)));
+        let doll_parts = DOLL_PARTS.map(|b| character.bone(b));
         let mut r = Rider {
+            doll_points,
+            doll_parts,
+            doll: None,
+            doll_dt: 0.0,
+            doll_on: false,
+            doll_weight: 0.0,
+            doll_offset: [crate::character::IDENTITY; PARTS],
+            doll_pose: vec![crate::character::IDENTITY; n],
+            doll_out: vec![crate::character::IDENTITY; n],
+            anim_world: vec![crate::character::IDENTITY; n],
+            anim_mirrored: false,
+            mirror_scratch: Vec::with_capacity(n),
             com_parts,
             board_bone,
             character,
@@ -752,6 +850,7 @@ impl Rider {
             let now = v3(at[0], at[1], at[2]).dot(up);
             ch.shift_subtree(b, up * (h - now));
         }
+        self.apply_doll();
         self.place_board(false);
         let ch = &mut self.character;
         ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), false);
@@ -815,6 +914,94 @@ impl Rider {
         ch.place_subtree(b, &rows);
     }
 
+    /// The ragdoll's body parts this frame (character space; `None` outside a bail) and the frame's
+    /// time: the next pose puts the bones on them, blending in at a bail and back out after.
+    pub fn set_ragdoll(&mut self, parts: Option<[Rows; PARTS]>, dt: f32) {
+        self.doll = parts;
+        self.doll_dt = dt;
+    }
+
+    /// How much of the pose the ragdoll holds (0..1; blending in or out between).
+    pub fn ragdoll_weight(&self) -> f32 {
+        self.doll_weight
+    }
+
+    /// Where the clips' pose (before the ragdoll) puts the ragdoll's points (character space, as
+    /// drawn), when this skeleton has every bone for them.
+    pub fn ragdoll_points(&self) -> Option<[Vec3; POINTS]> {
+        let mut out = [Vec3::ZERO; POINTS];
+        for (o, b) in out.iter_mut().zip(self.doll_points) {
+            let b = b?;
+            let src = if self.anim_mirrored {
+                self.character.mirror_partner(b).unwrap_or(b)
+            } else {
+                b
+            };
+            let t = self.anim_world.get(src)?[3];
+            *o = if self.anim_mirrored {
+                v3(-t[0], t[1], t[2])
+            } else {
+                v3(t[0], t[1], t[2])
+            };
+        }
+        Some(out)
+    }
+
+    /// The ragdoll's pose over the clips' (see [`Rider::set_ragdoll`]).
+    fn apply_doll(&mut self) {
+        let ch = &mut self.character;
+        let n = ch.bones().min(self.doll_pose.len());
+        self.anim_world.clear();
+        self.anim_world.extend_from_slice(ch.world());
+        let doll = self.doll.is_some() || self.doll_weight > 0.0;
+        self.anim_mirrored = self.mirror && !doll && !self.graph_posed;
+        let dt = self.doll_dt;
+        match self.doll {
+            Some(parts) => {
+                if !self.doll_on {
+                    // Each part's bone against the part, where the clips have it now.
+                    for (p, b) in self.doll_parts.iter().enumerate() {
+                        if let Some(b) = *b {
+                            self.doll_offset[p] =
+                                mul(&self.anim_world[b], &rigid_inverse(&parts[p]));
+                        }
+                    }
+                    self.doll_on = true;
+                }
+                self.doll_weight = (self.doll_weight + dt / DOLL_IN).min(1.0);
+                for b in 0..n {
+                    let part = self.doll_parts.iter().position(|x| *x == Some(b));
+                    let p = ch.parent(b);
+                    self.doll_pose[b] = match part {
+                        Some(k) => mul(&self.doll_offset[k], &parts[k]),
+                        None if p >= 0 && (p as usize) < b => {
+                            let p = p as usize;
+                            let local =
+                                mul(&self.anim_world[b], &rigid_inverse(&self.anim_world[p]));
+                            mul(&local, &self.doll_pose[p])
+                        }
+                        None => self.anim_world[b],
+                    };
+                }
+            }
+            None => {
+                self.doll_on = false;
+                if self.doll_weight <= 0.0 {
+                    return;
+                }
+                self.doll_weight = (self.doll_weight - dt / DOLL_OUT).max(0.0);
+            }
+        }
+        let k = self.doll_weight;
+        if k <= 0.0 {
+            return;
+        }
+        for b in 0..n {
+            self.doll_out[b] = blend_rows(&self.anim_world[b], &self.doll_pose[b], k);
+        }
+        ch.set_world(&self.doll_out[..n]);
+    }
+
     /// The last pose came from the state graphs' clips (mirrored per tree, not at skin time).
     pub fn graph_posed(&self) -> bool {
         self.graph_posed
@@ -851,12 +1038,20 @@ impl Rider {
                 self.a[i] = self.a[i].blend(&self.b[i], self.fakie * self.torso);
             }
         }
+        // The ragdoll poses an unmirrored skeleton: a mirrored rider's clips are mirrored first, as the
+        // state graphs' are.
+        let doll = self.doll.is_some() || self.doll_weight > 0.0;
+        let mirror = self.mirror && !doll;
+        if self.mirror && doll {
+            ch.mirror_locals(&mut self.a, &mut self.mirror_scratch);
+        }
         ch.pose(&self.a);
-        self.place_board(self.mirror);
+        self.apply_doll();
+        self.place_board(mirror);
         // The sun in the character's own space: R^T * sun.
         let c = &rot.cols;
         self.character
-            .skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), self.mirror);
+            .skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), mirror);
     }
 }
 

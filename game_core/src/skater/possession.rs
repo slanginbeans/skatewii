@@ -214,6 +214,27 @@ impl Possession {
         self.hold = Hold::Free;
     }
 
+    /// Lets go of the board in a bail (Skate 3's wipeout frees the board's drives): from under the feet
+    /// or the hands, at the deck in `frame` (nose along its z, up its y) with the rider's velocity.
+    pub fn release_with(&mut self, rider: RiderFrame, frame: crate::math::Mat3, vel: Vec3) {
+        let up = frame.cols[1].normalize_or(Vec3::UP);
+        let nose = frame.cols[2].normalize_or(rider.forward);
+        let pos = match self.hold {
+            Hold::Held => rider.hand(),
+            _ => rider.pos + up * DECK_HEIGHT,
+        };
+        self.board = FreeBoard {
+            pos,
+            vel,
+            nose,
+            up,
+            on_ground: false,
+        };
+        self.pitch = 0.0;
+        self.throw_ticks = 0;
+        self.hold = Hold::Free;
+    }
+
     /// Starts picking the board up (SK8 `Retrieve`): from where it is, moved in to the return distance,
     /// to the hands. `mounting`: getting on (the nearer distance, the time capped).
     pub fn retrieve(&mut self, t: &Tuning, rider: RiderFrame, mounting: bool) {

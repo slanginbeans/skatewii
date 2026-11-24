@@ -149,6 +149,11 @@ pub struct SectionTimes {
     pub cam_peak_us: u32,
     /// Recording the frame for the replay (packing the posed skeleton).
     pub replay_us: u32,
+    /// The skater's step on the last tick spent in a bail (the ragdoll, its controls and collision,
+    /// the injuries), part of `physics_us`, and the most one took since the platform last cleared
+    /// `ragdoll_peak_us`.
+    pub ragdoll_us: u32,
+    pub ragdoll_peak_us: u32,
 }
 
 struct Popup {
@@ -281,6 +286,8 @@ pub struct Game {
     /// replay's posing buffer.
     replay_saved: (Vec<crate::character::Rows>, crate::math::Vec3, bool),
     replay_pose: Vec<crate::character::Rows>,
+    /// Hall of Meat: the last bail's injuries, and seconds since it ended (shown a while after).
+    pub meat: Option<(crate::skater::meat::Meat, f32)>,
 }
 
 /// Lines kept while nobody takes them.
@@ -374,6 +381,7 @@ impl Game {
             replay_shown: None,
             replay_saved: (Vec::new(), crate::math::Vec3::UP, false),
             replay_pose: Vec::new(),
+            meat: None,
         }
     }
 
@@ -884,8 +892,20 @@ impl Game {
         let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
         let t1 = now(self.timer);
         if self.rider.is_some() && (ran > 0 || self.period <= TICK) {
-            let rot = self.imported_xform().rot;
+            let xf = self.imported_xform();
+            let rot = xf.rot;
             let place = self.board_place();
+            // In a bail the ragdoll's parts pose the bones (character space, between the ticks).
+            let doll = self.skater.ragdoll_active().then(|| {
+                let inv = crate::character::rigid_inverse(&xform_rows(&xf));
+                self.skater
+                    .wipeout
+                    .frames(self.alpha)
+                    .map(|f| crate::character::mul(&f, &inv))
+            });
+            if let Some(r) = &mut self.rider {
+                r.set_ragdoll(doll, pose_dt);
+            }
             let s = &self.skater;
             let ground: &dyn Terrain = terrain(&self.world, &self.park);
             let land_in = s.time_to_land(ground);
@@ -907,6 +927,23 @@ impl Game {
             if !posed && let Some(r) = &mut self.rider {
                 r.set_board_place(place);
                 r.update(&self.skater, self.clock, land_in, pose_dt, rot);
+            }
+            // The clips' pose as ragdoll points: where a bail starts the body, and in a bail where
+            // the drives pull it.
+            let points = self
+                .rider
+                .as_ref()
+                .and_then(|r| r.ragdoll_points())
+                .map(|p| {
+                    // Placed on the tick's frame, not the frame drawn between ticks: the simulation
+                    // stays the same whatever the display rate.
+                    let at = self.imported_xform_on(self.skater_base());
+                    p.map(|q| at.point(q))
+                });
+            if self.skater.ragdoll_active() {
+                self.skater.wipeout.anim = points;
+            } else {
+                self.skater.pose_seed = points;
             }
         }
         let t2 = now(self.timer);
@@ -971,6 +1008,14 @@ impl Game {
             p.time += dt;
             if p.time > POPUP_TIME {
                 self.popup = None;
+            }
+        }
+        if let Some((_, t)) = &mut self.meat
+            && !self.skater.ragdoll_active()
+        {
+            *t += dt;
+            if *t > MEAT_SHOW {
+                self.meat = None;
             }
         }
     }
@@ -1044,7 +1089,7 @@ impl Game {
                 world.deck_yaw_pitch = crate::graph::host::deck_angles(nose);
             }
             if matches!(s.mode, Mode::Bailed { .. }) {
-                world.wipe_stick = Some(pad.stick);
+                world.wipe_stick = Some(pad.flick);
             }
             let gates = crate::graph::input::Gates {
                 late_flips_blocked: s.trick.is_some_and(|t| t.progress() < 1.0),
@@ -1097,6 +1142,14 @@ impl Game {
         let air = self.skater.is_airborne();
         let t_step = now(self.timer);
         self.skater.step(ground, &pad, &flick, dt, &mut events);
+        let bailed = self.skater.ragdoll_active();
+        if bailed {
+            let us = now(self.timer).wrapping_sub(t_step);
+            self.times.ragdoll_us = us;
+            self.times.ragdoll_peak_us = self.times.ragdoll_peak_us.max(us);
+            // Hall of Meat: the bail's injuries so far (kept on screen after the reset).
+            self.meat = Some((self.skater.wipeout.meat, 0.0));
+        }
         // Skate 3's scoring: the tricks landed this tick into the sequence, then the timers and the line.
         let frame = ScoreFrame::of(&self.skater);
         for e in &mut events {
@@ -1352,18 +1405,23 @@ impl Game {
     /// on the ground ([`Rider::board_rest_height`], about [`crate::skater::DECK_HEIGHT`]), elsewhere
     /// the deck's height.
     pub fn imported_xform(&self) -> Xform {
+        self.imported_xform_on(self.drawn_base())
+    }
+
+    /// [`Game::imported_xform`] on a board frame (the drawn one, or the tick's).
+    fn imported_xform_on(&self, base: Xform) -> Xform {
         // Without bail clips in the pack, show a bail by tipping the rider over.
         let animated = self
             .rider
             .as_ref()
             .is_some_and(|r| r.character.has_clip("bail/fall"));
         let tip = match self.skater.mode {
+            _ if self.skater.ragdoll_active() => Mat3::IDENTITY,
             Mode::Bailed { time } | Mode::Runout { time } if !animated => {
                 Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48)
             }
             _ => Mat3::IDENTITY,
         };
-        let base = self.drawn_base();
         // Riding, the board's lowest wheel on the ground (a manual's pitch lifts the deck).
         let height = match (&self.rider, self.skater.mode) {
             (Some(r), Mode::Rolling) => r.board_rest_height() + self.wheel_lift(&base),
@@ -1406,9 +1464,26 @@ impl Game {
                 body: self.imported_xform(),
                 board: None,
                 tucked: false,
+                ragdoll: false,
             };
         }
         let s = &self.skater;
+        // In a bail the placeholder is the ragdoll's parts round its pelvis, and the free board.
+        if s.ragdoll_active() {
+            let pelvis = s.wipeout.body.between(self.alpha)[crate::skater::ragdoll::PELVIS];
+            let board = self.free_board_frame().map(|(pos, up, nose, _)| {
+                Xform::new(
+                    Mat3::from_cols(up.cross(nose), up, nose),
+                    pos - up * crate::skater::DECK_HEIGHT,
+                )
+            });
+            return Figure {
+                body: Xform::new(Mat3::IDENTITY, pelvis),
+                board,
+                tucked: false,
+                ragdoll: true,
+            };
+        }
         let base = self.drawn_base();
 
         // Board: lifts and turns under the feet while a trick plays.
@@ -1465,6 +1540,7 @@ impl Game {
             body: base.then(&Xform::new(stance.mul(&rider_rot), rider_pos)),
             board,
             tucked: s.crouch > 0.5 || (s.is_airborne() && lift > 0.05),
+            ragdoll: false,
         }
     }
 
@@ -1499,6 +1575,21 @@ impl Game {
         }
         if let Some(b) = &f.board {
             gfx.draw_tris(&self.models.board, &b.to_mat34());
+        }
+        if f.ragdoll {
+            let live;
+            let parts: &[crate::character::Rows] = match (&self.replay, &self.replay_shown) {
+                (Some(_), Some(_)) => &self.replay_pose,
+                _ => {
+                    live = self.placeholder_doll();
+                    &live
+                }
+            };
+            for (mesh, part) in self.models.doll.iter().zip(parts) {
+                let local = rows_xform(part);
+                gfx.draw_tris(mesh, &f.body.then(&local).to_mat34());
+            }
+            return;
         }
         let mesh = if f.tucked {
             &self.models.rider_crouched
@@ -1538,8 +1629,22 @@ impl Game {
             cam: self.drawn_camera(),
             mirror,
         });
-        let world = self.rider.as_ref().map_or(&[][..], |r| r.character.world());
-        self.recording.pose(world);
+        match &self.rider {
+            Some(r) => self.recording.pose(r.character.world()),
+            // The placeholder records its ragdoll's parts (round the pelvis) every frame, so the
+            // recording's size stays the same.
+            None => self.recording.pose(&self.placeholder_doll()),
+        }
+    }
+
+    /// The placeholder ragdoll's parts round its pelvis (between the ticks): what it draws and records.
+    fn placeholder_doll(&self) -> [crate::character::Rows; crate::skater::ragdoll::PARTS] {
+        let w = &self.skater.wipeout;
+        let pelvis = w.body.between(self.alpha)[crate::skater::ragdoll::PELVIS];
+        w.frames(self.alpha).map(|mut f| {
+            f[3] = [f[3][0] - pelvis.x, f[3][1] - pelvis.y, f[3][2] - pelvis.z];
+            f
+        })
     }
 
     /// Opens the replay on the latest frame (paused), keeping the live skeleton to put back.
@@ -1623,6 +1728,7 @@ impl Game {
                     (x, _) => x,
                 },
                 tucked: if k < 0.5 { fa.tucked } else { fb.tucked },
+                ragdoll: if k < 0.5 { fa.ragdoll } else { fb.ragdoll },
             }
         };
         let game = if k <= 0.0 {
@@ -1681,6 +1787,17 @@ impl Game {
             let sun = crate::gfx::SUN;
             r.character
                 .skin(v3(c[0].dot(sun), c[1].dot(sun), c[2].dot(sun)), a.mirror);
+        } else if self.rider.is_none()
+            && rec.bone_count() == crate::skater::ragdoll::PARTS
+            && figure.ragdoll
+        {
+            let (ba, bb) = (rec.bones(i), rec.bones(j));
+            self.replay_pose.clear();
+            self.replay_pose.extend(
+                ba.iter()
+                    .zip(bb)
+                    .map(|(x, y)| crate::replay::unpack_blend(x, y, k)),
+            );
         }
         self.replay_shown = Some((figure, cam));
     }
@@ -1771,6 +1888,7 @@ impl Game {
             white,
         );
         self.draw_line(&mut m);
+        self.draw_meat(&mut m);
 
         if let Some(p) = &self.popup {
             // Pop in with a slight scale-up, no wider than most of the screen.
@@ -1899,10 +2017,69 @@ impl Game {
     }
 }
 
+impl Game {
+    /// Hall of Meat (`skater::meat`): the bail's damage in dollars and its broken bones, small, at the
+    /// top right under the speed, during the bail and a while after.
+    fn draw_meat(&self, m: &mut MeshBuilder) {
+        let Some((meat, _)) = &self.meat else {
+            return;
+        };
+        if meat.hits == 0 {
+            return;
+        }
+        let right = SCREEN_W - 24.0;
+        let red = rgb(255, 110, 90);
+        let mut y = MEAT_Y;
+        let line = |m: &mut MeshBuilder, y: f32, px: f32, text: &str, c: u32| {
+            hud::text(m, right - hud::text_width(text, px), y, px, text, c);
+        };
+        line(m, y, MEAT_PX, "HALL OF MEAT", red);
+        y += MEAT_PX * 7.0;
+        line(
+            m,
+            y,
+            MEAT_PX,
+            &format!("${}", meat.score()),
+            rgb(255, 255, 255),
+        );
+        y += MEAT_PX * 7.0;
+        for name in meat.broken_names().take(MEAT_BONES) {
+            line(m, y, MEAT_BONES_PX, name, red);
+            y += MEAT_BONES_PX * 7.0;
+        }
+    }
+}
+
+/// Hall of Meat's place and text sizes, and the most broken bones listed.
+const MEAT_Y: f32 = 72.0;
+const MEAT_PX: f32 = 2.5;
+const MEAT_BONES_PX: f32 = 2.0;
+const MEAT_BONES: usize = 4;
+
 /// The line's text size, its timer bar's width, and the size of its trick names (above the trick popup).
 const LINE_PX: f32 = 2.5;
 const LINE_BAR_W: f32 = 120.0;
 const LINE_NAMES_PX: f32 = 2.0;
+
+/// An `Xform` as `character::Rows` (its axes as rows, then its place).
+fn xform_rows(x: &Xform) -> crate::character::Rows {
+    let c = &x.rot.cols;
+    [
+        [c[0].x, c[0].y, c[0].z],
+        [c[1].x, c[1].y, c[1].z],
+        [c[2].x, c[2].y, c[2].z],
+        [x.pos.x, x.pos.y, x.pos.z],
+    ]
+}
+
+/// `character::Rows` as an `Xform`.
+fn rows_xform(r: &crate::character::Rows) -> Xform {
+    let v = |i: usize| v3(r[i][0], r[i][1], r[i][2]);
+    Xform::new(Mat3::from_cols(v(0), v(1), v(2)), v(3))
+}
+
+/// How long the Hall of Meat result stays on screen after the bail (s, ours).
+const MEAT_SHOW: f32 = 5.0;
 
 /// The posed board's nose in the rider's space from the imported rider's last pose, as Skate 3 reads it
 /// for the deck's yaw and pitch: turned round for a mirrored rider, whose clips turn the posed board end
@@ -2100,6 +2277,44 @@ mod tests {
         assert!(lo >= SCREEN_W * 0.09 && hi <= SCREEN_W * 0.91, "{lo}..{hi}");
         let tall = o.0.iter().map(|v| v.pos[1]).fold(0.0f32, f32::max);
         assert!(tall < SCREEN_H * 0.4, "{tall}");
+    }
+
+    #[test]
+    fn the_hall_of_meat_is_small_at_the_top_right_and_leaves_the_lower_screen_clear() {
+        let mut g = Game::new();
+        g.update(&held(0), 1.0 / 60.0);
+        let mut meat = crate::skater::meat::Meat {
+            hits: 3,
+            ..Default::default()
+        };
+        meat.damage = [50.0; crate::skater::ragdoll::PARTS];
+        meat.broken = [true; crate::skater::ragdoll::PARTS];
+        g.meat = Some((meat, 0.0));
+        let mut o = Overlay::default();
+        g.render(&mut o);
+        assert!(
+            o.0.iter().all(|v| v.pos[1] < SCREEN_H * 0.66),
+            "text in the lower screen"
+        );
+        let red = rgb(255, 110, 90);
+        let meat_verts: Vec<_> = o.0.iter().filter(|v| v.rgba == red).collect();
+        assert!(!meat_verts.is_empty());
+        // Right of the middle, under the speed, the list cut short.
+        assert!(
+            meat_verts
+                .iter()
+                .all(|v| v.pos[0] > SCREEN_W * 0.6 && v.pos[0] <= SCREEN_W)
+        );
+        assert!(
+            meat_verts
+                .iter()
+                .all(|v| v.pos[1] > 60.0 && v.pos[1] < SCREEN_H * 0.4)
+        );
+        // Gone a while after the bail.
+        for _ in 0..(MEAT_SHOW * 60.0) as usize + 2 {
+            g.update(&held(0), 1.0 / 60.0);
+        }
+        assert!(g.meat.is_none());
     }
 
     #[test]

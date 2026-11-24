@@ -507,6 +507,7 @@ impl CameraMan {
         let st = &self.state;
         Conditions {
             wiping_out: s.wiping_out,
+            wipe_tweak: s.wipe_tweak,
             off_board: s.off_board,
             air_off_board: s.air_off_board,
             onboard_air: s.onboard_air,

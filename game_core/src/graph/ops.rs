@@ -175,6 +175,13 @@ pub enum Cond {
     Bumped,
     /// The physics has finished the wipeout (the rider is back on the board).
     DoneWipingOut,
+    /// `GestureType`: the wipeout's control profile is this one (0 free fall .. 4 torpedo; SK8
+    /// `motion_wipeout.rs`, the physics' profile).
+    GestureType(u8),
+    /// `WipeoutTimeToLand`: the body's predicted fall to the ground (s); `WipeoutTimeSinceContact`: time
+    /// since it last touched anything (s).
+    WipeTimeToLand(Num),
+    WipeSinceContact(Num),
     /// Off the board: Skate 3's locomotion state (0 stand, 1 walk, 2 run, 3 sprint).
     LocoState(u8),
     /// Off the board with the board in hand (`IsHoldingSkateboard`: SK8 OffBoard311, the possession's
@@ -691,8 +698,6 @@ const FIXED_FALSE: &[&str] = &[
     "MongoPushFootToFar",
     "IsProSkater",
     "IsLandingIntoGrind",
-    "WipeoutTimeSinceContact",
-    "WipeoutTimeToLand",
     "IsGrindApproach",
     "HasTiltToLargeForPreland",
     "IsPushOffEnabled",
@@ -841,6 +846,16 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
         "IsBumped" => Cond::Bumped,
         "IsDoneWipingOut" => Cond::DoneWipingOut,
         "IsTimeToLand" => Cond::TimeToLand(n()),
+        "WipeoutTimeToLand" => Cond::WipeTimeToLand(n()),
+        "WipeoutTimeSinceContact" => Cond::WipeSinceContact(n()),
+        "GestureType" => match a.text("gesture").and_then(|g| {
+            crate::tuning::wipeout::GESTURE_NAMES
+                .iter()
+                .position(|n| *n == g)
+        }) {
+            Some(i) => Cond::GestureType(i as u8),
+            None => Cond::Fixed(false),
+        },
         _ if FIXED_FALSE.contains(&name) => Cond::Fixed(false),
         _ if FIXED_TRUE.contains(&name) => Cond::Fixed(true),
         _ => Cond::Unsupported(NONE),
