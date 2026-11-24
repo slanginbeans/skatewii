@@ -32,6 +32,8 @@ const SKY: u32 = rgb(150, 196, 232);
 const IMPORTED_TO_BOARD: Mat3 = Mat3::IDENTITY;
 const POPUP_TIME: f32 = 1.8;
 const HINT_TIME: f32 = 12.0;
+/// The trick name's text size (pixels per font cell): small enough to leave the skater in view.
+const POPUP_PX: f32 = 3.5;
 /// The simulation's fixed step: Skate 3's tuning is per 1/60 s tick, so the skater, the flick reader and
 /// the camera always step at 60 Hz whatever the TV runs at (PAL50 draws between two ticks).
 pub const TICK: f32 = 1.0 / 60.0;
@@ -1235,15 +1237,17 @@ impl Game {
         );
 
         if let Some(p) = &self.popup {
-            // Pop in with a slight scale-up.
-            let px = 6.0 + 2.0 * (1.0 - (p.time * 8.0).min(1.0));
-            hud::text_centered(&mut m, SCREEN_W / 2.0, 120.0, px, &p.title, p.rgba);
+            // Pop in with a slight scale-up, no wider than most of the screen.
+            let grow = 1.0 + 0.15 * (1.0 - (p.time * 8.0).min(1.0));
+            let fit = (SCREEN_W * 0.8) / (4.0 * p.title.chars().count().max(1) as f32);
+            let px = POPUP_PX.min(fit) * grow;
+            hud::text_centered(&mut m, SCREEN_W / 2.0, 96.0, px, &p.title, p.rgba);
             if !p.detail.is_empty() {
                 hud::text_centered(
                     &mut m,
                     SCREEN_W / 2.0,
-                    120.0 + px * 7.0,
-                    4.0,
+                    96.0 + px * 7.0,
+                    2.5,
                     &p.detail,
                     white,
                 );
@@ -1289,26 +1293,6 @@ impl Game {
                 "CONNECT A GAMECUBE PAD TO PORT 1",
                 rgb(255, 120, 100),
             );
-        } else if self.clock < HINT_TIME {
-            for (i, line) in [
-                "A PUSH  B MONGO  A+B HIPPIE JUMP  X BRAKE",
-                "STICK STEER - FULL BACK + SIDE: POWERSLIDE",
-                "C-STICK: PULL BACK, FLICK UP TO OLLIE",
-                "FLICK OR ROLL FOR FLIPS - HOLD LIGHT: MANUAL",
-                "START: MENU - CHANGE LOCATION",
-            ]
-            .iter()
-            .enumerate()
-            {
-                hud::text_centered(
-                    &mut m,
-                    SCREEN_W / 2.0,
-                    374.0 + 18.0 * i as f32,
-                    3.0,
-                    line,
-                    white,
-                );
-            }
         }
         if let Some(man) = &self.skater.manual {
             // Balance meter: keep the marker in the middle.
@@ -1481,6 +1465,32 @@ mod tests {
             self.0.extend_from_slice(v);
         }
         fn end_frame(&mut self) {}
+    }
+
+    #[test]
+    fn the_hud_leaves_the_lower_screen_clear_and_a_long_trick_name_fits() {
+        let mut g = Game::new();
+        g.update(&held(0), 1.0 / 60.0);
+        let mut o = Overlay::default();
+        g.render(&mut o);
+        // No controls list: nothing drawn in the bottom third, where the skater stands.
+        assert!(o.0.iter().all(|v| v.pos[1] < SCREEN_H * 0.66), "text in the lower screen");
+        g.popup = Some(Popup {
+            title: "FAKIE BS 360 NOLLIE 360 INWARD HEELFLIP".into(),
+            detail: "+1234".into(),
+            rgba: 0x010203ff,
+            time: 1.0,
+        });
+        let mut o = Overlay::default();
+        g.render(&mut o);
+        o.0.retain(|v| v.rgba == 0x010203ff);
+        assert!(!o.0.is_empty());
+        let (lo, hi) = o.0.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| {
+            (lo.min(v.pos[0]), hi.max(v.pos[0]))
+        });
+        assert!(lo >= SCREEN_W * 0.09 && hi <= SCREEN_W * 0.91, "{lo}..{hi}");
+        let tall = o.0.iter().map(|v| v.pos[1]).fold(0.0f32, f32::max);
+        assert!(tall < SCREEN_H * 0.4, "{tall}");
     }
 
     #[test]
