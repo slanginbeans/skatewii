@@ -5,8 +5,9 @@
 //!
 //! A flip starts in the air with a flip asked for (the state graphs' `FrontFlip` / `BackFlip`) and a
 //! grab held, once the known flight is longer than the tuning's start time for the landing surface. It
-//! turns the whole body (board and rider) about an axis along the board, towards the toe side (front)
-//! or the heel side (back), as fast as `flip_scalar` turns over the flight asks (smoothed, at most
+//! turns the whole body (board and rider) end over end about the board's lateral axis (SK8 BeginBodyFlip:
+//! the reckoning system frame's right, turned round riding the other way), the head going over towards
+//! the travel (front) or back against it (back), as fast as `flip_scalar` turns over the flight asks (smoothed, at most
 //! `flip_max_speed`), while the grab is held or early in the flight; let go, it slows to a stop. The
 //! turn is drawn about the centre of mass and baked into the board's up at the landing: landing off
 //! it bails, and so does falling upside down without the grab.
@@ -32,11 +33,13 @@ pub struct BodyFlip {
 }
 
 impl BodyFlip {
-    /// Starts a flip: about the board's nose axis, so the head goes over the toe side (`toe`, the side
-    /// the rider faces) for a front flip and over the heel side for a back flip.
-    pub fn begin(up: Vec3, toe: Vec3, front: bool) -> BodyFlip {
-        // d(up)/d(angle) = axis x up: towards the toe side for a front flip.
-        let axis = up.cross(toe).normalize_or(Vec3::ZERO);
+    /// Starts a flip: end over end about the board's lateral axis (square to `up` and `ahead`, the
+    /// board's long axis pointed the way it travels), so the head goes over forwards (towards `ahead`)
+    /// for a front flip and backwards for a back flip, whatever the stance (SK8 BeginBodyFlip turns
+    /// the axis round only for the direction of travel).
+    pub fn begin(up: Vec3, ahead: Vec3, front: bool) -> BodyFlip {
+        // d(up)/d(angle) = axis x up = (up x ahead) x up: towards `ahead` for a front flip.
+        let axis = up.cross(ahead).normalize_or(Vec3::ZERO);
         BodyFlip {
             axis: if front { axis } else { -axis },
             angle: 0.0,
@@ -82,16 +85,18 @@ mod tests {
     use crate::math::v3;
 
     #[test]
-    fn a_back_flip_turns_the_head_over_the_heels() {
+    fn a_back_flip_turns_the_head_back_end_over_end() {
         let up = Vec3::UP;
-        let toe = v3(1.0, 0.0, 0.0);
-        let mut f = BodyFlip::begin(up, toe, false);
+        let ahead = v3(0.0, 0.0, 1.0);
+        let mut f = BodyFlip::begin(up, ahead, false);
         f.angle = 0.3;
-        // A little way in, the head has moved to the heel side.
-        assert!(f.apply(up).x < -0.2, "{:?}", f.apply(up));
-        let mut f = BodyFlip::begin(up, toe, true);
+        // A little way in, the head has moved back against the travel, not to a side.
+        let head = f.apply(up);
+        assert!(head.z < -0.2 && head.x.abs() < 1e-4, "{head:?}");
+        let mut f = BodyFlip::begin(up, ahead, true);
         f.angle = 0.3;
-        assert!(f.apply(up).x > 0.2);
+        let head = f.apply(up);
+        assert!(head.z > 0.2 && head.x.abs() < 1e-4, "{head:?}");
         // A full turn brings it back upright.
         f.angle = crate::math::TAU;
         assert!((f.apply(up) - up).length() < 1e-4);

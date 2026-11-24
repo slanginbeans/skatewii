@@ -3377,6 +3377,18 @@ impl Skater {
         if self.mirrored() { -side } else { side }
     }
 
+    /// The board's long axis pointed the way it travels, for a body flip's axis (SK8 BeginBodyFlip:
+    /// the reckoning frame turned round riding tail first): the nose, or the tail flying backwards.
+    fn flip_ahead(&self) -> Vec3 {
+        let along = self.vel.dot(self.fwd);
+        let backwards = if along.abs() > 0.1 {
+            along < 0.0
+        } else {
+            self.fakie
+        };
+        if backwards { -self.fwd } else { self.fwd }
+    }
+
     /// The body flip's tick (SK8 KnownAir `CalculateBodyFlipSpeed`, Reckoning `UpdateBodyFlip`,
     /// `CheckUpsideDownFallingWipeout`): starts with a flip asked for and a grab held once the known
     /// flight is long enough, turns while the grab is held (or early on), slows let go. Returns whether
@@ -3389,7 +3401,7 @@ impl Skater {
             && let (Some(front), true, Some(p)) = (g.body_flip, grabbing, &self.plan)
             && p.contact.time > m.flip_start_time.eval(p.normal.y)
         {
-            self.body_flip = Some(flip::BodyFlip::begin(self.normal, self.toe_side(), front));
+            self.body_flip = Some(flip::BodyFlip::begin(self.normal, self.flip_ahead(), front));
         }
         let Some(mut f) = self.body_flip else {
             return false;
