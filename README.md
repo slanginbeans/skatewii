@@ -50,13 +50,15 @@ X, Y). The default stance is goofy, as in Skate 3.
 | Control stick (and C-stick) left / right on a rail | Balance: pushes a slide across the rail (on a ledge, off it), leans a nose or tail slide in or out (too far out and it falls off the rail); fully over, a 50-50 drops onto one truck and turns across (crooked). Coming down hard on a rail with the board tilted against it is a wipeout |
 | L / R fully in on a rail | Grind grab (the grabs Skate 3 has for that grind: FS / BS grab, nosegrab, tailgrab), scored with the grind |
 | C-stick held back on a transition, then let go | Pump (gain speed) |
+| Come down onto the coping and stay still on it | A coping stall, back into the ramp when it stops: on both trucks an axle stall, the board's middle on it a rock to fakie (control stick held to the side as it falls back in: rock and roll; the nose back over the ramp: disaster), a tip a nose / tail stall, over the deck a blunt stall. Skate 3 plays and scores them as the grind they are |
+| Z held riding up a ramp to its coping | Hand plant (invert): the rider plants a hand on the coping, goes upside down over it and comes back down the ramp riding forwards. In it: C-stick tweaks it (up / down / left / right), A or B (held) takes one foot off, X both |
 | Rolling tail first (fakie), push | The rider turns round and pushes switch |
 | Y | Get off the board (on the ground), and back on it |
 | Z in the air (with Skate 3's motion graphs) | Dark catch |
 | Z + d-pad up | Put a session marker down where the rider is: riding on the ground with the board upright, or standing on foot, on ground a checkpoint could go on (Skate 3's rules; one marker, a new one replaces it) |
 | Z + d-pad down, held | Back to the marker: after Skate 3's hold (0.2 s up to 100 m away, up to 1 s from 1 km; the screen washes out as it fills) the rider is put there at rest, facing the way he was, on the board or on foot as he was, as a respawn puts him back: the line ends. Not mid-bail or in the air (the hold waits) |
 | Z + d-pad left | Replay of the last 30 s (see below) |
-| Z + C-stick | Free look where Skate 3 has it: on foot (see below). On the board it does nothing (no flick, no dark catch) |
+| Z + C-stick | Free look where Skate 3 has it: on foot (see below). On the board it does nothing (no flick, no dark catch); not in a hand plant (Z found the coping, the C-stick tweaks it) |
 | D-pad | Character gestures (with Skate 3's motion graphs) |
 
 Off the board (Y), with the board in hand:
@@ -67,6 +69,7 @@ Off the board (Y), with the board in hand:
 | A (hold) | Sprint: a burst that fades while held |
 | B | Jump |
 | Y | Back on the board, rolling the way the rider faces at his speed, in the stance he got off in. In the air (after B): he puts the board under his feet and lands on it |
+| Y held, standing within 1.5 m of a ramp's edge facing it | Drop in: he steps up to the edge and stands on the board with its tail on the coping while Y is held; let go of Y to drop in, or pull the control stick back to step away |
 | Z + C-stick up / down | Free look: the camera rises to look down on him (up) or drops to look up (down), up to Skate 3's 30 degrees; let go and it eases back |
 | L (fully in) | Drop the board beside him (Skate 3's LT off the board) |
 | R (fully in) | Throw the board down ahead of him, rolling (Skate 3's RT) |

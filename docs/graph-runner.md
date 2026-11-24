@@ -523,6 +523,70 @@ FootPlantManager and physical state 601) and `skate-core/src/air/known/footplant
   `SkaterIsPerformingFootPlant` / `SkaterIsPerformingBoneless` (still false).
 
 
+## Transition: drop-ins, coping stalls, hand plants (physics: `skater/dropin.rs`, `skater/stall.rs`, `skater/handplant.rs`; tuning: `tuning/handplant.rs`)
+
+- **Dropping in on foot** (SK8 `graph_host/action_conditions.rs` `IsDroppingIn`, grind output byte 324;
+  `player/offboard/contact_segments.rs` for the edge distance). The motion graph's
+  `Mount/Ground/IntoDropIn` is the first ground mount: entered on `OB_Mount` (Y pressed) while standing
+  (`LocoState` Stand), the board in hand and `DistToEdge` 1.5 m or nearer. `World::dist_to_edge` is the
+  walker's edge ahead (`dropin::find_edge`: along the facing to where the ground falls away by 0.3 m, or
+  slopes away steeper than 32 degrees; a sloping surface past it is a transition, a rail within 0.35 m its
+  coping). The physics starts the drop-in on the same press (`Skater::drop_in`): its `Into` steps up to the
+  edge (big step from over 1 m, small from over 0.4 m, none; with the graphs until `IntoDropIn/Cycle`),
+  stands there while Y is held (`OB_MountRaw`); the stick pulled back from the edge is fed as a negative
+  `OB_SteerMagnitude` (`TryToLeave`'s -0.5 goes `BackToLoco`, and the physics walks on). Y let go goes
+  `OutOfDropIn`: the rider is on the board, still, its tail on the coping; the world reads a grind
+  (`phys::GRIND`) with `IsDroppingIn`, so 0.2 s in the graph goes `OnBoard/Grinding/DroppingIn/Nose`.
+  After `LOCK_TIME` (0.4 s) there (without the graphs 0.6 s after letting go) the board is let go 0.1 m
+  behind the coping rolling at 1.2 m/s (under SK8's 1.45 m/s drop-in admission): the rolling drop-in takes
+  it over the coping into the transition. `IsDropInWithoutTransition` is an edge with no ramp under it.
+  `IsDroppingIn` is also on for a tip slide entered as a drop-in. Not done: the clips' `DropInLock` /
+  `DropInRelease` attributes (the lock is timed), `IsAnimInterpToEdge` (the step is eased by the physics),
+  the camera's `SkaterIsDroppingIn`; Skate 3's catalogue has `dropin` but no record on the disc, so a
+  drop-in isn't scored.
+- **Coping stalls** (lip tricks). Skate 3's graphs have no stall states and its disc no records for the
+  catalogue's `fakie_rock`, `fs_rock_n_roll`, `bs_rock_n_roll` (SK8 `scoring/catalog.rs` ids 181 to 183):
+  a stall is the grind the board is in on the coping, which its graphs play (`Grinding/FS_50_50`,
+  `FS_LIP` ...) and its physics holds on the way up (`TimeOfGravityRelief...`). A ledge rail with a sloping
+  surface 0.3 m or more under it 0.4 m out from its low side is a coping (`stall::is_coping`, on
+  `Grind::coping`); a grind on it that never went faster than 1 m/s along it and comes off without a pop
+  (stopped, leaned off) is a stall (`stall::Stall::of`): both trucks an axle stall, one a 5-0 or nosegrind
+  stall, a tip with the board out over the ramp a nose or tail stall, over the deck a blunt or noseblunt
+  stall, the board's middle with the nose over the deck a rock to fakie (the main stick held to the side
+  as it falls back in: rock and roll, turned round), with the nose back over the ramp a disaster. The truck
+  stalls and the rock and roll turn to ride back down the ramp. Shown by those names, scored as the
+  catalogue's identifier where the rules pack has a record for it, else as the grind (`Scored::Grind::base`).
+- **Hand plants** (SK8 `skate-game/src/physics/handplant.rs` and `contact.rs`, `trajectory.rs`,
+  `rotation.rs`; TU3 HandPlantManager `0x82D61040`, physical state 600). The world grab (Skate 3's RB:
+  `GrabWorld`, here Z; the motion graph's `OnGround` attaches it, `GraphControl::grab_world`) held riding
+  runs the manager (`handplant::Manager`): up a ramp steeper than `min_slope` (45 degrees) faster than
+  `min_speed` (0.5 m/s), the apexes the flight could reach (the seven window graphs of
+  `Hash_55B5940075F78842` against the speed up the ramp's plane, `window_drop` 1 m under them) make a
+  polygon across the ramp; a rail running across it no more than `depth` (1.5 m) into the ramp and inside
+  the polygon is the coping (`handplant::select`). Found, the path to the apex is laid out (0.8 m from the
+  coping, 0.3 rad back over the ramp) and the flags published (`World::handplant`): `IsHandPlanting`
+  ground (found), its side (frontside when the coping is on the board's left: SK8's reckoning side),
+  `HasNewHandPlantPos` (moved over 0.15 m), and the time to the apex on the plant's own clock
+  (`estimate_apex` over `time_warp`), which `ShouldPlayHandPlantAnim` compares with `anim_handplant`'s
+  thresholds (out 0.1, into 0.53, antic 0.75 s). The graph's `Riding/HandPlantGround/FS|BS` plays the
+  antic (`SetHandPlantAnticLength` hands it `antic_length` from the antic clips' lengths) and commits
+  (`AnimCommittedHandPlant`); once the apex is nearer than `committed_time` (0.55 s) the physics goes into
+  the plant (`handplant::Plant`, `IsHandPlanting` air): the centre of mass flies the path to the apex
+  (blended in from its own flight over `entry_blend`), round the apex on a curve (`curve_half_time` either
+  side) and down the fall to the landing (the first of six flights out over the ramp landing steeper than
+  45 degrees, at least 0.5 m under the coping; at least `min_out_speed` back over it), its clock slowed over
+  the apex; the rider turns from riding up the ramp to upside down over the hand and round to ride back
+  down (`into_rotation`, `out_heading`, `out_rotation`). The graph goes `HandPlantAir/FS|BS` (Into, Cyc,
+  Out; the action graph's `InAir/HandPlant` passes `HandPlantTweakX/Y` (C-stick), `HandPlantDismount` (X:
+  Skate 3's B), `HandPlantOneFootRight` (A) and `Left` (B: Skate 3's X) on, so its `OneFootRight/Left` and
+  `DismountTrans` states play). `hand_release` (0.25 s) past the apex the hand lets go and the rider falls
+  on into the ramp. Scored by `ScoringHandPlants` (the tweak by ScoringGrabs' windows: `FS_handplant_up`
+  ...) or the one-foot / no-foot states' `ScoringTrick`, with Skate 3's points (100, 150 for the
+  variants); without the graphs the same names from the C-stick and the buttons. Not done: the hand's IK
+  (`ik.rs`), the feet lifting the path (SK8 `values`' foot correction), the neighbouring coping segments'
+  extension in the search, the `to_fakie` / `to_revert` / mount variants (no records on the disc) and the
+  camera's `SkaterIsPerformingHandPlant`.
+
 ## Off the board (physics: `skater/biped.rs`; `skater.rs` `toggle_board`)
 
 Skate 3 has no separate off-board graph: the `OffBoard`, `Dismount` and `Mount` states are part of
@@ -621,7 +685,7 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 
 | GC | Intents | Does |
 |---|---|---|
-| Y | `ToggleOffBoardState` (held), `NewToggleOffBoardState` (pressed) | off the board and back on (below) |
+| Y | `ToggleOffBoardState` (held), `NewToggleOffBoardState` (pressed) | off the board and back on (below); held standing at a ramp's edge, the drop-in (above, "Transition") |
 | L / R fully in, off the board | `OB_DropBoard` / `OB_ThrowBoard`, either `OB_RetrieveBoard` | drop the board, throw it down ahead; out of the hands, pick it back up (above, "Off the board") |
 | A | `RightPush`, `Pushing`, `NewPush` | push (a press is remembered for 0.3 s); after a bail, back on the board once settled (Skate 3's `WipeOutRecover`) |
 | B | `LeftPush`, `Pushing`, `NewPush` | mongo push; after a bail, as A |
@@ -629,7 +693,8 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 | L / R fully in, then A / B | a ground grab's push | the action graph's `FSBoneless` ... `BSFastPlant`: a boneless or fastplant (above, "Foot plants"); a flick while a push's foot comes down is the motion graph's no-comply |
 | L / R, then A / B, in the air | a grab's push | the one-foot grab (`RightOneFootAir` / `LeftOneFootAir`) and its foot plant (above, "Foot plants") |
 | X | `Brake` | foot brake |
-| Z | `DarkCatch`, `NewDarkCatch`, `GrabWorld` | dark catch. SK8 also reads Xbox B for it; on the GameCube that is X, the foot brake, so only Z |
+| Z | `DarkCatch`, `NewDarkCatch`, `GrabWorld` | dark catch. SK8 also reads Xbox B for it; on the GameCube that is X, the foot brake, so only Z. Held riding up a ramp, the world grab looks for a coping: the hand plant (above, "Transition") |
+| C-stick, X, A, B in a hand plant | `HandPlantTweakX/Y`, `HandPlantDismount` (X: Skate 3's B), `HandPlantOneFootRight` (A), `HandPlantOneFootLeft` (B: Skate 3's X) | the hand plant's tweak and its one-foot and no-foot variants (SK8 trick_intentions.rs, by position) |
 | d-pad | `GestureLeft/Right/Up/DownStart`, `...Held` | character gestures (shrug, peace, shaka, surf's up); a d-pad press while Z is held on the ground is the marker / replay chord instead (`game_core::marker::Chord`) and doesn't reach them |
 | L / R | `LeftAirGrab` / `RightAirGrab`, fully in `Left/RightGroundGrab`, `Crouch` | grabs, crouch; with the left stick's flip shape just after take-off, body flips. A GameCube trigger at rest reads 1..7 of 255 and SK8 counts any trigger above 0, so the pad has a dead zone (`input::TRIGGER_DEAD_ZONE`, 0.1 of full, then rescaled); the physics grabs on the same reading |
 | main stick | `Turn`, `HardTurn`, `HardTurnCrouch`, `KickTurn`, `BodySpin`, `Left/RightSlide`, `Left/RightSlideStart` | steering, kick turns, powerslides, spins |
@@ -688,7 +753,9 @@ values),
 `IsCrouchedEnoughForBlendToGrabCycle` now read the physics and the crouch. Phase 8 (above, "Phase 8
 operations"): `BodyFlippingSignal`, `IsBodyFlipping`, `CharacterGesture`, `Pumping`, `IsBumped`,
 `SetBumpCoefficients`, `PowerSlideSpin`, `PowerSlideDecel`, `PushOut`, `MatchTwistAndLean`, `Wipeout`,
-`EnableWipeoutGestures`. With them the trick tour (BlackBoxPark and the demo park) logs no tree played
+`EnableWipeoutGestures`. Transition (above): `ScoringHandPlants`, `SetHandPlantAnticLength`,
+`IsDroppingIn`, `IsDropInWithoutTransition`, `IsHandPlanting`, `HasNewHandPlantPos`,
+`ShouldPlayHandPlantAnim`. With them the trick tour (BlackBoxPark and the demo park) logs no tree played
 with an unset parameter.
 
 Left as no-ops on purpose:
@@ -699,12 +766,11 @@ Left as no-ops on purpose:
 | `SetScoreAugmentation`, `JuiceHook`, `PrintText2D` | scoring augmentations, effects and debug text: no effect on riding |
 | `BipedCadence`, `MatchCadence`, `MatchAirTime`, `OffboardBodyTweakBlend`, `AirDismounting` | off the board (walking, running, carrying the board). The runner always hands the walker's step cadence (`Biped::phase`) to the animation as `BipedCadence` does, so the phase-controlled walk, run and sprint cycles play at it |
 | `InitMovingObjects`, `MovingObject`, `UpdateStandingOnCar`, `Shove`, `MaintainShove`, `EndShimmy` | moving objects, shoving people, skitching: systems flatground doesn't have |
-| `SetHandPlantAnticLength`, `ScoringHandPlants` | hand plants (not in flatground) |
 | `AddRunoutAttribs`, `HippyJumpAntic` | the physics owns runouts and the hippie jump |
 | `ForcePhysics` | flatground's physics always owns the board (no animation-driven board) |
 | `UpdateTimeSinceTeleport`, `UpdateTimeSinceKickturn`, `UpdateRidingFakie` | the runner counts the times every tick; riding fakie is the physics' rolling direction |
 | `ResetSkaterAnimation`, `ResetToGivenStance` | the runner starts the graphs over when the physics puts the rider back on |
-| conditions of absent systems (fixed): skitching, water, moving objects, biped/off-board states and landings, hand plants, debug animations, `IsProSkater` (no pro skaters), `DisableDismount`, `EnoughDistToObstacle`, `OBTrajTime`, `LocoState` | false (true for `EnoughDistToObstacle`), keeping the graph on the board |
+| conditions of absent systems (fixed): skitching, water, moving objects, biped/off-board states and landings, debug animations, `IsArmChannelPlaying` (no arm channel), `IsProSkater` (no pro skaters), `DisableDismount`, `EnoughDistToObstacle`, `OBTrajTime`, `LocoState` | false (true for `EnoughDistToObstacle`), keeping the graph on the board |
 
 Left, and they do touch the pose (the unset-parameter log names them; their blends sit at the neutral
 point or SK8's first child):
