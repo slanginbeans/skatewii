@@ -31,6 +31,7 @@ activation, controller) and crates/skate-game graph_host (what each behaviour an
 | `game_core/src/graph/push.rs` | SK8's push behaviours: push strength, the push trees' coefficients, the repush deadline |
 | `game_core/src/graph/riding.rs` | the riding animation's behaviours: the physics' animation turn conditioner, SetTurning, SettingBodyTilt, Crouching, SetManualAngle, the landing data |
 | `game_core/src/graph/input.rs` | the pad as action-graph intents, gesture recognizers |
+| `game_core/src/physics/` | the rigid-body physics (SK8 physics/): bodies and their integration, contact, joint and drive rows, the shared solve ("The rigid board") |
 | `game_core/src/graph/drive.rs` | the game's side: building the runner, the physics state it reads, timing |
 
 ## Selection
