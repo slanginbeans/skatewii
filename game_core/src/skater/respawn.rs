@@ -156,6 +156,17 @@ fn clear(t: &Tuning, park: &dyn Terrain, p: Vec3) -> bool {
     })
 }
 
+/// The ground under a session marker at `p` (`crate::marker`), when one may go down there: Skate 3 checks
+/// a marker's spot with the same numbers as a checkpoint's (SK8 `session_marker/validation.rs`: the
+/// ground within the drop, facing up enough, not a no-go surface, the capsule over it clear).
+pub fn marker_ground(t: &Tuning, park: &dyn Terrain, p: Vec3) -> Option<f32> {
+    let y = ground_at(t, park, p)?;
+    let bottom = v3(p.x, y, p.z) + Vec3::UP * t.respawn_radius;
+    park.raycast(bottom, Vec3::UP, t.respawn_height + t.respawn_radius)
+        .is_none()
+        .then_some(y)
+}
+
 fn safe(t: &Tuning, park: &dyn Terrain, p: Vec3) -> bool {
     ground_at(t, park, p).is_some_and(|y| clear(t, park, v3(p.x, y, p.z)))
 }

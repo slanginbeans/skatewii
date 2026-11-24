@@ -134,6 +134,8 @@ pub struct Character {
     binds: Vec<Option<Rows>>,
     /// The axis (0 = x, 2 = z) the bind pose is symmetric across: left and right bones differ along it.
     rest_axis: usize,
+    /// The light and mirroring of the last [`Character::skin`].
+    skinned: (Vec3, bool),
 }
 
 impl Character {
@@ -245,6 +247,7 @@ impl Character {
             world: alloc::vec![IDENTITY; bones],
             binds,
             rest_axis,
+            skinned: (Vec3::UP, false),
         })
     }
 
@@ -445,11 +448,25 @@ impl Character {
         &self.world
     }
 
+    /// Sets the posed bones' transforms (character space) directly, as [`Character::pose`] leaves them
+    /// (the replay draws a recorded skeleton). Extra bones are ignored, missing ones kept.
+    pub fn set_world(&mut self, world: &[Rows]) {
+        for (d, s) in self.world.iter_mut().zip(world) {
+            *d = *s;
+        }
+    }
+
+    /// The light and mirroring the parts were last skinned with.
+    pub fn last_skin(&self) -> (Vec3, bool) {
+        self.skinned
+    }
+
     /// Skins every part with the current pose and lights it from `light` (unit vector towards the light,
     /// in the character's own space). `mirror` draws the mirror image across the board's long axis
     /// (x = 0, swapping the toe and heel sides): each bone drives its left/right partner's vertices,
     /// reflected, which turns the clips' goofy rider into a regular one still facing down the board.
     pub fn skin(&mut self, light: Vec3, mirror: bool) {
+        self.skinned = (light, mirror);
         let world = &self.world;
         let skeleton = &self.skeleton;
         let binds = &self.binds;
