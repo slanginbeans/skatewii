@@ -40,6 +40,10 @@ pub const CLIP_SPEEDS: [f32; 3] = [1.683_4, 5.369_8, 9.101_9];
 pub const CYCLE_TIMES: [f32; 3] = [56.0 / 60.0, 38.0 / 60.0, 30.0 / 60.0];
 /// Below this (m/s) the rider stands.
 const STAND_SPEED: f32 = 0.01;
+/// Skate 3's ground profile ahead of the walker (SK8 contact_toolkit generation.rs): a rise or drop over
+/// 0.05 m in it is a step (`segment.length > 0.05`), and drops are looked for within 0.75 m.
+pub const PROFILE_STEP: f32 = 0.05;
+pub const PROFILE_LENGTH: f32 = 0.75;
 
 /// Skate 3's locomotion states (the motion graph's `LocoState`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -81,6 +85,12 @@ pub struct Biped {
     /// cycle is (0..1). It moves on by the distance covered over the cycle's own travel, so the feet
     /// keep pace with the ground; the phase-controlled locomotion clips are drawn at it.
     pub phase: f32,
+    /// Skate 3's ground kind along the facing (the motion graph's `GroundSlopeType`; SK8
+    /// contact_toolkit classification.rs): 0 flat, 1 stairs up shallow, 2 up steep, 3 down shallow, 4
+    /// down steep, 5..8 the same on a ramp. A new kind is taken once the last three samples agree.
+    pub slope_kind: u8,
+    slope_samples: [u8; 3],
+    slope_cursor: u8,
 }
 
 /// What the controller reads each tick.
@@ -91,6 +101,55 @@ pub struct BipedInput {
     pub cam_yaw: f32,
     pub sprint: bool,
     pub jump: bool,
+}
+
+/// The slope classes' bounds, compared with the tangent's rise over its run: `tan` of Skate 3's globals
+/// 822F8FCC / 822F8FD0 (0.1047 and 0.5585 rad: 6 and 32 degrees).
+const SLOPE_LOW_TAN: f32 = 0.105_104_24;
+const SLOPE_HIGH_TAN: f32 = 0.624_869_35;
+
+/// The ground ahead along `forward` from the feet at `pos` (on ground of up `normal`): its tangent's rise
+/// over run, and whether it steps (stairs). Skate 3 builds a profile of the ground ahead and marks a
+/// rise or drop over 0.05 m as a step (SK8 contact_toolkit generation.rs); flatground samples the ground
+/// every [`PROFILE_STEP`] up to [`PROFILE_LENGTH`] ahead, and a height change that the surfaces' own
+/// slope doesn't account for by over 0.05 m is a step. On stairs the tangent joins the first and last
+/// steps seen (SK8 joins the steps' ends: `between_slope`), or the feet and the one step; elsewhere it
+/// is the ground's own slope.
+pub fn ground_ahead(park: &dyn Terrain, pos: Vec3, forward: Vec3, normal: Vec3) -> (f32, bool) {
+    let f = Vec3 { y: 0.0, ..forward }.normalize_or(v3(0.0, 0.0, 1.0));
+    let along = |n: Vec3| {
+        if n.y > 0.1 {
+            -(n.x * f.x + n.z * f.z) / n.y
+        } else {
+            0.0
+        }
+    };
+    let own = along(normal);
+    let (mut h, mut n) = (pos.y, normal);
+    let mut first: Option<(f32, f32)> = None;
+    let mut last = (0.0, pos.y);
+    let steps = libm::roundf(PROFILE_LENGTH / PROFILE_STEP) as usize;
+    for i in 1..=steps {
+        let d = i as f32 * PROFILE_STEP;
+        let p = pos + f * d;
+        let g = park.ground(p.x, p.z, h + STEP_UP);
+        if g.height <= f32::MIN / 2.0 || g.height > h + STEP_UP || g.height < h - STEP_DOWN {
+            break;
+        }
+        let expected = (along(n) + along(g.normal)) * 0.5 * PROFILE_STEP;
+        if (g.height - h - expected).abs() > PROFILE_STEP {
+            first.get_or_insert((d, g.height));
+            last = (d, g.height);
+        }
+        h = g.height;
+        n = g.normal;
+    }
+    match first {
+        // Two steps or more: the pitch between the first and last step seen.
+        Some(a) if last.0 > a.0 => ((last.1 - a.1) / (last.0 - a.0), true),
+        Some(_) => ((last.1 - pos.y) / last.0, true),
+        None => (own, false),
+    }
 }
 
 /// The move amount and turn from the stick in the world against the facing (SK8 ground_input.rs).
@@ -315,6 +374,39 @@ impl Biped {
         } else {
             pos.y = g.height;
             self.normal = g.normal;
+            let (slope, stairs) = ground_ahead(park, *pos, self.forward(), self.normal);
+            self.classify(slope, stairs);
+        }
+    }
+
+    /// Skate 3's slope class from the tangent's rise over run along the facing, on stairs or a ramp, and
+    /// its three-sample acceptance (SK8 contact_toolkit classification.rs, TU3 82D848D0): flat is taken
+    /// at once and clears the history; another kind once the three samples before it were the same.
+    pub fn classify(&mut self, slope: f32, stairs: bool) {
+        let a = slope.abs();
+        let proposed = if a <= SLOPE_LOW_TAN {
+            0
+        } else if a <= SLOPE_HIGH_TAN {
+            if slope > 0.0 { 1 } else { 3 }
+        } else if slope > 0.0 {
+            2
+        } else {
+            4
+        };
+        let proposed = if proposed != 0 && !stairs {
+            proposed + 4
+        } else {
+            proposed
+        };
+        if proposed == 0 {
+            self.slope_kind = 0;
+            self.slope_samples = [0; 3];
+            self.slope_cursor = 0;
+        } else if self.slope_samples.iter().all(|&k| k == proposed) {
+            self.slope_kind = proposed;
+        } else {
+            self.slope_cursor = (self.slope_cursor + 1) % 3;
+            self.slope_samples[self.slope_cursor as usize] = proposed;
         }
     }
 
@@ -474,6 +566,124 @@ mod tests {
         assert!(steer > 0.0, "{steer}");
         let (_, steer) = read_stick(&T, 0.0, world_stick([-1.0, 0.3], 0.0));
         assert!(steer < 0.0, "{steer}");
+    }
+
+    /// Stairs up +z from z = 1: `count` steps of `rise` over `tread`, then a landing; or a plain slope of
+    /// `rise / tread` (a ramp) when `ramp`.
+    struct Stairs {
+        rise: f32,
+        tread: f32,
+        count: f32,
+        ramp: bool,
+    }
+
+    impl Terrain for Stairs {
+        fn ground(&self, _x: f32, z: f32, _max: f32) -> crate::park::Surface {
+            let top = self.count * self.tread;
+            let along = (z - 1.0).clamp(0.0, top);
+            if self.ramp {
+                let k = self.rise / self.tread;
+                let on = z > 1.0 && z < 1.0 + top;
+                return crate::park::Surface {
+                    height: along * k,
+                    normal: if on {
+                        v3(0.0, 1.0, -k).normalize_or(Vec3::UP)
+                    } else {
+                        Vec3::UP
+                    },
+                };
+            }
+            let steps = if z < 1.0 {
+                0.0
+            } else {
+                (libm::floorf(along / self.tread) + 1.0).min(self.count)
+            };
+            crate::park::Surface {
+                height: steps * self.rise,
+                normal: Vec3::UP,
+            }
+        }
+        fn spawn(&self) -> (Vec3, f32) {
+            (Vec3::ZERO, 0.0)
+        }
+    }
+
+    /// Walks the stick straight ahead along +z from z = 0 (or back down along -z from the top) and
+    /// returns the ground kind held longest off the flat, and the kind at the end.
+    fn walk_over(park: &Stairs, down: bool, stick: f32) -> (u8, u8) {
+        let top = park.count * park.tread;
+        let mut pos = if down {
+            v3(0.0, park.count * park.rise, 1.0 + top + 1.0)
+        } else {
+            Vec3::ZERO
+        };
+        let heading = if down { PI } else { 0.0 };
+        let mut b = Biped::new(heading, Vec3::ZERO, Vec3::UP);
+        let input = BipedInput {
+            stick: [0.0, stick],
+            cam_yaw: heading,
+            ..BipedInput::default()
+        };
+        let mut ticks = [0; 9];
+        for _ in 0..600 {
+            b.step(&T, 9.81, park, &mut pos, input, TICK);
+            ticks[b.slope_kind as usize] += 1;
+            if (down && pos.z < -0.5) || (!down && pos.z > top + 2.5) {
+                break;
+            }
+        }
+        let most = (1..9).max_by_key(|&k| ticks[k]).unwrap() as u8;
+        (most, b.slope_kind)
+    }
+
+    #[test]
+    fn stairs_and_ramps_are_told_apart_by_their_steps() {
+        // Shallow stairs (0.15 m over 0.3 m: 27 degrees), steep stairs (0.2 over 0.25: 39 degrees).
+        let shallow = Stairs {
+            rise: 0.15,
+            tread: 0.3,
+            count: 8.0,
+            ramp: false,
+        };
+        let steep = Stairs {
+            rise: 0.2,
+            tread: 0.25,
+            count: 8.0,
+            ramp: false,
+        };
+        assert_eq!(walk_over(&shallow, false, 1.0), (1, 0));
+        assert_eq!(walk_over(&steep, false, 0.5), (2, 0));
+        assert_eq!(walk_over(&shallow, true, 1.0), (3, 0));
+        assert_eq!(walk_over(&steep, true, 0.5), (4, 0));
+        // The same slopes as ramps: no steps, the ramp's own kinds.
+        let ramp = Stairs {
+            ramp: true,
+            ..shallow
+        };
+        assert_eq!(walk_over(&ramp, false, 1.0), (5, 0));
+        assert_eq!(walk_over(&ramp, true, 1.0), (7, 0));
+        let ramp = Stairs {
+            ramp: true,
+            ..steep
+        };
+        assert_eq!(walk_over(&ramp, false, 0.5), (6, 0));
+    }
+
+    #[test]
+    fn a_new_ground_kind_waits_for_three_agreeing_samples_and_flat_is_at_once() {
+        let mut b = Biped::default();
+        for expected in [0, 0, 0, 1] {
+            b.classify(0.3, true);
+            assert_eq!(b.slope_kind, expected);
+        }
+        // Under 6 degrees is flat at once.
+        b.classify(0.1, true);
+        assert_eq!(b.slope_kind, 0);
+        // Over 32 degrees steep; a ramp without steps.
+        for _ in 0..4 {
+            b.classify(-0.7, false);
+        }
+        assert_eq!(b.slope_kind, 8);
     }
 
     #[test]

@@ -673,8 +673,20 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   flying back), `IsDroppingSkateboard` / `IsRetrievingSkateboard` (below), `IsInBipedAir`,
   `CanBipedLand` (in the air), `CanLandOnBoard` (on foot only once the landing assist has taken a flight
   onto the free board, below), `IsLandingOnBoard` (coming down onto the board from the air: the hippie
-  jump, the air mount and the caveman; SK8's physical state 503), `GroundSlopeType`'s ramp classes (5 and
-  25 degrees; flatground doesn't tell stairs apart yet), `ComVelCompare` in the facing's frame.
+  jump, the air mount and the caveman; SK8's physical state 503), `GroundSlopeType` (below),
+  `ComVelCompare` in the facing's frame.
+- **Stairs** (Skate 3's off-board ground kind, SK8 contact_toolkit classification.rs / generation.rs, TU3
+  82D848D0; `Biped::slope_kind`, `biped::ground_ahead`). The motion graph's `Locomotion/NotStand/NotThin`
+  has a walk, run and sprint state for each `GroundSlopeType`: flat, stairs up or down shallow or steep
+  (`BR_/NB_WALK_FWD_STAIRUP30_CYC` ...) and ramps up or down shallow or steep. Skate 3 profiles the
+  ground ahead and marks a rise or drop over 0.05 m in it as a step; flatground samples the ground
+  every 0.05 m to 0.75 m ahead along the facing, and a height change the surfaces' own slope doesn't
+  account for by over 0.05 m is a step. With steps the tangent joins the first and last steps seen (or
+  the feet and the one step) and the kind is a stairs kind, else the ground's own slope gives a ramp
+  kind. Its rise over run against tan 6 and tan 32 degrees (Skate 3's 0.1047 and 0.5585 rad) is flat,
+  shallow or steep, up or down; a new kind is taken once the three samples before it agree, flat at
+  once (clearing them). Tests: `biped` unit tests, `tests/offboard_walk.rs` (built-in stairs and ramps;
+  imported: `Walk_StairUpShallow`, `Walk_StairDnShallow`, `Run_StairUpShallow`, `Run_StairDnShallow`).
 - **Drawn**: the off-board clips' origin is the ground under the feet (the riding clips' is the deck's
   centre); the drawing moves between the two over 0.2 s while getting off or on.
 - **Dropping, throwing and picking up the board** (`skater/possession.rs`, Skate 3's SkateboardController
@@ -730,7 +742,7 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   the landing on deck's query; a body above the board's deck that moves over 0.7 m/s between two queries
   is a hurdle (`IsHippyHurdling`: `OnBoard/HippyJump/HurdleCyc`, the landing on the board held off) until
   0.3 s past the apex. Flatground's world is static, so its hippie jumps never hurdle.
-- **Not done**: moving objects (so nothing to hippie hurdle), standing on cars, stairs' own clips, the obstacle steering
+- **Not done**: moving objects (so nothing to hippie hurdle), standing on cars, the obstacle steering
   of `movement_intent.rs`, foot IK; the free board has no rigid rotation of its own (it keeps its nose,
   pitched only by the throw, and lands on its wheels whatever way it falls) and doesn't collide with the
   rider; the retrieve hands (SK8's hand contact that catches the board early) aren't modelled.

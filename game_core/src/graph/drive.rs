@@ -716,7 +716,7 @@ fn walking(w: &mut World, s: &Skater) {
     // once the landing assist has taken the flight down onto the free board (`Mode::Air`, the caveman).
     w.can_biped_land = b.air.is_some();
     w.can_land = s.deck_assist && s.free_board_landing(b.air_remaining).0;
-    w.biped_slope = super::ops::slope::biped(slope, false);
+    w.biped_slope = super::ops::slope::biped(b.slope_kind);
     w.speed = b.speed;
     w.forward_speed = b.vel.dot(f);
     w.com_vel = [b.vel.dot(side), b.vel.y, b.vel.dot(f)];
