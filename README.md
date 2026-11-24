@@ -193,7 +193,7 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
                    the sound bank (imported or the synthesised placeholders)
 wii/
   game/            Rust staticlib for the Wii: Gfx over the C layer, allocator, panic screen
-  platform/        C layer over libogc (video/GX, pads, sound output on ASND, panic console) + main()
+  platform/        C layer over libogc (video/GX, pads, sound output by the audio interface's DMA, panic console) + main()
   Makefile         links flatground.dol with devkitPPC
 tools/preview/     PC tool: runs the game with scripted input through a software rasteriser to PNGs
 tools/import/      PC tool: converts assets from your own Skate 3 disc image into Wii packs (docs/importing.md)

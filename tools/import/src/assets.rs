@@ -382,8 +382,8 @@ pub fn run(args: &[String]) -> Res<()> {
     for job in &jobs(default) {
         if job.kind == "sound" && !can_sound {
             println!(
-                "[assets] sound: skipped, no FFmpeg with an XMA2 decoder found (install FFmpeg or set FG_FFMPEG;
-                 [assets] docs/importing.md); the game plays its placeholder sounds"
+                "[assets] sound: skipped, no FFmpeg with an XMA2 decoder found (install FFmpeg or set \
+                 FG_FFMPEG; docs/importing.md): the game plays its built-in sounds"
             );
             continue;
         }

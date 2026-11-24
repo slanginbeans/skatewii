@@ -20,7 +20,7 @@ OGC       := $(DEVKITPRO)/libogc
 MACHDEP := -DGEKKO -mrvl -mcpu=750 -meabi -mhard-float
 CFLAGS  := -O2 -g -Wall -Wextra -ffunction-sections -fdata-sections $(MACHDEP) -I$(OGC)/include -Iplatform
 LDFLAGS := -g $(MACHDEP) -L$(OGC)/lib/wii -Wl,--gc-sections
-LIBS    := -lwiiuse -lbte -lfat -lasnd -logc -lm
+LIBS    := -lwiiuse -lbte -lfat -logc -lm
 
 RUST_TARGET := powerpc-unknown-linux-gnu
 # Cargo profile for the game and the converter: release (default), or dolphin for quicker test builds

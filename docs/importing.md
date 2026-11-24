@@ -28,8 +28,8 @@ folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg
   Dolphin but hasn't been tried on a real Wii yet ("Riding a district" below).
 
 - converts Skate 3's sounds into `data/sound.fgpak` (about 1.9 MB, below) when an FFmpeg with an XMA2 decoder
-  is found (`FG_FFMPEG`, else `ffmpeg` on the PATH); without one it says so and the game plays its built-in
-  sounds.
+  is found (`FG_FFMPEG`, else `ffmpeg` on the PATH; `build.bat` hands the one on the Windows PATH to devkitPro's
+  shell); without one it says so and the game plays its built-in sounds.
 
 All of it is about 39 MB (the motion library 20 MB, the six parks 12.5 MB, the sounds 1.9 MB). Copy `dist/apps/flatground` to
 the SD card's `apps` folder and the game finds its packs at

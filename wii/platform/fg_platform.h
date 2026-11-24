@@ -138,7 +138,8 @@ int32_t fg_read_poll(int32_t ticket, void **data, uint32_t *size);
 // The read isn't wanted any more: dropped if not started, freed when it ends otherwise.
 void fg_read_cancel(int32_t ticket);
 // Sound output (fg_audio.c): the game mixes (game_core::sound::mix) and queues 32 kHz stereo PCM16, native
-// (big-endian) samples interleaved left, right; ASND plays them. When the queue runs dry it plays silence.
+// (big-endian) samples interleaved left, right; the audio interface plays them by DMA. When the queue runs
+// dry it plays silence.
 #define FG_AUDIO_RATE 32000
 // Stereo frames the queue takes now to be at its target depth (about 64 ms); 0 when it is full.
 uint32_t fg_audio_wanted(void);
