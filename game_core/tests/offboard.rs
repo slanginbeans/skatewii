@@ -137,9 +137,22 @@ fn the_stick_pulled_back_turns_round_on_the_spot() {
     let mut g = on_foot(LANE, 0.0);
     let start = g.skater.pos;
     let h0 = g.skater.biped.heading;
-    // Back and a little to the side (straight back has no side to turn to: Skate 3 turns right).
-    run(&mut g, 40, [10, -100], 0);
-    let turned = wrap_angle(g.skater.biped.heading - h0).abs();
+    // Back and to the right (straight back has no side to turn to: Skate 3 turns right). The stick is read
+    // against the chase camera, which sits a few degrees to one side after getting off (so the stick's side
+    // has to be clear of that) and follows him round, so he may carry on past facing back: the most he
+    // turned counts.
+    let mut turned: f32 = 0.0;
+    let mut right = 0.0;
+    for _ in 0..40 {
+        run(&mut g, 1, [30, -100], 0);
+        let d = wrap_angle(g.skater.biped.heading - h0);
+        if turned < 0.3 {
+            right = d;
+        }
+        turned = turned.max(d.abs());
+    }
+    // Turning right is towards -x when facing +z: the yaw goes down.
+    assert!(right < 0.0, "turned the wrong way: {right}");
     assert!(turned > 2.5, "turned {:.0} deg", turned.to_degrees());
     let moved = (g.skater.pos - start).horizontal().length();
     // (The stick stays where it points while he turns: towards the end it is ahead and he walks.)
@@ -293,4 +306,90 @@ fn imported_graphs_get_off_walk_and_get_back_on() {
     }
     assert!(on, "back on the board: {}", path(&g));
     assert!(path(&g).starts_with("OnBoard/"), "{}", path(&g));
+}
+
+#[test]
+fn y_in_the_air_off_the_board_gets_on_at_landing() {
+    let mut g = on_foot(LANE, 0.0);
+    run(&mut g, 30, [0, 100], 0);
+    run(&mut g, 1, [0, 100], btn::B);
+    run(&mut g, 3, [0, 100], 0);
+    assert!(g.skater.biped.air.is_some(), "jumping");
+    // Y in the air: nothing yet, and the graphs aren't told (the physics doesn't take it now)...
+    let pad = game_core::input::Pad::from_raw(&pad([0, 0], btn::Y), 0);
+    assert_eq!(g.skater.board_toggle_intent(&pad), (false, false));
+    run(&mut g, 1, [0, 0], btn::Y);
+    assert_eq!(g.skater.mode, Mode::Walk);
+    assert!(g.skater.board_toggle.is_none());
+    // ...it gets on as he lands.
+    let mut on = None;
+    for i in 0..60 {
+        run(&mut g, 1, [0, 0], 0);
+        if g.skater.mode == Mode::Rolling {
+            on = Some(i);
+            break;
+        }
+    }
+    assert!(on.is_some(), "on the board after landing");
+    // A Y long before landing is forgotten.
+    let mut g = on_foot(LANE, 0.0);
+    g.skater.biped.air = None;
+    run(&mut g, 1, [0, 0], btn::B);
+    run(&mut g, 1, [0, 0], btn::Y);
+    g.skater.pos.y += 30.0;
+    run(&mut g, 200, [0, 0], 0);
+    assert_eq!(g.skater.mode, Mode::Walk, "a Y from 3 s before landing");
+}
+
+/// With the player's imported data: however Y is pressed around a jump off the board, the physics and the
+/// graphs end up agreeing (riding with the graph on the board, or walking with it off), never riding
+/// while the graph holds the board in its hands.
+#[test]
+fn imported_y_around_a_jump_keeps_the_graphs_with_the_physics() {
+    let Some(dir) = data_dir() else {
+        eprintln!("offboard: no imported data (FG_DATA): skipped");
+        return;
+    };
+    let path = |g: &Game| g.graph.as_ref().unwrap().runner.motion_state();
+    // When Y goes down after the jump (ticks), and how long it is held.
+    for (at, hold) in [(3, 1), (3, 60), (10, 1), (20, 40), (0, 90)] {
+        let mut g = Game::new();
+        g.load_rules(&std::fs::read(dir.join("rules.fgpak")).unwrap())
+            .unwrap();
+        g.load_skater(leak(dir.join("skater.fgpak"))).unwrap();
+        g.load_motion(leak(dir.join("motion.fgpak"))).unwrap();
+        g.place_rider(LANE, 0.0, 3.0);
+        run(&mut g, 30, [0, 0], 0);
+        run(&mut g, 1, [0, 0], btn::Y);
+        run(&mut g, 120, [0, 0], 0);
+        if g.skater.mode != Mode::Walk {
+            eprintln!("offboard: the motion pack has no off-board clips: skipped");
+            return;
+        }
+        g.skater.pos = LANE;
+        run(&mut g, 40, [0, 100], 0);
+        run(&mut g, 1, [0, 100], btn::B);
+        run(&mut g, at, [0, 100], 0);
+        run(&mut g, hold, [0, 100], btn::Y);
+        let mut mixed = 0;
+        for _ in 0..150 {
+            run(&mut g, 1, [0, 0], 0);
+            let riding = matches!(g.skater.mode, Mode::Rolling | Mode::Air { .. });
+            mixed = if riding && path(&g).starts_with("OffBoard/") {
+                mixed + 1
+            } else {
+                0
+            };
+        }
+        let p = path(&g);
+        match g.skater.mode {
+            Mode::Rolling => assert!(p.starts_with("OnBoard/"), "Y at {at} for {hold}: {p}"),
+            Mode::Walk => assert!(p.starts_with("OffBoard/"), "Y at {at} for {hold}: {p}"),
+            m => panic!("Y at {at} for {hold}: {m:?} {p}"),
+        }
+        assert_eq!(
+            mixed, 0,
+            "Y at {at} for {hold}: riding with the graph off the board"
+        );
+    }
 }

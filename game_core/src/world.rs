@@ -12,18 +12,89 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use crate::collision::{self, TriMesh, WALKABLE_Y};
-use crate::gfx::{Gfx, SUN, StaticVerts, TexVertex, Texture, Vertex, rgb, shade};
+use crate::gfx::{Gfx, GpuList, SUN, StaticVerts, TexVertex, Texture, Vertex, rgb, shade};
 use crate::math::{Vec3, Xform, v3};
 use crate::pack::{Kind, Pack};
 
 /// Chunk edge for drawing (m).
 const CHUNK: f32 = 16.0;
-/// Chunks further than this from the camera (m, centre to eye, flat) are skipped.
+/// Chunks further than this from the camera (m, centre to eye, flat) are skipped; a district's draw distance
+/// is a setting ([`MIN_DRAW_DISTANCE`]..[`MAX_DRAW_DISTANCE`]) and this is its default.
 pub const DRAW_DISTANCE: f32 = 90.0;
+pub const MIN_DRAW_DISTANCE: f32 = 40.0;
+pub const MAX_DRAW_DISTANCE: f32 = 120.0;
 /// A streamed district fades into the sky from here ...
 pub const FOG_START: f32 = 50.0;
 /// ... to here, short of the draw distance, so models never pop in or out in plain sight.
 pub const FOG_END: f32 = DRAW_DISTANCE - 5.0;
+
+/// The fog for a district drawn to `draw_distance`: [`FOG_START`]..[`FOG_END`] at the default, scaled with it.
+pub fn fog_for(draw_distance: f32) -> (f32, f32) {
+    let k = draw_distance / DRAW_DISTANCE;
+    (FOG_START * k, FOG_END * k)
+}
+
+/// What the camera can see: within `reach` (flat, from the eye) and inside the view's four sides. Meshes
+/// outside it aren't drawn.
+#[derive(Clone, Copy, Debug)]
+pub struct Sight {
+    pub eye: Vec3,
+    pub reach: f32,
+    /// Inward normals of the left, right, bottom and top sides (planes through the eye); none: everything
+    /// within reach is seen.
+    sides: Option<[Vec3; 4]>,
+}
+
+impl Sight {
+    /// Everything within `reach` of `eye`, whichever way it is.
+    pub fn around(eye: Vec3, reach: f32) -> Sight {
+        Sight {
+            eye,
+            reach,
+            sides: None,
+        }
+    }
+
+    /// What `cam` sees on a screen `aspect` wide (width / height), out to `reach`.
+    pub fn of(cam: &crate::gfx::Camera, aspect: f32, reach: f32) -> Sight {
+        let f = (cam.target - cam.eye).normalize_or(v3(0.0, 0.0, 1.0));
+        let right = f.cross(cam.up).normalize_or(v3(1.0, 0.0, 0.0));
+        let up = right.cross(f);
+        let half_y = (cam.fov_y_deg * 0.5).to_radians();
+        let half_x = libm::atanf(libm::tanf(half_y) * aspect);
+        let side =
+            |axis: Vec3, half: f32, s: f32| f * libm::sinf(half) + axis * (s * libm::cosf(half));
+        Sight {
+            eye: cam.eye,
+            reach,
+            sides: Some([
+                side(right, half_x, 1.0),
+                side(right, half_x, -1.0),
+                side(up, half_y, 1.0),
+                side(up, half_y, -1.0),
+            ]),
+        }
+    }
+
+    /// Whether the sphere at `c` (radius `r`) comes within reach, whichever way it is.
+    pub fn within(&self, c: Vec3, r: f32) -> bool {
+        let (dx, dz) = (c.x - self.eye.x, c.z - self.eye.z);
+        let reach = self.reach + r;
+        dx * dx + dz * dz <= reach * reach
+    }
+
+    /// Whether any of the sphere at `c` (radius `r`) can be seen.
+    pub fn sees(&self, c: Vec3, r: f32) -> bool {
+        if !self.within(c, r) {
+            return false;
+        }
+        let d = c - self.eye;
+        // A little slack, so nothing on an edge flickers.
+        let r = r + 1.0;
+        self.sides
+            .is_none_or(|sides| sides.iter().all(|n| n.dot(d) >= -r))
+    }
+}
 /// The old mesh header (no magic): vertices not aligned, copied when parsed.
 const MESH_HEADER_V1: usize = 12;
 /// `"FGM2"`, `u32` vertex count, `u32` index count, `u16` texture, `u16` flags, `f32` centre x, y, z,
@@ -48,6 +119,8 @@ pub struct ParkMesh {
     /// Bounding sphere for culling.
     pub center: Vec3,
     pub radius: f32,
+    /// Its draw commands built for the GPU ([`ImportedPark::build_lists`]; the Wii only).
+    pub list: Option<GpuList>,
 }
 
 /// A mesh's indices: a copy, or (on a big-endian machine) a pack's bytes in place.
@@ -92,6 +165,24 @@ impl Indices {
 }
 
 impl ImportedPark {
+    /// Builds each model's draw commands for the GPU ([`GpuList`]), for a platform that draws them (the
+    /// Wii), and sorts the models by texture so the same texture is loaded once for a run of them. `flush`
+    /// writes each list out of the CPU cache (the GPU reads it from memory).
+    pub fn build_lists(&mut self, flush: Option<fn(*const u8, usize)>) {
+        for m in &mut self.models {
+            if m.indices.is_empty() || m.indices.len() % 3 != 0 || m.verts.len() > 0x10000 {
+                continue;
+            }
+            let l = GpuList::triangles(&m.indices);
+            if let Some(f) = flush {
+                f(l.bytes().as_ptr(), l.bytes().len());
+            }
+            m.list = Some(l);
+        }
+        self.models
+            .sort_by_key(|m| m.texture.as_ref().map_or(0, |t| t.data.as_ptr() as usize));
+    }
+
     /// Heap bytes the parsed park takes beyond what it reads in place from its pack.
     pub fn heap_bytes(&self) -> usize {
         self.mesh.heap_bytes()
@@ -99,7 +190,10 @@ impl ImportedPark {
                 .models
                 .iter()
                 .map(|m| {
-                    m.verts.heap_bytes() + m.indices.heap_bytes() + core::mem::size_of::<ParkMesh>()
+                    m.verts.heap_bytes()
+                        + m.indices.heap_bytes()
+                        + m.list.as_ref().map_or(0, GpuList::heap_bytes)
+                        + core::mem::size_of::<ParkMesh>()
                 })
                 .sum::<usize>()
             + self
@@ -236,6 +330,7 @@ fn parse_mesh_v2(
         texture,
         center,
         radius,
+        list: None,
     })
 }
 
@@ -296,6 +391,7 @@ fn parse_mesh_v1(
         indices: Indices::Owned(indices),
         texture,
         center,
+        list: None,
     })
 }
 
@@ -386,21 +482,23 @@ impl ImportedPark {
 
     /// Draws what is within [`DRAW_DISTANCE`] of `eye`: the park's models, else its collision. Returns how
     /// many meshes and vertices it drew.
-    pub fn draw(&self, gfx: &mut dyn Gfx, eye: Vec3) -> (u32, u32) {
+    pub fn draw(&self, gfx: &mut dyn Gfx, sight: &Sight) -> (u32, u32) {
         let m = Xform::IDENTITY.to_mat34();
         let (mut draws, mut verts) = (0, 0);
         for p in &self.models {
-            let (dx, dz) = (p.center.x - eye.x, p.center.z - eye.z);
-            let reach = DRAW_DISTANCE + p.radius;
-            if dx * dx + dz * dz <= reach * reach {
-                gfx.draw_indexed_static(&p.verts, &p.indices, p.texture.as_ref(), &m);
+            if sight.sees(p.center, p.radius) {
+                match &p.list {
+                    Some(l) => gfx.draw_list(&p.verts, &p.indices, l, p.texture.as_ref(), &m),
+                    None => gfx.draw_indexed_static(&p.verts, &p.indices, p.texture.as_ref(), &m),
+                }
                 draws += 1;
                 verts += p.verts.len() as u32;
             }
         }
         for c in &self.chunks {
-            let (dx, dz) = (c.center.x - eye.x, c.center.z - eye.z);
-            if dx * dx + dz * dz <= DRAW_DISTANCE * DRAW_DISTANCE {
+            // Collision drawn for want of models (a fallback): its chunks' heights aren't kept, so only
+            // the distance is checked.
+            if sight.within(c.center, 0.0) {
                 gfx.draw_tris(&c.verts, &m);
                 draws += 1;
                 verts += c.verts.len() as u32;
@@ -475,6 +573,129 @@ mod tests {
 
     fn floor() -> Vec<u8> {
         collision::encode(&[([[-5., 0., -5.], [-5., 0., 5.], [5., 0., 5.]], 1, 0)])
+    }
+
+    #[test]
+    fn only_what_the_camera_sees_is_drawn() {
+        // Eye at the origin looking along +z, 60 degrees tall on a 4:3 screen (about 75 degrees wide).
+        let cam = crate::gfx::Camera {
+            eye: v3(0.0, 2.0, 0.0),
+            target: v3(0.0, 2.0, 10.0),
+            up: v3(0.0, 1.0, 0.0),
+            fov_y_deg: 60.0,
+            near: 0.1,
+            far: 500.0,
+        };
+        let s = Sight::of(&cam, 4.0 / 3.0, 90.0);
+        assert!(s.sees(v3(0.0, 2.0, 30.0), 1.0), "ahead");
+        assert!(!s.sees(v3(0.0, 2.0, -30.0), 1.0), "behind");
+        assert!(!s.sees(v3(40.0, 2.0, 10.0), 1.0), "off to one side");
+        assert!(!s.sees(v3(-40.0, 2.0, 10.0), 1.0), "off to the other");
+        assert!(!s.sees(v3(0.0, 60.0, 20.0), 1.0), "far above the view");
+        assert!(
+            !s.sees(v3(0.0, 2.0, 120.0), 1.0),
+            "beyond the draw distance"
+        );
+        // Just outside an edge but big enough to reach into the view; right beside the eye.
+        assert!(s.sees(v3(30.0, 2.0, 30.0), 10.0));
+        assert!(s.sees(v3(0.0, 2.0, -2.0), 3.0));
+        // A wider screen sees further to the sides.
+        let wide = Sight::of(&cam, 16.0 / 9.0, 90.0);
+        let side = v3(30.0, 2.0, 30.0);
+        assert!(!s.sees(side, 1.0) && wide.sees(side, 1.0));
+        // Around: everything within reach.
+        assert!(Sight::around(cam.eye, 90.0).sees(v3(0.0, 2.0, -30.0), 1.0));
+
+        // A park draws only the meshes in sight.
+        struct Count(u32);
+        impl Gfx for Count {
+            fn begin_frame(&mut self, _: &crate::gfx::Camera, _: u32) {}
+            fn draw_tris(&mut self, _: &[Vertex], _: &crate::math::Mat34) {}
+            fn draw_2d(&mut self, _: &[Vertex]) {}
+            fn draw_indexed(
+                &mut self,
+                _: &[TexVertex],
+                _: &[u16],
+                _: Option<&Texture>,
+                _: &crate::math::Mat34,
+            ) {
+            }
+            fn draw_indexed_static(
+                &mut self,
+                _: &StaticVerts,
+                _: &[u16],
+                _: Option<&Texture>,
+                _: &crate::math::Mat34,
+            ) {
+                self.0 += 1;
+            }
+            fn end_frame(&mut self) {}
+        }
+        let quad = |x: f32, z: f32| {
+            let q = [
+                ([x, 0.0, z], 0xffff_ffff, [0.0, 0.0]),
+                ([x + 1.0, 0.0, z], 0xffff_ffff, [1.0, 0.0]),
+                ([x + 1.0, 0.0, z + 1.0], 0xffff_ffff, [1.0, 1.0]),
+            ];
+            encode_mesh(&q, &[0, 1, 2], None, 0)
+        };
+        let p = pack(&[
+            ("park/collision", Kind::Collision, floor(), 0, 0, 0),
+            ("park/spawn", Kind::Data, vec![0; 16], 0, 0, 0),
+            ("park/mesh/0", Kind::Data, quad(0.0, 20.0), 0, 0, 0),
+            ("park/mesh/1", Kind::Data, quad(0.0, -20.0), 0, 0, 0),
+            ("park/mesh/2", Kind::Data, quad(60.0, 5.0), 0, 0, 0),
+        ]);
+        let park = ImportedPark::parse(p).unwrap();
+        let mut g = Count(0);
+        assert_eq!(park.draw(&mut g, &s), (1, 3));
+        assert_eq!(g.0, 1);
+        assert_eq!(park.draw(&mut Count(0), &Sight::around(cam.eye, 90.0)).0, 3);
+
+        // With the GPU's draw commands built (the Wii), the meshes are drawn through them.
+        struct Lists(u32, u32);
+        impl Gfx for Lists {
+            fn begin_frame(&mut self, _: &crate::gfx::Camera, _: u32) {}
+            fn draw_tris(&mut self, _: &[Vertex], _: &crate::math::Mat34) {}
+            fn draw_2d(&mut self, _: &[Vertex]) {}
+            fn draw_indexed(
+                &mut self,
+                _: &[TexVertex],
+                _: &[u16],
+                _: Option<&Texture>,
+                _: &crate::math::Mat34,
+            ) {
+                self.0 += 1;
+            }
+            fn draw_list(
+                &mut self,
+                _: &StaticVerts,
+                indices: &[u16],
+                list: &GpuList,
+                _: Option<&Texture>,
+                _: &crate::math::Mat34,
+            ) {
+                assert_eq!(list.bytes(), GpuList::triangles(indices).bytes());
+                self.1 += 1;
+            }
+            fn end_frame(&mut self) {}
+        }
+        let mut park = ImportedPark::parse(p).unwrap();
+        park.build_lists(None);
+        assert!(park.models.iter().all(|m| m.list.is_some()));
+        let mut g = Lists(0, 0);
+        park.draw(&mut g, &Sight::around(cam.eye, 90.0));
+        assert_eq!((g.0, g.1), (0, 3));
+        assert!(park.heap_bytes() >= 3 * 32);
+    }
+
+    #[test]
+    fn the_fog_follows_the_draw_distance() {
+        assert_eq!(fog_for(DRAW_DISTANCE), (FOG_START, FOG_END));
+        for d in [MIN_DRAW_DISTANCE, 60.0, MAX_DRAW_DISTANCE] {
+            let (start, end) = fog_for(d);
+            assert!(0.0 < start && start < end && end < d, "{d}: {start} {end}");
+        }
     }
 
     #[test]

@@ -33,13 +33,17 @@ use crate::math::{Vec3, v3};
 use crate::park::{Hit, Surface, Terrain};
 use crate::rails::Rail;
 use crate::reader::{Poll, Reader, Ticket};
-use crate::world::{DRAW_DISTANCE, ImportedPark};
+use crate::world::{DRAW_DISTANCE, ImportedPark, MAX_DRAW_DISTANCE, MIN_DRAW_DISTANCE, Sight};
 
 /// Cells within this (m, flat, to the cell's square) must be loaded to ride: what the rider stands on and
 /// can reach in the next second or two.
 pub const RIDE_RADIUS: f32 = 30.0;
 /// Cells within this are read in: everything drawn, and some way beyond.
 pub const LOAD_RADIUS: f32 = DRAW_DISTANCE + 20.0;
+/// [`LOAD_RADIUS`] for the player's draw distance (the default's is [`LOAD_RADIUS`]).
+pub fn load_radius(draw_distance: f32) -> f32 {
+    draw_distance + 20.0
+}
 /// Loaded cells beyond this are dropped (the gap to [`LOAD_RADIUS`] keeps a cell on an edge from being read
 /// and dropped over and over).
 pub const KEEP_RADIUS: f32 = LOAD_RADIUS + 40.0;
@@ -84,6 +88,8 @@ pub struct District {
     rails: Vec<Rail>,
     /// Writes a parsed cell's vertex arrays out of the CPU cache (the Wii's GPU reads them in place).
     pub flush: Option<fn(*const u8, usize)>,
+    /// Build each cell's draw commands for the GPU as it loads ([`ImportedPark::build_lists`]; the Wii).
+    pub lists: bool,
     /// Microseconds, for the log's parse times.
     pub timer: Option<fn() -> u32>,
     /// What happened (cells loaded, dropped, failed), for the game's log.
@@ -91,6 +97,8 @@ pub struct District {
     /// Which of the index's starts the rider starts at (and respawns at).
     start: usize,
     kill: f32,
+    /// How far the cells are drawn (the player's setting); what is read and kept follows it.
+    draw_distance: f32,
 }
 
 impl District {
@@ -119,11 +127,22 @@ impl District {
             failed: Vec::new(),
             rails: Vec::new(),
             flush: None,
+            lists: false,
             timer: None,
             log: Vec::new(),
             start: 0,
             kill,
+            draw_distance: DRAW_DISTANCE,
         })
+    }
+
+    /// Draws to `d` metres (clamped to the setting's range); cells are read and kept that much further out.
+    pub fn set_draw_distance(&mut self, d: f32) {
+        self.draw_distance = d.clamp(MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE);
+    }
+
+    pub fn draw_distance(&self) -> f32 {
+        self.draw_distance
     }
 
     /// Starts the rider at the index's start `i` (the first if there is no such start).
@@ -206,7 +225,11 @@ impl District {
         // Drop what is out of reach, and cancel reads no longer wanted.
         let keep: Vec<(i32, i32)> = self
             .index
-            .near(at.x, at.z, KEEP_RADIUS)
+            .near(
+                at.x,
+                at.z,
+                load_radius(self.draw_distance) + (KEEP_RADIUS - LOAD_RADIUS),
+            )
             .iter()
             .map(|(c, _)| (c.x, c.z))
             .collect();
@@ -254,7 +277,7 @@ impl District {
         // Start reads, nearest first.
         let want: Vec<(i32, i32, u32, f32)> = self
             .index
-            .near(at.x, at.z, LOAD_RADIUS)
+            .near(at.x, at.z, load_radius(self.draw_distance))
             .iter()
             .map(|(c, d)| (c.x, c.z, c.bytes, *d))
             .collect();
@@ -317,6 +340,9 @@ impl District {
                 let (p, n) = m.verts.bytes();
                 flush(p, n);
             }
+        }
+        if self.lists {
+            park.build_lists(self.flush);
         }
         // Its rails go in the first run of inert rails long enough, else at the end.
         let rails = core::mem::take(&mut park.mesh.rails);
@@ -385,9 +411,10 @@ impl District {
 
     /// Draws the loaded cells' models (or collision) within the draw distance of `eye`: meshes and
     /// vertices drawn.
-    pub fn draw(&self, gfx: &mut dyn Gfx, eye: Vec3) -> (u32, u32) {
+    pub fn draw(&self, gfx: &mut dyn Gfx, sight: &Sight) -> (u32, u32) {
+        let eye = sight.eye;
         let h = self.index.cell * 0.5;
-        let reach = DRAW_DISTANCE + self.index.cell;
+        let reach = sight.reach + self.index.cell;
         let (mut draws, mut verts) = (0, 0);
         for c in &self.cells {
             let dx = (libm::fabsf(eye.x - c.x as f32) - h).max(0.0);
@@ -395,7 +422,7 @@ impl District {
             if dx * dx + dz * dz > reach * reach {
                 continue;
             }
-            let (d, v) = c.park.draw(gfx, eye);
+            let (d, v) = c.park.draw(gfx, sight);
             draws += d;
             verts += v;
         }

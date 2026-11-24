@@ -121,6 +121,8 @@ pub struct SectionTimes {
     pub skin_us: u32,
     /// Building and submitting the frame's draws (not waiting for the GPU).
     pub render_us: u32,
+    /// The part of `render_us` spent on the park or district (choosing what's in sight and sending it).
+    pub world_us: u32,
     /// Park meshes and vertices drawn last frame.
     pub park_draws: u32,
     pub park_verts: u32,
@@ -141,6 +143,22 @@ struct Popup {
     detail: String,
     rgba: u32,
     time: f32,
+}
+
+/// After a landing: the drawn board's yaw against the rider's travel, unwrapped (radians), for the log.
+struct BoardWatch {
+    trick: String,
+    frames: u32,
+    last: Option<f32>,
+    turned: f32,
+    lo: f32,
+    hi: f32,
+}
+
+impl BoardWatch {
+    const FRAMES: u32 = 45;
+    /// More than this (degrees) is the board turning round, not the landing lining up with the travel.
+    const SWING: f32 = 90.0;
 }
 
 pub struct Game {
@@ -195,6 +213,14 @@ pub struct Game {
     pub timer: Option<fn() -> u32>,
     pub times: SectionTimes,
     render_times: core::cell::Cell<(u32, u32, u32)>,
+    world_us: core::cell::Cell<u32>,
+    /// How far a district is drawn (m): the pause menu's setting.
+    draw_distance: f32,
+    /// After a landing: the drawn board's yaw against the way the rider travels, to log the board turning
+    /// under his feet (a player saw it after some tricks; not reproduced off the Wii yet).
+    board_watch: Option<BoardWatch>,
+    /// The player changed a setting since the platform last saved them.
+    settings_changed: bool,
     /// Simulated time minus shown time (s): ticks run until the simulation is at or just past the frame.
     ahead: f32,
     /// Ticks run since the start.
@@ -283,6 +309,10 @@ impl Game {
             timer: None,
             times: SectionTimes::default(),
             render_times: core::cell::Cell::new((0, 0, 0)),
+            world_us: core::cell::Cell::new(0),
+            draw_distance: crate::world::DRAW_DISTANCE,
+            board_watch: None,
+            settings_changed: false,
             ahead: 0.0,
             ticks: 0,
             prev_view: None,
@@ -348,7 +378,8 @@ impl Game {
     /// Rides a district that streams in as the rider goes ([`District`]): the loading screen shows until
     /// the cells around its start are read, then the rider starts there. Replaces the park or district
     /// ridden before (which is freed: call between frames).
-    pub fn load_district(&mut self, district: District) {
+    pub fn load_district(&mut self, mut district: District) {
+        district.set_draw_distance(self.draw_distance);
         self.world = World::District(Box::new(district));
         self.district_wait = true;
     }
@@ -424,7 +455,76 @@ impl Game {
             Choice::Quit => self.request = Some(Request::Quit),
             Choice::Ride(i) if i == self.location => {}
             Choice::Ride(i) => self.request = Some(Request::Load(i.min(self.locations.len() - 1))),
+            Choice::DrawDistance(d) => self.set_draw_distance(d as f32),
         }
+    }
+
+    /// Follows the drawn board for [`BoardWatch::FRAMES`] frames after a landing: its yaw in the world
+    /// against the way the rider travels. Logs once if that swings more than [`BoardWatch::SWING`] degrees
+    /// (the board turning round under his feet), with what the graphs and the stance were doing.
+    fn watch_board(&mut self) {
+        let Some(mut w) = self.board_watch.take() else {
+            return;
+        };
+        w.frames += 1;
+        if w.frames > BoardWatch::FRAMES {
+            return;
+        }
+        let travel = self.skater.vel.horizontal();
+        let axes = self.board_axes_in_character();
+        let Some((_, nose)) =
+            axes.filter(|_| travel.length() >= 1.0 && self.skater.mode == Mode::Rolling)
+        else {
+            self.board_watch = Some(w);
+            return;
+        };
+        let nose = self.imported_xform().rot.apply(nose);
+        let rel = crate::math::wrap_angle(
+            crate::math::atan2f(nose.x, nose.z) - crate::math::atan2f(travel.x, travel.z),
+        );
+        if let Some(last) = w.last {
+            w.turned += crate::math::wrap_angle(rel - last);
+            w.lo = w.lo.min(w.turned);
+            w.hi = w.hi.max(w.turned);
+        }
+        w.last = Some(rel);
+        let swing = (w.hi - w.lo).to_degrees();
+        if swing > BoardWatch::SWING {
+            let state = self
+                .graph
+                .as_ref()
+                .map(|g| g.runner.motion_state())
+                .unwrap_or_default();
+            let line = format!(
+                "board: turned {swing:.0} deg under the rider {} frames after {} (graph {state}, fakie {}, frame turned {})",
+                w.frames, w.trick, self.skater.fakie, self.skater.frame_turned
+            );
+            if self.log.len() < LOG_CAP {
+                self.log.push(line);
+            }
+            return;
+        }
+        self.board_watch = Some(w);
+    }
+
+    /// How far a district is drawn (m, the pause menu's setting): its fog and the cells read follow it.
+    pub fn set_draw_distance(&mut self, d: f32) {
+        self.draw_distance = d.clamp(
+            crate::world::MIN_DRAW_DISTANCE,
+            crate::world::MAX_DRAW_DISTANCE,
+        );
+        if let World::District(dist) = &mut self.world {
+            dist.set_draw_distance(self.draw_distance);
+        }
+    }
+
+    pub fn draw_distance(&self) -> f32 {
+        self.draw_distance
+    }
+
+    /// True once after the player changed a setting (the platform saves them).
+    pub fn take_settings_changed(&mut self) -> bool {
+        core::mem::take(&mut self.settings_changed)
     }
 
     /// Uses a rules pack (`fg_import rules`): Skate 3's tuning values and flick shapes from the player's
@@ -515,6 +615,13 @@ impl Game {
         }
     }
 
+    pub fn imported_park_mut(&mut self) -> Option<&mut ImportedPark> {
+        match &mut self.world {
+            World::Park(p) => Some(p),
+            _ => None,
+        }
+    }
+
     /// What the skater rides on: the imported park if there is one, else the demo park.
     /// Puts the rider back at the park's spawn, a fresh start (scripted runs between tours).
     pub fn restart_at_spawn(&mut self) {
@@ -599,8 +706,13 @@ impl Game {
         // A menu freezes the riding and takes the pad (the d-pad moves its cursor, not the rider's
         // gestures).
         if let Some(menu) = &mut self.menu {
-            if let Some(c) = menu.update(raw, dt, self.locations.len(), self.location) {
-                self.choose(c, raw.buttons);
+            match menu.update(raw, dt, self.locations.len(), self.location) {
+                Some(Choice::DrawDistance(d)) => {
+                    self.set_draw_distance(d as f32);
+                    self.settings_changed = true;
+                }
+                Some(c) => self.choose(c, raw.buttons),
+                None => {}
             }
             return;
         }
@@ -608,7 +720,7 @@ impl Game {
             return;
         }
         if pressed & btn::START != 0 {
-            self.menu = Some(Menu::pause(raw.buttons));
+            self.menu = Some(Menu::pause(raw.buttons, self.draw_distance as u16));
             return;
         }
         self.blocked &= raw.buttons;
@@ -657,12 +769,22 @@ impl Game {
         self.times.skin_us = t2.wrapping_sub(t1);
         let (render_us, park_draws, park_verts) = self.render_times.get();
         self.times.render_us = render_us;
+        self.times.world_us = self.world_us.get();
         self.times.park_draws = park_draws;
         self.times.park_verts = park_verts;
 
+        self.watch_board();
         for e in &self.events {
             match e {
                 Event::Landed { name, points } => {
+                    self.board_watch = Some(BoardWatch {
+                        trick: name.clone(),
+                        frames: 0,
+                        last: None,
+                        turned: 0.0,
+                        lo: 0.0,
+                        hi: 0.0,
+                    });
                     self.score += points;
                     self.popup = Some(Popup {
                         title: name.clone(),
@@ -720,6 +842,7 @@ impl Game {
             let s = &self.skater;
             let walking = s.mode == Mode::Walk;
             let ob_world = crate::skater::biped::world_stick(pad.stick, s.cam_yaw);
+            let (toggle_board, toggle_board_new) = s.board_toggle_intent(&pad);
             let (ob_mag, ob_steer) =
                 crate::skater::biped::read_stick(&s.tuning.biped, s.biped.heading, ob_world);
             // The known landing's time (the trajectory selector), else straight down.
@@ -742,6 +865,8 @@ impl Game {
                 ob_mag,
                 ob_steer,
                 ob_world,
+                toggle_board,
+                toggle_board_new,
             };
             g.tick(&lib.db, &pad, world, gates, dt, self.timer);
             let mut control = g.control(&lib.db, &self.tuning);
@@ -843,6 +968,11 @@ impl Game {
         }
     }
 
+    /// The posed board's up and nose in the rider's space (the imported rider's last pose).
+    pub fn board_axes_in_character(&self) -> Option<(crate::math::Vec3, crate::math::Vec3)> {
+        self.rider.as_ref().and_then(|r| r.board_axes())
+    }
+
     /// The posed board's centre in the rider's space (the imported rider's last pose).
     pub fn board_in_character(&self) -> Option<crate::math::Vec3> {
         self.rider.as_ref().and_then(|r| r.board_in_character())
@@ -912,21 +1042,28 @@ impl Game {
         }
         gfx.begin_frame(&cam, SKY);
         // A district is drawn only so far around the rider: it fades into the sky before that.
+        let mut reach = crate::world::DRAW_DISTANCE;
         if let World::District(_) = self.world {
+            reach = self.draw_distance;
+            let (start, end) = crate::world::fog_for(reach);
             gfx.fog(Some(crate::gfx::Fog {
-                start: crate::world::FOG_START,
-                end: crate::world::FOG_END,
+                start,
+                end,
                 rgba: SKY,
             }));
         }
+        // Only what the camera can see is drawn.
+        let sight = crate::world::Sight::of(&cam, self.cam.aspect, reach);
+        let tw = now();
         let (draws, verts) = match &self.world {
-            World::Park(p) => p.draw(gfx, cam.eye),
-            World::District(d) => d.draw(gfx, cam.eye),
+            World::Park(p) => p.draw(gfx, &sight),
+            World::District(d) => d.draw(gfx, &sight),
             World::Demo => {
                 gfx.draw_tris(&self.park_mesh, &Xform::IDENTITY.to_mat34());
                 (1, self.park_mesh.len() as u32)
             }
         };
+        self.world_us.set(now().wrapping_sub(tw));
         self.draw_skater(gfx);
         self.draw_hud(gfx);
         // Before end_frame: that waits for the GPU and the TV, which the platform measures itself.
@@ -1276,6 +1413,26 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_that_ran_long_keeps_the_game_at_full_speed() {
+        // The Wii passes the refreshes the last frame was on screen for: a frame shown for two refreshes
+        // runs two ticks, so the game keeps its speed at 30 fps (it doesn't go into slow motion).
+        let mut g = Game::new();
+        let mut slow = Game::new();
+        for i in 0..60 {
+            g.update(&held(crate::input::btn::A), 1.0 / 60.0);
+            if i % 2 == 1 {
+                let before = slow.ticks;
+                slow.update(&held(crate::input::btn::A), 2.0 / 60.0);
+                assert_eq!(slow.ticks - before, 2);
+            }
+        }
+        assert_eq!((g.ticks, slow.ticks), (60, 60));
+        assert_eq!(g.skater.pos, slow.skater.pos);
+        assert_eq!(g.skater.speed, slow.skater.speed);
+        assert_eq!(slow.blend(), 1.0);
+    }
+
+    #[test]
     fn pal50_draws_between_the_last_two_ticks() {
         let mut g = Game::new();
         let mut seen_between = false;
@@ -1436,6 +1593,29 @@ mod tests {
         let f = seen.0.last().copied().flatten().expect("fog in a district");
         assert!(f.start < f.end && f.end < crate::world::DRAW_DISTANCE);
         assert_eq!(f.rgba, SKY);
+
+        // The pause menu's draw distance: the fog comes in with it, the district reads that far, and the
+        // change is flagged for saving once.
+        g.update(&held(btn::START), 1.0 / 60.0);
+        g.update(&held(0), 1.0 / 60.0);
+        for b in [
+            btn::DPAD_DOWN,
+            btn::DPAD_DOWN,
+            btn::DPAD_LEFT,
+            btn::DPAD_LEFT,
+        ] {
+            g.update(&held(b), 1.0 / 60.0);
+            g.update(&held(0), 1.0 / 60.0);
+        }
+        assert_eq!(g.draw_distance(), 70.0);
+        assert_eq!(g.district().unwrap().draw_distance(), 70.0);
+        assert!(g.take_settings_changed() && !g.take_settings_changed());
+        g.render(&mut seen);
+        let near = seen.0.last().copied().flatten().unwrap();
+        assert!(near.end < f.end && near.end < 70.0, "{near:?}");
+        // Out of range: held to the range.
+        g.set_draw_distance(500.0);
+        assert_eq!(g.draw_distance(), crate::world::MAX_DRAW_DISTANCE);
     }
 
     /// Draws nothing.

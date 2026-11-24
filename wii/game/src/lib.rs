@@ -21,7 +21,7 @@ use game_core::autoplay::Autoplay;
 use game_core::character;
 use game_core::district::District;
 use game_core::game::{FrameCost, Game};
-use game_core::gfx::{Camera, Fog, Gfx, StaticVerts, TexVertex, Texture, Vertex};
+use game_core::gfx::{Camera, Fog, Gfx, GpuList, StaticVerts, TexVertex, Texture, Vertex};
 use game_core::input::PadRaw;
 use game_core::math::Mat34;
 use game_core::menu::{self, Location, LocationTour, Request};
@@ -77,6 +77,28 @@ impl Gfx for WiiGfx {
         // Flushed once when the park loaded (`flush_park`).
         draw(ffi::fg_draw_indexed_static, verts, indices, texture, model);
     }
+    fn draw_list(
+        &mut self,
+        verts: &StaticVerts,
+        _indices: &[u16],
+        list: &GpuList,
+        texture: Option<&Texture>,
+        model: &Mat34,
+    ) {
+        let tex = texture.map(fg_texture);
+        let tex_ptr = tex.as_ref().map_or(ptr::null(), |t| t as *const _);
+        let l = list.bytes();
+        unsafe {
+            ffi::fg_draw_list(
+                verts.as_ptr(),
+                verts.len() as u32,
+                l.as_ptr(),
+                l.len() as u32,
+                tex_ptr,
+                model,
+            )
+        }
+    }
     fn draw_2d(&mut self, verts: &[Vertex]) {
         for chunk in verts.chunks(MAX_BATCH) {
             unsafe { ffi::fg_draw_2d(chunk.as_ptr(), chunk.len() as u32) }
@@ -96,20 +118,24 @@ type DrawFn = unsafe extern "C" fn(
     *const Mat34,
 );
 
-/// An indexed mesh through `f` (copying or in place), in batches one `GX_Begin` takes.
-fn draw(f: DrawFn, verts: &[TexVertex], indices: &[u16], texture: Option<&Texture>, model: &Mat34) {
-    // One GX_Begin takes at most 65535 indices; 16-bit indices reach 65536 vertices.
-    if verts.len() > 0x10000 {
-        return;
-    }
-    let tex = texture.map(|t| ffi::FgTexture {
+fn fg_texture(t: &Texture) -> ffi::FgTexture {
+    ffi::FgTexture {
         data: t.data.as_ptr(),
         width: t.width,
         height: t.height,
         format: t.format,
         alpha_test: t.alpha_test as u8,
         _pad: 0,
-    });
+    }
+}
+
+/// An indexed mesh through `f` (copying or in place), in batches one `GX_Begin` takes.
+fn draw(f: DrawFn, verts: &[TexVertex], indices: &[u16], texture: Option<&Texture>, model: &Mat34) {
+    // One GX_Begin takes at most 65535 indices; 16-bit indices reach 65536 vertices.
+    if verts.len() > 0x10000 {
+        return;
+    }
+    let tex = texture.map(fg_texture);
     let tex_ptr = tex.as_ref().map_or(ptr::null(), |t| t as *const _);
     for chunk in indices.chunks(MAX_BATCH) {
         unsafe {
@@ -125,13 +151,15 @@ fn draw(f: DrawFn, verts: &[TexVertex], indices: &[u16], texture: Option<&Textur
     }
 }
 
-/// Writes a freshly loaded park's vertex arrays out of the CPU cache once: the GPU reads them in place.
-fn flush_park(game: &Game) {
-    if let Some(p) = game.imported_park() {
+/// Writes a freshly loaded park's vertex arrays out of the CPU cache once (the GPU reads them in place),
+/// and builds its meshes' draw commands for the GPU.
+fn flush_park(game: &mut Game) {
+    if let Some(p) = game.imported_park_mut() {
         for m in &p.models {
             let (data, len) = m.verts.bytes();
             unsafe { ffi::fg_flush_range(data, len as u32) };
         }
+        p.build_lists(Some(flush_range));
     }
 }
 
@@ -247,6 +275,7 @@ fn open_district(dir: &str, file: &str) -> Result<District, String> {
     let mut d = District::new(&index, folder, Box::new(WiiReader), DISTRICT_BUDGET)
         .map_err(|e| format!("{file}: unreadable index ({e:?})"))?;
     d.flush = Some(flush_range);
+    d.lists = true;
     d.timer = Some(clock_us);
     Ok(d)
 }
@@ -455,13 +484,14 @@ fn load_location(game: &mut Game, places: &mut Places, i: usize, show: bool) -> 
     ok
 }
 
-/// Remembers the location the player chose (`settings.txt` in the app folder).
-fn save_location(places: &Places, id: &str) {
+/// Remembers the location the player chose and the draw distance (`settings.txt` in the app folder).
+fn save_settings(game: &Game, places: &Places, id: &str) {
     let Some(dir) = places.data_dir.map(app_dir) else {
         return;
     };
     let path = format!("{dir}{SETTINGS_FILE}");
-    if !save(&path, menu::write_settings(id).as_bytes()) {
+    let text = menu::write_settings(id, game.draw_distance() as u16);
+    if !save(&path, text.as_bytes()) {
         log(false, &format!("settings: could not write {path}"));
     }
 }
@@ -597,13 +627,17 @@ pub extern "C" fn fg_rust_init() {
     let autoplay = AUTOPLAY_FILES.iter().find_map(|p| load(p));
     let tour = autoplay.and_then(|a| LocationTour::from_autoplay(&String::from_utf8_lossy(a)));
     let (data_dir, index) = find_locations();
-    let last = match (autoplay, data_dir) {
+    let settings = match (autoplay, data_dir) {
         (None, Some(dir)) => load_text(&format!("{}{SETTINGS_FILE}", app_dir(dir)))
-            .and_then(|t| menu::parse_settings(&t)),
-        _ => None,
+            .map(|t| menu::parse_settings(&t))
+            .unwrap_or_default(),
+        _ => menu::Settings::default(),
     };
+    if let Some(d) = settings.draw_distance {
+        game.set_draw_distance(d as f32);
+    }
     game.set_locations(index.locations);
-    let start = menu::start_location(&game.locations, last.as_deref(), index.default);
+    let start = menu::start_location(&game.locations, settings.location.as_deref(), index.default);
     let mut places = Places {
         data_dir,
         pack: None,
@@ -730,12 +764,22 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) -> i32 {
         }
         Some(Request::Load(i)) => {
             if load_location(game, places, i, true) {
-                save_location(places, &game.locations[i].id);
+                save_settings(game, places, &game.locations[i].id);
             } else {
                 game.open_start_menu();
             }
         }
         None => {}
+    }
+    // A setting changed in the pause menu (the draw distance): written when the menu closes, not on every
+    // step.
+    if game.menu.is_none() && game.take_settings_changed() {
+        let id = game.locations[game.location].id.clone();
+        save_settings(game, places, &id);
+        log(
+            false,
+            &format!("settings: draw distance {} m", game.draw_distance()),
+        );
     }
     // Autoplay visiting every location in turn.
     if let (Some(auto), Some(tour)) = (unsafe { AUTOPLAY.as_mut() }, &mut places.tour)
@@ -803,7 +847,7 @@ fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
             log(
                 false,
                 &format!(
-                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, air {:.2} / {:.2} peak, camera {:.2} / {:.2} peak, skin {:.1}, draw {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
+                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, air {:.2} / {:.2} peak, camera {:.2} / {:.2} peak, skin {:.1}, draw {:.1}, of which world {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
                     c.avg_us / 1000.0,
                     c.peak_us as f32 / 1000.0,
                     t.physics_us as f32 / 1000.0,
@@ -814,6 +858,7 @@ fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
                     t.cam_peak_us as f32 / 1000.0,
                     t.skin_us as f32 / 1000.0,
                     t.render_us as f32 / 1000.0,
+                    t.world_us as f32 / 1000.0,
                     c.gpu_avg_us / 1000.0,
                     c.idle_avg_us / 1000.0,
                     c.dropped,

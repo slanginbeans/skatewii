@@ -600,6 +600,13 @@ impl Rider {
         Some([foot("LEFTFOOT")?, foot("RIGHTFOOT")?])
     }
 
+    /// The posed board's up and nose axes (`SKATEBOARD_ROOT`'s y and z) in the character's space, from the
+    /// last pose: up `(0, 1, 0)` and nose along the character's +-z when it rides flat under him.
+    pub fn board_axes(&self) -> Option<(Vec3, Vec3)> {
+        let m = self.character.world().get(self.board_bone?)?;
+        Some((v3(m[1][0], m[1][1], m[1][2]), v3(m[2][0], m[2][1], m[2][2])))
+    }
+
     /// The posed board's centre (`SKATEBOARD_ROOT`) in the character's space, from the last pose.
     pub fn board_in_character(&self) -> Option<Vec3> {
         let b = self.character.world().get(self.board_bone?)?[3];

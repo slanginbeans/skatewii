@@ -67,6 +67,14 @@ unsafe extern "C" {
         tex: *const FgTexture,
         model: *const Mat34,
     );
+    pub fn fg_draw_list(
+        verts: *const TexVertex,
+        vert_count: u32,
+        list: *const u8,
+        list_size: u32,
+        tex: *const FgTexture,
+        model: *const Mat34,
+    );
     pub fn fg_flush_range(data: *const u8, size: u32);
     pub fn fg_draw_2d(verts: *const Vertex, count: u32);
     pub fn fg_end_frame();

@@ -53,7 +53,13 @@ pub struct Driver {
     /// The graph's string for each grind name the physics publishes (`skater::GRAPH_NAMES`: Skate 3's
     /// `IsGrinding` grindName values, `BF_` variants included).
     grinds: Vec<Str>,
+    /// Ticks the physics has been riding while the motion graph stayed off the board.
+    off_board_ticks: u32,
 }
+
+/// The motion graph is put back on the board once the physics has been riding this long while it stays
+/// off it (a get-on that went wrong): longer than a mount clip's tail after the rider is on.
+pub const OFF_BOARD_RESYNC: u32 = 30;
 
 impl Driver {
     /// `entry`: the `motion/graph` pack entry. `sets`: gesture files by name (`skater`, `skaterls`, ...).
@@ -93,6 +99,7 @@ impl Driver {
             },
             jumping: false,
             last_path: String::new(),
+            off_board_ticks: 0,
             grinds,
         })
     }
@@ -249,8 +256,19 @@ impl Driver {
         let off = matches!(world.phys, phys::GROUND | phys::AIR)
             && !world.toggling_board
             && matches!(r.mg_state_root(), Some("WipeOut" | "Dismount" | "Default"));
-        if off {
+        // Riding while the motion graph is still off the board (its clips holding the board): it never
+        // gets back on by itself, so it is started over on the board once that has lasted a while.
+        let riding_off = matches!(world.phys, phys::GROUND | phys::AIR)
+            && !world.toggling_board
+            && self.last_path.starts_with("OffBoard");
+        self.off_board_ticks = if riding_off {
+            self.off_board_ticks + 1
+        } else {
+            0
+        };
+        if off || self.off_board_ticks > OFF_BOARD_RESYNC {
             r.reset(Some(db));
+            self.off_board_ticks = 0;
         }
         r.s.world = world;
         r.update(Some(db), dt);

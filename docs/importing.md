@@ -458,10 +458,13 @@ plenty for an offline converter.
   can't blend bone weights). It is checked in the PC preview only, not yet in Dolphin or on hardware, and
   its frame cost on the Wii is unmeasured (the HUD now shows it). Bails are clip-based: Skate 3 plays its
   wipeout clips over a physics ragdoll, which is not ported, so a bail is a step-off and a get-up.
-- Park visuals: lightmaps (the second UV set), display lists, and model LOD for districts (a district draws
-  everything within 90 m at full detail, fogged from 50 m).
-- Districts: not yet run on a real Wii (only in Dolphin), so the SD card's speed and the memory there are
-  unmeasured; water has no collision, so riding off Skate School's island lands on the seabed.
+- Park visuals: lightmaps (the second UV set) and model LOD for districts (a district draws what is in view
+  within its draw distance, 90 m by default, at full detail, fogged from 50 m). Meshes are drawn from display
+  lists built as they load (`gfx::GpuList`), so the Wii's CPU no longer sends every index each frame.
+- Districts: the first real-Wii run drew 12-24 ms of CPU a frame (60-120k vertices, nothing culled behind the
+  camera, every index sent by the CPU) and so ran near 30 fps, in slow motion; culling, display lists and the
+  draw distance setting are not measured there yet. Water has no collision, so riding off Skate School's
+  island lands on the seabed.
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
 - Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
 - Riding: Skate 3 turns, pumps and wipes out through rigid-body truck and ragdoll physics; flatground keeps

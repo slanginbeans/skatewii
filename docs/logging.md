@@ -51,9 +51,12 @@ At the start:
 
 While playing:
 - `frame:` once a second: the CPU's own work per frame (average and worst, split into physics (with the state
-  graphs, the air step and the camera's tick in it), skinning and drawing), the time waiting for the GPU to finish, the idle time until the TV's next refresh, frames that missed
-  their refresh, park meshes and vertices drawn, the vertex arena, heap and free memory. The budget at 60 Hz is
-  16.7 ms for CPU + GPU wait; idle is what is left.
+  graphs, the air step and the camera's tick in it), skinning and drawing, and the part of drawing that is the
+  park or district: choosing the meshes in view and handing them to the GPU), the time waiting for the GPU to
+  finish, the idle time until the TV's next refresh, frames that missed their refresh, park meshes and
+  vertices drawn (only those in view), the vertex arena, heap and free memory. The budget at 60 Hz is 16.7 ms
+  for CPU + GPU wait; idle is what is left. A frame that runs past a refresh is counted as dropped (it is
+  shown for two refreshes), and the game then runs two steps in it, so it keeps its speed at 30 fps.
 - `slow frame:` whenever a frame missed its refresh, with that frame's breakdown (a location loading misses a
   few).
 - `location:` every time a location loads (at start-up and from the menus): the pack read and parse times,
@@ -65,6 +68,11 @@ While playing:
 - `district: cell <x> <z> in, <KB>, <triangles>, <rails>, parsed in <ms> (<cells> cells, <KB> held)` as each
   cell of a district arrives, `district: cell <x> <z> out (...)` as one is dropped, and `district: cell <x>
   <z> could not be read` (it isn't tried again). The `frame:` line's heap shows what the district holds.
+- `settings: draw distance <m> m` when the pause menu's draw distance was changed (written to `settings.txt`
+  as the menu closes).
+- `board: turned <deg> deg under the rider <n> frames after <trick> (graph <state>, fakie, frame turned)` if the
+  drawn board swings round under the rider's feet in the 45 frames after a landing (more than 90 degrees
+  against the way he travels). Not seen off the Wii yet: the line says which trick and state it follows.
 - `status:` once a second: the skater's mode, position, heading, speed, stance (switch, fakie), the camera's
   distance and how often a wall pulled it in, and the range each stick axis and trigger reached (for tuning the
   C-stick, whose range differs between pads).
