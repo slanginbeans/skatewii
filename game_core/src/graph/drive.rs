@@ -399,6 +399,7 @@ impl Driver {
             // The action graph publishing the stick and the motion graph in its board-adjust states
             // (until then the take-off's clip still poses the deck).
             board_adjust: r.board_adjusting() && path.contains("/BoardAdjusts/"),
+            adjust_posed: path.contains("/BoardAdjusts/"),
             ..GraphControl::default()
         };
         if path.contains("/Manual/") {
@@ -450,6 +451,7 @@ impl Driver {
         // first tick), as the plant the graph scores.
         if r.s.world.phys == phys::GROUND {
             c.anim_skateboard = has(self.clips.anim_skateboard);
+            c.board_animated = c.anim_skateboard || path.starts_with("OnBoard/Trick/");
             let foot_jump = has(self.clips.foot_jump);
             c.foot_jump = foot_jump && !self.foot_jumping;
             self.foot_jumping = foot_jump;

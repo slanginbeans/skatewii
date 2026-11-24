@@ -1009,6 +1009,9 @@ pub struct GraphControl {
     /// The action graph is adjusting the board (its BoardAdjust behaviour publishes the C-stick to the
     /// motion graph's board-adjust clips).
     pub board_adjust: bool,
+    /// The motion graph is in its board-adjust states (`/BoardAdjusts/`): let go, their clips still
+    /// pose the deck turned as they blend back, and Skate 3's physical board follows the posed one.
+    pub adjust_posed: bool,
     /// Off the board, ToggleBoard's throw clip let go of the board this tick (`OB_RELEASEBOARD`: a drop,
     /// `Some(false)`; `OB_THROWBOARD`: a throw, `Some(true)`).
     pub release_board: Option<bool>,
@@ -1033,6 +1036,10 @@ pub struct GraphControl {
     /// physical state 602) and jump off the planted foot (`FOOTJUMP`, on its first tick), as the plant the
     /// graph scores (its `PushTrick` states' `ScoringTrick`).
     pub anim_skateboard: bool,
+    /// The clips move the board (SK8's `GroundAnimation` physical state: a trick's take-off from the
+    /// ground, the board in hand): the drawn rider keeps the board's heading against his body as it was,
+    /// rather than putting the posed board on the physical one (`Game`'s ground alignment).
+    pub board_animated: bool,
     pub foot_jump: bool,
     pub plant: Option<plant::PlantKind>,
     /// In the air: a one-foot grab (the `OneFootAir` attribute: the foot plant manager runs) and the
