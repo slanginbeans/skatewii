@@ -131,7 +131,7 @@ impl DevLog {
                     s.speed.abs().max(s.vel.horizontal().length()),
                     s.vel.y
                 )),
-                Event::Landed { name, points } => {
+                Event::Landed { name, points, .. } => {
                     let detail = match (&s.landing, s.mode) {
                         (Some(l), Mode::Rolling) if l.time == 0.0 => format!(
                             " ({:?}, {:.0} deg off, {:.1} m/s down)",

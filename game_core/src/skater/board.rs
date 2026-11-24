@@ -762,7 +762,8 @@ impl Skater {
         if time > 0.2 {
             events.push(Event::Landed {
                 name: "WALLRIDE".into(),
-                points: WALLRIDE_POINTS + (time * 200.0) as u32,
+                points: 0,
+                score: crate::scoring::Scored::Flat(WALLRIDE_POINTS + (time * 200.0) as u32),
             });
         }
     }

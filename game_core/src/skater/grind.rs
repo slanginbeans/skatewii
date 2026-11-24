@@ -176,15 +176,10 @@ const HISTORY: usize = 30;
 /// rail's plane (SK8 pose.rs).
 const STRAIGHT_COS: f32 = 0.9397;
 const LOW_DOT: f32 = -0.1;
-pub const GRIND_POINTS: u32 = 150;
-pub const GRIND_POINTS_PER_S: f32 = 200.0;
 /// A grind shorter than this isn't scored.
 const GRIND_MIN_TIME: f32 = 0.15;
 /// A grind grab is named with the grind once held this long (s: the score's 12 ticks, ours).
 const GRAB_MIN_TIME: f32 = 0.2;
-/// Grind grabs score as air grabs do (ours).
-const GRIND_GRAB_POINTS: u32 = 200;
-const GRIND_GRAB_POINTS_PER_S: f32 = 150.0;
 /// Rails near the board looked at for contact (more than this many near at once are rare).
 const NEAR_RAILS: usize = 16;
 
@@ -317,8 +312,8 @@ pub struct Grind {
     /// Where along the board the rail is (m from the middle, + towards the nose).
     pub along: f32,
     pub time: f32,
-    /// The trick that took the skater onto the rail (named with the grind).
-    pub into: Option<(String, u32)>,
+    /// The trick that took the skater onto the rail (named and scored with the grind).
+    pub into: Option<(String, crate::scoring::Air)>,
     /// The stick's smoothed pitch and the sticks' yaw (SK8 `Control`).
     pub pitch: f32,
     pub yaw: f32,
@@ -372,6 +367,23 @@ impl Grind {
             }
             _ => name,
         }
+    }
+
+    /// Skate 3's trick id for the grind as scored (`fs_50_50`), with the grind grab held longest when it
+    /// has one (`fs_5_o_nosegrab`).
+    pub fn scorable(&self) -> Option<u16> {
+        use crate::scoring::catalog::{id, id_of};
+        let name = self
+            .naming
+            .scoring
+            .or(self.naming.anim)
+            .unwrap_or("BS_50_50");
+        let base = id(name).or_else(|| name.strip_prefix("BF_").and_then(id))?;
+        let grab = self
+            .grabbed
+            .filter(|(_, t)| *t >= GRAB_MIN_TIME)
+            .and_then(|(grab, _)| id_of(&[crate::scoring::catalog::name(base), "_", grab]));
+        Some(grab.unwrap_or(base))
     }
 
     /// The graph name's grind without side or `BF_` (`5_O`, `CROOK` ...).
@@ -1334,9 +1346,15 @@ impl Skater {
         let along = entry_v.dot(c.dir);
         let across_s = c.dir.cross(n).normalize_or(Vec3::ZERO);
         let dir = if along >= 0.0 { 1.0 } else { -1.0 };
-        let into = self
-            .trick_label()
-            .map(|(n, p)| (format!("{}{n}", self.stance_prefix()), p));
+        let into = self.trick_label().map(|(n, trick)| {
+            (
+                format!("{}{n}", self.stance_prefix()),
+                crate::scoring::Air {
+                    trick,
+                    ..Default::default()
+                },
+            )
+        });
         // Where along the board the rail is.
         let along_board = (c.point - f.deck).dot(f.fwd);
         // The approach (SK8 chromosome): from where the rider was against the rail, and the chest then.
@@ -1959,17 +1977,15 @@ impl Skater {
                 Some((tr, _)) => format!("{tr} {}", g.display()),
                 None => g.display(),
             };
-            let grab = g
-                .grabbed
-                .filter(|(_, t)| *t >= GRAB_MIN_TIME)
-                .map_or(0, |(_, t)| {
-                    GRIND_GRAB_POINTS + (t * GRIND_GRAB_POINTS_PER_S) as u32
-                });
-            let points = g.into.as_ref().map_or(0, |t| t.1)
-                + GRIND_POINTS
-                + (g.time * GRIND_POINTS_PER_S) as u32
-                + grab;
-            events.push(Event::Landed { name, points });
+            events.push(Event::Landed {
+                name,
+                points: 0,
+                score: crate::scoring::Scored::Grind {
+                    into: g.into.as_ref().map(|t| t.1),
+                    id: g.scorable(),
+                    held: g.time,
+                },
+            });
         }
         let backwards = self.fwd.dot(travel) < 0.0;
         let square = if backwards { -travel } else { travel };
