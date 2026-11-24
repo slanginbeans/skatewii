@@ -39,6 +39,7 @@ pub mod rider;
 pub mod scoring;
 pub mod skater;
 pub mod skinned;
+pub mod sound;
 pub mod tuning;
 pub mod world;
 
