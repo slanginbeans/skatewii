@@ -66,11 +66,15 @@ typedef struct {
     uint32_t mem1_free;     // bytes free in the MEM1 / MEM2 arenas
     uint32_t mem2_free;
     uint32_t heap_used;     // bytes the C heap (Rust's allocator) has handed out
-    uint32_t _pad;
+    uint32_t audio_underruns; // sound blocks played as silence because the queue ran dry, since the start
 } FgFrameStats;
 
 // ---- Called from C main ----
 void fg_platform_init(void);
+// Starts the sound output (fg_platform_init calls it).
+void fg_audio_init(void);
+// Blocks of silence played since the start (FgFrameStats.audio_underruns).
+uint32_t fg_audio_underruns(void);
 // Opens the session log in <app folder>/logs (argv0: where the loader started us, may be NULL) and writes
 // the platform's own lines (video mode, storage). Call after fg_platform_init.
 void fg_log_start(const char *argv0);
@@ -133,6 +137,13 @@ int32_t fg_read_start(const char *path);
 int32_t fg_read_poll(int32_t ticket, void **data, uint32_t *size);
 // The read isn't wanted any more: dropped if not started, freed when it ends otherwise.
 void fg_read_cancel(int32_t ticket);
+// Sound output (fg_audio.c): the game mixes (game_core::sound::mix) and queues 32 kHz stereo PCM16, native
+// (big-endian) samples interleaved left, right; ASND plays them. When the queue runs dry it plays silence.
+#define FG_AUDIO_RATE 32000
+// Stereo frames the queue takes now to be at its target depth (about 64 ms); 0 when it is full.
+uint32_t fg_audio_wanted(void);
+// Queues `count` stereo frames (2 * count samples) after what is queued; what doesn't fit is dropped.
+void fg_audio_submit(const int16_t *frames, uint32_t count);
 // Writes a whole (small) file, replacing it: settings in the app folder. 0 on success, -1 if it couldn't.
 int32_t fg_save_file(const char *path, const void *data, uint32_t size);
 void fg_end_frame(void);

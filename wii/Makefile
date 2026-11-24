@@ -20,7 +20,7 @@ OGC       := $(DEVKITPRO)/libogc
 MACHDEP := -DGEKKO -mrvl -mcpu=750 -meabi -mhard-float
 CFLAGS  := -O2 -g -Wall -Wextra -ffunction-sections -fdata-sections $(MACHDEP) -I$(OGC)/include -Iplatform
 LDFLAGS := -g $(MACHDEP) -L$(OGC)/lib/wii -Wl,--gc-sections
-LIBS    := -lwiiuse -lbte -lfat -logc -lm
+LIBS    := -lwiiuse -lbte -lfat -lasnd -logc -lm
 
 RUST_TARGET := powerpc-unknown-linux-gnu
 # Cargo profile for the game and the converter: release (default), or dolphin for quicker test builds
@@ -30,7 +30,7 @@ RUSTLIB     := ../target/$(RUST_TARGET)/$(RUST_PROFILE)/libfg_game.a
 BUILD_ID    ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo dev)
 
 BUILD := build
-OBJS  := $(BUILD)/main.o $(BUILD)/fg_platform.o $(BUILD)/fg_log.o $(BUILD)/fg_read.o
+OBJS  := $(BUILD)/main.o $(BUILD)/fg_platform.o $(BUILD)/fg_log.o $(BUILD)/fg_read.o $(BUILD)/fg_audio.o
 
 .PHONY: all package assets run clean rustlib
 all: $(BUILD)/flatground.dol

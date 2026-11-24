@@ -34,10 +34,19 @@ pub struct FgFrameStats {
     pub mem1_free: u32,
     pub mem2_free: u32,
     pub heap_used: u32,
-    pub _pad: u32,
+    /// Sound blocks played as silence since the start (the queue ran dry).
+    pub audio_underruns: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<FgFrameStats>() == 32);
+const _: () = {
+    assert!(core::mem::size_of::<FgFrameStats>() == 32);
+    assert!(core::mem::offset_of!(FgFrameStats, heap_used) == 24);
+    assert!(core::mem::offset_of!(FgFrameStats, audio_underruns) == 28);
+};
+
+/// `FG_AUDIO_RATE`: the sound output's rate, which the mixer's must match.
+pub const FG_AUDIO_RATE: u32 = 32_000;
+const _: () = assert!(FG_AUDIO_RATE == game_core::sound::RATE);
 
 unsafe extern "C" {
     pub fn fg_begin_frame(
@@ -89,4 +98,6 @@ unsafe extern "C" {
     pub fn fg_panic(msg: *const u8, len: u32) -> !;
     pub fn fg_log(line: *const u8, len: u32, important: i32);
     pub fn fg_frame_stats(out: *mut FgFrameStats);
+    pub fn fg_audio_wanted() -> u32;
+    pub fn fg_audio_submit(frames: *const i16, count: u32);
 }

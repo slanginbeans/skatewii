@@ -6,7 +6,8 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 bad=0
-names='\.(iso|xex|big|rx2|loc|abin|vp6|mus|mpf|mxb|bh|snr|sns|fgpak)$|^imported/'
+# Audio too: EA sample banks and streams, grains, seek tables, XMA (and WAVs, which converted sound would be).
+names='\.(iso|xex|big|rx2|loc|abin|vp6|mus|mpf|mxb|bh|snr|sns|abk|bnk|grain|sek|csi|ems|xma|wav|fgpak)$|^imported/'
 hits=$(git ls-files --cached | grep -Ei "$names" || true)
 if [ -n "$hits" ]; then
     echo "Disc-data file names are tracked:" >&2

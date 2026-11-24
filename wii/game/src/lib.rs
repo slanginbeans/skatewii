@@ -26,6 +26,7 @@ use game_core::input::PadRaw;
 use game_core::math::Mat34;
 use game_core::menu::{self, Location, LocationTour, Request};
 use game_core::reader::{Poll, Reader, Ticket};
+use game_core::sound::{Audio, Bank, Command, Mixer};
 
 /// Max vertices per `GX_Begin` (it takes a u16), rounded down to whole triangles.
 const MAX_BATCH: usize = 65535 / 3 * 3;
@@ -108,6 +109,37 @@ impl Gfx for WiiGfx {
         unsafe { ffi::fg_end_frame() }
     }
 }
+
+/// The sound: the frame's commands into the shared mixer, then as much 32 kHz stereo as the platform's queue
+/// takes (`fg_audio.c`), timed for the log.
+struct WiiAudio {
+    mixer: Mixer,
+    buf: alloc::vec::Vec<i16>,
+}
+
+/// Microseconds the last frame spent mixing, and the most in the last second (for the log).
+static mut AUDIO_US: (u32, u32) = (0, 0);
+
+impl Audio for WiiAudio {
+    fn frame(&mut self, bank: &Bank, commands: &[Command], master: f32) {
+        let t0 = clock_us();
+        self.mixer.apply(bank, commands);
+        // A frame is about 533 stereo frames at 60 Hz; the queue asks for what keeps it about 64 ms deep.
+        let want = (unsafe { ffi::fg_audio_wanted() } as usize).min(4096);
+        if want > 0 {
+            self.buf.resize(want * 2, 0);
+            self.mixer.mix(bank, &mut self.buf, master);
+            unsafe { ffi::fg_audio_submit(self.buf.as_ptr(), want as u32) };
+        }
+        let us = clock_us().wrapping_sub(t0);
+        unsafe {
+            AUDIO_US = (us, AUDIO_US.1.max(us));
+        }
+    }
+}
+
+/// The sound output, made in `fg_rust_init`.
+static mut AUDIO: *mut WiiAudio = ptr::null_mut();
 
 type DrawFn = unsafe extern "C" fn(
     *const TexVertex,
@@ -194,6 +226,12 @@ const RULES_PACKS: &[&CStr] = &[
 const MOTION_PACKS: &[&CStr] = &[
     c"sd:/apps/flatground/data/motion.fgpak",
     c"usb:/apps/flatground/data/motion.fgpak",
+];
+
+/// Skate 3's sounds, converted from the player's disc (`fg_import sound`): DSP-ADPCM clips read in place.
+const SOUND_PACKS: &[&CStr] = &[
+    c"sd:/apps/flatground/data/sound.fgpak",
+    c"usb:/apps/flatground/data/sound.fgpak",
 ];
 
 /// A file in the app folder that turns on hands-off play (`game_core::autoplay::Autoplay`): scripted test
@@ -491,7 +529,12 @@ fn save_settings(game: &Game, places: &Places, id: &str) {
         return;
     };
     let path = format!("{dir}{SETTINGS_FILE}");
-    let text = menu::write_settings(id, game.draw_distance() as u16, game.camera_angle());
+    let text = menu::write_settings(
+        id,
+        game.draw_distance() as u16,
+        game.camera_angle(),
+        game.volume(),
+    );
     if !save(&path, text.as_bytes()) {
         log(false, &format!("settings: could not write {path}"));
     }
@@ -640,6 +683,9 @@ pub extern "C" fn fg_rust_init() {
     if let Some(c) = settings.camera {
         game.set_camera_angle(c);
     }
+    if let Some(v) = settings.volume {
+        game.set_volume(v);
+    }
     game.set_locations(index.locations);
     let start = menu::start_location(&game.locations, settings.location.as_deref(), index.default);
     let mut places = Places {
@@ -716,7 +762,46 @@ pub extern "C" fn fg_rust_init() {
             ),
         );
     }
-    let notice = format!("SKATER: {skater}  PARK: {park}  RULES: {rules}  MOTION: {motion}");
+    let sound: String = match load_first("sound", SOUND_PACKS) {
+        Some(pack) => match game.load_sounds(pack) {
+            Ok((cues, clips)) => {
+                log(
+                    false,
+                    &format!(
+                        "sound: {cues} of {} cues from the disc ({clips} clips), {} KB of samples",
+                        game_core::sound::Cue::COUNT,
+                        game.sounds.bytes() / 1024
+                    ),
+                );
+                "DISC".into()
+            }
+            Err(e) => {
+                log(
+                    true,
+                    &format!("sound: unreadable ({e:?}), placeholders used"),
+                );
+                "UNREADABLE".into()
+            }
+        },
+        None => {
+            log(
+                false,
+                &format!(
+                    "sound: built-in placeholders, {} KB",
+                    game.sounds.bytes() / 1024
+                ),
+            );
+            "BUILT-IN".into()
+        }
+    };
+    unsafe {
+        AUDIO = Box::into_raw(Box::new(WiiAudio {
+            mixer: Mixer::new(),
+            buf: alloc::vec::Vec::new(),
+        }))
+    };
+    let notice =
+        format!("SKATER: {skater}  PARK: {park}  RULES: {rules}  MOTION: {motion}  SOUND: {sound}");
     log(true, &format!("ready: {notice}, stance {:?}", game.stance));
     game.notice = Some(notice);
     game.frame_cost = Some(FrameCost::default());
@@ -783,9 +868,10 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) -> i32 {
         log(
             false,
             &format!(
-                "settings: draw distance {} m, camera {}",
+                "settings: draw distance {} m, camera {}, volume {}",
                 game.draw_distance(),
-                game.camera_angle().name()
+                game.camera_angle().name(),
+                game.volume()
             ),
         );
     }
@@ -820,6 +906,11 @@ fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
     }
     let start = clock_us();
     game.update(pad, dt);
+    // The sound before the drawing: fg_end_frame waits for the refresh, and the queue should be topped up
+    // before that wait.
+    if let Some(a) = unsafe { AUDIO.as_mut() } {
+        game.sound(a);
+    }
     game.render(&mut WiiGfx);
     // The frame's time includes waiting for the GPU and for the TV's refresh (in fg_end_frame): take
     // those out to get the CPU's own work.
@@ -855,7 +946,7 @@ fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
             log(
                 false,
                 &format!(
-                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, air {:.2} / {:.2} peak, camera {:.2} / {:.2} peak, ragdoll {:.2} / {:.2} peak, skin {:.1}, replay {:.2}, draw {:.1}, of which world {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
+                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, air {:.2} / {:.2} peak, camera {:.2} / {:.2} peak, ragdoll {:.2} / {:.2} peak, skin {:.1}, replay {:.2}, audio {:.2} / {:.2} peak ({} voices, {} underruns), draw {:.1}, of which world {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
                     c.avg_us / 1000.0,
                     c.peak_us as f32 / 1000.0,
                     t.physics_us as f32 / 1000.0,
@@ -868,6 +959,10 @@ fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
                     t.ragdoll_peak_us as f32 / 1000.0,
                     t.skin_us as f32 / 1000.0,
                     t.replay_us as f32 / 1000.0,
+                    AUDIO_US.0 as f32 / 1000.0,
+                    AUDIO_US.1 as f32 / 1000.0,
+                    AUDIO.as_ref().map_or(0, |a| a.mixer.playing()),
+                    st.audio_underruns,
                     t.render_us as f32 / 1000.0,
                     t.world_us as f32 / 1000.0,
                     c.gpu_avg_us / 1000.0,
@@ -884,6 +979,7 @@ fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
             game.times.air_peak_us = 0;
             game.times.cam_peak_us = 0;
             game.times.ragdoll_peak_us = 0;
+            AUDIO_US.1 = 0;
         }
     }
     // What the game noticed this frame (flicks, landings, bails, status lines).
