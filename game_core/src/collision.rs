@@ -702,6 +702,50 @@ impl TriMesh {
         false
     }
 
+    /// The triangles that come within `r` of `c` (corners and unit normal), appended to `out`: the
+    /// rigid board's narrow phase tests its spheres against them (SK8's sphere-triangle queries).
+    pub fn triangles_near(&self, c: Vec3, r: f32, out: &mut Vec<([Vec3; 3], Vec3)>) {
+        let view = self.view();
+        let (c0, r0) = self.cell_of(c.x - r, c.z - r);
+        let (c1, r1) = self.cell_of(c.x + r, c.z + r);
+        let first = out.len();
+        let mut seen: Vec<u32> = Vec::new();
+        for row in r0.max(0)..=r1.min(self.rows as isize - 1) {
+            for col in c0.max(0)..=c1.min(self.cols as isize - 1) {
+                let x = self.min.x + (col as f32 + 0.5) * self.cell;
+                let z = self.min.z + (row as f32 + 0.5) * self.cell;
+                for i in self.cell(x, z) {
+                    let i = i as u32;
+                    if seen.contains(&i) {
+                        continue;
+                    }
+                    seen.push(i);
+                    let v = view.corners(i as usize);
+                    let lo = v[0].y.min(v[1].y).min(v[2].y);
+                    let hi = v[0].y.max(v[1].y).max(v[2].y);
+                    let lx = v[0].x.min(v[1].x).min(v[2].x);
+                    let hx = v[0].x.max(v[1].x).max(v[2].x);
+                    let lz = v[0].z.min(v[1].z).min(v[2].z);
+                    let hz = v[0].z.max(v[1].z).max(v[2].z);
+                    if c.y + r < lo
+                        || c.y - r > hi
+                        || c.x + r < lx
+                        || c.x - r > hx
+                        || c.z + r < lz
+                        || c.z - r > hz
+                    {
+                        continue;
+                    }
+                    let n = view.normal(i as usize, &v);
+                    if (c - v[0]).dot(n).abs() <= r {
+                        out.push((v, n));
+                    }
+                }
+            }
+        }
+        let _ = first;
+    }
+
     /// The nearest triangle (either side) a ray from `from` along the unit `dir` meets within `max`.
     pub fn ray(&self, from: Vec3, dir: Vec3, max: f32) -> Option<Hit> {
         let view = self.view();
@@ -826,6 +870,11 @@ impl Terrain for TriMesh {
 
     fn raycast(&self, from: Vec3, dir: Vec3, max: f32) -> Option<Hit> {
         self.ray(from, dir, max)
+    }
+
+    fn triangles_near(&self, c: Vec3, r: f32, out: &mut Vec<([Vec3; 3], Vec3)>) -> bool {
+        TriMesh::triangles_near(self, c, r, out);
+        true
     }
 
     fn spawn(&self) -> (Vec3, f32) {

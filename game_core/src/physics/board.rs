@@ -14,6 +14,7 @@ use super::{
 };
 use crate::math::{Mat3, Vec3, v3};
 use crate::park::Terrain;
+use alloc::vec::Vec;
 
 pub const RIGHT_FRONT_WHEEL: usize = 0;
 pub const LEFT_FRONT_WHEEL: usize = 1;
@@ -147,6 +148,286 @@ pub const TRUCK_DRIVE: DriveDynamics = DriveDynamics {
     },
 };
 
+/// `physicstrucks` `TruckStaticFriction`, `TruckDynamicFriction`, `TruckRestitution` and
+/// `physicsdeck` `DeckStaticFriction`, `DeckDynamicFriction`, `DeckRestitution`.
+const TRUCK_MATERIAL: [f32; 3] = [0.9, 0.0, 0.0];
+const DECK_MATERIAL: [f32; 3] = [0.1, 0.1, 0.0];
+/// The truck capsule's radius (`RadiusScalar` 0.5375 x the wheel radius), spheres along its axle
+/// between the wheels.
+const TRUCK_RADIUS: f32 = 0.5375 * WHEEL_RADIUS;
+const TRUCK_SPHERE_SPACING: f32 = 0.06;
+/// The deck's underside capsules' radius (half `DeckThickness` 0.015, x 0.9) and spheres along its
+/// middle and edges: the middle part (`DeckMidLength` 0.59, `DeckWidth` 0.24) and the kicked ends
+/// (`DeckBackEndSize` 0.165 at 12.5 and 13 degrees).
+const DECK_RADIUS: f32 = 0.0075 * 0.9;
+const DECK_SPHERES: [Vec3; 9] = [
+    v3(0.0, -0.0075, 0.0),
+    v3(0.0, -0.0075, 0.15),
+    v3(0.0, -0.0075, -0.15),
+    v3(0.11, -0.0075, 0.0),
+    v3(-0.11, -0.0075, 0.0),
+    v3(0.0, -0.0075, 0.295),
+    v3(0.0, -0.0075, -0.295),
+    v3(0.0, 0.0206, 0.42),
+    v3(0.0, 0.0196, -0.42),
+];
+const BODY_SPHERES: usize = 6 + DECK_SPHERES.len();
+
+/// The terrain as the board's narrow phase sees it this tick: its triangles near the board when it has
+/// them (SK8's sphere-triangle queries), else rays.
+pub struct World<'a> {
+    pub park: &'a dyn Terrain,
+    pub tris: Option<Vec<([Vec3; 3], Vec3)>>,
+}
+
+impl<'a> World<'a> {
+    /// The terrain within `r` of `c`.
+    pub fn near(park: &'a dyn Terrain, c: Vec3, r: f32) -> World<'a> {
+        let mut tris = Vec::new();
+        let has = park.triangles_near(c, r, &mut tris);
+        World {
+            park,
+            tris: has.then_some(tris),
+        }
+    }
+}
+
+/// The point of triangle `t` closest to `p`, and whether it is inside the face (not on an edge or a
+/// corner): Ericson, Real-Time Collision Detection 5.1.5.
+fn closest_on_triangle(p: Vec3, t: &[Vec3; 3]) -> (Vec3, bool) {
+    let [a, b, c] = *t;
+    let (ab, ac, ap) = (b - a, c - a, p - a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return (a, false);
+    }
+    let bp = p - b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return (b, false);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return (a + ab * (d1 / (d1 - d3)), false);
+    }
+    let cp = p - c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return (c, false);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return (a + ac * (d2 / (d2 - d6)), false);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        return (b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6))), false);
+    }
+    let denom = 1.0 / (va + vb + vc);
+    (a + ab * (vb * denom) + ac * (vc * denom), true)
+}
+
+/// Does the segment p..q pass through triangle t? (Moller-Trumbore.)
+fn segment_crosses(t: &[Vec3; 3], p: Vec3, q: Vec3) -> bool {
+    let d = q - p;
+    let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
+    let h = d.cross(e2);
+    let a = e1.dot(h);
+    if a.abs() < 1e-12 {
+        return false;
+    }
+    let f = 1.0 / a;
+    let s = p - t[0];
+    let u = f * s.dot(h);
+    let qv = s.cross(e1);
+    let v = f * d.dot(qv);
+    let k = f * e2.dot(qv);
+    (0.0..=1.0).contains(&u) && v >= 0.0 && u + v <= 1.0 && (0.0..=1.0).contains(&k)
+}
+
+/// A candidate contact: gap, normal, the triangle's own normal, inside its face.
+type Candidate = (f32, Vec3, Vec3, bool);
+
+/// A sphere against triangles: a contact a triangle, facing the centre from the triangle's closest
+/// point. An edge or corner contact whose triangle lies in the plane of a face the sphere touches is
+/// that face's inner edge and is dropped (SK8's board query bends edges under 0.999); the two nearest
+/// distinct contacts are kept.
+#[allow(clippy::too_many_arguments)]
+fn sphere_triangles(
+    tris: &[([Vec3; 3], Vec3)],
+    c: Vec3,
+    was: Vec3,
+    radius: f32,
+    reach: f32,
+    up: Vec3,
+    m: [f32; 3],
+    min_up: f32,
+) -> [Option<ContactInput>; 2] {
+    const MAX: usize = 12;
+    let mut cand: [Candidate; MAX] = [(0.0, Vec3::ZERO, Vec3::ZERO, false); MAX];
+    let mut count = 0;
+    for (t, n) in tris {
+        let (q, face) = closest_on_triangle(c, t);
+        let d = c - q;
+        let dist = d.length();
+        if dist > reach {
+            continue;
+        }
+        // The side the centre is on, unless it went through the face this tick (a fast sphere).
+        let through = segment_crosses(t, was, c);
+        let side = if (if through { was - t[0] } else { d }).dot(*n) >= 0.0 {
+            *n
+        } else {
+            -*n
+        };
+        let crossed = through && d.dot(side) < 0.0;
+        let normal = if face || crossed || dist < 1e-5 {
+            side
+        } else {
+            d * (1.0 / dist)
+        };
+        let gap = if face || crossed { d.dot(side) } else { dist };
+        if normal.dot(up) < min_up || count == MAX {
+            continue;
+        }
+        cand[count] = (gap, normal, *n, face);
+        count += 1;
+    }
+    let cand = &cand[..count];
+    let mut found: [Option<(f32, Vec3)>; 2] = [None; 2];
+    for (i, &(gap, normal, own, face)) in cand.iter().enumerate() {
+        // An edge whose own face is coplanar with a touched face is that face's inner edge; one
+        // facing the centre within about 11 degrees of a nearer face contact is a concave joint the
+        // face already holds.
+        let inner = !face
+            && cand.iter().enumerate().any(|(j, f)| {
+                j != i
+                    && f.3
+                    && (f.1.dot(own).abs() > 0.999 || (f.1.dot(normal) > 0.98 && f.0 <= gap))
+            });
+        if inner {
+            continue;
+        }
+        if let Some(same) = found.iter_mut().flatten().find(|f| f.1.dot(normal) > 0.999) {
+            if gap < same.0 {
+                *same = (gap, normal);
+            }
+            continue;
+        }
+        match found.iter_mut().find(|f| f.is_none()) {
+            Some(slot) => *slot = Some((gap, normal)),
+            None => {
+                let worst = usize::from(found[0].unwrap().0 <= found[1].unwrap().0);
+                if gap < found[worst].unwrap().0 {
+                    found[worst] = Some((gap, normal));
+                }
+            }
+        }
+    }
+    found.map(|f| {
+        f.map(|(gap, n)| ContactInput {
+            point_a: c - n * radius,
+            point_b: c - n * gap,
+            normal: n,
+            restitution: m[2],
+            static_friction: m[0],
+            dynamic_friction: m[1],
+        })
+    })
+}
+
+/// A sphere's contacts with the terrain (at most two): SK8 queries the triangles a sphere touches.
+/// Rays from the centre down the deck's up and tipped 35 and 70 degrees fore and aft along the travel
+/// find the surface near it; a face whose plane's closest point is on it gives a face contact, else
+/// the hit is an edge's corner and the contact faces the centre from it (a wheel rolling over a coping
+/// pivots on it). Faces turned further than `min_up` from the deck's up are skipped (wheels don't ride
+/// walls); the two nearest distinct contacts are kept.
+fn sphere_contacts(
+    world: &World,
+    c: Vec3,
+    radius: f32,
+    v: Vec3,
+    deck: &Body,
+    m: [f32; 3],
+    min_up: f32,
+) -> [Option<ContactInput>; 2] {
+    let park = world.park;
+    let up = deck.axes.cols[1];
+    let travel = (v - up * up.dot(v)).normalize_or(deck.axes.cols[2]);
+    let approach = (-v.dot(up)).max(0.0) * super::STEP;
+    let reach = radius + 0.02 + approach;
+    if let Some(tris) = &world.tris {
+        let reach = radius + 0.02 + v.length() * super::STEP;
+        return sphere_triangles(tris, c, c - v * super::STEP, radius, reach, up, m, min_up);
+    }
+    let mut found: [Option<(f32, Vec3, Vec3)>; 2] = [None; 2];
+    const LIFT: f32 = 0.05;
+    for (s, k) in [
+        (0.0, 1.0),
+        (0.574, 0.819),
+        (-0.574, 0.819),
+        (0.940, 0.342),
+        (-0.940, 0.342),
+    ] {
+        let dir = (travel * s - up * k).normalize_or(-up);
+        let from = if s == 0.0 { c + up * LIFT } else { c };
+        let lift = if s == 0.0 { LIFT } else { 0.0 };
+        let Some(hit) = park.raycast(from, dir, lift + reach + 0.03) else {
+            continue;
+        };
+        let n = hit.normal;
+        let gap = (c - hit.point).dot(n);
+        let foot = c - n * gap;
+        let back = park.raycast(foot + n * 0.01, -n, 0.02);
+        let on_face = back.is_some_and(|b| b.normal.dot(n) > 0.999);
+        let (normal, gap, touch) = if on_face {
+            (n, gap, foot)
+        } else if back.is_some() {
+            // The plane's foot is on another face (a concave joint): that face gives the contact.
+            continue;
+        } else {
+            let d = c - hit.point;
+            let l = d.length();
+            if l < 1e-5 {
+                continue;
+            }
+            (d * (1.0 / l), l, hit.point)
+        };
+        if gap > reach || gap < -radius || normal.dot(up) < min_up {
+            continue;
+        }
+        if let Some(same) = found.iter_mut().flatten().find(|f| f.1.dot(normal) > 0.999) {
+            if gap < same.0 {
+                *same = (gap, normal, touch);
+            }
+            continue;
+        }
+        match found.iter_mut().find(|f| f.is_none()) {
+            Some(slot) => *slot = Some((gap, normal, touch)),
+            None => {
+                let worst = if found[0].unwrap().0 > found[1].unwrap().0 {
+                    0
+                } else {
+                    1
+                };
+                if gap < found[worst].unwrap().0 {
+                    found[worst] = Some((gap, normal, touch));
+                }
+            }
+        }
+    }
+    found.map(|f| {
+        f.map(|(_, n, touch)| ContactInput {
+            point_a: c - n * radius,
+            point_b: touch,
+            normal: n,
+            restitution: m[2],
+            static_friction: m[0],
+            dynamic_friction: m[1],
+        })
+    })
+}
+
 /// A wheel on the ground after a step: where it touches, the surface's normal there and the load it
 /// carried (N).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -180,6 +461,8 @@ pub struct BoardInput {
 pub struct Board {
     pub parts: [Body; PARTS],
     pub wheels: [Option<WheelContact>; 4],
+    /// The load the trucks and deck carried against the world in the last step (N).
+    pub body_load: f32,
 }
 
 impl Board {
@@ -194,6 +477,7 @@ impl Board {
         let mut b = Board {
             parts,
             wheels: [None; 4],
+            body_load: 0.0,
         };
         b.place(deck, axes, Vec3::ZERO, Vec3::ZERO);
         b
@@ -241,67 +525,43 @@ impl Board {
         self.wheels = [None; 4];
     }
 
-    /// The wheels' contacts with the terrain: each wheel sphere against the surface pieces it reaches
-    /// (SK8 queries the triangles a sphere touches). The surface is looked for down the deck's up from
-    /// the wheel's centre and from a radius ahead of and behind it along its travel; each face found
-    /// gives a contact where the wheel's closest point on its plane really is on that face, so over a
-    /// concave kink the wheel touches both faces (at most two contacts a wheel), and steep transitions
-    /// up to vert are met square to them.
-    fn wheel_contacts(
-        &self,
-        park: &dyn Terrain,
-        friction: [f32; 2],
-    ) -> [[Option<ContactInput>; 2]; 4] {
+    /// The wheels' contacts with the terrain (at most two a wheel, `sphere_contacts`).
+    fn wheel_contacts(&self, world: &World, friction: [f32; 2]) -> [[Option<ContactInput>; 2]; 4] {
         let m = combine([friction[0], friction[1], WHEEL_FRICTION[2]], FLOOR);
-        let up = self.parts[DECK].axes.cols[1];
-        const ABOVE: f32 = 0.1;
+        let deck = &self.parts[DECK];
         core::array::from_fn(|w| {
             let wheel = &self.parts[w];
-            let c = wheel.position;
-            let v = wheel.velocity;
-            let travel = (v - up * up.dot(v)).normalize_or(self.parts[DECK].axes.cols[2]);
-            let approach = (-v.dot(up)).max(0.0) * super::STEP;
-            let mut out: [Option<ContactInput>; 2] = [None; 2];
-            for offset in [0.0, WHEEL_RADIUS, -WHEEL_RADIUS] {
-                let from = c + travel * offset + up * ABOVE;
-                let Some(hit) = park.raycast(from, -up, ABOVE + WHEEL_RADIUS + 0.05 + approach)
-                else {
-                    continue;
-                };
-                let n = hit.normal;
-                // Faces the wheel comes at from behind (walls, the underside of things) are not ridden.
-                if n.dot(up) < 0.3 {
-                    continue;
-                }
-                let gap = (c - hit.point).dot(n);
-                let reach = WHEEL_RADIUS + 0.02 + (-v.dot(n)).max(0.0) * super::STEP;
-                if gap > reach || gap < -WHEEL_RADIUS {
-                    continue;
-                }
-                let touch = c - n * gap;
-                if offset != 0.0 {
-                    // The plane's closest point must be on this face, not on its extension.
-                    let back = park.raycast(touch + n * 0.01, -n, 0.02);
-                    if back.is_none_or(|b| b.normal.dot(n) < 0.999) {
-                        continue;
-                    }
-                }
-                if out.iter().flatten().any(|o| o.normal.dot(n) > 0.999) {
-                    continue;
-                }
-                let Some(slot) = out.iter_mut().find(|o| o.is_none()) else {
-                    break;
-                };
-                *slot = Some(ContactInput {
-                    point_a: c - n * WHEEL_RADIUS,
-                    point_b: touch,
-                    normal: n,
-                    restitution: m[2],
-                    static_friction: m[0],
-                    dynamic_friction: m[1],
-                });
-            }
-            out
+            sphere_contacts(
+                world,
+                wheel.position,
+                WHEEL_RADIUS,
+                wheel.velocity,
+                deck,
+                m,
+                0.3,
+            )
+        })
+    }
+
+    /// The trucks' and the deck's contacts with the terrain: SK8's truck capsules (radius
+    /// `RadiusScalar` x the wheel radius, along the axle) and the deck's underside (its capsules,
+    /// `DeckThickness` / 2 x 0.9), each as spheres along it; their own materials.
+    fn body_contacts(&self, world: &World) -> [(usize, [Option<ContactInput>; 2]); BODY_SPHERES] {
+        let deck = &self.parts[DECK];
+        let truck = combine(TRUCK_MATERIAL, FLOOR);
+        let board = combine(DECK_MATERIAL, FLOOR);
+        core::array::from_fn(|i| {
+            let (part, local, radius, m) = if i < 6 {
+                let t = if i < 3 { FRONT_TRUCK } else { BACK_TRUCK };
+                let z = [-TRUCK_SPHERE_SPACING, 0.0, TRUCK_SPHERE_SPACING][i % 3];
+                (t, v3(0.0, 0.0, z), TRUCK_RADIUS, truck)
+            } else {
+                (DECK, DECK_SPHERES[i - 6], DECK_RADIUS, board)
+            };
+            let body = &self.parts[part];
+            let at = body.position + body.axes.apply(local);
+            let v = body.point_velocity(at - body.position);
+            (part, sphere_contacts(world, at, radius, v, deck, m, -1.0))
         })
     }
 
@@ -315,8 +575,10 @@ impl Board {
         deck.add_angular_displacement(input.angular);
         deck.add_limited_displacement(input.limited);
 
-        let found = self.wheel_contacts(park, input.wheel_friction);
-        let mut contacts = [ContactRow::default(); 8];
+        let d = self.parts[DECK];
+        let world = World::near(park, d.position, 0.6 + d.velocity.length() * super::STEP);
+        let found = self.wheel_contacts(&world, input.wheel_friction);
+        let mut contacts = [ContactRow::default(); 8 + 2 * BODY_SPHERES];
         let mut count = 0;
         let mut which = [[None; 2]; 4];
         for (w, cs) in found.iter().enumerate() {
@@ -326,6 +588,13 @@ impl Board {
                     contacts[count] = ContactRow::build(&self.parts, Some(w), None, c);
                     count += 1;
                 }
+            }
+        }
+        let wheel_rows = count;
+        for (part, cs) in self.body_contacts(&world) {
+            for c in cs.iter().flatten() {
+                contacts[count] = ContactRow::build(&self.parts, Some(part), None, c);
+                count += 1;
             }
         }
         let wheel_frame = wheel_frame();
@@ -394,6 +663,10 @@ impl Board {
             p.mass.linear_drag = input.linear_drag;
             p.integrate(r, GRAVITY);
         }
+        self.body_load = contacts[wheel_rows..count]
+            .iter()
+            .map(|c| c.normal_force())
+            .sum();
         // A wheel on two faces reports their load-weighted normal and point.
         self.wheels = core::array::from_fn(|w| {
             let mut load = 0.0;
@@ -425,6 +698,26 @@ impl Board {
                 }
             })
         });
+    }
+
+    /// Lifts the board out of the terrain along its up by its wheels' deepest penetration (put down by
+    /// a landing or a kinematic move on a curved surface, the wheels between the trucks' touch points
+    /// would start inside it, and the solve would throw them out).
+    pub fn settle(&mut self, park: &dyn Terrain) {
+        let mut lift: f32 = 0.0;
+        let world = World::near(park, self.parts[DECK].position, 0.6);
+        for (w, cs) in self.wheel_contacts(&world, [0.0, 0.0]).iter().enumerate() {
+            for c in cs.iter().flatten() {
+                let gap = (self.parts[w].position - c.point_b).dot(c.normal);
+                lift = lift.max(WHEEL_RADIUS - gap);
+            }
+        }
+        if lift > 0.0 {
+            let up = self.parts[DECK].axes.cols[1] * lift;
+            for p in &mut self.parts {
+                p.position += up;
+            }
+        }
     }
 
     /// The velocity of the board's centre of mass.

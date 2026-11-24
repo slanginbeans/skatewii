@@ -487,6 +487,13 @@ impl Terrain for District {
     fn rails(&self) -> &[Rail] {
         &self.rails
     }
+    fn triangles_near(&self, c: Vec3, r: f32, out: &mut Vec<([Vec3; 3], Vec3)>) -> bool {
+        let m = v3(r, r, r);
+        for t in self.touching(c - m, c + m, 0.0) {
+            t.triangles_near(c, r, out);
+        }
+        true
+    }
 }
 
 impl Drop for District {

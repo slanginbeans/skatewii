@@ -199,7 +199,7 @@ impl Skater {
             self.ride_rigid(park, d, dt, events);
         } else {
             self.ride_kinematic(park, d, dt, events);
-            self.follow_rig();
+            self.follow_rig(park);
         }
     }
 

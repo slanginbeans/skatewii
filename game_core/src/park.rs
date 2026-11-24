@@ -63,6 +63,11 @@ pub trait Terrain {
     fn rails(&self) -> &[Rail] {
         &[]
     }
+    /// The triangles within `r` of `c` (corners, unit normal), appended to `out`; false when the
+    /// terrain has no triangles (a height field), and the rigid board looks for it with rays instead.
+    fn triangles_near(&self, _c: Vec3, _r: f32, _out: &mut Vec<([Vec3; 3], Vec3)>) -> bool {
+        false
+    }
     /// The first surface a ray from `from` along the unit `dir` meets within `max`: how far, where, and
     /// the surface normal (facing back along the ray). A height field is marched: its ground faces up and
     /// a rise between two steps is a wall facing the ray.

@@ -87,6 +87,8 @@ pub struct Rig {
     pos: Vec3,
     fwd: Vec3,
     velocity: Vec3,
+    /// The velocity change last brought in from outside the ride (diagnostics).
+    pub last_sync: Vec3,
 }
 
 impl Skater {
@@ -103,7 +105,7 @@ impl Skater {
 
     /// Brings the rigid board in line with the skater's ground state: new when riding starts, put where
     /// the skater is if something moved or turned him, given any velocity change made from outside.
-    pub(super) fn sync_rig(&mut self) {
+    pub(super) fn sync_rig(&mut self, park: &dyn Terrain) {
         let n = self.contact_n;
         let velocity = self.ground_velocity() + n * self.vn;
         let deck = self.pos + n * pb::DECK_HEIGHT;
@@ -112,24 +114,35 @@ impl Skater {
         match &mut self.rig {
             Some(r) if r.pos == self.pos && r.fwd == self.fwd => {
                 let dv = velocity - r.velocity;
+                r.last_sync = dv;
                 if dv.dot(dv) > 0.0 {
                     for p in &mut r.board.parts {
                         p.velocity += dv;
                     }
                 }
             }
-            Some(r) => r.board.place(deck, &axes, velocity, spin),
+            Some(r) => {
+                r.last_sync = v3(
+                    (r.pos - self.pos).length(),
+                    (r.fwd - self.fwd).length(),
+                    99.0,
+                );
+                r.board.place(deck, &axes, velocity, spin);
+                r.board.settle(park);
+            }
             None => {
                 // Entering the ground: Skate 3 starts its wobble afresh.
                 self.wobble.reset();
                 let mut board = Board::new(deck, &axes);
                 board.place(deck, &axes, velocity, spin);
+                board.settle(park);
                 self.rig = Some(Rig {
                     board,
                     ground_time: 0.0,
                     pos: self.pos,
                     fwd: self.fwd,
                     velocity,
+                    last_sync: Vec3::ZERO,
                 });
             }
         }
@@ -164,9 +177,9 @@ impl Skater {
     }
 
     /// Puts the rigid board where the kinematic ground model left the skater.
-    pub(super) fn follow_rig(&mut self) {
+    pub(super) fn follow_rig(&mut self, park: &dyn Terrain) {
         if self.mode == Mode::Rolling {
-            self.sync_rig();
+            self.sync_rig(park);
             self.mark_rig();
         }
     }
@@ -182,7 +195,7 @@ impl Skater {
         let t = self.tuning;
         let ticks = dt * 60.0;
         let n = self.contact_n;
-        self.sync_rig();
+        self.sync_rig(park);
 
         // The speed model's target (SK8 speed_model.rs), as `ride`.
         let bound = t.friction_max_change.max(0.0);
@@ -419,11 +432,14 @@ impl Skater {
         // Walls at wheel height ahead, as the older ground model meets them.
         let motion = vel * dt;
         let len = motion.length();
-        if len > 1e-6 {
+        // (Riding a transition, the rigid board meets what is ahead with its own contacts.)
+        if len > 1e-6 && n.y > 0.7 {
             let dir = motion * (1.0 / len);
             let lead = (dir.dot(f).abs() * AXLE).max(0.1);
             if let Some(h) = park.raycast(self.pos + n * 0.04, dir, len + lead)
                 && h.normal.dot(n) < 0.64
+                // (A transition curving up ahead is ridden into by the wheels, not hit.)
+                && h.normal.y < 0.3
                 && h.normal.dot(dir) < -0.2
                 && let Some(vv) = self.hit_wall(h.normal, vel, false, events)
             {
@@ -432,7 +448,7 @@ impl Skater {
                 }
                 self.set_ground_velocity(vv);
                 self.pos += h.normal * (t.wall_push_away * dt);
-                self.follow_rig();
+                self.follow_rig(park);
                 return;
             }
         }
@@ -516,15 +532,33 @@ impl Skater {
         self.wall_clock += dt;
         if down.is_empty() {
             self.vn = v.dot(nn);
-            let s = park.ground(deck.position.x, deck.position.z, deck.position.y);
-            let gap = deck.position.y - s.height - pb::DECK_HEIGHT;
-            let leave = gap > t.natural_air_max_dist || s.height == f32::MIN || {
-                if gap > t.natural_air_min_dist {
-                    self.gap_time += dt;
-                } else {
-                    self.gap_time = 0.0;
+            // How far the surface is below the deck along its up (a board tipped over a coping looks
+            // down the transition, not to the pipe's floor).
+            let up = deck.axes.cols[1];
+            let gap = park
+                .raycast(deck.position, -up, 1.0)
+                .map_or(f32::MAX, |h| h.t - pb::DECK_HEIGHT);
+            // A board tipping nose first over an edge stays on its physics for Skate 3's natural-air
+            // time (SK8's rigid board falls onto the transition below a coping on its own and lands
+            // there, a quarter second later, without the flight's kinematic path).
+            let nose = deck.axes.cols[2];
+            let lead = if deck.velocity.dot(nose) >= 0.0 {
+                nose
+            } else {
+                -nose
+            };
+            let tipping = lead.y < -0.2;
+            let leave = if tipping {
+                gap == f32::MAX
+            } else {
+                gap > t.natural_air_max_dist || {
+                    if gap > t.natural_air_min_dist {
+                        self.gap_time += dt;
+                    } else {
+                        self.gap_time = 0.0;
+                    }
+                    self.gap_time > t.natural_air_time
                 }
-                self.gap_time > t.natural_air_time
             };
             if leave {
                 // The flight starts from the board as it is: a board tipped over an edge leaves it
