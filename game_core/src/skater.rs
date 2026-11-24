@@ -1710,7 +1710,11 @@ impl Skater {
             // off-board reckonings clear the lean.
             self.wobble.reset();
             self.reckoning.lean = 0.0;
-            self.rig = None;
+            if matches!(self.mode, Mode::Air { .. }) {
+                self.fly_rig(park);
+            } else {
+                self.rig = None;
+            }
         }
         self.sync_heading();
     }
@@ -3078,8 +3082,10 @@ impl Skater {
         let pose = self.approach_pose();
         self.approach.take_off(pose);
         self.air_assist = None;
-        // Off the ground: the rigid board is put down afresh on landing.
-        self.rig = None;
+        // Off the ground: the rigid board flies on, hooked to the flight (`skater::rig`).
+        if let Some(r) = &mut self.rig {
+            r.airborne = true;
+        }
         self.mode = Mode::Air { time: 0.0 };
         // Rolling off a ledge mid-manual just ends it (no points: it wasn't finished).
         self.manual = None;

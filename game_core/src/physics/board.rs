@@ -108,6 +108,24 @@ const WHEELS: [(usize, f32); 4] = [
     (BACK_TRUCK, -WHEEL_X),
 ];
 
+/// SK8's hook drive when the animation holds the board (hook_drive/mod.rs
+/// `enable_animation_soft`): a soft linear drive, spring 5000 with critical damping 2 sqrt(5000) and
+/// strength 1800, and a soft angular drive, spring 20000, damping 2 sqrt(20000), strength 36000.
+pub const HOOK_DRIVE: DriveDynamics = DriveDynamics {
+    linear: DriveParams {
+        spring_or_max_velocity: 5000.0,
+        damping: 141.421_36,
+        max_strength: 1_799.999_8,
+        kind: DriveKind::Soft,
+    },
+    angular: DriveParams {
+        spring_or_max_velocity: 20000.0,
+        damping: 282.842_7,
+        max_strength: 35_999.996,
+        kind: DriveKind::Soft,
+    },
+};
+
 /// The trucks' joints: swing locked, twist about the pivot within 14 degrees, at most 86.1 degrees a
 /// tick (`physicstrucks`); the wheels': all locked but the spin (SK8 joint_records.rs).
 fn truck_joint() -> JointParams {
@@ -245,8 +263,9 @@ fn segment_crosses(t: &[Vec3; 3], p: Vec3, q: Vec3) -> bool {
     (0.0..=1.0).contains(&u) && v >= 0.0 && u + v <= 1.0 && (0.0..=1.0).contains(&k)
 }
 
-/// A candidate contact: gap, normal, the triangle's own normal, inside its face.
-type Candidate = (f32, Vec3, Vec3, bool);
+// A candidate contact: gap, normal, the triangle's own normal, inside its face, the closest point,
+/// the triangle.
+type Candidate = (f32, Vec3, Vec3, bool, Vec3, [Vec3; 3]);
 
 /// A sphere against triangles: a contact a triangle, facing the centre from the triangle's closest
 /// point. An edge or corner contact whose triangle lies in the plane of a face the sphere touches is
@@ -264,7 +283,14 @@ fn sphere_triangles(
     min_up: f32,
 ) -> [Option<ContactInput>; 2] {
     const MAX: usize = 24;
-    let mut cand: [Candidate; MAX] = [(0.0, Vec3::ZERO, Vec3::ZERO, false); MAX];
+    let mut cand: [Candidate; MAX] = [(
+        0.0,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        false,
+        Vec3::ZERO,
+        [Vec3::ZERO; 3],
+    ); MAX];
     let mut count = 0;
     for (t, n) in tris {
         let (q, face) = closest_on_triangle(c, t);
@@ -306,19 +332,27 @@ fn sphere_triangles(
                 }
                 worst
             };
-        cand[slot] = (gap, normal, *n, face);
+        cand[slot] = (gap, normal, *n, face, q, *t);
     }
     let cand = &cand[..count];
     let mut found: [Option<(f32, Vec3)>; 2] = [None; 2];
-    for (i, &(gap, normal, own, face)) in cand.iter().enumerate() {
+    for (i, &(gap, normal, own, face, q, tri)) in cand.iter().enumerate() {
         // An edge whose own face is coplanar with a touched face is that face's inner edge; one
         // facing the centre within about 11 degrees of a nearer face contact is a concave joint the
         // face already holds.
+        // An edge on the plane of a face the sphere stands on, whose own triangle rises above that
+        // plane, is a concave joint: the faces hold the sphere there, the edge doesn't (it would
+        // face the travel and stop the board dead).
         let inner = !face
             && cand.iter().enumerate().any(|(j, f)| {
-                j != i
-                    && f.3
-                    && (f.1.dot(own).abs() > 0.999 || (f.1.dot(normal) > 0.98 && f.0 <= gap))
+                if j == i || !f.3 {
+                    return false;
+                }
+                let coplanar = f.1.dot(own).abs() > 0.999;
+                let joint = f.1.dot(normal) > 0.98 && f.0 <= gap;
+                let on_plane = (q - f.4).dot(f.1).abs() < 1e-3;
+                let rises = tri.iter().any(|v| (*v - q).dot(f.1) > 1e-3);
+                coplanar || joint || (on_plane && rises)
             });
         if inner {
             continue;
@@ -469,6 +503,9 @@ pub struct BoardInput {
     /// The ground's linear drag on every part this tick (per second; SK8 grounded/drag.rs: 60 while
     /// a brake holds a slow board, which stops it dead).
     pub linear_drag: f32,
+    /// The animated board the deck is hooked to (deck centre, axes): SK8's hook drive, on while the
+    /// rider's animation holds the board (the air).
+    pub hook: Option<(Vec3, Mat3)>,
 }
 
 /// The board's seven bodies.
@@ -650,7 +687,7 @@ impl Board {
             orientation: Quat::IDENTITY,
             translation: Vec3::ZERO,
         };
-        let mut drives: [DriveRow; 2] = core::array::from_fn(|i| {
+        let drives: [DriveRow; 2] = core::array::from_fn(|i| {
             let front = i == 0;
             // The back truck's frame faces the other way: the same steering turns it back.
             let angle = if front {
@@ -666,11 +703,24 @@ impl Board {
             let truck = if front { FRONT_TRUCK } else { BACK_TRUCK };
             DriveRow::build(&self.parts, truck, DECK, &here, &target, &TRUCK_DRIVE)
         });
-        let mut reactions = [Reaction::default(); PARTS];
+        let mut reactions = [Reaction::default(); PARTS + 1];
+        // The hook drive (SK8 hook_drive/mod.rs, CreateHookDrive): the deck pulled to the animated
+        // board, an immovable body put there, with soft linear and angular drives.
+        let mut all = [Body::new(deck_mass(), Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO); PARTS + 1];
+        all[..PARTS].copy_from_slice(&self.parts);
+        let mut rows: [DriveRow; 3] = [drives[0], drives[1], drives[0]];
+        let mut n_drives = 2;
+        if let Some((at, axes)) = input.hook {
+            let mut hook = Body::new(deck_mass(), at, Quat::from_mat3(&axes), Vec3::ZERO);
+            hook.active = false;
+            all[PARTS] = hook;
+            rows[2] = DriveRow::build(&all, PARTS, DECK, &here, &here, &HOOK_DRIVE);
+            n_drives = 3;
+        }
         super::solve(
             &mut contacts[..count],
             &mut joints,
-            &mut drives,
+            &mut rows[..n_drives],
             &mut reactions,
             ITERATIONS,
         );
