@@ -6,6 +6,9 @@
 //!   the motion graph plays its own stairs walk and run cycles (`Walk_StairUpShallow` ...).
 //! - Obstacles (SK8 movement_intent.rs): walking straight into a wall turns the rider to face it and
 //!   stops him there; walking into it at an angle turns him along it and he walks on.
+//! - Foot IK (SK8 offboard/feet.rs, the skeleton IK's leg solve), with the player's imported rider:
+//!   standing with a foot over a step, that foot is lifted onto it (the knee bent, the leg's length
+//!   kept); walking, the foot holding the ground stays put in the world.
 
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
@@ -272,4 +275,105 @@ fn imported_stairs_play_the_graphs_stairs_cycles() {
         assert!(went_up, "{up}: {}", path(&g));
         assert!(went_down, "{down}: {}", path(&g));
     }
+}
+
+/// A toe's drawn place in the world (`LEFTTOEBASE` / `RIGHTTOEBASE`) and a bone's in character space.
+fn toe_world(g: &Game, foot: usize) -> Vec3 {
+    let r = g.rider().unwrap();
+    let b = r
+        .character
+        .bone(["LEFTTOEBASE", "RIGHTTOEBASE"][foot])
+        .unwrap();
+    let t = g.rider_bones().unwrap()[b][3];
+    g.imported_xform().point(v3(t[0], t[1], t[2]))
+}
+
+fn bone_at(g: &Game, name: &str) -> Vec3 {
+    let r = g.rider().unwrap();
+    let t = g.rider_bones().unwrap()[r.character.bone(name).unwrap()][3];
+    v3(t[0], t[1], t[2])
+}
+
+/// With the player's imported data: standing with one foot over a 0.12 m step, the foot placement lifts
+/// that foot onto it (the clip has both on the flat), the leg bent to reach it and its length kept, the
+/// other foot left on the ground.
+#[test]
+fn imported_a_foot_over_a_step_stands_on_it() {
+    let Some(g) = imported() else {
+        eprintln!("offboard_walk: no imported data with the off-board clips (FG_DATA): skipped");
+        return;
+    };
+    let mut g = on_foot(g, LANE, 0.0);
+    run(&mut g, 60, [0, 0], 0);
+    // Where the feet stand on the flat, and the legs' length.
+    let flat = [toe_world(&g, 0), toe_world(&g, 1)];
+    let thigh = (bone_at(&g, "LEFTLEG") - bone_at(&g, "LEFTUPLEG")).length();
+    let shin = (bone_at(&g, "LEFTFOOT") - bone_at(&g, "LEFTLEG")).length();
+    let (high, low) = if flat[0].x > flat[1].x {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    // A step under the foot further towards +x only (its edge halfway between the feet).
+    let edge = (flat[0].x + flat[1].x) * 0.5;
+    g.park.shapes.push(Shape::Block {
+        min: v3(edge, 0.0, LANE.z - 1.0),
+        max: v3(edge + 1.0, 0.12, LANE.z + 1.0),
+        rgba: 0x808080ff,
+    });
+    run(&mut g, 60, [0, 0], 0);
+    assert!(g.skater.pos.y.abs() < 1e-4, "still standing on the flat");
+    let now = [toe_world(&g, 0), toe_world(&g, 1)];
+    let lift = now[high].y - flat[high].y;
+    assert!(
+        (lift - 0.12).abs() < 0.03,
+        "the foot over the step stands on it: {lift} ({:?} -> {:?})",
+        flat[high],
+        now[high]
+    );
+    assert!(
+        (now[low].y - flat[low].y).abs() < 0.01,
+        "the other stays on the ground: {:?} -> {:?}",
+        flat[low],
+        now[low]
+    );
+    let thigh2 = (bone_at(&g, "LEFTLEG") - bone_at(&g, "LEFTUPLEG")).length();
+    let shin2 = (bone_at(&g, "LEFTFOOT") - bone_at(&g, "LEFTLEG")).length();
+    assert!(
+        (thigh2 - thigh).abs() < 1e-3 && (shin2 - shin).abs() < 1e-3,
+        "the leg keeps its length"
+    );
+}
+
+/// With the player's imported data: walking up stairs, the foot holding the ground stays where it was
+/// in the world (following the clip by at most 0.08 m a tick).
+#[test]
+fn imported_the_support_foot_stays_put_walking_up_stairs() {
+    let Some(mut g) = imported() else {
+        eprintln!("offboard_walk: no imported data with the off-board clips (FG_DATA): skipped");
+        return;
+    };
+    add_stairs(&mut g, LANE.z + 2.0, 0.15, 0.3, 10);
+    let mut g = on_foot(g, LANE, 0.0);
+    let (mut held, mut moved) = (0, 0.0f32);
+    let mut last: Option<(u8, Vec3)> = None;
+    for _ in 0..180 {
+        run(&mut g, 1, [0, 40], 0);
+        let support = g.rider().unwrap().foot_support();
+        if support < 2 {
+            let toe = toe_world(&g, support as usize);
+            if let Some((s, p)) = last
+                && s == support
+            {
+                held += 1;
+                moved = moved.max(v3(toe.x - p.x, 0.0, toe.z - p.z).length());
+            }
+            last = Some((support, toe));
+        } else {
+            last = None;
+        }
+    }
+    assert!(g.skater.pos.y > 0.5, "up the stairs: {:?}", g.skater.pos);
+    assert!(held > 30, "a foot holds the ground for {held} ticks");
+    assert!(moved <= 0.081, "and stays put: {moved}");
 }

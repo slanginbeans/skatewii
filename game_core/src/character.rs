@@ -136,6 +136,8 @@ pub struct Character {
     rest_axis: usize,
     /// The light and mirroring of the last [`Character::skin`].
     skinned: (Vec3, bool),
+    /// Which bones a subtree move takes along (kept between calls: no allocation per move).
+    moved: Vec<bool>,
 }
 
 impl Character {
@@ -248,6 +250,7 @@ impl Character {
             binds,
             rest_axis,
             skinned: (Vec3::UP, false),
+            moved: alloc::vec![false; bones],
         })
     }
 
@@ -415,7 +418,9 @@ impl Character {
 
     /// Moves a posed bone and everything under it by `by` (the character's space), before skinning.
     pub fn shift_subtree(&mut self, bone: usize, by: Vec3) {
-        let mut moved = alloc::vec![false; self.world.len()];
+        let mut moved = core::mem::take(&mut self.moved);
+        moved.clear();
+        moved.resize(self.world.len(), false);
         for b in bone..self.world.len() {
             let p = self.skeleton.parent(b);
             moved[b] = b == bone || (p >= 0 && moved.get(p as usize).copied().unwrap_or(false));
@@ -426,6 +431,7 @@ impl Character {
                 t[2] += by.z;
             }
         }
+        self.moved = moved;
     }
 
     /// Moves `bone`'s subtree rigidly so the bone's transform (character space) becomes `to`.
@@ -434,7 +440,9 @@ impl Character {
             return;
         };
         let d = mul(&rigid_inverse(from), to);
-        let mut moved = alloc::vec![false; self.world.len()];
+        let mut moved = core::mem::take(&mut self.moved);
+        moved.clear();
+        moved.resize(self.world.len(), false);
         for b in bone..self.world.len() {
             let p = self.skeleton.parent(b);
             moved[b] = b == bone || (p >= 0 && moved.get(p as usize).copied().unwrap_or(false));
@@ -442,6 +450,7 @@ impl Character {
                 self.world[b] = mul(&self.world[b], &d);
             }
         }
+        self.moved = moved;
     }
 
     /// A bone's left/right partner (`None` for a bone in the middle).

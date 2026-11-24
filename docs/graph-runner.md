@@ -699,6 +699,25 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   imported: `Walk_StairUpShallow`, `Walk_StairDnShallow`, `Run_StairUpShallow`, `Run_StairDnShallow`).
 - **Drawn**: the off-board clips' origin is the ground under the feet (the riding clips' is the deck's
   centre); the drawing moves between the two over 0.2 s while getting off or on.
+- **Foot IK** (Skate 3's off-board foot placement and skeleton IK: SK8 player/offboard/feet.rs,
+  biped_air/feet.rs, TU3 82D773F8 / 82D77558 / 82D77AE8, physics/biped_ground/feet.rs 82D77330,
+  physics/foot_ik_queries.rs 82DB63C0, animation/foot_ik external.rs 82BEE390 and two_bone.rs;
+  `game_core::foot_ik`, run by `Rider::update_graph` on the imported rider's graph pose while walking).
+  Each toe of the last pose looks for the ground 0.33 m over it to 1.5 m under it; a foot whose ground
+  is over 0.3 m from it and from the other's is ignored. A foot is low when the clip has its toe and the
+  middle of the foot (standing in for Skate 3's foot volume) within 0.09 m of the ground plane, and
+  supported within 0.09 m of its ground (0.2 m when low). On the ground exactly one supported foot holds
+  it: it stays where it was in the world, following the clip by at most 0.08 m a tick. The other foot
+  is kept 0.02 to 0.1 m over the ground under it (as the clip has it over its own ground plane; not
+  raised over 0.4 m nor past 0.46 m under the hips), blends back over 0.1 s after holding, and eases its
+  correction in at 0.3 of the way, at most 0.025 m a tick. A supported foot tilts to its ground (the
+  normal laid back to 0.9 up, turned at most 0.1 rad and blended in by 0.2 a tick, the tilt at most
+  0.71 rad); a foot moves at most 0.7 m. The leg is solved to the foot: the thigh turned about the hip
+  and the shin about the knee, the knee in its own plane between Skate 3's `IKMinAngle` and `IKMaxAngle`
+  (20 and 165 degrees), the leg's length kept. On the board the correction fades by
+  `FeetIKMaxBlendDeltaOut` (0.15) a tick. Host cost about 0.9 us a tick (two ground tests and two leg
+  solves on the 36-bone rider). Tests: `foot_ik` unit tests, `tests/offboard_walk.rs` (imported: a foot
+  over a step stands on it, the leg's length kept; walking up stairs the holding foot stays put).
 - **Dropping, throwing and picking up the board** (`skater/possession.rs`, Skate 3's SkateboardController
   possession as SK8 ports it: skate-core player/offboard/board_possession, skate-game
   physics/offboard/board_manager; the animation side is `graph/toggle.rs`, SK8's ToggleBoard). Off the
@@ -752,8 +771,9 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   the landing on deck's query; a body above the board's deck that moves over 0.7 m/s between two queries
   is a hurdle (`IsHippyHurdling`: `OnBoard/HippyJump/HurdleCyc`, the landing on the board held off) until
   0.3 s past the apex. Flatground's world is static, so its hippie jumps never hurdle.
-- **Not done**: moving objects (so nothing to hippie hurdle), standing on cars, foot IK, the slide on
-  steep ground and the drop-in edge alignment of `movement_intent.rs`; the free board has no rigid rotation of its own (it keeps its nose,
+- **Not done**: moving objects (so nothing to hippie hurdle), standing on cars, the slide on steep
+  ground and the drop-in edge alignment of `movement_intent.rs`; the foot IK's clip-forced plants
+  (flags 2480 / 2484) and its on-deck and hand limbs (the board's feet come from the clips); the free board has no rigid rotation of its own (it keeps its nose,
   pitched only by the throw, and lands on its wheels whatever way it falls) and doesn't collide with the
   rider; the retrieve hands (SK8's hand contact that catches the board early) aren't modelled.
 - **Camera**: walking is `IsOffboard` and the walker's air `IsAirOffboard` (both read by Skate 3's camera

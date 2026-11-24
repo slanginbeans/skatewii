@@ -554,6 +554,11 @@ pub struct Rider {
     /// The clips' pose was mirrored at skinning (the ragdoll points are read reflected).
     anim_mirrored: bool,
     mirror_scratch: Vec<crate::anim::Sample>,
+    /// Off the board, the feet on the ground under them (`foot_ik`): the legs' bones, the placement's
+    /// state, and this tick's ground under the toes (`None` on the board: the correction fades out).
+    legs: Option<crate::foot_ik::Legs>,
+    feet_ik: crate::foot_ik::FeetIk,
+    feet_frame: Option<crate::foot_ik::Frame>,
 }
 
 impl Rider {
@@ -592,7 +597,11 @@ impl Rider {
         let board_bone = character.bone("SKATEBOARD_ROOT");
         let doll_points = DOLL_POINTS.map(|names| names.iter().find_map(|b| character.bone(b)));
         let doll_parts = DOLL_PARTS.map(|b| character.bone(b));
+        let legs = crate::foot_ik::Legs::find(&character);
         let mut r = Rider {
+            legs,
+            feet_ik: crate::foot_ik::FeetIk::default(),
+            feet_frame: None,
             doll_points,
             doll_parts,
             doll: None,
@@ -852,9 +861,31 @@ impl Rider {
         }
         self.apply_doll();
         self.place_board(false);
+        if let Some(legs) = self.legs {
+            self.feet_ik
+                .update(&mut self.character, &legs, self.feet_frame.as_ref());
+        }
         let ch = &mut self.character;
         ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), false);
         true
+    }
+
+    /// Off the board: the ground under the toes this tick for the next graph pose's foot placement
+    /// (`foot_ik`), or `None` (on the board, climbing) to fade it out.
+    pub fn set_feet(&mut self, frame: Option<crate::foot_ik::Frame>) {
+        self.feet_frame = frame;
+    }
+
+    /// The toes where the last pose put them (character space), for their ground tests.
+    pub fn toes(&self) -> Option<[Vec3; 2]> {
+        let legs = self.legs?;
+        let w = self.character.world();
+        Some(legs.toe.map(|b| v3(w[b][3][0], w[b][3][1], w[b][3][2])))
+    }
+
+    /// Which foot holds the ground off the board (0 left, 1 right, 2 neither, 3 in the air).
+    pub fn foot_support(&self) -> u8 {
+        self.feet_ik.support()
     }
 
     /// Draws the board at this height over the character's origin (world metres) from the next pose on,
