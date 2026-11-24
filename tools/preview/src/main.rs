@@ -870,6 +870,7 @@ fn main() {
     let mut shots: Vec<(u32, &str)> = vec![(45, "rolling")];
     let mut took_air = false;
     let mut took_land = false;
+    let mut body_flip_quarter = 0;
     let grind_test = args.iter().any(|a| a == "--grind-test");
     if carve_ollie.is_some() {
         let (p, h) = game_core::autoplay::CarveOllie::START;
@@ -1012,6 +1013,15 @@ fn main() {
             shots.push((frame, "mid-flip"));
             took_air = true;
         }
+        // A body flip: a shot each quarter turn (end over end, seen from the side).
+        let flip_quarter = game
+            .skater
+            .body_flip
+            .map_or(0, |f| (f.angle.abs() / std::f32::consts::FRAC_PI_2) as u32);
+        if flip_quarter > body_flip_quarter {
+            shots.push((frame, "body flip"));
+        }
+        body_flip_quarter = flip_quarter;
         let label = shots
             .iter()
             .find(|(f, _)| *f == frame)
