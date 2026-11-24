@@ -90,6 +90,27 @@ fn y_gets_off_the_board_and_back_on() {
     assert_eq!(g.skater.mode, Mode::Rolling);
 }
 
+/// Getting off while riding switch and back on rides on switch: the stance isn't set back to natural
+/// (which turned the rider round a moment after getting on).
+#[test]
+fn getting_back_on_keeps_the_stance() {
+    for switch in [false, true] {
+        let mut g = Game::new();
+        g.place_rider(LANE, 0.0, 3.0);
+        g.skater.switch = switch;
+        run(&mut g, 20, [0, 0], 0);
+        run(&mut g, 1, [0, 0], btn::Y);
+        assert_eq!(g.skater.mode, Mode::Walk);
+        assert_eq!(g.skater.switch, switch, "off the board");
+        run(&mut g, 60, [0, 0], 0);
+        run(&mut g, 1, [0, 0], btn::Y);
+        assert_eq!(g.skater.mode, Mode::Rolling);
+        assert_eq!(g.skater.switch, switch, "back on");
+        run(&mut g, 120, [0, 0], 0);
+        assert_eq!(g.skater.switch, switch, "and riding on");
+    }
+}
+
 #[test]
 fn no_getting_off_in_the_air() {
     let mut g = Game::new();
@@ -392,4 +413,37 @@ fn imported_y_around_a_jump_keeps_the_graphs_with_the_physics() {
             "Y at {at} for {hold}: riding with the graph off the board"
         );
     }
+}
+
+/// With the player's imported data: off the board after riding switch, getting back on plays the mount in
+/// that stance and rides on in it; the rider's mirror never changes from the press to a second after.
+#[test]
+fn imported_getting_on_switch_stays_switch() {
+    let Some(dir) = data_dir() else {
+        eprintln!("offboard: no imported data (FG_DATA): skipped");
+        return;
+    };
+    let mut g = Game::new();
+    g.load_rules(&std::fs::read(dir.join("rules.fgpak")).unwrap())
+        .unwrap();
+    g.load_skater(leak(dir.join("skater.fgpak"))).unwrap();
+    g.load_motion(leak(dir.join("motion.fgpak"))).unwrap();
+    g.place_rider(LANE, 0.0, 3.0);
+    g.skater.switch = true;
+    run(&mut g, 30, [0, 0], 0);
+    run(&mut g, 1, [0, 0], btn::Y);
+    run(&mut g, 120, [0, 0], 0);
+    if g.skater.mode != Mode::Walk {
+        eprintln!("offboard: the motion pack has no off-board clips: skipped");
+        return;
+    }
+    let mirrored = g.skater.mirrored();
+    run(&mut g, 1, [0, 0], btn::Y);
+    let mut on = false;
+    for i in 0..150 {
+        run(&mut g, 1, [0, 0], 0);
+        on |= g.skater.mode == Mode::Rolling;
+        assert_eq!(g.skater.mirrored(), mirrored, "tick {i}");
+    }
+    assert!(on && g.skater.switch, "riding switch");
 }

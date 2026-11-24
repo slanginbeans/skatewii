@@ -1598,7 +1598,8 @@ impl Skater {
         events.push(Event::SteppedOff);
     }
 
-    /// Back on the board, its nose the way the rider faces, rolling at his speed that way.
+    /// Back on the board, its nose the way the rider faces, rolling at his speed that way, in the stance
+    /// he got off in.
     fn step_on(&mut self, park: &dyn Terrain, events: &mut Vec<Event>) {
         let n = park
             .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
@@ -1613,7 +1614,9 @@ impl Skater {
         self.vel = self.fwd * along;
         self.fakie = false;
         self.fakie_timer = 0.0;
-        self.switch = false;
+        // The stance stays: off the board after riding switch, the graphs get him on switch (the mount
+        // clips' switch versions), so he rides on switch. Setting it back to natural here turned the rider
+        // round a moment after getting on.
         self.spin = 0.0;
         self.spin_rate = 0.0;
         self.mode = Mode::Rolling;
