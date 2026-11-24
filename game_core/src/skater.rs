@@ -25,6 +25,7 @@ mod air;
 pub mod balance;
 pub mod biped;
 mod board;
+pub mod climb;
 pub mod dropin;
 pub mod flip;
 mod grind;
@@ -892,6 +893,8 @@ pub struct Skater {
     air_lift_rate: f32,
     /// Off the board (`Mode::Walk`): the walker.
     pub biped: Biped,
+    /// Climbing ledges on foot (SK8's own extension: `climb`).
+    pub climb: climb::Climber,
     /// The camera's yaw: the walker reads the stick against it (the game sets it each tick).
     pub cam_yaw: f32,
     /// Y asked to get off the board (riding) or on it (walking), seconds ago: the graphs' clips decide
@@ -1264,6 +1267,7 @@ impl Skater {
             grind_sticks_x: 0.0,
             fwd: yaw_dir(heading),
             biped: Biped::default(),
+            climb: climb::Climber::default(),
             cam_yaw: heading,
             board_toggle: None,
             mount_traj: false,
@@ -1844,7 +1848,7 @@ impl Skater {
     /// the state graphs the clips time it: off once the dismount clip starts walking the rider
     /// (`OB_TRAJ`), on once the mount clip's `OB_TRAJ` is over; without them at once.
     fn toggle_board(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
-        if self.drop_in.is_some() {
+        if self.drop_in.is_some() || self.climbing() {
             return;
         }
         if self.toggle_starts(pad)
@@ -1939,6 +1943,11 @@ impl Skater {
     /// Skate 3's `ToggleOffBoardState` and `NewToggleOffBoardState` for the graphs this tick (held, new):
     /// only while the physics takes Y as a toggle (it starts this tick or is under way), so a Y it turns
     /// down (in the air, on steep ground) doesn't start the clips without it.
+    /// Holding a ledge (climbing on foot).
+    pub fn climbing(&self) -> bool {
+        self.mode == Mode::Walk && self.climb.holding()
+    }
+
     pub fn board_toggle_intent(&self, pad: &Pad) -> (bool, bool) {
         let new = self.toggle_starts(pad);
         let toggling = self.board_toggle.is_some()
@@ -2010,7 +2019,7 @@ impl Skater {
         }
         let rider = self.rider_frame();
         let t = self.tuning;
-        if self.mode == Mode::Walk {
+        if self.mode == Mode::Walk && !self.climb.holding() {
             let p = &mut self.possession;
             match self.graph {
                 None => {
@@ -2159,6 +2168,19 @@ impl Skater {
     /// On foot: Skate 3's biped controller (`skater::biped`). Sprint is A (Skate 3's A, without its
     /// B: here X), jump is B (Skate 3's X, by position).
     fn walk(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32) {
+        // Holding a ledge, the climb moves the rider; B pulls him up (SK8 climbing: its jump button).
+        if let Some(h) = self.climb.hold(park, pad.was_pressed(btn::B), dt) {
+            self.pos = h.pos;
+            self.biped.heading = h.heading;
+            self.biped.turn = 0.0;
+            self.biped.vel = Vec3::ZERO;
+            self.biped.speed = 0.0;
+            self.biped.air = None;
+            self.biped.loco = biped::Loco::Stand;
+            self.sync_walk();
+            self.edge = None;
+            return;
+        }
         let input = BipedInput {
             stick: pad.stick,
             cam_yaw: self.cam_yaw,
@@ -2170,6 +2192,21 @@ impl Skater {
         self.biped
             .step(&tuning.biped, tuning.gravity, park, &mut pos, input, dt);
         self.pos = pos;
+        // Reaching for a ledge ahead, and in the air catching it.
+        let b = &self.biped;
+        self.climb.approach(
+            park,
+            self.pos,
+            b.heading,
+            b.vel,
+            b.air.is_some(),
+            b.world_stick,
+            dt,
+        );
+        if self.climb.holding() {
+            self.biped.air = None;
+            self.biped.vel = Vec3::ZERO;
+        }
         self.sync_walk();
         // The edge ahead (Skate 3's off-board `DistToEdge`).
         self.edge = if self.biped.air.is_none() {

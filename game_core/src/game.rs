@@ -1020,7 +1020,9 @@ impl Game {
             }
             // Off the board, the ground under the toes for the foot placement (SK8's skeleton line
             // tests from the last pose: 0.33 m over each toe to 1.5 m under it).
-            let feet = (self.skater.mode == Mode::Walk && self.foot_origin >= 1.0)
+            let feet = (self.skater.mode == Mode::Walk
+                && !self.skater.climbing()
+                && self.foot_origin >= 1.0)
                 .then(|| {
                     let toes = self.rider.as_ref()?.toes()?;
                     let at = self.imported_xform_on(self.skater_base());
@@ -1203,7 +1205,10 @@ impl Game {
                 self.skater.cam_yaw = crate::math::atan2f(look.x, look.z);
             }
         }
-        if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
+        // Holding a ledge the stock graphs wait where they were (SK8's climb pauses them).
+        if !self.skater.climbing()
+            && let (Some(g), Some(lib)) = (&mut self.graph, &self.motion)
+        {
             let s = &self.skater;
             let walking = s.mode == Mode::Walk;
             let ob_world = crate::skater::biped::world_stick(pad.stick, s.cam_yaw);

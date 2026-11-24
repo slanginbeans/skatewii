@@ -9,6 +9,9 @@
 //! - Foot IK (SK8 offboard/feet.rs, the skeleton IK's leg solve), with the player's imported rider:
 //!   standing with a foot over a step, that foot is lifted onto it (the knee bent, the leg's length
 //!   kept); walking, the foot holding the ground stays put in the world.
+//! - Climbing (SK8's own extension, physics/climbing/): running and jumping (B) at a 2 m wall the rider
+//!   catches its edge and hangs; B again pulls him up onto the top, where he walks on with the board
+//!   still in hand. A wall too high is not caught; the stock graphs wait while he holds the edge.
 
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
@@ -207,6 +210,145 @@ fn walking_into_a_wall_at_an_angle_turns_along_it() {
         assert!(b.speed > 1.5, "walking on: {}", b.speed);
         assert!((g.skater.pos.x - x0) * along > 2.0, "{:?}", g.skater.pos);
     }
+}
+
+/// A block `height` high and 3 m deep across the lane from `ahead` of it.
+fn add_block(g: &mut Game, ahead: f32, height: f32) -> f32 {
+    let z = LANE.z + ahead;
+    g.park.shapes.push(Shape::Block {
+        min: v3(LANE.x - 6.0, 0.0, z),
+        max: v3(LANE.x + 6.0, height, z + 3.0),
+        rgba: 0x808080ff,
+    });
+    z
+}
+
+/// Runs at the block ahead, jumping (B) when the feet are `at` from its face; returns whether the
+/// rider caught its edge.
+fn run_and_jump(g: &mut Game, face: f32, at: f32) -> bool {
+    for _ in 0..240 {
+        run(g, 1, [0, 100], 0);
+        if face - g.skater.pos.z < at {
+            break;
+        }
+    }
+    run(g, 1, [0, 100], btn::B);
+    for _ in 0..60 {
+        run(g, 1, [0, 100], 0);
+        if g.skater.climbing() {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn jumping_at_a_ledge_catches_it_and_b_climbs_onto_it() {
+    let mut g = Game::new();
+    let face = add_block(&mut g, 6.0, 2.0);
+    let mut g = on_foot(g, LANE, 0.0);
+    let held = g.skater.possession.held();
+    assert!(run_and_jump(&mut g, face, 1.0), "caught the edge");
+    // Hanging: the body under the edge facing the wall, held there however long.
+    run(&mut g, 90, [0, 0], 0);
+    let c = g.skater.climb.attached.expect("holding");
+    assert_eq!(c.phase, game_core::skater::climb::Phase::Hang);
+    assert!(
+        g.skater.pos.z < face && g.skater.pos.y < 1.0,
+        "{:?}",
+        g.skater.pos
+    );
+    // Facing into the wall (the built-in park's height field gives a wall the ray's own way back).
+    let into = c.ledge.forward;
+    let yaw = game_core::math::atan2f(into.x, into.z);
+    assert!(game_core::math::wrap_angle(g.skater.heading - yaw).abs() < 1e-3);
+    assert!(yaw.abs() < 0.2, "{yaw}");
+    assert_eq!(g.skater.mode, Mode::Walk);
+    // B pulls him up onto the top.
+    run(&mut g, 1, [0, 0], btn::B);
+    assert_eq!(
+        g.skater.climb.attached.unwrap().phase,
+        game_core::skater::climb::Phase::Mantle
+    );
+    let mut over = None;
+    for i in 0..180 {
+        run(&mut g, 1, [0, 0], 0);
+        if !g.skater.climbing() {
+            over = Some(i);
+            break;
+        }
+    }
+    let over = over.expect("up and over");
+    let t = game_core::skater::climb::MANTLE + game_core::skater::climb::SETTLE;
+    assert!((over as f32 / 60.0 - t).abs() < 0.1, "{over} ticks");
+    assert!(
+        (g.skater.pos.y - 2.0).abs() < 0.03 && g.skater.pos.z > face + 0.4,
+        "standing on the top: {:?}",
+        g.skater.pos
+    );
+    assert_eq!(g.skater.possession.held(), held, "the board still in hand");
+    // And walks on along the top.
+    run(&mut g, 60, [0, 60], 0);
+    assert!(g.skater.pos.z > face + 1.5 && (g.skater.pos.y - 2.0).abs() < 0.01);
+    assert!(!g.skater.climbing() && g.skater.biped.air.is_none());
+}
+
+#[test]
+fn a_ledge_too_high_is_not_caught() {
+    let mut g = Game::new();
+    let face = add_block(&mut g, 6.0, 3.2);
+    let mut g = on_foot(g, LANE, 0.0);
+    assert!(!run_and_jump(&mut g, face, 1.0), "nothing to reach");
+    run(&mut g, 60, [0, 0], 0);
+    assert!(g.skater.pos.y.abs() < 1e-3 && g.skater.biped.air.is_none());
+}
+
+#[test]
+fn walking_up_to_a_ledge_without_jumping_never_catches_it() {
+    let mut g = Game::new();
+    let face = add_block(&mut g, 4.0, 1.8);
+    let mut g = on_foot(g, LANE, 0.0);
+    for _ in 0..120 {
+        run(&mut g, 1, [0, 100], 0);
+        assert!(!g.skater.climbing());
+    }
+    assert!(g.skater.pos.z < face, "{:?}", g.skater.pos);
+    assert!(
+        g.skater.climb.reach() > 0.3,
+        "reaching for it: {}",
+        g.skater.climb.reach()
+    );
+}
+
+/// With the player's imported data: the stock graphs wait in the jump while the rider holds the edge,
+/// and pick up walking on the top after.
+#[test]
+fn imported_climbing_holds_the_graphs_and_walks_on_after() {
+    let Some(mut g) = imported() else {
+        eprintln!("offboard_walk: no imported data with the off-board clips (FG_DATA): skipped");
+        return;
+    };
+    let path = |g: &Game| g.graph.as_ref().unwrap().runner.motion_state();
+    let face = add_block(&mut g, 6.0, 2.0);
+    let mut g = on_foot(g, LANE, 0.0);
+    assert!(
+        run_and_jump(&mut g, face, 1.0),
+        "caught the edge: {}",
+        path(&g)
+    );
+    let held = path(&g);
+    run(&mut g, 60, [0, 0], 0);
+    assert_eq!(path(&g), held, "the graphs wait");
+    run(&mut g, 1, [0, 0], btn::B);
+    run(&mut g, 120, [0, 0], 0);
+    assert!(!g.skater.climbing());
+    run(&mut g, 60, [0, 60], 0);
+    assert!(
+        path(&g).starts_with("OffBoard/OBGround/"),
+        "walking on the top: {}",
+        path(&g)
+    );
+    assert!((g.skater.pos.y - 2.0).abs() < 0.01, "{:?}", g.skater.pos);
 }
 
 fn data_dir() -> Option<std::path::PathBuf> {

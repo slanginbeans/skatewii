@@ -124,15 +124,22 @@ fn signed_yaw(a: Vec3, b: Vec3) -> f32 {
     wrap_angle(crate::math::atan2f(b.x, b.z) - crate::math::atan2f(a.x, a.z))
 }
 
-/// The body against a wall at the feet `pos`: the way out of it, from a ring of [`BODY_RADIUS`] round the
-/// feet (the points in a wall, or a move to them blocked, push the body the other way). `None` clear.
-pub fn body_contact(park: &dyn Terrain, pos: Vec3) -> Option<Vec3> {
+/// The body against a wall at the feet `pos`, facing `heading`: the way out of it, from a ring of
+/// [`BODY_RADIUS`] round the feet every 45 degrees (fixed in the world, so a flat wall's points pair up
+/// round its normal), only its points ahead of or beside the walker (he only ever moves ahead, and a
+/// wall behind him steers nothing). The points in a wall, or a move to them blocked, push the body the
+/// other way. `None` clear.
+pub fn body_contact(park: &dyn Terrain, pos: Vec3, heading: f32) -> Option<Vec3> {
     const RING: usize = 8;
+    let f = v3(sinf(heading), 0.0, cosf(heading));
     let mut push = Vec3::ZERO;
     let mut any = None;
     for i in 0..RING {
         let a = i as f32 * (2.0 * PI / RING as f32);
         let d = v3(sinf(a), 0.0, cosf(a));
+        if d.dot(f) < -0.01 {
+            continue;
+        }
         let p = pos + d * BODY_RADIUS;
         let g = park.ground(p.x, p.z, pos.y + STEP_UP);
         if g.height > pos.y + STEP_UP || park.blocked(pos, Vec3 { y: pos.y, ..p }) {
@@ -291,7 +298,7 @@ impl Biped {
         };
         let mut desired = normal_speed + (t.sprint_speed.eval(mag) - normal_speed) * blend;
         let mut steer = steer;
-        self.obstacle = body_contact(park, *pos);
+        self.obstacle = body_contact(park, *pos, self.heading);
         self.steer_round_obstacle(&mut steer, &mut desired);
         self.steer = steer;
 
@@ -818,9 +825,11 @@ mod tests {
                 (Vec3::ZERO, 0.0)
             }
         }
-        let out = body_contact(&Wall, Vec3::ZERO).expect("in contact");
+        let out = body_contact(&Wall, Vec3::ZERO, 0.0).expect("in contact");
         assert!((out - v3(0.0, 0.0, -1.0)).length() < 1e-4, "{out:?}");
-        assert!(body_contact(&Wall, v3(0.0, 0.0, -0.2)).is_none());
+        assert!(body_contact(&Wall, v3(0.0, 0.0, -0.2), 0.0).is_none());
+        // Facing away, it steers nothing.
+        assert!(body_contact(&Wall, Vec3::ZERO, PI).is_none());
     }
 
     #[test]

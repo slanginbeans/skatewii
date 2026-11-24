@@ -662,8 +662,8 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
 - **Obstacles** (SK8 `movement_intent.rs` TU3 82D7CF50 / 82D7D5A0, `movement_velocity.rs`,
   `contact_correction.rs`; `Biped::steer_round_obstacle`, `biped::body_contact`). Skate 3 reads its
   skeleton's collision volumes pushed out of the world; flatground's rider has no body, so a ring of 0.3 m
-  (`BODY_RADIUS`, SK8's biped air sphere radius) round the feet stands in: its points in a wall (or a
-  move to them blocked) give the way out. With somewhere to go, the stick's way within 25 degrees of
+  (`BODY_RADIUS`, SK8's biped air sphere radius) round the feet stands in: its points ahead of and
+  beside the walker in a wall (or a move to them blocked) give the way out. With somewhere to go, the stick's way within 25 degrees of
   straight into the wall (55 once in) turns the walker to face it square and stops him; any other way
   turns him along the wall towards the stick's side (the correction `(side - facing x 2/pi) / 2`), only
   while he faces it within 90 degrees, merged with the stick's own turn (the other way replaces it, the
@@ -699,6 +699,26 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   imported: `Walk_StairUpShallow`, `Walk_StairDnShallow`, `Run_StairUpShallow`, `Run_StairDnShallow`).
 - **Drawn**: the off-board clips' origin is the ground under the feet (the riding clips' is the deck's
   centre); the drawing moves between the two over 0.2 s while getting off or on.
+- **Climbing ledges** (SK8's own extension, not stock Skate 3: skate-game physics/climbing/ ledge.rs,
+  approach.rs, mod.rs; `skater::climb`). On foot, moving, each tick looks for a ledge the stick's way
+  (else the facing): a wall within 2.6 m of the chest (1.15 m over the feet), facing back at it (normal
+  within 0.2 of level, at most -0.65 along the way), its top 1.25 to 2.75 m over the feet, flat under
+  both hands (0.3 m each side, within 0.06 m), room to stand 0.62 m in (flat within 0.06 m there and
+  0.25 m round it, 1.2 m of headroom over each, the way over the edge free) and room outside the face.
+  The reach builds towards SK8's `reach_gain` (none from 2.6 m, all within 0.8 m, under half on the
+  ground) over 0.1 s; jumping (B), with it over 0.95 and both palms within the arms' reach, the rider
+  catches the edge: the catch eases him under it (0.22 s plus 0.18 s a metre, at most 0.5 s), turning
+  him to face the wall, and he hangs until B (with the top still clear) pulls him up: the mantle holds
+  the edge through its first 55% pushing the body up to it, then goes over onto the top, settles for
+  0.25 s, and he walks on (no new reach for 0.3 s). While he holds the edge the climb owns his movement
+  (no gravity, collisions, board toggles or drops); the stock graphs wait where they were (SK8 pauses
+  them) and the foot IK fades. SK8 times and places the hang and mantle by its own authored clips (not
+  Skate 3's), which flatground hasn't: the hanging feet 2 m under the edge and 0.3 m out (never under
+  the ground there), the shoulders 1.45 m over the feet and 0.18 m each side, the arms' 0.62 m reach and
+  the 1.2 s mantle are flatground's own, and the rider is drawn in the graphs' last pose moved along the
+  climb. The built-in park's height field gives a wall's normal as the ray's own way back. Tests: `climb`
+  unit tests, `tests/offboard_walk.rs` (catch, hang, B over the top and walk on with the board in hand;
+  too high; no jump, no catch; imported: the graphs wait and walk on after).
 - **Foot IK** (Skate 3's off-board foot placement and skeleton IK: SK8 player/offboard/feet.rs,
   biped_air/feet.rs, TU3 82D773F8 / 82D77558 / 82D77AE8, physics/biped_ground/feet.rs 82D77330,
   physics/foot_ik_queries.rs 82DB63C0, animation/foot_ik external.rs 82BEE390 and two_bone.rs;
@@ -771,7 +791,8 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   the landing on deck's query; a body above the board's deck that moves over 0.7 m/s between two queries
   is a hurdle (`IsHippyHurdling`: `OnBoard/HippyJump/HurdleCyc`, the landing on the board held off) until
   0.3 s past the apex. Flatground's world is static, so its hippie jumps never hurdle.
-- **Not done**: moving objects (so nothing to hippie hurdle), standing on cars, the slide on steep
+- **Not done**: moving objects (so nothing to hippie hurdle), standing on cars, climbing's hang and
+  mantle clips and hand IK (SK8's are its own authored ones), the slide on steep
   ground and the drop-in edge alignment of `movement_intent.rs`; the foot IK's clip-forced plants
   (flags 2480 / 2484) and its on-deck and hand limbs (the board's feet come from the clips); the free board has no rigid rotation of its own (it keeps its nose,
   pitched only by the throw, and lands on its wheels whatever way it falls) and doesn't collide with the
@@ -802,7 +823,7 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 | C-stick, main stick in a bail | `WipeoutGestureX/Y` (always published), `WipeoutControlX/Y` (off centre) | the wipeout gesture (body tweaks) and steering (above, "Bails") |
 | main stick | `Turn`, `HardTurn`, `HardTurnCrouch`, `KickTurn`, `BodySpin`, `Left/RightSlide`, `Left/RightSlideStart` | steering, kick turns, powerslides, spins |
 | C-stick | `AnticMag`, `AnticAngle`, `Manual`, `ManualBrake`, `TweakX/Y`, `BoardAdjustAngle/Mag` | wind-up (past 0.9), manuals (held below full for 0.2 s), grab variants (past half way) and tweaks; in the air the board adjust (`OnBoard/InAir/BoardAdjusts/*`); on a rail its y tips a 50-50 into a nosegrind (up) or a 5-0 (down) and its x (with the main stick's) turns a 5-0 across the rail (Skate 3's `PhysGrindUpDown`, `PhysGrindTranslation`) |
-| off the board | `OB_Jump` (B pressed: Skate 3's X), `OB_Sprint` (A without X), `OB_Mag`, `OB_Steer` (the walker's move amount and turn), `OB_BipedWorldX/Z`, `OB_BipedStickMag` (the stick; on the board the raw stick, which the dismount reads), `OB_LookAtX/Y` (C-stick) | walking, below |
+| off the board | `OB_Jump` (B pressed: Skate 3's X), `OB_Sprint` (A without X), `OB_Mag`, `OB_Steer` (the walker's move amount and turn), `OB_BipedWorldX/Z`, `OB_BipedStickMag` (the stick; on the board the raw stick, which the dismount reads), `OB_LookAtX/Y` (C-stick) | walking, below; B also catches a ledge and, hanging, pulls up onto it (climbing, above: SK8's jump button) |
 | gestures | `Trick`, the gesture's name, `GestureSpeed`, `HoldPattern` | right stick: `skater`, `skater90`, `skaterN90`, `skater_air`, `skater_fingerflip`; left stick: `skaterls` (SlideFs180/SlideBs180 reverts), `skaterstep`; all recognised in parallel at 60 Hz |
 
 Gesture groups come from the graphs (`HasGestureIntent`, `CreateTrickIntentFromGesture`): Square takes
