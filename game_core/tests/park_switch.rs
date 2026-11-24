@@ -305,8 +305,8 @@ fn the_menus_take_the_pad_and_ask_for_locations() {
     assert!((g.skater.pos - spawn).length() > 0.5);
     ride(&mut g, 1, btn::START);
     ride(&mut g, 1, 0);
-    // Down past Change location and Draw distance.
-    for _ in 0..3 {
+    // Down past Change location, Draw distance and Camera.
+    for _ in 0..4 {
         ride(&mut g, 1, btn::DPAD_DOWN);
         ride(&mut g, 1, 0);
     }
