@@ -38,6 +38,8 @@ X, Y). The default stance is goofy, as in Skate 3.
 | L / R in the air | Left-hand / right-hand grab (indy, melon; both: mute) |
 | C-stick held in the air | Board adjust: turns the board across (left / right) or tips its nose down / up (forward / back) to line it up: across a rail it slides (boardslide) instead of grinding, and the landing goes by where the board points |
 | Come down onto a rail | The grind or slide comes from how the board meets it: along it a 50-50 (C-stick held back: 5-0, forward: nosegrind), angled a crooked, willy, feeble or smith, across it a boardslide, lipslide, noseslide or tailslide. Flick to pop off |
+| Control stick (and C-stick) left / right on a rail | Balance: pushes a slide across the rail (on a ledge, off it), leans a nose or tail slide in or out (too far out and it falls off the rail); fully over, a 50-50 drops onto one truck and turns across (crooked). Coming down hard on a rail with the board tilted against it is a wipeout |
+| L / R fully in on a rail | Grind grab (the grabs Skate 3 has for that grind: FS / BS grab, nosegrab, tailgrab), scored with the grind |
 | C-stick held back on a transition, then let go | Pump (gain speed) |
 | Rolling tail first (fakie), push | The rider turns round and pushes switch |
 | Y | Get off the board (on the ground), and back on it |
