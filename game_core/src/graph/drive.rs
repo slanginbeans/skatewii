@@ -450,6 +450,12 @@ impl Driver {
         if r.s.grab_score != super::NONE {
             c.grab_name = Some(r.pack.str(r.s.grab_score));
         }
+        // Grinding: the grind grab the motion graph's `<grind>_<grab>` states score (`ScoringTrick`
+        // `FS_5_O_FSGRAB` in their grab cycle), and the free end they hold up.
+        if r.s.world.phys == phys::GRIND {
+            c.grind_grab = crate::skater::balance::grab_of(r.str(r.s.trick));
+            c.grind_grab_min_height = r.packet_named("PhysGrindGrabMinHeight").unwrap_or(0.0);
+        }
         let tx = r.s.filtered.get(r.names.tweak_x).unwrap_or(0.0);
         let ty = r.s.filtered.get(r.names.tweak_y).unwrap_or(0.0);
         c.tweak = libm::sqrtf(tx * tx + ty * ty);
