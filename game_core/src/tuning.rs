@@ -15,6 +15,7 @@ pub mod biped;
 pub mod camera;
 pub mod grind;
 pub mod moves;
+pub mod plant;
 pub mod possession;
 pub mod wobble;
 pub use camera::CamTuning;
@@ -482,6 +483,8 @@ pub struct Tuning {
     pub wobble: wobble::WobbleTuning,
     /// Board adjust in the air (`tuning::adjust`; measured from Skate 3's clips, no rules-pack values).
     pub adjust: adjust::AdjustTuning,
+    /// Foot plants: the FootJump launch and the air foot plant (`tuning::plant`).
+    pub plant: plant::PlantTuning,
 
     // Walking off the board (`tuning::biped`).
     pub biped: biped::BipedTuning,
@@ -756,6 +759,7 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .chain(wobble::PATHS.iter())
         .chain(biped::PATHS.iter())
         .chain(possession::PATHS.iter())
+        .chain(plant::PATHS.iter())
         .copied()
 }
 
@@ -1346,6 +1350,7 @@ impl Tuning {
         moves: moves::MoveTuning::BUILT_IN,
         wobble: wobble::WobbleTuning::BUILT_IN,
         adjust: adjust::AdjustTuning::BUILT_IN,
+        plant: plant::PlantTuning::BUILT_IN,
         biped: biped::BipedTuning::BUILT_IN,
         possession: possession::PossessionTuning::BUILT_IN,
     };
@@ -1709,6 +1714,7 @@ impl Tuning {
                     || self.wobble.set(name, f, c())
                     || self.biped.set(name, f, c())
                     || self.possession.set(name, f, c())
+                    || self.plant.set(name, f, c(), v)
             }
         }
     }
@@ -1873,6 +1879,36 @@ mod tests {
         assert_eq!(t.anim.cond[11], 12.0);
         assert_eq!(t.anim.auto_pump[2], 0.5);
         assert!((t.anim.crouch_max_height.eval(10.0) - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_foot_plants_come_through_the_rules_entry() {
+        let data = encode(&[
+            (
+                "Hash_CCB95A83C78B4FF9/default/Hash_6D781EFAF01E707D",
+                vec![0.0, 1.0, 1.0, 2.5],
+            ),
+            (
+                "physics_footplantmanager/default/DeckBB",
+                vec![0.2, 0.05, 0.3, 0.0],
+            ),
+            (
+                "physics_footplantmanager/default/LegLengthOnLanding",
+                vec![0.9],
+            ),
+            (
+                "physics_footplantmanager/default/Hash_68C05A7FCC6BB718",
+                vec![0.3],
+            ),
+        ]);
+        let mut t = Tuning::BUILT_IN;
+        assert_eq!(t.plant.jump_up_vs_normal_y.eval(1.0), 3.0, "Skate 3's");
+        assert_eq!(t.apply(&data), 4);
+        assert_eq!(t.plant.jump_up_vs_normal_y.eval(1.0), 2.5);
+        assert_eq!(t.plant.deck_bb, [0.2, 0.05, 0.3]);
+        assert_eq!(t.plant.leg_length, 0.9);
+        assert_eq!(t.plant.max_duration, 0.3);
+        assert!(all_paths().any(|p| p == "physics_footplantmanager/default/DeckBB"));
     }
 
     #[test]

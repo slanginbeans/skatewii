@@ -182,6 +182,25 @@ impl DevLog {
                 Event::Switched => out.push(String::from(
                     "stance: pushed from fakie, turned round to switch",
                 )),
+                Event::FootJump(k) => out.push(format!(
+                    "{}: jumped off the planted foot at {:.1} m/s, up {:.2} m/s",
+                    k.trick(),
+                    s.vel.horizontal().length(),
+                    s.vel.y
+                )),
+                Event::FootPlanted => out.push(format!(
+                    "foot plant: {} in {:.2} s on a surface facing ({:.2}, {:.2}, {:.2})",
+                    s.footplanted.unwrap_or("?"),
+                    s.air_plant.map_or(0.0, |p| p.length()),
+                    s.footplant.normal.x,
+                    s.footplant.normal.y,
+                    s.footplant.normal.z
+                )),
+                Event::FootReleased => out.push(format!(
+                    "foot plant: off the foot at {:.1} m/s, up {:.2} m/s",
+                    s.vel.horizontal().length(),
+                    s.vel.y
+                )),
             }
         }
         if s.switch != self.switch {

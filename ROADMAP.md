@@ -149,6 +149,9 @@ content second.
   grind name the state graphs know (BF_ variants included), the grind trees' twist and height
 - [x] Grind balance (Skate 3's pins and forces across the rail, falling off or bailing either side), the
   grind closing-speed wipeout, grind grabs (docs/graph-runner.md "Grinds")
+- [x] Foot plants: boneless, fastplant and no-comply with Skate 3's FootJump launch, foot plants in the air
+  off ledges, coping and walls (wallplants) with its foot plant manager and swing (docs/graph-runner.md
+  "Foot plants")
 - [ ] A light physics fall for bails (Skate 3's ragdoll)
 - [x] Camera as Skate 3's (phase 7, docs/graph-runner.md "The camera"): the disc's camera graph run on
   the graph runner choosing the disc's shots (blend trees by speed, slope, steering, air time, grind

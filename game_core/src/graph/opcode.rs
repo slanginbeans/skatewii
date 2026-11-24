@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 struct W(Vec<u8>);
 
@@ -262,7 +262,7 @@ fn read_op(r: &mut R) -> Option<Op> {
 }
 
 /// Conditions without fields, by tag.
-const PLAIN_CONDS: [Cond; 35] = [
+const PLAIN_CONDS: [Cond; 37] = [
     Cond::Mirrored,
     Cond::RidingFakie,
     Cond::RidingGoofy,
@@ -298,6 +298,8 @@ const PLAIN_CONDS: [Cond; 35] = [
     Cond::DroppingBoard,
     Cond::RetrievingBoard,
     Cond::LandingOnBoard,
+    Cond::FootPlanting,
+    Cond::PrepareFootplant,
 ];
 
 fn cond(w: &mut W, c: &Cond) {
@@ -816,6 +818,10 @@ fn beh(w: &mut W, b: &Beh) {
             w.o16(*gesture_x);
             w.o16(*gesture_y);
         }
+        Beh::FootPlantAbsorb(n) => {
+            w.u8(38);
+            w.o16(*n);
+        }
         // Every field-less behaviour was written above.
         _ => w.u8(255),
     }
@@ -989,6 +995,7 @@ fn read_beh(r: &mut R) -> Option<Beh> {
             gesture_x: r.o16()?,
             gesture_y: r.o16()?,
         },
+        38 => Beh::FootPlantAbsorb(r.o16()?),
         _ => return None,
     })
 }

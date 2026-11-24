@@ -35,7 +35,10 @@ X, Y). The default stance is goofy, as in Skate 3.
 | ... roll three quarters round, then flick across | 360 flip, laser flip, 360 hardflip, 360 inward heelflip |
 | C-stick: push forward, then flick back | Nollie, and the nollie version of each trick |
 | C-stick held lightly back / forward while rolling | Manual / nose manual (keep the balance marker centred; with Skate 3's motion graphs a manual lasts as long as the stick is held, as in Skate 3); fully over drags the tail or nose to brake |
+| L or R fully in on the ground (a ground grab), then A / B | Boneless (A) / fastplant (B): the rider plants a foot, the board comes up with the other and he jumps off the planted foot (with the goofy stance L is frontside, R backside; regular the other way round) |
+| A or B, then a flick on the C-stick while the pushing foot is still coming down | No-comply (a flick once the foot is down, or without pushing, is the flick's trick) |
 | L / R in the air | Left-hand / right-hand grab (indy, melon; both: mute) |
+| L / R in the air, then A / B (held) | One-foot grab (a foot off the board); about to meet a ledge, the coping or a wall, the free foot plants on it and the rider springs off it (foot plant, wallplant) |
 | C-stick held in the air | Board adjust: turns the board across (left / right) or tips its nose down / up (forward / back) to line it up: across a rail it slides (boardslide) instead of grinding, and the landing goes by where the board points |
 | Come down onto a rail | The grind or slide comes from how the board meets it: along it a 50-50 (C-stick held back: 5-0, forward: nosegrind), angled a crooked, willy, feeble or smith, across it a boardslide, lipslide, noseslide or tailslide. Flick to pop off |
 | Control stick (and C-stick) left / right on a rail | Balance: pushes a slide across the rail (on a ledge, off it), leans a nose or tail slide in or out (too far out and it falls off the rail); fully over, a 50-50 drops onto one truck and turns across (crooked). Coming down hard on a rail with the board tilted against it is a wipeout |

@@ -23,10 +23,11 @@ ways:
   (the physics recovers on its own instead), `WipeoutControlX/Y` and `WipeoutGestureX/Y`.
 - **Fixed conditions and stubbed behaviours.** `graph/ops.rs` holds `FIXED_FALSE` (conditions pinned
   so the graph stays on the board), the no-op behaviour list and `UNSUPPORTED`. Pinned false today:
-  plants (`IsFootPlanting`, `IsHandPlanting`, `HasNewHandPlantPos`, `ShouldPrepareOneFootAirForFootplant`),
+  hand plants (`IsHandPlanting`, `HasNewHandPlantPos`; the foot plants' `IsFootPlanting` and
+  `ShouldPrepareOneFootAirForFootplant` now read the physics),
   skitching (`IsEnteringSkitch`, `IsSkitching`, `IsSkitchShimmying`, `IsSkitchingWithAbsorb`),
   `IsDroppingIn`, `IsHippyHurdling`, `IsLandingIntoGrind`, `IsGrindApproach` and the wipeout timers.
-  Stubbed behaviours: `FootPlantAbsorb`, `ScoringHandPlants`, `Shove`,
+  Stubbed behaviours: `ScoringHandPlants`, `Shove` (`FootPlantAbsorb` now runs),
   `AirDismounting`, `SetScoreAugmentation`. `UNSUPPORTED` holds the three skitching behaviours, and
   `GestureType` (the wipeout body tweaks) is also logged as unsupported.
 - **Board adjust** (fixed). `Beh::BoardAdjust` (`graph/host.rs` `run`, `AdjustSeam`) now publishes its
@@ -87,9 +88,10 @@ ways:
 | Manuals and nose manuals (balance meter) | done | `update_manual` (no graphs: flatground's balance meter tips out), `graph_manual` publishes `PhysicsWantsManualExit` (`Skater::manual_exit`) as SK8's `apply_correction` does. Skate 3's graphs end a manual only on the stick, leaving the ground or that flag, which fires only while dragging with the mode's corrective force off (Easy); Normal has it on, so a Normal manual drags and never tips out, as on the disc. Tests: `graph::tests::manual_exit`, `tests/manual_wobble.rs` (Skate 3's own graphs). The corrective drag and no-contact torque bleed are not modelled | `physics/manual/`, `input/manual_intentions.rs` | – |
 | Manual tricks (flicks off the manual) | done | `flick_group` (`Group::Nose`/`Tail`) | same | – |
 | Reverts | done | `update_revert`, `SlideFs180`/`SlideBs180` | `physics/revert_state.rs` | – |
-| Foot plants: boneless, no-comply, fastplant | missing | `IsFootPlanting` and `ShouldPrepareOneFootAirForFootplant` pinned false; `FootPlantAbsorb` no-op; no FootJump state | `physics/boneless.rs` (state 602), `physics/footplant/`, `air/known/footplant.rs` | M |
+| Foot plants: boneless, no-comply, fastplant | done | `skater/plant.rs`: a ground grab (a trigger fully in) and a push button (A boneless, B fastplant, by Skate 3's action graph's `OnGround/Grabbing` table, `PlantKind::from_grab`), or a flick while a push's foot comes down (no-comply), play Skate 3's `OnBoard/Trick/PushTrick/<plant>` states; while their clips carry `ANIMSKATEBOARD` the board is in hand (`GroundPlant`, SK8's physical state 602) and on `FOOTJUMP` the rider jumps off the planted foot with Skate 3's launch (`plant::foot_jump`: the four point graphs of `Hash_CCB95A83C78B4FF9`, 3 m/s up on flat, at least 1.92 m/s along the facing; `tuning/plant.rs`). Without the graphs the same buttons, timed as the graphs play them. `IsCrouchedEnoughForBlendToGrabCycle` reads the posed rider's height on the ground too (SK8's physical `animation_height`), so a push from a ground grab reaches `PushTrick`. Scored as `FS BONELESS`, `BS FASTPLANT`, `NO COMPLY`. Tests: `tests/foot_plants.rs` (synthetic: boneless height and timing, fastplant, no-comply; imported: Skate 3's graphs play the boneless and no-comply and jump on `FOOTJUMP`), `skater::plant::tests` | `physics/boneless.rs` (state 602), `input/*` (none: the graphs ask for them) | – |
 | Wallrides | done | `board.rs` `update_wallride`, `start_wallride`; `try_air_wallride` | `riding/ground_contact_response.rs` | – |
-| Wallies, wallplants | missing (minor) | wallplants come with the foot plants; no wallie code here or in SK8 | footplant against walls | S (after foot plants) |
+| Foot plants in the air, wallplants | done | a grab and a push button in the air is Skate 3's one-foot grab (its `OneFootAir` states); `plant::Manager` (SK8's FootPlantManager) reaches the free foot (0.92 m, within 35 degrees of straight down, along the flight away from the landing) and sweeps it ahead; a contact 0.11 to 0.3 s away is taken up (`ShouldPrepareOneFootAirForFootplant` between 0.1 and 0.5 s), the clips' `FootPlanting` asks for it and it plants on touching (a ledge, the coping, a wall's face); `plant::AirPlant` (SK8's physical state 601) swings the rider over the foot on Skate 3's curve (`physics_footplantmanager`: 0.08 to 0.25 s, 0.88 m leg, 2 m/s out along the leg) and throws him off it, wiping out over 10 m/s down or 11 m/s across; `IsFootPlanting` holds through the swing and `FootPlantAbsorb` hands its time to the absorb clips (`absorblength`). Scored by Skate 3's names (`FSGRAB FS FOOTPLANT` ...). SK8's snap of the contact to a nearby grind edge is not done. Tests: `tests/foot_plants.rs` `a_one_foot_grab_at_a_wall_plants_on_it_and_flies_off_it`, `imported_graphs_play_the_foot_plant_against_a_wall`, `graph::tests::foot_plant` | `physics/footplant/`, `air/known/footplant.rs` | – |
+| Wallies | not a Skate 3 move | no wallie code in SK8 or states in the graphs | – | – |
 
 ## Off the board
 
@@ -155,7 +157,7 @@ Feel of core skating comes first, then the two features the user named, then the
 | 5 | ~~**Drop and throw the board** (`OB_DropBoard`/`OB_ThrowBoard`/`OB_RetrieveBoard`, a free board body, `IsDeckFree`/`IsDroppingSkateboard`, `ToggleBoard`)~~ done | user-named; also needed for caveman | L |
 | 6 | ~~Caveman and landing on the board from the air (`Mount/Air`, `LandOnBoard`, `IsLandingOnBoard`)~~ done | follows from 1 and 5 | M |
 | 7 | ~~Grind balance as a rigid board, then grind grabs~~ done: Skate 3's balance forces across the rail, the closing-speed wipeout, and grind grabs through its graphs | grinds are half of street skating | L, then M |
-| 8 | Foot plants (boneless, no-comply, fastplant, wallplant) | common Skate 3 street moves; the graph states are already there | M |
+| 8 | ~~Foot plants (boneless, no-comply, fastplant, wallplant)~~ done: Skate 3's FootJump launch and its foot plant manager and swing, through its graphs' `PushTrick` and one-foot air states | common Skate 3 street moves; the graph states are already there | M |
 | 9 | Combos and lines, plus fuller trick scoring | gives the tricks a goal | M |
 | 10 | Session markers | cheap and a big help for practising spots | S |
 | 11 | Replay (input recording) | the Skate 3 loop of landing a trick and watching it | M |

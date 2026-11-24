@@ -36,6 +36,10 @@ struct Clips {
     /// `OB_ThrowBoard`).
     release: Option<NameId>,
     throw: Option<NameId>,
+    /// The ground foot plants' clips (SK8 extended_attributes.rs): the board in the clip's hands
+    /// (`AnimSkateboard`) and the jump off the planted foot (`FootJump`).
+    anim_skateboard: Option<NameId>,
+    foot_jump: Option<NameId>,
 }
 
 pub struct Driver {
@@ -52,6 +56,8 @@ pub struct Driver {
     clips: Clips,
     /// The playing clips carried the jump attribute last tick.
     jumping: bool,
+    /// The playing clips carried `FOOTJUMP` last tick.
+    foot_jumping: bool,
     /// The motion state's path last tick (for edges).
     last_path: String,
     /// The graph's string for each grind name the physics publishes (`skater::GRAPH_NAMES`: Skate 3's
@@ -102,8 +108,11 @@ impl Driver {
                 ob_traj: db.name_id("OB_TRAJ"),
                 release: db.name_id("OB_RELEASEBOARD"),
                 throw: db.name_id("OB_THROWBOARD"),
+                anim_skateboard: db.name_id("ANIMSKATEBOARD"),
+                foot_jump: db.name_id("FOOTJUMP"),
             },
             jumping: false,
+            foot_jumping: false,
             last_path: String::new(),
             off_board_ticks: 0,
             grinds,
@@ -257,6 +266,11 @@ impl Driver {
             board_returning: s.possession.hold == crate::skater::possession::Hold::Returning,
             board_angle: s.possession.angle(s.rider_frame()),
             landing_on_board: s.landing_on_deck(),
+            // The foot plant (`skater::plant`).
+            foot_planting: s.air_plant.is_some(),
+            footplant_length: s.air_plant.map_or(-1.0, |p| p.length()),
+            footplant_contact: s.footplant.published_contact(),
+            pose_com: s.body_com,
             ..World::default()
         };
         // Coming down onto the free board (the caveman): `CanLandOnBoard` while the feet will meet its
@@ -411,6 +425,22 @@ impl Driver {
             c.pop = Some((flick, jump_strength(height, over, t)));
         }
         self.jumping = attr;
+        // Foot plants on the ground: the clips' board in hand and their jump off the planted foot (its
+        // first tick), as the plant the graph scores.
+        if r.s.world.phys == phys::GROUND {
+            c.anim_skateboard = has(self.clips.anim_skateboard);
+            let foot_jump = has(self.clips.foot_jump);
+            c.foot_jump = foot_jump && !self.foot_jumping;
+            self.foot_jumping = foot_jump;
+        } else {
+            self.foot_jumping = false;
+        }
+        if path.contains("/PushTrick/") {
+            c.plant = crate::skater::plant::PlantKind::from_trick(r.str(r.s.trick));
+        }
+        // In the air: a one-foot grab runs the foot plant manager, its foot plant states reach for it.
+        c.one_foot_air = r.packet_named("OneFootAir").is_some();
+        c.foot_planting = r.packet_named("FootPlanting").is_some();
         // In the air: the trick the clips animate, whether the board is caught yet, a dark catch.
         // The danger zone's end (seconds into the clip; untimed: the whole clip): landing within the
         // last moment of it (`DANGER_GRACE`) still counts as caught.
