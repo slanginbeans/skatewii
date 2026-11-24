@@ -473,6 +473,56 @@ the balance forces) are used as SK8 documents them.
   5-0 hang rule on ledges; the trajectory candidates' height preference (`RequiredAngleVsHeight`).
 
 
+## Foot plants (physics: `skater/plant.rs`, tuning: `tuning/plant.rs`)
+
+After SK8's `skate-game/src/physics/boneless.rs` (physical state 602), `physics/footplant/` (the
+FootPlantManager and physical state 601) and `skate-core/src/air/known/footplant.rs`.
+
+- **On the ground** (boneless, fastplant, no-comply). Nothing in the input layer asks for them: the action
+  graph's `OnGround/Grabbing/LeftGrab|RightGrab` (a trigger fully in: `LeftGroundGrab` /
+  `RightGroundGrab`) turns a push button into `FSBoneless` / `BSBoneless` / `FSFastPlant` / `BSFastPlant`
+  with `NewFootPlant` and `Left/RightFootPlant` (by the hand and the stance, `PlantKind::from_grab`), and
+  the motion graph's `Push/PushStart` goes to `PushTrick/NoComply/FootPlant` on a flick
+  (`HasGestureIntent` Square) while the pushing foot comes down. `PushTrick` needs
+  `IsCrouchedEnoughForBlendToGrabCycle` while the `Grab` intent is on: SK8 reads the physical rider's
+  height over the board (`animation_height`, under 0.6 m), so the runner reads the posed rider's
+  (`World::pose_com`) on the ground too; the ground grab's clips crouch under it. The `PushTrick` clips
+  carry SK8's extended attributes: while they carry `ANIMSKATEBOARD` (the `_L` clips) the board is in the
+  clip's hands (`GraphControl::anim_skateboard`, `Skater::ground_plant`: no push, brake or pop), and on
+  the first tick of `FOOTJUMP` (the `_A` clips) the rider jumps off the planted foot
+  (`plant::foot_jump`, SK8 `launch`): the planted share (`Hash_9228B7F18C223F9C` against the ground
+  normal's y, 1 on flat) keeps the speed along the ground times `Hash_88D0CDEFA38A36D6` (2 standing, 0.85
+  at 6 m/s) and goes `Hash_6D781EFAF01E707D` x `Hash_C9112CCD0BCB1850` up the normal (3 m/s on flat), the
+  rest keeps the velocity and only sets its up speed; a change of over 10 m/s keeps the velocity, and at
+  least 1.92 m/s goes along the facing. The landing scores the graph's `ScoringTrick` (`FS BONELESS`,
+  `NO COMPLY` ...). Without the graphs the same buttons start them, timed as the graphs play them
+  (`PlantKind::timing`: the board up 0.225 s after the press and the jump 0.233 s later for a boneless).
+- **In the air** (foot plants on ledges, coping and walls: wallplants). A grab and a push is the action
+  graph's `InAir/Grabbing/*/OneFootRight|OneFootLeft`; the motion graph's `OneFootAir` states carry the
+  `OneFootAir` attribute (`GraphControl::one_foot_air`), which runs the manager (`plant::Manager`) once
+  the air is over 0.1 s old. Each tick the leg reaches along the flight at the expected contact, away from
+  the landing's normal, within 35 degrees of straight down from the rider; the free foot's flight from
+  `LegLengthOnLanding` (0.92 m) is swept ahead half a second (chord rays, bounded per tick; Skate 3
+  queries a second asynchronously). A contact 0.11 to 0.3 s away is taken up;
+  `ShouldPrepareOneFootAirForFootplant` (0.1 to 0.5 s) takes the graph into its `Footplant/Into`, whose
+  `FootPlanting` attribute asks for the plant; it plants when the contact is within a tick
+  (`PERFORM_TIME`) and the leg within `MaxLegAngleError` of its reach. The swing (`plant::AirPlant`, SK8
+  `Footplant::start` / `update`): the centre of mass round the foot on a cubic curve, its rate the leg's
+  turn rate times `Hash_8A8887218466ED15` against the speed along the leg, ending `Hash_4F45DA86685CF029`
+  (0) degrees from straight up over the foot no sooner than `Hash_D6224B710A36D643` (0.08 s) and no later
+  than `Hash_68C05A7FCC6BB718` (0.25 s), `Hash_0DE0027B9913C5D5` (0.88 m) from it; handles
+  `Hash_5C4341EF35F4B2B0` / `Hash_628C228DCC7B6ED5` (0.3); then the flight off it from 0.2 m over the
+  foot with the swing's velocity (times the rate factor) and `Hash_C5F92168DFAFD0B8` (2 m/s) out along
+  the leg. Over `Hash_52436D9F4FE56BCB` (10 m/s) down or `Hash_149A5D0D4768D2B1` (11 m/s) across while
+  planted wipes out. `IsFootPlanting` holds through the swing (the graph's `Absorb`), `FootPlantAbsorb`
+  hands its time to the absorb clips as `absorblength`, and the graph's `JumpOut` follows. Scored by the
+  graph's `ScoringGrabs` names (`fsgrab_fs_footplant` ...; without the graphs the same names from the grab's
+  hand and the free foot).
+- **Not done**: SK8's snap of the foot's contact to a nearby grind edge (`nearby_edge`), the foot IK and
+  collision volumes (the rider has no body), `BodyAdjustX/Z` moving the release, and the camera graph's
+  `SkaterIsPerformingFootPlant` / `SkaterIsPerformingBoneless` (still false).
+
+
 ## Off the board (physics: `skater/biped.rs`; `skater.rs` `toggle_board`)
 
 Skate 3 has no separate off-board graph: the `OffBoard`, `Dismount` and `Mount` states are part of
@@ -576,6 +626,8 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 | A | `RightPush`, `Pushing`, `NewPush` | push (a press is remembered for 0.3 s); after a bail, back on the board once settled (Skate 3's `WipeOutRecover`) |
 | B | `LeftPush`, `Pushing`, `NewPush` | mongo push; after a bail, as A |
 | A and B | both pushes | the hippie jump: the action graph takes the pair as its wind-up (`OnBoard/HippyJump`), as SK8's riding intentions pass both on |
+| L / R fully in, then A / B | a ground grab's push | the action graph's `FSBoneless` ... `BSFastPlant`: a boneless or fastplant (above, "Foot plants"); a flick while a push's foot comes down is the motion graph's no-comply |
+| L / R, then A / B, in the air | a grab's push | the one-foot grab (`RightOneFootAir` / `LeftOneFootAir`) and its foot plant (above, "Foot plants") |
 | X | `Brake` | foot brake |
 | Z | `DarkCatch`, `NewDarkCatch`, `GrabWorld` | dark catch. SK8 also reads Xbox B for it; on the GameCube that is X, the foot brake, so only Z |
 | d-pad | `GestureLeft/Right/Up/DownStart`, `...Held` | character gestures (shrug, peace, shaka, surf's up) |
@@ -647,12 +699,12 @@ Left as no-ops on purpose:
 | `SetScoreAugmentation`, `JuiceHook`, `PrintText2D` | scoring augmentations, effects and debug text: no effect on riding |
 | `BipedCadence`, `MatchCadence`, `MatchAirTime`, `OffboardBodyTweakBlend`, `AirDismounting` | off the board (walking, running, carrying the board). The runner always hands the walker's step cadence (`Biped::phase`) to the animation as `BipedCadence` does, so the phase-controlled walk, run and sprint cycles play at it |
 | `InitMovingObjects`, `MovingObject`, `UpdateStandingOnCar`, `Shove`, `MaintainShove`, `EndShimmy` | moving objects, shoving people, skitching: systems flatground doesn't have |
-| `FootPlantAbsorb`, `SetHandPlantAnticLength`, `ScoringHandPlants` | foot and hand plants (not in flatground) |
+| `SetHandPlantAnticLength`, `ScoringHandPlants` | hand plants (not in flatground) |
 | `AddRunoutAttribs`, `HippyJumpAntic` | the physics owns runouts and the hippie jump |
 | `ForcePhysics` | flatground's physics always owns the board (no animation-driven board) |
 | `UpdateTimeSinceTeleport`, `UpdateTimeSinceKickturn`, `UpdateRidingFakie` | the runner counts the times every tick; riding fakie is the physics' rolling direction |
 | `ResetSkaterAnimation`, `ResetToGivenStance` | the runner starts the graphs over when the physics puts the rider back on |
-| conditions of absent systems (fixed): skitching, water, moving objects, biped/off-board states and landings, hand and foot plants, debug animations, `IsProSkater` (no pro skaters), `DisableDismount`, `EnoughDistToObstacle`, `OBTrajTime`, `LocoState` | false (true for `EnoughDistToObstacle`), keeping the graph on the board |
+| conditions of absent systems (fixed): skitching, water, moving objects, biped/off-board states and landings, hand plants, debug animations, `IsProSkater` (no pro skaters), `DisableDismount`, `EnoughDistToObstacle`, `OBTrajTime`, `LocoState` | false (true for `EnoughDistToObstacle`), keeping the graph on the board |
 
 Left, and they do touch the pose (the unset-parameter log names them; their blends sit at the neutral
 point or SK8's first child):
