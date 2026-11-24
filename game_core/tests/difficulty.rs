@@ -173,15 +173,18 @@ fn the_discs_modes_are_the_built_in_ones() {
             .count()
     };
     let g = imported(&dir, Difficulty::Hardcore);
-    assert_eq!(carried(Difficulty::Normal), 14);
-    assert_eq!(g.tuning.modes[1], ModeTuning::NORMAL, "the disc's Normal");
-    if carried(Difficulty::Easy) == 0 {
-        eprintln!("difficulty: rules pack without Easy and Hardcore (re-import): partly skipped");
+    let fields = game_core::tuning::mode::FIELDS.len();
+    if carried(Difficulty::Easy) == 0 || carried(Difficulty::Normal) < fields {
+        eprintln!(
+            "difficulty: rules pack from before every mode field (re-import): partly skipped"
+        );
         return;
     }
+    assert_eq!(carried(Difficulty::Normal), fields);
+    assert_eq!(g.tuning.modes[1], ModeTuning::NORMAL, "the disc's Normal");
     assert_eq!(
         (carried(Difficulty::Easy), carried(Difficulty::Hardcore)),
-        (14, 14)
+        (fields, fields)
     );
     assert_eq!(
         g.tuning.modes,

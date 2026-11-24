@@ -2008,3 +2008,18 @@ mod transition {
         assert_eq!(r.s.handplant_score, pack.find("FS_handplant").unwrap());
     }
 }
+
+#[test]
+fn a_clips_jump_height_override_counts_only_where_the_physics_mode_allows_it() {
+    // SK8 attribute finalization: `JumpHeightOverride` raises the jump only with the mode's
+    // `JumpHeightOverrideEnabled` (on for Easy and Normal, off for Hardcore).
+    use crate::tuning::{Difficulty, Tuning};
+    let mut t = Tuning::BUILT_IN;
+    let low = t.jump_clamp_low;
+    assert_eq!(super::drive::jump_strength(low, 0.6, &t), 0.6);
+    t.set_difficulty(Difficulty::Hardcore);
+    assert!(!t.jump_height_override);
+    assert_eq!(super::drive::jump_strength(low, 0.6, &t), 0.0);
+    t.set_difficulty(Difficulty::Easy);
+    assert_eq!(super::drive::jump_strength(low, 0.6, &t), 0.6);
+}

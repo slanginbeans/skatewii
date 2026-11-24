@@ -25,6 +25,12 @@ pub struct MoveTuning {
     /// the landing surface's up under `fall_max_dot`.
     pub fall_min_up_y: f32,
     pub fall_max_dot: f32,
+    /// That bail is checked (the physics mode's `Hash_2B913C786BEFF4CD`; off on Easy).
+    pub upside_down_bail: bool,
+    /// The physics mode's `PerfectBodyFlips` (Easy): the flip's speed is `2.4 pi` over the flight
+    /// whatever the grab, slowed so it ends exactly one turn round (SK8 known/trajectory.rs
+    /// `InitTrajectoryInfo`, known/body.rs `CalculateBodyFlipSpeed`, body_flip.rs `UpdateBodyFlip`).
+    pub perfect_body_flips: bool,
     // Body flips (the action graph's BodyFlippingSignal).
     /// A flip gesture counts this long (s), and only this long after take-off (s).
     pub flip_gesture_window: f32,
@@ -80,6 +86,8 @@ impl MoveTuning {
         flip_spin_scale: 0.6,
         fall_min_up_y: -0.6,
         fall_max_dot: -0.5,
+        upside_down_bail: super::ModeTuning::NORMAL.upside_down_bail,
+        perfect_body_flips: super::ModeTuning::NORMAL.perfect_body_flips,
         flip_gesture_window: 0.15,
         flip_takeoff_window: 0.4,
         pump_amplify: Curve::new(&[(0.0, 0.0), (0.3, 0.2), (1.0, 1.0)]),

@@ -306,6 +306,10 @@ pub struct Tuning {
     pub pump_factor: f32,
     pub pump_max_accel: f32,
     pub pump_unintentional: f32,
+    /// Pumping against the ground's turn (a convex kink taken while rising slows the board): its factor
+    /// and its most speed taken a second (m/sÂ², 0: none; the physics mode's).
+    pub pump_absorption: f32,
+    pub pump_max_absorption: f32,
     /// How the ground presses the rider down (SK8 pumping/controller.rs `calculate`): the crouch the
     /// physics asks of the animation against the ground's angle (quarter turns), the least crouch,
     /// and the deck's angle's; times their scalars (negative: down into the board).
@@ -321,6 +325,11 @@ pub struct Tuning {
     pub jump_floor: f32,
     pub jump_low: f32,
     pub jump_high: f32,
+    /// The low end instead of `jump_low` for a jump the clip marks as out of a manual (the physics
+    /// mode's; SK8 ground_jump `TrickFromManual`).
+    pub jump_low_manual: f32,
+    /// A clip's `JumpHeightOverride` may raise the jump's strength (the physics mode's).
+    pub jump_height_override: bool,
     pub jump_low_vs_speed: Curve,
     pub jump_high_vs_speed: Curve,
     pub jump_speed_range: f32,
@@ -354,6 +363,13 @@ pub struct Tuning {
     /// Most the spin speed may change per tick while the landing assist turns the body (rad/s, against
     /// time in the air).
     pub spin_auto_change: Curve,
+    /// The easier body spin's `spin_speed`, `spin_change` and `spin_windup` (`physics_bodyspin`'s
+    /// `Hash_D7C6855B7814D048`, `Hash_BEA30B5DC6AFF26A`, `Hash_3974F0228331EB22`), ridden when the
+    /// physics mode has `easy_body_spins` (SK8 air/body_spin.rs: the mode byte picks them).
+    pub spin_speed_easy: Curve,
+    pub spin_change_easy: Curve,
+    pub spin_windup_easy: Curve,
+    pub easy_body_spins: bool,
     /// Without a known landing: the stick's spin (`max_spin_speed` deg/s per unit) scaled by this against
     /// twice the time in the air.
     pub spin_input_filter: Curve,
@@ -425,6 +441,10 @@ pub struct Tuning {
     pub land_max_impact: f32,
     pub land_max_stairs: f32,
     pub land_max_grind: f32,
+    /// Those three checks (Skate 3's bad landing) are made, with their limits times the scale (the
+    /// physics mode's `WipeoutCheckForBadLanding`, `Hash_D978550D6DB4E6F7`).
+    pub bad_landing: bool,
+    pub bad_landing_scale: f32,
     /// Landing while the clips say the board isn't caught (Skate 3's closing-velocity check with the
     /// trick limits): a bail when the speed into the surface, seen from the rider (his up against the
     /// surface's normal), has more than `danger_max_impact` along his up or `danger_max_side` across it
@@ -924,6 +944,9 @@ pub const PATHS: &[&str] = &[
     "physics_bodyspin/default/DerivativeBodySpinVsTime",
     "physics_bodyspin/default/MinDerivativeScalar",
     "physics_bodyspin/default/MaxDeltaForAutoVsTime",
+    "physics_bodyspin/default/Hash_D7C6855B7814D048",
+    "physics_bodyspin/default/Hash_BEA30B5DC6AFF26A",
+    "physics_bodyspin/default/Hash_3974F0228331EB22",
     "physics_airstates/default/BodySpinInputFilter",
     "physics_airstates/default/MaxSpinSpeed",
     "physics_airstates/default/MinAutoBodySpeed",
@@ -1258,6 +1281,8 @@ impl Tuning {
         pump_factor: ModeTuning::NORMAL.pump_factor,
         pump_max_accel: ModeTuning::NORMAL.pump_max_accel,
         pump_unintentional: ModeTuning::NORMAL.pump_unintentional,
+        pump_absorption: ModeTuning::NORMAL.pump_absorption,
+        pump_max_absorption: ModeTuning::NORMAL.pump_max_absorption,
         compression_vs_ground_angle: Curve::new(&[
             (0.0, 0.0),
             (0.072, 0.044),
@@ -1293,6 +1318,8 @@ impl Tuning {
         jump_floor: 0.9,
         jump_low: ModeTuning::NORMAL.jump_low,
         jump_high: ModeTuning::NORMAL.jump_high,
+        jump_low_manual: ModeTuning::NORMAL.jump_low_manual,
+        jump_height_override: ModeTuning::NORMAL.jump_height_override,
         jump_low_vs_speed: Curve::constant(1.0),
         jump_high_vs_speed: Curve::new(&[(0.0, 1.0), (0.5, 0.8), (1.0, 0.5)]),
         jump_speed_range: 25.0,
@@ -1317,6 +1344,37 @@ impl Tuning {
         spin_windup: Curve::new(&[(-0.5, 0.0), (-0.3, 1.0), (0.1, 1.0), (0.5, 0.3)]),
         spin_no_windup: 0.45,
         spin_auto_change: Curve::new(&[(0.0, 0.8), (0.3, 0.55), (1.0, 0.4)]),
+        spin_speed_easy: Curve::new(&[
+            (0.0, 2.25),
+            (0.055_374_59, 5.528_571),
+            (0.133_550_5, 7.553_572),
+            (0.250_814_3, 7.971_429),
+            (0.403_908_8, 7.682_143),
+            (0.667_752_4, 6.653_571),
+            (1.026_059, 5.560_714),
+            (2.0, 3.664_286),
+        ]),
+        spin_change_easy: Curve::new(&[
+            (0.0, 1.0),
+            (0.083_061_89, 0.907_142_9),
+            (0.154_723_1, 0.828_571_4),
+            (0.237_785, 0.753_571_5),
+            (0.377_850_2, 0.671_428_6),
+            (0.555_374_6, 0.582_142_8),
+            (0.773_615_7, 0.507_142_8),
+            (1.0, 0.496_428_6),
+        ]),
+        spin_windup_easy: Curve::new(&[
+            (-0.5, 0.0),
+            (-0.368_078_2, 0.057_142_86),
+            (-0.255_700_3, 1.0),
+            (-0.032_573_28, 1.0),
+            (0.043_973_92, 1.0),
+            (0.071_661_23, 1.0),
+            (0.096_091_21, 1.0),
+            (0.5, 1.0),
+        ]),
+        easy_body_spins: ModeTuning::NORMAL.easy_body_spins,
         spin_input_filter: Curve::new(&[(0.0, 0.0), (0.05, 1.0), (0.3, 0.8), (1.0, 0.45)]),
         max_spin_speed: 540.0,
         max_auto_spin: ModeTuning::NORMAL.max_auto_spin,
@@ -1357,6 +1415,8 @@ impl Tuning {
         land_max_impact: 11.0,
         land_max_stairs: 5.5,
         land_max_grind: 7.5,
+        bad_landing: ModeTuning::NORMAL.bad_landing,
+        bad_landing_scale: ModeTuning::NORMAL.bad_landing_scale,
         danger_max_impact: 0.6,
         danger_max_side: 0.1,
         danger_ignore_ticks: 5.0,
@@ -1638,6 +1698,9 @@ impl Tuning {
                 scalar!(self.land_max_impact)
             }
             "physics_bodyspin/default/MaxDeltaForAutoVsTime" => curve!(self.spin_auto_change),
+            "physics_bodyspin/default/Hash_D7C6855B7814D048" => curve!(self.spin_speed_easy),
+            "physics_bodyspin/default/Hash_BEA30B5DC6AFF26A" => curve!(self.spin_change_easy),
+            "physics_bodyspin/default/Hash_3974F0228331EB22" => curve!(self.spin_windup_easy),
             "physics_airstates/default/BodySpinInputFilter" => curve!(self.spin_input_filter),
             "physics_airstates/default/MaxSpinSpeed" => scalar!(self.max_spin_speed),
             "physics_airstates/default/MinAutoBodySpeed" => scalar!(self.min_auto_spin),
@@ -1822,9 +1885,14 @@ impl Tuning {
 
     /// Centre-of-mass height a jump reaches, for a flick `strength` (0..1) at `speed`.
     pub fn jump_height(&self, strength: f32, speed: f32) -> f32 {
+        self.jump_height_from(self.jump_low, strength, speed)
+    }
+
+    /// [`Tuning::jump_height`] with the low end `low` (`jump_low`, or for a trick the clip marks as out of
+    /// a manual `jump_low_manual`; SK8 ground_jump `calculate`).
+    pub fn jump_height_from(&self, low: f32, strength: f32, speed: f32) -> f32 {
         let k = (speed.abs() / self.jump_speed_range.max(0.01)).clamp(0.0, 1.0);
-        let lo =
-            self.jump_floor + self.jump_low_vs_speed.eval(k) * (self.jump_low - self.jump_floor);
+        let lo = self.jump_floor + self.jump_low_vs_speed.eval(k) * (low - self.jump_floor);
         let hi =
             self.jump_floor + self.jump_high_vs_speed.eval(k) * (self.jump_high - self.jump_floor);
         lo + (hi - lo) * strength.clamp(0.0, 1.0)

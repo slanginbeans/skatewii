@@ -10,6 +10,9 @@
 //!   rider who pushed out of fakie, the board's frame turned end for end) and riding normal.
 //! - Out of a tail manual into a 180: the manual's score comes as it pops, and the board turns with the
 //!   rider in the spin; landing fakie isn't the board turning under him.
+//! - A 180 landed fakie and rolled tail first into a wall: the wall pushes the rider back nose first
+//!   and his travel turns round, not the board. The game's watch measures the drawn board against the
+//!   physical one, end for end (it measured against the travel and logged this as a 180-degree turn).
 //!
 //! Needs the player's imported data (`FG_DATA`, else `dist/apps/flatground/data`); without it the
 //! tests pass and say so.
@@ -96,6 +99,10 @@ struct Seen {
     step: f32,
     off_deck: f32,
     logged: Vec<String>,
+    /// Where the rider landed and his speed along the board then (m/s, negative rolling tail first).
+    landed_at: (Vec3, f32),
+    /// The travel turned round (a wall pushed him back) while the board stayed as it was.
+    bounced: bool,
 }
 
 /// Rides the open lane along +X on the built-in park, feeding `script(frame)`, and watches the drawn
@@ -106,6 +113,12 @@ fn ride(g: &mut Game, fakie: bool, script: impl Fn(u32) -> PadRaw) -> Seen {
     } else {
         g.place_rider(v3(-18.0, 0.0, -15.0), PI / 2.0, 6.0);
     }
+    watch(g, script)
+}
+
+/// Feeds `script(frame)` from where the rider is and watches the drawn board after the first trick
+/// landing ([`ride`]).
+fn watch(g: &mut Game, script: impl Fn(u32) -> PadRaw) -> Seen {
     let mut seen = Seen::default();
     let mut since: Option<u32> = None;
     let mut last = drawn_board_yaw(g);
@@ -128,6 +141,10 @@ fn ride(g: &mut Game, fakie: bool, script: impl Fn(u32) -> PadRaw) -> Seen {
             assert_eq!(g.skater.mode, Mode::Rolling, "rode away from the landing");
             seen.step = seen.step.max(wrap_angle(now - last).abs().to_degrees());
             seen.off_deck = seen.off_deck.max(axis_apart(now, yaw(g.skater.fwd)));
+            if *n == 0 {
+                seen.landed_at = (g.skater.pos, g.skater.speed);
+            }
+            seen.bounced |= g.skater.speed * seen.landed_at.1 < 0.0;
             *n += 1;
             if *n > 45 {
                 break;
@@ -237,4 +254,24 @@ fn a_180_out_of_a_manual_does_not_turn_the_board_under_the_rider() {
     assert!(seen.manual, "the manual scored as it popped");
     assert!(g.skater.fakie, "landed fakie");
     assert_board_stays(&seen, "FS 180 OLLIE");
+}
+
+#[test]
+fn a_180_landed_fakie_into_a_wall_does_not_turn_the_board_under_the_rider() {
+    // The trick tour's BS 180 to fakie, with its kicker flicked at other points, landed by the kicker
+    // and rolled tail first into its side: the wall pushed the rider back (`hit_wall`: the speed into
+    // it goes, `physics_collision/TargetDisplacementVel` out) and he rolled on nose first. The board
+    // never turned; the travel did, and the game logged "board: turned 180 deg ... after BS 180
+    // OLLIE". Here a 180 lands fakie in the south lane just short of the park's south wall.
+    for (spin, want) in [(100, "FS 180 OLLIE"), (-100, "BS 180 OLLIE")] {
+        let Some(mut g) = imported_game("180 into a wall") else {
+            return;
+        };
+        g.place_rider(v3(-5.0, 0.0, -4.0), PI, 6.0);
+        let seen = watch(&mut g, ollie(false, spin, 24, 0, 0));
+        assert!(seen.landed_at.1 < 0.0, "landed fakie: {seen:?}");
+        assert!(seen.bounced, "the wall pushed him back: {seen:?}");
+        assert!(!g.skater.fakie, "rolling nose first after the wall");
+        assert_board_stays(&seen, want);
+    }
 }

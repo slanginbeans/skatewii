@@ -71,6 +71,10 @@ pub struct GrindTuning {
     /// How close a flight must come to a rail to be steered onto it (m), scaled on ledges by where the
     /// flight and the body are (high side, low side).
     pub lock_dist: f32,
+    /// The pop out of a grind (m/s along its launch normal, before SK8's 1.03): the low and high
+    /// strength ends for the 50-50, 5-0, backslash and darkslide, the boardslide, and the nose and tail
+    /// slides (the physics mode's).
+    pub pop: [[f32; 2]; 3],
     pub lock_ledge: [f32; 4],
     /// Most cross-rail speed squared into a ledge and into a rail, and most speed down onto it.
     pub max_speed_sq_ledge: f32,
@@ -183,6 +187,7 @@ impl GrindTuning {
         truck_z: -0.052,
         truck_y: -0.0565,
         lock_dist: super::ModeTuning::NORMAL.grind_lock_dist,
+        pop: super::ModeTuning::NORMAL.grind_pop,
         lock_ledge: [0.35, 0.5, 0.65, 1.0],
         max_speed_sq_ledge: 36.0,
         max_speed_sq_rail: 64.0,

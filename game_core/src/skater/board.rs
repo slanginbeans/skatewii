@@ -713,13 +713,26 @@ impl Skater {
         let pumping = p.turn_rate * t.pump_vs_vel.eval(v);
         p.pumping = pumping;
         p.dv = 0.0;
-        if pumping > 0.0 && effect > 0.0 && d.slide.is_none() {
-            let mut dv = (pumping * t.pump_factor * effect).min(t.pump_max_accel * dt);
+        // Rising with the ground turning up along the travel pumps (`PumpEffectFactor`); rising with it
+        // turning away takes speed (`PumpEffectFactorAbsorption`), at most the mode's
+        // `pump_max_absorption` a second (SK8 pumping/controller.rs `update`; none on Easy and Normal).
+        if pumping != 0.0 && effect > 0.0 && d.slide.is_none() {
+            let factor = if pumping * effect > 0.0 {
+                t.pump_factor
+            } else {
+                t.pump_absorption
+            };
+            let raw = pumping * factor * effect;
+            let mut dv = raw
+                .max(-(t.pump_max_absorption * dt))
+                .min(t.pump_max_accel * dt);
             if !d.intentional_pump {
                 dv *= t.pump_unintentional;
             }
-            self.speed += if self.speed < 0.0 { -dv } else { dv };
-            self.pump.dv = dv;
+            if dv != 0.0 {
+                self.speed += if self.speed < 0.0 { -dv } else { dv };
+                self.pump.dv = dv;
+            }
         }
     }
 

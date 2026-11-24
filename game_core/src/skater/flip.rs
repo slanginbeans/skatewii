@@ -21,6 +21,10 @@ use super::rotate;
 pub const PIVOT: f32 = 0.85;
 /// A landing whose flipped up is further than this from the surface's up (cosine) bails (ours).
 pub const LAND_MIN_DOT: f32 = 0.6;
+/// A perfect body flip's turn over the flight (SK8 known/trajectory.rs `0xC0F1463B`, -2.4 pi; the
+/// sign is the axis's here) and its fixed tick (`0x3C888889`, 1/60 s).
+const PERFECT_TURN: f32 = 2.4 * core::f32::consts::PI;
+const PERFECT_STEP: f32 = 1.0 / 60.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BodyFlip {
@@ -48,14 +52,33 @@ impl BodyFlip {
         }
     }
 
-    /// The wanted speed for a flight of `flight` seconds (SK8: `FlipScalar / collision time x 2 pi`).
+    /// The wanted speed for a flight of `flight` seconds (SK8 InitTrajectoryInfo: `FlipScalar /
+    /// collision time x 2 pi`; with the mode's perfect body flips `2.4 pi / collision time`).
     pub fn target_speed(t: &MoveTuning, flight: f32) -> f32 {
-        t.flip_scalar / flight.max(0.1) * crate::math::TAU
+        let flight = flight.max(0.1);
+        if t.perfect_body_flips {
+            PERFECT_TURN / flight
+        } else {
+            t.flip_scalar / flight * crate::math::TAU
+        }
     }
 
-    /// One tick towards `requested` (rad/s): smoothed, capped, turned.
+    /// One tick towards `requested` (rad/s): smoothed, capped, turned. With the mode's perfect body
+    /// flips (SK8 UpdateBodyFlip) the cap is what is left of one turn x 12 instead, the turn a fixed
+    /// tick, and it stops at one turn.
     pub fn update(&mut self, t: &MoveTuning, requested: f32, dt: f32) {
-        let speed = self.speed + (requested - self.speed) * t.flip_smoothing;
+        let mut speed = self.speed + (requested - self.speed) * t.flip_smoothing;
+        if t.perfect_body_flips {
+            let tau = crate::math::TAU;
+            let left = (tau - self.angle.abs()) * 12.0;
+            let sign = if speed > 0.0 { 1.0 } else { -1.0 };
+            if speed.abs() >= left {
+                speed = sign * left;
+            }
+            self.speed = speed;
+            self.angle = (self.angle + speed * PERFECT_STEP).clamp(-tau, tau);
+            return;
+        }
         self.speed = speed.clamp(-t.flip_max_speed, t.flip_max_speed);
         self.angle += self.speed * dt;
     }
@@ -100,7 +123,33 @@ mod tests {
         // A full turn brings it back upright.
         f.angle = crate::math::TAU;
         assert!((f.apply(up) - up).length() < 1e-4);
-        assert_eq!(f.turns().0, 1);
+    }
+
+    #[test]
+    fn a_perfect_body_flip_ends_exactly_one_turn_round() {
+        // SK8 body_flip.rs `update` with `PerfectBodyFlips`: no speed cap but what is left of the turn
+        // x 12, the angle stopping at 2 pi; the target is 2.4 pi over the flight.
+        let mut t = MoveTuning::BUILT_IN;
+        t.perfect_body_flips = true;
+        assert!((BodyFlip::target_speed(&t, 1.2) - 2.0 * core::f32::consts::PI).abs() < 1e-4);
+        let mut f = BodyFlip::begin(Vec3::UP, v3(0.0, 0.0, 1.0), true);
+        let mut fastest: f32 = 0.0;
+        for _ in 0..600 {
+            f.update(&t, 100.0, 1.0 / 60.0);
+            fastest = fastest.max(f.speed);
+        }
+        assert!(
+            fastest > t.flip_max_speed,
+            "not capped by FlipMaxSpeed: {fastest}"
+        );
+        assert!((f.angle - crate::math::TAU).abs() < 1e-3, "{}", f.angle);
+        // Without it the cap holds and the flip turns on past one turn.
+        t.perfect_body_flips = false;
+        let mut f = BodyFlip::begin(Vec3::UP, v3(0.0, 0.0, 1.0), true);
+        for _ in 0..120 {
+            f.update(&t, 100.0, 1.0 / 60.0);
+        }
+        assert!(f.speed <= t.flip_max_speed && f.angle > crate::math::TAU);
     }
 
     #[test]

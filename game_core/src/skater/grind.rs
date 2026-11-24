@@ -219,6 +219,20 @@ impl Family {
         }
     }
 
+    /// The pop's speed along the launch normal for a jump of `strength` (0..1; m/s, before the launch's
+    /// 1.03): the physics mode's low and high ends for the family's group, blended, unclamped (SK8
+    /// grind/substate/settings.rs `vertical`: the 50-50s, 5-0s, backslashes and darkslides, the
+    /// boardslides, the nose and tail slides).
+    fn pop(self, t: &crate::tuning::grind::GrindTuning, strength: f32) -> f32 {
+        let group = match self {
+            Family::Boardslide => 1,
+            Family::Tipslide => 2,
+            _ => 0,
+        };
+        let [low, high] = t.pop[group];
+        (1.0 - strength) * low + high * strength
+    }
+
     /// The pop's sideways push off a ledge's high side (SK8 substate settings `side`).
     fn side_jump(self, class: RailClass) -> f32 {
         match self {
@@ -1321,7 +1335,8 @@ impl Skater {
             }
         };
         let impact = (entry_v - v).length();
-        if impact > t.land_max_grind {
+        // Skate 3's bad landing onto a rail (SK8 wipeout/air.rs): the mode's check and scale.
+        if t.bad_landing && impact > t.land_max_grind * t.bad_landing_scale {
             self.pos = c.point;
             self.vel = v * 0.5;
             self.bail("came onto the rail too hard", events);
@@ -2048,8 +2063,7 @@ impl Skater {
         }
         match pop {
             Some((f, strength)) => {
-                let h = t.jump_height(strength, g.speed);
-                let jump = self.pop_speed(h);
+                let jump = g.family.pop(&t.grind, strength);
                 self.vel = self.launch(&g, vel, p, d, jump, pad.stick[0]);
                 self.take_off(Some(f));
                 events.push(Event::Popped(f));
@@ -2345,6 +2359,32 @@ mod tests {
         assert!(segment_box(v3(0.5, -0.5, 0.2), v3(0.5, -0.5, 1.0), corner, e1, e2).is_none());
         // Parallel to the box: no crossing.
         assert!(segment_box(v3(-1.0, -0.5, 0.0), v3(2.0, -0.5, 0.0), corner, e1, e2).is_none());
+    }
+
+    #[test]
+    fn grind_pops_are_the_physics_modes_per_family() {
+        // SK8 grind/substate/settings.rs `vertical`: (1 - strength) x low + high x strength, from the
+        // mode's pair for the family's group; Skate 3's Hardcore pops weakly at low strength.
+        use crate::tuning::{Difficulty, Tuning};
+        let mut t = Tuning::BUILT_IN;
+        for (f, n) in [
+            (Family::FiftyFifty, 2.5),
+            (Family::FiveO, 2.5),
+            (Family::Backslash, 2.5),
+            (Family::Darkslide, 2.5),
+            (Family::Boardslide, 2.61),
+            (Family::Tipslide, 2.61),
+        ] {
+            assert_eq!(f.pop(&t.grind, 0.0), n);
+            assert_eq!(f.pop(&t.grind, 1.0), n);
+        }
+        t.set_difficulty(Difficulty::Hardcore);
+        let g = &t.grind;
+        assert_eq!(Family::FiftyFifty.pop(g, 0.0), 0.5);
+        assert_eq!(Family::Darkslide.pop(g, 1.0), 2.0);
+        assert!((Family::Boardslide.pop(g, 0.5) - 1.805).abs() < 1e-5);
+        assert_eq!(Family::Tipslide.pop(g, 0.0), 1.0);
+        assert_eq!(Family::Tipslide.pop(g, 1.0), 2.0);
     }
 
     #[test]
