@@ -306,14 +306,194 @@ fn box_meets(b: (Vec3, Vec3), points: &[Vec3]) -> bool {
         && hi.z >= b.0.z
 }
 
-/// A candidate contact: gap, normal, the triangle's own normal, inside its face, the closest point,
-/// the triangle.
-type Candidate = (f32, Vec3, Vec3, bool, Vec3, [Vec3; 3]);
+/// A candidate contact: gap, normal, the triangle.
+type Candidate = (f32, Vec3, [Vec3; 3]);
+
+/// Corners closer than this are one vertex (SK8's portable maps weld collision vertices at 1 mm).
+const WELD: f32 = 1.0e-3;
+
+/// `FaceTolerance` of SK8 collision/fixup.rs: a contact normal this close to the face's is a face
+/// contact.
+const FACE_TOLERANCE: f32 = 0.999_85;
+
+/// Where a contact sits on a triangle (SK8 collision/fixup.rs `TriangleRegion`): its face, edge `i`
+/// (corners `i` and `i + 1`) or corner `i`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Region {
+    Face,
+    Edge(usize),
+    Vertex(usize),
+}
+
+/// SK8 collision/fixup.rs `TriangleFeature::classify` (ComputeTriangleFeatureTypeFromNormal): the
+/// region an in-plane direction from the triangle points out of.
+fn classify(t: &[Vec3; 3], direction: Vec3) -> Region {
+    let dir = |a: Vec3, b: Vec3| (b - a).normalize_or(Vec3::ZERO);
+    // The native edge directions: v2 - v0, v1 - v2, v0 - v1.
+    let a = direction.dot(dir(t[0], t[2]));
+    let b = direction.dot(dir(t[2], t[1]));
+    let c = direction.dot(dir(t[1], t[0]));
+    let k = 0.05;
+    if a > k && b < -k {
+        Region::Vertex(2)
+    } else if b > k && c < -k {
+        Region::Vertex(1)
+    } else if c > k && a < -k {
+        Region::Vertex(0)
+    } else if a > -c && -b >= a {
+        Region::Edge(2)
+    } else if b > -a && -c >= b {
+        Region::Edge(1)
+    } else if c > -b && -a >= c {
+        Region::Edge(0)
+    } else {
+        Region::Face
+    }
+}
+
+/// The index of `t`'s corner at `p` (within the weld).
+fn corner_at(t: &[Vec3; 3], p: Vec3) -> Option<usize> {
+    t.iter().position(|v| (*v - p).length() <= WELD)
+}
+
+/// Edge `e` of triangle `t` (normal `n`) against each triangle across it among `tris` (SK8's mesh
+/// adjacency, `ExtendedEdgeCosine` / `MakeEdgeCode`): the cosine between the faces and whether the
+/// edge is convex on `n`'s side, the neighbour's normal taken on the same side (turned over when it
+/// runs the shared edge the same way, which a consistently wound mesh never does). `None`: an open
+/// edge, nothing across it.
+fn edge_neighbours<'a>(
+    tris: &'a [([Vec3; 3], Vec3)],
+    t: &'a [Vec3; 3],
+    n: Vec3,
+    e: usize,
+) -> impl Iterator<Item = (f32, bool)> + 'a {
+    let (a, b) = (t[e], t[(e + 1) % 3]);
+    tris.iter().filter_map(move |(u, un)| {
+        let ia = corner_at(u, a)?;
+        let ib = corner_at(u, b)?;
+        if corner_at(u, t[(e + 2) % 3]).is_some() {
+            return None; // The triangle itself (or its double).
+        }
+        let nu = if (ib + 1) % 3 == ia { *un } else { -*un };
+        let cosine = n.dot(nu).clamp(-1.0, 1.0);
+        let orientation = (b - a).dot(n.cross(nu));
+        Some((cosine, orientation > -1.0e-6 && cosine < 1.0))
+    })
+}
+
+/// SK8 collision/edge.rs `edge_cos_test` (EdgeCosTest, one-sided): whether `normal` lies within the
+/// bend of an edge (direction `edge`) of a face (`face`) with the given cosine and convexity.
+fn edge_cos_test(edge: Vec3, face: Vec3, normal: Vec3, cosine: f32, convex: bool) -> bool {
+    if normal.dot(edge.cross(face)) < 0.0 {
+        return true;
+    }
+    if !convex {
+        return false;
+    }
+    let projected = (normal - edge * normal.dot(edge)).normalize_or(Vec3::ZERO);
+    projected.dot(face) >= cosine
+}
+
+/// What the triangle fixup makes of a contact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fixup {
+    /// Not this triangle's contact.
+    Drop,
+    /// Kept as it is.
+    Keep,
+    /// Bent onto the triangle's face normal (an edge of a concave joint).
+    Bend,
+}
+
+/// SK8 collision/fixup.rs `fix_up_triangle` (FixUpTriangleResult) for a one-sided triangle with edge
+/// cosines, its front the side the sphere is on (flatground's meshes are not wound to a side): what
+/// becomes of a contact facing `toward` (from the triangle to the sphere). A face contact is kept. An
+/// edge contact of a convex joint is kept within the bend to the face across it
+/// (`convexity_epsilon` 0.01); one of a concave joint bends onto the face's normal when it is within
+/// the bend, unless the joint is all but flat (`edge_cos_bend_normal_threshold` 0.999); a flat
+/// joint's is dropped. A corner contact is kept within both its edges' bends, and dropped at a corner
+/// inside a flat surface. The neighbours come from `tris` (every triangle near the sphere: one across
+/// an edge the sphere is near is near it too); an open edge bends all the way round.
+fn fix_up(tris: &[([Vec3; 3], Vec3)], t: &[Vec3; 3], n: Vec3, toward: Vec3) -> Fixup {
+    const BEND_THRESHOLD: f32 = 0.999;
+    const CONVEXITY_EPSILON: f32 = 0.01;
+    let raw = toward.dot(n);
+    if raw.abs() >= FACE_TOLERANCE {
+        return Fixup::Keep;
+    }
+    // The sphere's side is the front: the face turned to it, its edges' convexity with it.
+    let back = raw < 0.0;
+    let face = if back { -n } else { n };
+    let projection = raw.abs();
+    let side = |(cosine, convex): (f32, bool)| {
+        (
+            cosine,
+            if back {
+                !convex && cosine < 1.0
+            } else {
+                convex
+            },
+        )
+    };
+    let along = (toward - n * raw).normalize_or(Vec3::ZERO);
+    match classify(t, along) {
+        Region::Face => Fixup::Keep,
+        Region::Edge(e) => {
+            let mut bend = false;
+            let ok = edge_neighbours(tris, t, n, e)
+                .map(side)
+                .all(|(cosine, convex)| {
+                    if convex {
+                        return projection + CONVEXITY_EPSILON >= cosine;
+                    }
+                    if cosine > BEND_THRESHOLD || cosine <= 0.001 {
+                        return false;
+                    }
+                    bend = true;
+                    projection > libm::sqrtf(1.0 - cosine * cosine)
+                });
+            match (ok, bend) {
+                (false, _) => Fixup::Drop,
+                (true, true) => Fixup::Bend,
+                (true, false) => Fixup::Keep,
+            }
+        }
+        Region::Vertex(v) => {
+            // Its edges: the one ending at it and the one starting from it.
+            let mut open = false;
+            let ok = [(v + 2) % 3, v].iter().all(|&e| {
+                let dir = (t[(e + 1) % 3] - t[e]).normalize_or(Vec3::ZERO);
+                let dir = if back { -dir } else { dir };
+                let mut any = false;
+                let ok = edge_neighbours(tris, t, n, e)
+                    .map(side)
+                    .all(|(cosine, convex)| {
+                        any = true;
+                        edge_cos_test(dir, face, toward, cosine, convex)
+                    });
+                open |= !any;
+                ok
+            });
+            // A corner inside a flat surface (every face round it in one plane) is disabled.
+            let p = t[v];
+            let flat = !open
+                && tris
+                    .iter()
+                    .filter(|(u, _)| corner_at(u, p).is_some())
+                    .all(|(_, un)| un.dot(n).abs() >= 0.99);
+            if ok && !flat {
+                Fixup::Keep
+            } else {
+                Fixup::Drop
+            }
+        }
+    }
+}
 
 /// A sphere against triangles: a contact a triangle, facing the centre from the triangle's closest
-/// point. An edge or corner contact whose triangle lies in the plane of a face the sphere touches is
-/// that face's inner edge and is dropped (SK8's board query bends edges under 0.999); the two nearest
-/// distinct contacts are kept.
+/// point, kept when SK8's triangle fixup takes it (no contact from a flat or concave joint's edge, nor
+/// from a convex corner's edge outside its bend) and the sphere's swept box meets the triangle; the
+/// two nearest distinct contacts are kept.
 #[allow(clippy::too_many_arguments)]
 fn sphere_triangles(
     tris: &[([Vec3; 3], Vec3)],
@@ -326,21 +506,14 @@ fn sphere_triangles(
     min_up: f32,
 ) -> [Option<ContactInput>; 2] {
     const MAX: usize = 24;
-    let mut cand: [Candidate; MAX] = [(
-        0.0,
-        Vec3::ZERO,
-        Vec3::ZERO,
-        false,
-        Vec3::ZERO,
-        [Vec3::ZERO; 3],
-    ); MAX];
+    let mut cand: [Candidate; MAX] = [(0.0, Vec3::ZERO, [Vec3::ZERO; 3]); MAX];
     let mut count = 0;
     let swept = swept_box(c, radius, (c - was) * 60.0);
     for (t, n) in tris {
         let (q, face) = closest_on_triangle(c, t);
         let d = c - q;
         let dist = d.length();
-        if dist > reach {
+        if dist > reach || !box_meets(swept, t) {
             continue;
         }
         // The side the centre is on, unless it went through the face this tick (a fast sphere).
@@ -362,6 +535,15 @@ fn sphere_triangles(
         if normal.dot(up) < min_up || (!face && !crossed && gap > radius + 0.02) {
             continue;
         }
+        let (gap, normal) = match fix_up(tris, t, *n, normal) {
+            Fixup::Drop => continue,
+            Fixup::Keep => (gap, normal),
+            // Onto the face's normal, the gap along it (SK8 `bend` reprojects the contact points).
+            Fixup::Bend => (d.dot(side), side),
+        };
+        if normal.dot(up) < min_up {
+            continue;
+        }
         // Full: the nearest are kept.
         let slot =
             if count < MAX {
@@ -376,46 +558,10 @@ fn sphere_triangles(
                 }
                 worst
             };
-        cand[slot] = (gap, normal, *n, face, q, *t);
+        cand[slot] = (gap, normal, *t);
     }
-    let cand = &cand[..count];
     let mut found: [Option<(f32, Vec3)>; 2] = [None; 2];
-    for (i, &(gap, normal, own, face, q, tri)) in cand.iter().enumerate() {
-        // An edge whose own face is coplanar with a touched face is that face's inner edge; one
-        // facing the centre within about 11 degrees of a nearer face contact is a concave joint the
-        // face already holds.
-        // An edge on the plane of a face the sphere stands on, whose own triangle rises above that
-        // plane, is a concave joint: the faces hold the sphere there, the edge doesn't (it would
-        // face the travel and stop the board dead).
-        let inner = !face
-            && cand.iter().enumerate().any(|(j, f)| {
-                if j == i || !f.3 {
-                    return false;
-                }
-                let coplanar = f.1.dot(own).abs() > 0.999;
-                let joint = f.1.dot(normal) > 0.98 && f.0 <= gap;
-                let on_plane = (q - f.4).dot(f.1).abs() < 1e-3;
-                let rises = tri.iter().any(|v| (*v - q).dot(f.1) > 1e-3);
-                // An edge on the plane of a face the sphere stands on, whose own triangle falls
-                // away behind it, is a convex corner: its normals lie between the two faces'
-                // outsides. The own face's outside is away from the standing face's triangle; an edge
-                // normal behind it (a wheel on a wall below the deck's edge, reaching up to it) is no
-                // contact of that corner.
-                let behind = on_plane && !rises && {
-                    let far =
-                        f.5.iter()
-                            .map(|v| (*v - q).dot(own))
-                            .fold(0.0f32, |a, d| if d.abs() > a.abs() { d } else { a });
-                    let outside = if far > 0.0 { -own } else { own };
-                    far.abs() > 1e-3 && normal.dot(outside) < -1e-3
-                };
-                coplanar || joint || (on_plane && rises) || behind
-            });
-        // (Every near triangle tells the joints apart; only those the sphere's swept box meets
-        // make contacts.)
-        if inner || !box_meets(swept, &tri) {
-            continue;
-        }
+    for &(gap, normal, _) in &cand[..count] {
         if let Some(same) = found.iter_mut().flatten().find(|f| f.1.dot(normal) > 0.999) {
             if gap < same.0 {
                 *same = (gap, normal);
@@ -907,6 +1053,68 @@ impl Board {
 pub(crate) mod tests {
     use super::*;
     use crate::park::Surface;
+
+    /// A triangle and its winding's unit normal.
+    fn tri(a: Vec3, b: Vec3, c: Vec3) -> ([Vec3; 3], Vec3) {
+        ([a, b, c], (b - a).cross(c - a).normalize_or(Vec3::ZERO))
+    }
+
+    #[test]
+    fn the_fixup_classifies_by_skate_3s_edge_numbering() {
+        // Edge i runs from corner i to corner i + 1.
+        let t = [v3(0.0, 0.0, 0.0), v3(0.0, 0.0, 1.0), v3(1.0, 0.0, 0.0)];
+        assert_eq!(classify(&t, v3(-1.0, 0.0, 0.0)), Region::Edge(0));
+        assert_eq!(
+            classify(&t, v3(1.0, 0.0, 1.0).normalize_or(Vec3::ZERO)),
+            Region::Edge(1)
+        );
+        assert_eq!(classify(&t, v3(0.0, 0.0, -1.0)), Region::Edge(2));
+        assert_eq!(
+            classify(&t, v3(1.0, 0.0, -1.0).normalize_or(Vec3::ZERO)),
+            Region::Vertex(2)
+        );
+    }
+
+    #[test]
+    fn the_fixup_keeps_convex_edges_bends_concave_ones_and_drops_flat_ones() {
+        // A deck top (y = 0, z >= 0) over a wall facing -z: a convex corner along x.
+        let corner = [
+            tri(v3(-1.0, 0.0, 0.0), v3(-1.0, 0.0, 1.0), v3(1.0, 0.0, 0.0)),
+            tri(v3(1.0, 0.0, 0.0), v3(-1.0, 0.0, 1.0), v3(1.0, 0.0, 1.0)),
+            tri(v3(-1.0, 0.0, 0.0), v3(1.0, 0.0, 0.0), v3(-1.0, -1.0, 0.0)),
+            tri(v3(1.0, 0.0, 0.0), v3(1.0, -1.0, 0.0), v3(-1.0, -1.0, 0.0)),
+        ];
+        let (top, n) = corner[0];
+        // Over the edge, beyond it: the corner's contact.
+        let over = v3(0.0, 1.0, -1.0).normalize_or(Vec3::ZERO);
+        assert_eq!(fix_up(&corner, &top, n, over), Fixup::Keep);
+        // On the wall below the deck's edge, reaching up to it: not the deck's.
+        let under = v3(0.0, -0.64, -0.77).normalize_or(Vec3::ZERO);
+        assert_eq!(fix_up(&corner, &top, n, under), Fixup::Drop);
+
+        // A floor (z <= 0) into a ramp rising 20 degrees: a concave joint.
+        let (h, d) = (
+            libm::sinf(20.0f32.to_radians()),
+            libm::cosf(20.0f32.to_radians()),
+        );
+        let joint = [
+            tri(v3(-1.0, 0.0, -1.0), v3(-1.0, 0.0, 0.0), v3(1.0, 0.0, -1.0)),
+            tri(v3(1.0, 0.0, -1.0), v3(-1.0, 0.0, 0.0), v3(1.0, 0.0, 0.0)),
+            tri(v3(1.0, 0.0, 0.0), v3(-1.0, 0.0, 0.0), v3(-1.0, h, d)),
+            tri(v3(1.0, 0.0, 0.0), v3(-1.0, h, d), v3(1.0, h, d)),
+        ];
+        // A wheel on the floor reaching the ramp's foot: bent onto the ramp's face.
+        let (ramp, rn) = joint[2];
+        let toward = v3(0.0, 0.03, -0.02).normalize_or(Vec3::ZERO);
+        assert_eq!(fix_up(&joint, &ramp, rn, toward), Fixup::Bend);
+        // The floor's own diagonal (flat): no edge contact.
+        let (floor, fln) = joint[0];
+        let across = v3(1.0, 1.0, 1.0).normalize_or(Vec3::ZERO);
+        assert_eq!(fix_up(&joint, &floor, fln, across), Fixup::Drop);
+        // Its open side (nothing across): an edge all the way round.
+        let off = v3(-1.0, 1.0, 0.0).normalize_or(Vec3::ZERO);
+        assert_eq!(fix_up(&joint, &floor, fln, off), Fixup::Keep);
+    }
 
     /// Flat ground at y = 0, falling to `drop` beyond z = `edge`.
     pub(crate) struct Ledge {
