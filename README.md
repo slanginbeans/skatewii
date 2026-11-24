@@ -60,7 +60,10 @@ With parks converted from your own disc, the game starts in a **start menu** lis
 skate parks the build converted, then the built-in demo park), with the last one you chose highlighted
 (`settings.txt` in the app folder remembers it; the first time, the build's default). Up/down on the d-pad or
 the control stick moves, A (or START) rides. **START** while riding opens the **pause menu**: Resume, Change
-location (the same list; B goes back), Respawn (back to the park's start), Quit to loader. B or START resumes.
+location (the same list; B goes back), Draw distance, Respawn (back to the park's start), Quit to loader. B or
+START resumes. **Draw distance** (left/right, 40 to 120 m in steps of 10, 90 by default) sets how far a city
+district is drawn and read from the card, with the fog following it: shorter runs faster on a real Wii.
+`settings.txt` remembers it too.
 While a menu is open the riding waits and the pad only drives the menu (the d-pad's gestures don't fire, and
 the A that chose an item is not a push until you let go of it). Changing location shows a loading screen
 while the park is read from the SD card (Dolphin reads the biggest, 4.2 MB, in well under a second; a real

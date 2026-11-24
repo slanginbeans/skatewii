@@ -265,8 +265,8 @@ impl GpuList {
     /// The commands drawing `indices` (a whole number of triangles) as triangles.
     pub fn triangles(indices: &[u16]) -> GpuList {
         let mut bytes: Vec<u8> = Vec::with_capacity(indices.len() * 6 + 64);
-        // Runs of whole triangles, each as many as a command's count takes.
-        for run in indices.chunks(65535 - 65535 % 3) {
+        // Runs as long as a command's count takes (65,535, a whole number of triangles).
+        for run in indices.chunks(65535) {
             bytes.push(GX_TRIANGLES_VTXFMT1);
             bytes.extend_from_slice(&(run.len() as u16).to_be_bytes());
             for &i in run {

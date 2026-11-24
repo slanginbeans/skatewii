@@ -616,8 +616,10 @@ mod tests {
             None,
             "held: one step"
         );
-        let mut left = PadRaw::default();
-        left.stick_x = -90;
+        let left = PadRaw {
+            stick_x: -90,
+            ..Default::default()
+        };
         m.update(&pad(0), DT, 4, 0);
         assert_eq!(m.update(&left, DT, 4, 0), Some(Choice::DrawDistance(80)));
         // It stops at the ends of the range.
