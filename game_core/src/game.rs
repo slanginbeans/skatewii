@@ -804,6 +804,8 @@ impl Game {
         self.flick.reset();
         self.cam.request_reset();
         self.scoring.teleport();
+        // A teleport is not the board turning under the rider.
+        self.board_watch = None;
     }
 
     /// The screen's width over its height (the platform's TV setting): the camera's field of view

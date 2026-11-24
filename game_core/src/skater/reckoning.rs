@@ -208,6 +208,12 @@ fn signed_angle(a: Vec3, b: Vec3, axis: Vec3) -> f32 {
     }
 }
 
+/// The signed angle from `a` to `b` about `axis`, -pi..pi (SK8 ground_runtime/pumping.rs's
+/// `wrap(signed_angle(..))`).
+pub fn wrapped_angle(a: Vec3, b: Vec3, axis: Vec3) -> f32 {
+    wrap(signed_angle(a, b, axis))
+}
+
 /// Into -pi..pi (SK8 reckoning_frames.rs `wrap_fraction`).
 fn wrap(angle: f32) -> f32 {
     let turns = angle / (2.0 * PI);
@@ -228,6 +234,17 @@ fn clamp_length(v: Vec3, max: f32) -> Vec3 {
 }
 
 impl Reckoning {
+    /// The rider's heading, square to his up.
+    pub fn heading(&self) -> Vec3 {
+        self.heading
+    }
+
+    /// The ground frame's right (SK8 `ReckoningFrames::ground[0]`: the smoothed ground normal across
+    /// the heading).
+    pub fn ground_right(&self) -> Vec3 {
+        normalize_or(self.ground_normal.cross(self.heading), self.right)
+    }
+
     /// One ground tick (SK8 `GroundOrientation::update`, then the frames' transform and dynamic lean).
     pub fn update(&mut self, t: &ReckoningTuning, i: ReckoningInput) {
         let com = normalize_or(i.com_to_deck, Vec3::ZERO);

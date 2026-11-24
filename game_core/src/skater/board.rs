@@ -661,6 +661,7 @@ impl Skater {
     fn update_pumping(&mut self, d: &Drive, dt: f32) {
         let t = self.tuning;
         let n = self.contact_n;
+        let deck_angle = self.deck_angle();
         let height = self.body_com.unwrap_or(-self.crouch * CROUCH_DEPTH);
         let vel = self.ground_velocity();
         let p = &mut self.pump;
@@ -698,7 +699,17 @@ impl Skater {
         p.ground_absorption =
             t.compression_vs_ground_angle.eval(angle.clamp(0.0, 1.0)) * t.compression_ground_scale;
         p.min_crouch = t.min_crouch_vs_ground_angle.eval(angle.clamp(0.0, 1.0));
-        p.deck_absorption = 0.0;
+        // The deck's angle (SK8 ground_runtime/pumping.rs `update`): when the physical deck is
+        // pitched further from the rider's up than the posed board, by how much (about the ground
+        // frame's right); it compresses the rider by `CompressionVsDeckAngle` x
+        // `CompressionDeckScalar` when that outweighs the ground's compression.
+        p.deck_absorption = t
+            .compression_vs_deck_angle
+            .eval(deck_angle * (2.0 / core::f32::consts::PI));
+        let deck_compression = t.compression_deck_scale * p.deck_absorption;
+        if deck_compression * deck_compression > p.ground_absorption * p.ground_absorption {
+            p.ground_absorption = deck_compression;
+        }
         let pumping = p.turn_rate * t.pump_vs_vel.eval(v);
         p.pumping = pumping;
         p.dv = 0.0;
@@ -710,6 +721,41 @@ impl Skater {
             self.speed += if self.speed < 0.0 { -dv } else { dv };
             self.pump.dv = dv;
         }
+    }
+
+    /// The physical deck's pitch against the posed board's, both from the rider's (reckoning) up about
+    /// the ground frame's right, when the deck is the steeper of the two (SK8 ground_runtime/pumping.rs
+    /// `update`, its `deck_angle`): a deck pitched over a kink or a transition's start while the
+    /// rider's up lags. The posed board is the imported rider's (`GraphControl::pose_deck`, in the
+    /// rider's frame), else level in it.
+    fn deck_angle(&self) -> f32 {
+        // All in the board's effective frame (the rider's), turned end for end with it.
+        let r = &self.reckoning;
+        let turn = if self.frame_turned { -1.0 } else { 1.0 };
+        let up = r.up;
+        let axis = r.ground_right() * turn;
+        // The rider's frame: his heading square to his up.
+        let right = up.cross(r.heading() * turn).normalize_or(axis);
+        let heading = right.cross(up).normalize_or(r.heading() * turn);
+        let posed = self.graph.and_then(|g| g.pose_deck).unwrap_or(Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        });
+        let animated = right * posed.x + up * posed.y + heading * posed.z;
+        let frame = self.board_frame();
+        let mut deck = frame.cols[2];
+        if let Some(m) = &self.manual {
+            // The manual pitches the deck about the wheels left down: a tail manual's nose up.
+            let lift = if m.nose { -m.pitch } else { m.pitch };
+            deck = deck * libm::cosf(lift) + frame.cols[1] * libm::sinf(lift);
+        }
+        if deck.dot(up).abs() <= animated.dot(up).abs() {
+            return 0.0;
+        }
+        let physical = super::reckoning::wrapped_angle(deck, up, axis);
+        let posed = super::reckoning::wrapped_angle(animated, up, axis);
+        (physical - posed).abs()
     }
 
     /// The floor under a point on a steep face: its normal and how far below (m), looking straight down.

@@ -844,9 +844,10 @@ dismount states: no wipeout request is raised) where flatground's plays a bump a
 the wipeout's lean and twist come from the drawn bail, not a ragdoll's hips; the d-pad's gestures are
 a fixed set (Skate 3's are the player's pick). The
 turn conditioner's lean comes from the kinematic board's acceleration, so a full carve's lean builds
-faster than SK8's rigid board lets it (0.64 against 0.44 rad 9 ticks in, both 0.88 steady); Crouching has no board or ground absorption
-force (only its restoring force) and no deck-angle crouch; the powerslide's side for SetTurning is the
-physics' slide.
+faster than SK8's rigid board lets it (0.64 against 0.44 rad 9 ticks in, both 0.88 steady); the
+deck-angle crouch reads the kinematic board's pitch (the chord between its trucks' contacts, and a
+manual's), not a rigid deck pivoting over an edge, so a drop-in reports it at other times than SK8's
+(both 0.1 to 0.9 through the transition); the powerslide's side for SetTurning is the physics' slide.
 
 ## The camera (`game_core/src/camera`)
 
@@ -994,7 +995,11 @@ Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_
 - **Pumping**: the height the pump watches is the animated COM over the board; the ground's angle
   reports its compression and least crouch to the crouch (`CompressionVsGroundAngle` x
   `CompressionGroundScalar`, `MinCrouchVsGroundAngle`), with the board's absorption and the pumping as
-  its potential; the pumping and compression tuning is the disc's.
+  its potential; the pumping and compression tuning is the disc's. The deck's angle (`feel-parity`,
+  SK8 ground_runtime/pumping.rs): when the board is pitched further from the rider's reckoning up
+  than the posed board, the difference reports `CompressionVsDeckAngle` (the crouch's
+  `MaxCrouchFromDeckAngle` floor) and `CompressionDeckScalar` x it as the ground's compression when
+  that is the larger; it was 0.
 - **Drop-ins**: Skate 3's drop-in depth windows (a tip 0.06 m, a 5-0 0.13 m from the deck's centre), and
   while a board rolled off an edge is still tipping over it, rails are ridden onto, not landed on: a slow
   roll off a half pipe's deck goes into the transition (it was a 0 m/s nose blunt or lipslide).

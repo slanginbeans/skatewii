@@ -6764,6 +6764,30 @@ mod tests {
     }
 
     #[test]
+    fn a_deck_pitched_from_the_riders_up_compresses_the_crouch() {
+        // SK8 ground_runtime/pumping.rs: the physical deck pitched further from the rider's up than
+        // the posed board reports `CompressionVsDeckAngle` of the difference (quarter turns) to the
+        // crouch, and `CompressionDeckScalar` x that as the ground's compression when it outweighs it.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 4.0;
+        steps(&mut s, &park, &Pad::default(), None, 30);
+        assert_eq!(s.pump.deck_absorption, 0.0, "level with the rider's up");
+        // The rider's up leaning back 0.3 rad from the deck's (as over a transition's start).
+        let right = s.reckoning.ground_right();
+        s.reckoning.up = rotate(Vec3::UP, right, 0.3);
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        let t = &s.tuning;
+        let want = t.compression_vs_deck_angle.eval(0.3 * 2.0 / PI);
+        assert!(
+            (s.pump.deck_absorption - want).abs() < 0.02,
+            "{} against {want}",
+            s.pump.deck_absorption
+        );
+        assert!((s.pump.ground_absorption - t.compression_deck_scale * want).abs() < 0.2);
+    }
+
+    #[test]
     fn a_manual_lifted_off_the_ground_bleeds_its_correction() {
         // SK8 manual/controller.rs: the manual's wheels off the ground, the correction bleeds by
         // `TorqueBleedOffWithNoContact` (0.96) a tick and turns the deck by `TorqueScalarWithNoContact`
