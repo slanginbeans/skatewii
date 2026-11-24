@@ -20,6 +20,7 @@ use crate::model::Models;
 use crate::pack::Pack;
 use crate::park::{Park, Terrain};
 use crate::rider::Rider;
+use crate::scoring::{Frame as ScoreFrame, Scoring};
 use crate::skater::{ClipTiming, Event, Mode, Skater, Stance};
 use crate::tuning::Tuning;
 use crate::world::ImportedPark;
@@ -194,7 +195,10 @@ pub struct Game {
     pub tuning: Tuning,
     pub stance: Stance,
     cam: CameraMan,
+    /// The total score (every line banked and the one going on), from `scoring`.
     pub score: u32,
+    /// Skate 3's trick scoring, combos and lines.
+    pub scoring: Scoring,
     popup: Option<Popup>,
     prev_held: u32,
     /// How far the imported character's origin has moved from the deck's centre (the riding clips') to
@@ -292,6 +296,7 @@ impl Game {
             tuning: Tuning::BUILT_IN,
             stance: Stance::Goofy,
             score: 0,
+            scoring: Scoring::new(),
             popup: None,
             prev_held: 0,
             foot_origin: 0.0,
@@ -424,6 +429,7 @@ impl Game {
         self.cam.request_reset();
         self.prev_view = None;
         self.popup = None;
+        self.scoring.teleport();
         if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
             g.runner.reset(Some(&lib.db));
             g.input.reset();
@@ -537,13 +543,20 @@ impl Game {
         core::mem::take(&mut self.settings_changed)
     }
 
-    /// Uses a rules pack (`fg_import rules`): Skate 3's tuning values and flick shapes from the player's
-    /// disc. Returns how many tuning values and flick shapes it supplied.
+    /// Uses a rules pack (`fg_import rules`): Skate 3's tuning values, flick shapes and trick scoring
+    /// from the player's disc. Returns how many tuning values and flick shapes it supplied.
     pub fn load_rules(&mut self, pack: &[u8]) -> Result<(usize, usize), crate::pack::Error> {
         let pack = Pack::parse(pack)?;
         let mut values = 0;
         if let Some(e) = pack.find("rules/tuning") {
-            values = self.tuning.apply(e.data);
+            values = self.tuning.apply(e.data) + self.scoring.rules.apply(e.data);
+        }
+        // The disc's trick catalogue (points and completion delays), else Skate 3's built-in one.
+        if let Some(e) = pack.find(crate::scoring::catalog::ENTRY) {
+            match crate::scoring::Catalog::parse(e.data) {
+                Some(c) => self.scoring.catalog = c,
+                None => self.log.push("scoring: trick catalogue unreadable".into()),
+            }
         }
         let mut shapes = 0;
         if let Some(e) = pack.find("rules/gestures/skater")
@@ -639,6 +652,7 @@ impl Game {
         self.skater.reset_to_spawn(ground);
         self.flick.reset();
         self.cam.request_reset();
+        self.scoring.teleport();
     }
 
     /// Puts the rider on the board at `pos` (on the ground there), heading `heading` (yaw), rolling at
@@ -662,6 +676,7 @@ impl Game {
         self.skater.put_at(ground, pos, heading, speed);
         self.flick.reset();
         self.cam.request_reset();
+        self.scoring.teleport();
     }
 
     /// The screen's width over its height (the platform's TV setting): the camera's field of view
@@ -797,7 +812,7 @@ impl Game {
         self.watch_board();
         for e in &self.events {
             match e {
-                Event::Landed { name, points } => {
+                Event::Landed { name, points, .. } => {
                     self.board_watch = Some(BoardWatch {
                         trick: name.clone(),
                         speed: self.skater.speed,
@@ -807,7 +822,6 @@ impl Game {
                         lo: 0.0,
                         hi: 0.0,
                     });
-                    self.score += points;
                     self.popup = Some(Popup {
                         title: name.clone(),
                         detail: format!("+{points}"),
@@ -932,6 +946,21 @@ impl Game {
         let air = self.skater.is_airborne();
         let t_step = now(self.timer);
         self.skater.step(ground, &pad, &flick, dt, &mut events);
+        // Skate 3's scoring: the tricks landed this tick into the sequence, then the timers and the line.
+        let frame = ScoreFrame::of(&self.skater);
+        for e in &mut events {
+            if let Event::Landed {
+                name,
+                points,
+                score,
+            } = e
+            {
+                *points = libm::roundf(self.scoring.credit(name, score, &frame)) as u32;
+            }
+        }
+        self.scoring
+            .advance(&frame, dt, events.contains(&Event::Respawned));
+        self.score = libm::roundf(self.scoring.total()) as u32;
         let off_clips = self.graph.is_some()
             && (self.skater.mode == Mode::Walk
                 || self
@@ -1312,6 +1341,7 @@ impl Game {
             &speed,
             white,
         );
+        self.draw_line(&mut m);
 
         if let Some(p) = &self.popup {
             // Pop in with a slight scale-up, no wider than most of the screen.
@@ -1346,7 +1376,14 @@ impl Game {
             } else {
                 rgb(200, 255, 200)
             };
-            hud::text(&mut m, 24.0, 52.0, 2.5, &line, colour);
+            hud::text(
+                &mut m,
+                SCREEN_W - 24.0 - hud::text_width(&line, 2.0),
+                50.0,
+                2.0,
+                &line,
+                colour,
+            );
         }
         if let Some(menu) = &self.menu {
             let names: Vec<&str> = self.locations.iter().map(|l| l.name.as_str()).collect();
@@ -1382,6 +1419,61 @@ impl Game {
         gfx.draw_2d(&m.verts);
     }
 }
+
+impl Game {
+    /// The line going on, under the score (Skate 3's scoring HUD, compactly): its score and multiplier
+    /// with the sequence being skated, the line timer as a bar, and its tricks (the latest that fit).
+    fn draw_line(&self, m: &mut MeshBuilder) {
+        let s = &self.scoring;
+        if !s.in_line() {
+            return;
+        }
+        let (x, y) = (24.0, 50.0);
+        let gold = rgb(255, 230, 90);
+        let mut head = format!(
+            "LINE {}  X{}",
+            libm::roundf(s.line_score()) as u32,
+            s.multiplier()
+        );
+        let live = s.sequence_score();
+        if live >= 0.5 {
+            head.push_str(&format!("  +{}", libm::roundf(live) as u32));
+        }
+        hud::text(m, x, y, LINE_PX, &head, gold);
+        // The line timer: full at its capacity.
+        let (w, by) = (LINE_BAR_W, y + LINE_PX * 5.0 + 3.0);
+        m.rect_2d(x, by, w, 3.0, rgb(30, 30, 30));
+        m.rect_2d(x, by, w * s.line_fill(), 3.0, gold);
+        // The tricks, newest last, as many as fit.
+        let room = SCREEN_W * 0.45;
+        let names: Vec<&str> = s.names().collect();
+        let mut first = names.len();
+        let mut width = 0.0;
+        while first > 0 {
+            let add = hud::text_width(names[first - 1], LINE_NAMES_PX)
+                + if first == names.len() {
+                    0.0
+                } else {
+                    hud::text_width(" + ", LINE_NAMES_PX)
+                };
+            if width + add > room && first < names.len() {
+                break;
+            }
+            width += add;
+            first -= 1;
+        }
+        if first < names.len() {
+            let text = names[first..].join(" + ");
+            let px = LINE_NAMES_PX.min(room / (4.0 * text.chars().count().max(1) as f32));
+            hud::text(m, x, by + 7.0, px, &text, rgb(255, 255, 255));
+        }
+    }
+}
+
+/// The line's text size, its timer bar's width, and the size of its trick names (above the trick popup).
+const LINE_PX: f32 = 2.5;
+const LINE_BAR_W: f32 = 120.0;
+const LINE_NAMES_PX: f32 = 2.0;
 
 /// The posed board's nose in the rider's space from the imported rider's last pose, as Skate 3 reads it
 /// for the deck's yaw and pitch: turned round for a mirrored rider, whose clips turn the posed board end
@@ -1579,6 +1671,63 @@ mod tests {
         assert!(lo >= SCREEN_W * 0.09 && hi <= SCREEN_W * 0.91, "{lo}..{hi}");
         let tall = o.0.iter().map(|v| v.pos[1]).fold(0.0f32, f32::max);
         assert!(tall < SCREEN_H * 0.4, "{tall}");
+    }
+
+    #[test]
+    fn the_line_is_shown_under_the_score_and_clear_of_the_trick_popup() {
+        let mut g = Game::new();
+        g.update(&held(0), 1.0 / 60.0);
+        let gold = rgb(255, 230, 90);
+        let lines = |g: &Game| {
+            let mut o = Overlay::default();
+            g.render(&mut o);
+            o.0.retain(|v| v.rgba == gold || v.rgba == rgb(30, 30, 30));
+            o.0
+        };
+        assert!(lines(&g).is_empty(), "no line yet");
+        // Three tricks in a line (credited as the skater's landings would be).
+        let frame = ScoreFrame {
+            collector: crate::scoring::Collector::Ground,
+            speed: 6.0,
+            ..ScoreFrame::default()
+        };
+        for name in ["KICKFLIP", "FS 50-50 A VERY LONG GRIND NAME", "HEELFLIP"] {
+            let id = crate::scoring::catalog::id(if name == "HEELFLIP" {
+                "heelflip"
+            } else {
+                "kickflip"
+            });
+            let s = crate::scoring::Scored::Air(crate::scoring::Air {
+                trick: id,
+                ..Default::default()
+            });
+            g.scoring.credit(name, &s, &frame);
+            for _ in 0..4 {
+                g.scoring.advance(&frame, TICK, false);
+            }
+        }
+        assert!(g.scoring.in_line() && g.scoring.multiplier() > 1.0);
+        let v = lines(&g);
+        assert!(!v.is_empty(), "the line and its timer are drawn");
+        // Under the score, left of the middle, and above the trick popup (y 96).
+        assert!(
+            v.iter().all(|v| v.pos[1] > 45.0 && v.pos[1] < 96.0),
+            "{v:?}"
+        );
+        assert!(v.iter().all(|v| v.pos[0] < SCREEN_W * 0.5));
+        // The trick names (white) fit beside it, above the popup.
+        let mut o = Overlay::default();
+        g.render(&mut o);
+        let names: Vec<_> =
+            o.0.iter()
+                .filter(|v| v.rgba == rgb(255, 255, 255) && v.pos[1] > 70.0 && v.pos[1] < 96.0)
+                .collect();
+        assert!(!names.is_empty());
+        assert!(
+            names
+                .iter()
+                .all(|v| v.pos[0] <= 24.0 + SCREEN_W * 0.45 + 1.0)
+        );
     }
 
     #[test]

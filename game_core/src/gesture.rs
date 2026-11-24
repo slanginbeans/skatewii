@@ -458,11 +458,6 @@ impl Trick {
         }
     }
 
-    pub fn points(self) -> u32 {
-        let (flip, shove) = self.motion();
-        100 + 200 * flip.abs() as u32 + 150 * shove.abs() as u32
-    }
-
     /// The mirror-image trick (what the same stick motion does for the other stance).
     pub fn mirrored(self) -> Trick {
         match self {
@@ -524,10 +519,6 @@ impl Flick {
             return None;
         }
         Some(Flick { trick, nollie })
-    }
-
-    pub fn points(self) -> u32 {
-        self.trick.points() + if self.nollie { 20 } else { 0 }
     }
 }
 

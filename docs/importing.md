@@ -391,9 +391,16 @@ Writes `imported/rules.fgpak` (about 80 KB) with what makes the skating feel lik
   (`game_core::tuning::camera::PATHS`: `camera_tracker`, `camera/dynamics`, `camera/rotation`,
   `camera/subject_tracker`, `camera_compass`, `camera_positioner`, `camera_droppredictor`,
   `camera_lag_profile`) and the grinds' numbers (`game_core::tuning::grind::PATHS`: `physics_grinds`, `physics_grinds_air`, grind
-  targeting, grind wipeouts, the board's dimensions, the grind trees' twist and height).
+  targeting, grind wipeouts, the board's dimensions, the grind trees' twist and height), and the scoring
+  module's numbers (`game_core::scoring::rules::PATHS`: the line and combo timers, the multiplier's levels,
+  the repetition and announcement curves, the bail and unannounced factors, the collectors' time, distance,
+  air and grab curves and their landing and take-off factors).
   Values are found by hashing their names, as the game does; inherited values are followed up the parent
   chain.
+- `rules/scoring`: the trick catalogue: every trick's points and completion delay (300 on the US/EU
+  disc) from its scoring record (class `Hash_6918469984A8C596`, one collection per trick, named by the
+  trick's identifier in the executable's enum, `game_core::scoring::catalog::IDENTIFIERS`; a record whose
+  id disagrees with the enum is skipped). Layout from SK8's `skate-data/src/scoring.rs`.
 - `rules/camera/graph`: Skate 3's camera graph (`data/script/camera/Default_cameragraph.stategraph` in
   `miscload.big`, the low and high cameras), compiled for the game's graph runner like the motion graphs
   (`game_core::graph`, one graph named `Camera`).
@@ -406,7 +413,9 @@ Writes `imported/rules.fgpak` (about 80 KB) with what makes the skating feel lik
   finger flips, the left stick).
 
 Without it the game uses its own built-in values and shapes, which only approximate Skate 3's, and its own
-camera shots and shot choice (`game_core::camera::builtin`, `select::built_in`).
+camera shots and shot choice (`game_core::camera::builtin`, `select::built_in`). Its scoring then uses
+Skate 3's stock numbers built in (`game_core::scoring::rules::Rules::BUILT_IN`) and Skate 3's points for the
+tricks flatground can do (`scoring::catalog`).
 
 ### Water and menu tables (from the executable)
 Two tables exist only inside the game's code: the ocean PCA water animation and the front-end menu tables.

@@ -109,7 +109,6 @@ const TOGGLE_WAIT: f32 = 2.0;
 /// (flatground's own rules; with the state graphs the revert gesture decides).
 const LANDING_SHOW: f32 = 1.5;
 const REVERT_WINDOW: f32 = 0.4;
-const REVERT_POINTS: u32 = 100;
 /// A spin landing keeps pivoting the board this long (s, ours), fading as a wall hit's turn does.
 const SPIN_PIVOT_TIME: f32 = 0.15;
 /// Without the state graphs: landing while still grabbing with the C-stick tweaking the grab this far
@@ -126,20 +125,12 @@ const MANUAL_SWEET: f32 = 0.35;
 /// The C-stick deflection a manual balances at (for the log).
 pub const MANUAL_BALANCED_AT: f32 = MANUAL_MIN + MANUAL_SWEET * (MANUAL_BRAKE - MANUAL_MIN);
 const MANUAL_MIN_TIME: f32 = 0.5;
-const MANUAL_POINTS_PER_S: f32 = 120.0;
 /// Analog trigger past this holds a grab: any pressure, as Skate 3 and the state graphs' grab intents
 /// (`graph::input`) count it; the pad's trigger dead zone (`input::TRIGGER_DEAD_ZONE`) already took out a
 /// trigger at rest, so the physics and the graphs agree on when the rider grabs.
 const GRAB_TRIGGER: f32 = 0.0;
-const GRAB_POINTS: u32 = 200;
-/// Points per whole body flip turn (ours).
-const BODY_FLIP_POINTS: u32 = 600;
-const GRAB_POINTS_PER_S: f32 = 150.0;
-/// A foot plant in the air on top of its grab's points (flatground's).
-const FOOTPLANT_POINTS: u32 = 300;
 /// Both push buttons pressed within this of each other wind up a hippie jump.
 const HIPPY_CHORD: f32 = 0.08;
-const HIPPY_POINTS: u32 = 150;
 /// Most flips a held kickflip or heelflip can reach (Skate 3: four).
 const MAX_FLIPS: u8 = 4;
 
@@ -394,8 +385,10 @@ impl ActiveTrick {
         }
     }
 
-    pub fn points(&self) -> u32 {
-        self.flick.points() + (self.flips.saturating_sub(1)) as u32 * 250
+    /// Skate 3's trick id for it: the flip (doubles up to quadruples of kick and heel flips, the nollie
+    /// and late versions, a dark catch) as its scoring catalogue names it.
+    pub fn scorable(&self) -> Option<u16> {
+        crate::scoring::catalog::flip_id(self.flick, self.flips, self.late, self.dark)
     }
 
     pub fn name(&self) -> String {
@@ -659,9 +652,12 @@ pub struct Revert {
 pub enum Event {
     Popped(Flick),
     Launched,
+    /// A trick landed: its name as shown, what it was (for Skate 3's scoring) and its raw reward (filled
+    /// in by the game's scoring; 0 from the skater).
     Landed {
         name: String,
         points: u32,
+        score: crate::scoring::Scored,
     },
     Bailed,
     /// Stepped off the board after a hit (no respawn).
@@ -2157,7 +2153,8 @@ impl Skater {
                 if w.time > 0.0 {
                     events.push(Event::Landed {
                         name: "WALLRIDE".into(),
-                        points: 250 + (w.time * 200.0) as u32,
+                        points: 0,
+                        score: crate::scoring::Scored::Flat(250 + (w.time * 200.0) as u32),
                     });
                 }
                 let n = self.contact_n;
@@ -2213,17 +2210,29 @@ impl Skater {
     fn update_revert(&mut self, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
         let n = self.contact_n;
+        let fs_side = self.frontside_sign(self.speed < 0.0);
+        let graphs = self.graph.is_some();
         let Some(r) = &mut self.revert else { return };
         r.time += dt;
         let left = PI - r.turned;
         let tolerance = t.revert_tolerance.eval(n.y) * PI / 180.0;
         if left < tolerance || r.time > t.revert_duration {
+            // Skate 3's fsrevert / bsrevert: the graphs say which (+1 frontside); without them, the
+            // turn's way for the stance.
+            let fs = if graphs {
+                r.side > 0.0
+            } else {
+                r.side * fs_side > 0.0
+            };
+            let id = crate::scoring::catalog::id(if fs { "fsrevert" } else { "bsrevert" });
+            let held = r.time;
             self.revert = None;
             self.fakie = self.speed < 0.0;
             self.fakie_timer = 0.0;
             events.push(Event::Landed {
                 name: "REVERT".into(),
-                points: REVERT_POINTS,
+                points: 0,
+                score: crate::scoring::Scored::Ground { id, held },
             });
             return;
         }
@@ -2689,9 +2698,11 @@ impl Skater {
         if let Some(m) = self.manual.take()
             && m.time >= MANUAL_MIN_TIME
         {
+            let id = crate::scoring::catalog::id(if m.nose { "nosemanual" } else { "tailmanual" });
             events.push(Event::Landed {
                 name: (if m.nose { "NOSE MANUAL" } else { "MANUAL" }).into(),
-                points: (m.time * MANUAL_POINTS_PER_S) as u32,
+                points: 0,
+                score: crate::scoring::Scored::Ground { id, held: m.time },
             });
         }
     }
@@ -3259,16 +3270,23 @@ impl Skater {
     }
 
     /// The name and points of the jump so far (without spin and grab), for grinds and landings.
-    fn trick_label(&self) -> Option<(String, u32)> {
+    /// The air's trick as shown, and its Skate 3 trick id.
+    fn trick_label(&self) -> Option<(String, Option<u16>)> {
         if let Some(tr) = &self.trick {
-            return Some((tr.name(), tr.points()));
+            return Some((tr.name(), tr.scorable()));
         }
         if let Some(k) = self.plant_trick {
-            return Some((String::from(k.name()), k.points()));
+            return Some((
+                String::from(k.name()),
+                crate::scoring::catalog::id(k.trick()),
+            ));
         }
-        self.takeoff
-            .hippy
-            .then(|| (String::from("HIPPIE JUMP"), HIPPY_POINTS))
+        self.takeoff.hippy.then(|| {
+            (
+                String::from("HIPPIE JUMP"),
+                crate::scoring::catalog::id("hippyjump"),
+            )
+        })
     }
 
     /// Stance words for a name: FAKIE or SWITCH (from take-off).
@@ -3388,10 +3406,14 @@ impl Skater {
         if floor.dot(n) >= t.wallride_max_dot_floor || height < WALLRIDE_MIN_HEIGHT {
             return false;
         }
-        if let Some((name, points)) = self.trick_label() {
+        if let Some((name, trick)) = self.trick_label() {
             events.push(Event::Landed {
                 name: format!("{}{name}", self.stance_prefix()),
-                points,
+                points: 0,
+                score: crate::scoring::Scored::Air(crate::scoring::Air {
+                    trick,
+                    ..Default::default()
+                }),
             });
         }
         self.mode = Mode::Rolling;
@@ -3625,6 +3647,7 @@ impl Skater {
         let footplant = self.footplanted.take();
         let grab_name = footplant.or(grab.map(|g| g.name));
         let mut label = self.trick_label();
+        let mut body_flips = 0;
         if let Some((front, turns)) = self.flipped.take() {
             let flip = match (front, turns) {
                 (true, 1) => String::from("FRONTFLIP"),
@@ -3632,9 +3655,8 @@ impl Skater {
                 (true, n) => format!("{n}X FRONTFLIP"),
                 (false, n) => format!("{n}X BACKFLIP"),
             };
-            let (name, points) =
-                label.map_or((flip.clone(), 0), |(l, p)| (format!("{flip} {l}"), p));
-            label = Some((name, points + BODY_FLIP_POINTS * turns));
+            body_flips = turns;
+            label = Some(label.map_or((flip.clone(), None), |(l, id)| (format!("{flip} {l}"), id)));
         }
         let fs = (halves as f32) * self.frontside_sign(self.takeoff.fakie) > 0.0;
         if let Some(name) = landed_name(
@@ -3644,23 +3666,30 @@ impl Skater {
             fs,
             grab_name,
         ) {
-            let base = label.map_or(0, |l| l.1);
-            let spin_bonus = halves.unsigned_abs() * 150;
-            let grab_bonus = grab.map_or(0, |g| GRAB_POINTS + (g.time * GRAB_POINTS_PER_S) as u32)
-                + if footplant.is_some() {
-                    FOOTPLANT_POINTS
-                } else {
-                    0
-                };
-            let air_bonus = 1.0 + air_time.min(2.0);
-            let mut points = ((base + spin_bonus + grab_bonus) as f32 * air_bonus) as u32;
+            // Skate 3's scoring: the trick, the grab held longest, a foot plant, the spin and body flips
+            // (the air's distance and height the game's scoring measures itself).
+            let score = crate::scoring::Air {
+                trick: label.and_then(|l| l.1),
+                grab: grab.and_then(|g| Some((crate::scoring::catalog::grab_id(g.name)?, g.time))),
+                footplant: footplant.and_then(crate::scoring::catalog::id),
+                halves: halves.unsigned_abs(),
+                body_flips,
+                landing: match kind {
+                    LandKind::Clean => crate::scoring::Landing::Clean,
+                    LandKind::Sketchy { .. } => crate::scoring::Landing::Sketchy,
+                    LandKind::Spin => crate::scoring::Landing::Plain,
+                },
+            };
             let name = if matches!(kind, LandKind::Sketchy { .. }) {
-                points /= 2;
                 format!("SKETCHY {name}")
             } else {
                 name
             };
-            events.push(Event::Landed { name, points });
+            events.push(Event::Landed {
+                name,
+                points: 0,
+                score: crate::scoring::Scored::Air(score),
+            });
         }
         self.mode = Mode::Rolling;
         self.trick = None;
@@ -4735,7 +4764,8 @@ mod tests {
         assert!(!m.nose && m.time > 1.7);
         let ev = steps(&mut s, &park, &Pad::default(), None, 1);
         assert!(
-            matches!(&ev[..], [Event::Landed { name, points }] if name == "MANUAL" && *points >= 200),
+            matches!(&ev[..], [Event::Landed { name, score: crate::scoring::Scored::Ground { id, held }, .. }]
+                if name == "MANUAL" && *id == crate::scoring::catalog::id("tailmanual") && *held > 1.7),
             "{ev:?}"
         );
         let ev = hold_manual(&mut s, &park, 5.0, false);

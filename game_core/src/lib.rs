@@ -34,6 +34,7 @@ pub mod park;
 pub mod rails;
 pub mod reader;
 pub mod rider;
+pub mod scoring;
 pub mod skater;
 pub mod skinned;
 pub mod tuning;

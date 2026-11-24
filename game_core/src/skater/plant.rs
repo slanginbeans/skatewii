@@ -96,14 +96,6 @@ impl PlantKind {
         }
     }
 
-    /// flatground's points (Skate 3's come from its scoring data).
-    pub fn points(self) -> u32 {
-        match self {
-            PlantKind::NoComply => 150,
-            _ => 200,
-        }
-    }
-
     /// Skate 3's action graph (`OnGround/Grabbing/LeftGrab|RightGrab`, `Goofy|Regular`): a ground grab
     /// with the left trigger or the right, the right foot's push (A, `RightPush`) or the left's (B), for
     /// the rider's poses mirrored (regular stance) or not. The front hand's grab is frontside; the

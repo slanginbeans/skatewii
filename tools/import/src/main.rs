@@ -22,6 +22,7 @@ mod raster;
 mod refpack;
 mod rules;
 mod rw4;
+mod scoring;
 mod skater;
 mod skin;
 mod starts;

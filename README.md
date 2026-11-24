@@ -11,7 +11,10 @@ versions), held double and triple kickflips, air spins that reward a wind-up, gr
 The board follows any surface under its trucks: banks, curved transitions and vert (air out over the
 coping, land back in fakie), wallrides across steep faces, pumping, and grinds and slides chosen by how the
 board meets the rail (50-50, 5-0, nosegrind, crooked, willy, feeble, smith, boardslide, lipslide, noseslide,
-tailslide). Bails come from what the board hits: walls, hard or off-axis landings. With your own Skate 3 disc the build also takes Skate 3's own riding numbers and
+tailslide). Bails come from what the board hits: walls, hard or off-axis landings. Tricks score as in
+Skate 3 (its points, repetition penalty, grind, manual and grab curves, air height and spin), and linked
+tricks build a line with Skate 3's multiplier and line timer (shown under the score); a bail ends the line.
+With your own Skate 3 disc the build also takes Skate 3's own riding numbers, trick points and
 flick shapes from it. Tested on the PC and on an emulated Wii CPU. **Not yet run on a Wii or in Dolphin.**
 Plan: [ROADMAP.md](ROADMAP.md).
 
@@ -100,7 +103,8 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
   flick.rs         the flick stick: gestures, crouch, manual hold
   gesture.rs       Skate 3-style stick-shape recogniser, the 30 flick tricks and their stance mirroring
   tuning.rs        every riding number (built in, or Skate 3's from the player's disc)
-  skater.rs        board physics, stance, pushing, braking, landing rules, trick scoring
+  skater.rs        board physics, stance, pushing, braking, landing rules, what each landed trick was
+  scoring/         Skate 3's trick scoring: its trick catalogue, rewards, combo multiplier and lines
   camera/          Skate 3's camera: shots and blends, the camera graph's choice, rig, collision, framing
   park.rs          height-field park made of blocks and ramps (placeholder geometry in code)
   game.rs          update + render loop; draws only through gfx::Gfx

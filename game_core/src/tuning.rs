@@ -64,7 +64,7 @@ impl Curve {
     }
 
     /// From a tuning value: x values then y values.
-    fn from_values(v: &[f32]) -> Option<Curve> {
+    pub(crate) fn from_values(v: &[f32]) -> Option<Curve> {
         let n = v.len() / 2;
         if n == 0 || !v.len().is_multiple_of(2) || n > CURVE_POINTS {
             return None;

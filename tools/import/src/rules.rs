@@ -1,5 +1,6 @@
 //! `fg_import rules`: Skate 3's riding rules from the player's disc as `rules.fgpak`: the tuning values
-//! flatground's skating reads (`game_core::tuning::PATHS`, from the `skatercollections` database) and
+//! flatground's skating and scoring read (`game_core::tuning::PATHS`, `game_core::scoring::rules::PATHS`,
+//! from the `skatercollections` database), the trick catalogue (`rules/scoring`, [`crate::scoring`]) and
 //! the flick-stick shapes (`data/joystick/*.pat`).
 
 use crate::attrib::Database;
@@ -107,7 +108,9 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let db = database(disc)?;
     let mut values = Vec::new();
     let mut missing = Vec::new();
-    for path in game_core::tuning::all_paths() {
+    let paths =
+        || game_core::tuning::all_paths().chain(game_core::scoring::rules::PATHS.iter().copied());
+    for path in paths() {
         match db.values(path) {
             Some(v) => values.push((path, v)),
             None => missing.push(path),
@@ -124,6 +127,21 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         height: 0,
         gx_format: 0,
     }];
+    // The trick catalogue: every trick's points and completion delay.
+    let tricks =
+        crate::scoring::catalogue(|name, field| db.raw(crate::scoring::CLASS, name, field));
+    if tricks.is_empty() {
+        eprintln!("scoring: no trick records found (the built-in catalogue stays)");
+    } else {
+        items.push(pack::Item {
+            name: game_core::scoring::catalog::ENTRY.into(),
+            kind: Kind::Data,
+            data: game_core::scoring::catalog::encode(&tricks),
+            width: 0,
+            height: 0,
+            gx_format: 0,
+        });
+    }
     // The camera: Skate 3's camera graph and every shot it can choose.
     let compiled = crate::camera::graph(&read_asset(disc, crate::camera::GRAPH)?)?;
     let roots = crate::camera::shots_named(&compiled)?;
@@ -180,11 +198,12 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
     let bytes = pack::write(&items);
     std::fs::write(&path, &bytes)?;
     println!(
-        "rules -> {} ({} bytes): {} of {} tuning values, {} flick shapes in {} files",
+        "rules -> {} ({} bytes): {} of {} tuning values, {} tricks, {} flick shapes in {} files",
         path.display(),
         bytes.len(),
         values.len(),
-        game_core::tuning::all_paths().count(),
+        paths().count(),
+        tricks.len(),
         shape_count,
         SHAPES.len()
     );
