@@ -931,6 +931,72 @@ deck-angle crouch reads the kinematic board's pitch (the chord between its truck
 manual's), not a rigid deck pivoting over an edge, so a drop-in reports it at other times than SK8's
 (both 0.1 to 0.9 through the transition); the powerslide's side for SetTurning is the physics' slide.
 
+## The rigid board (`game_core/src/physics`)
+
+Skate 3's board is a jointed assembly of rigid bodies that one constraint solve moves every tick. The port
+follows SK8's reconstruction of it (crates/skate-core/src/physics: board_step.rs, solver.rs and
+solver/, joint_builder.rs, drive_solver/, contact.rs, solver/contact_build/, rigid_body.rs and
+rigid_body/dynamic_update.rs, mass.rs and construction/, joint_records.rs, drive_frames.rs,
+truck_frames.rs, drive_parameters.rs, point_force.rs, force_queue.rs, deck_angular_correction.rs).
+
+**SK8's structure.** One tick of `BoardStep::advance`:
+
+1. The queued point forces (`BoardForceQueue`, at most 21: the ground behaviours' forces, each a world
+   force at a deck-local point lifted by `DeckForceYOffset`) are added to the deck's force and torque
+   accelerators (`accumulate_point_force`). Angular corrections (heading, straighten, the manual) go
+   straight into the deck's torque accelerator as the acceleration that turns it by a displacement in
+   one tick (`deck_angular_correction.rs`).
+2. Constraint rows are compiled from the bodies' current state: a contact row per narrow-phase contact
+   (normal plus two friction axes, a position-only lane), six joints (deck to each truck, truck to
+   each wheel) and the drives (each truck to the deck, turning it to the steering's target about its
+   31 degree axle; the hook drive to the animated board, off while riding).
+3. `solve_constraints` runs the configured iterations (50, measured in TU3), each a pass over the
+   contacts, then the joints, then the drives, every row seeing the previous rows' corrections. The
+   unknowns are per-body displacement corrections (a velocity-producing linear and angular pair, and a
+   position-only pair the contacts use to push out of penetration): Skate 3's solver works in
+   displacements per tick, not impulses.
+4. Every body integrates (`DynamicUpdate`): acceleration to a candidate velocity, that times dt plus the
+   solver's corrections is the tick's displacement, the velocity is rebuilt from it less the body's
+   drag (`(1/dt - drag)`), the orientation quaternion advanced, the world inverse inertia rebuilt;
+   gravity is the next tick's accelerator.
+
+The assembly (SK8 board.rs, joint_records.rs, mass.rs, the stock `physicsdeck`, `physicstrucks`,
+`physicswheels` collections): four wheel spheres (radius 0.031 m, 0.083 kg x `SkateboardMassFactor`
+5), two truck capsules (0.39 kg x 5) and the deck (1.2 kg x 5, its inertia aggregated from its
+boxes and end capsules, angular drag 0.45 x 60 per second): 11.5 kg in all. The trucks' joints lock
+their swing and limit their twist (14 degrees, at most 86.1 degrees a tick); the wheels' joints lock
+all but their spin. The truck drives are hard angular drives (`Angular_Hard_Displacement` 10 x 60,
+`Angular_Hard_Strength` 11 x 3600). Wheels touch the world with the surface's wheel friction
+(smooth concrete: static 0.8, dynamic 0.7), the deck and trucks with their own.
+
+**The rider.** In SK8 the rider is a physical skeleton (26 bodies, 28 joints, 53 drives to its animation
+targets) in the same solve. Measured in SK8 (headless harness, SK8's course): while riding, the only
+contacts on the board are its four wheels on the ground, and they carry 113.3 N standing, the board's own
+weight (11.56 kg x 9.8); the skeleton's drives hold the rider to its animation, not the deck. So the board
+is ported fully and the rider is not: flatground's rider stays animated over the deck, as before.
+
+**What is simplified for the Wii, and why.**
+
+- The skeleton is not simulated (above). With it a tick solves about 120 rows (board 13, skeleton
+  81, contacts) 50 times; the board alone is 13 rows plus its contacts. The board's solve measures on
+  the host as noted under "Measured against SK8"; at the Wii's 15 to 25 times slower core the board
+  costs well under a millisecond, the skeleton would cost several.
+- Arithmetic: SK8 keeps the Xenon's fused multiply-adds, reciprocal estimates and operation order to
+  match the console bit for bit; flatground computes the same formulas in plain f32 (the PowerPC 750CL
+  has no matching estimates), which differs in the last bits only.
+- Records: SK8 packs rows in the native 64/96-word layouts; flatground keeps named fields.
+- Narrow phase: the wheels are spheres against the terrain's surface under them (`Terrain::ground` and
+  rays), the deck and trucks boxes and capsules against it; SK8 queries triangles (its sphere-triangle
+  and box-triangle routines). Both report a contact point, a normal and a depth.
+- Islands, sleeping and the hook drive are not needed while the board is ridden and are left out.
+
+**How the ground behaviours drive it.** flatground's ground model computes each of Skate 3's riding
+behaviours (speed model, rolling resistance, pushes, the foot brake, pumping, the slide's forces) as an
+acceleration; on the rigid board each becomes the force that gives the board that acceleration (its
+mass times it), queued at the deck as SK8 queues its forces, and the steering's deck tilt becomes the
+trucks' drive targets (SK8 steering.rs `TruckSteeringState`), so the turn comes from the trucks and the
+wheels' grip instead of a curve with flatground's own follow, lag and grip constants.
+
 ## The camera (`game_core/src/camera`)
 
 After SK8's `crates/skate-core/src/camera` (shot.rs, shot_manager.rs, manager_*.rs, rig*.rs, compass*.rs,
