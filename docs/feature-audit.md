@@ -18,16 +18,15 @@ ways:
   entered. `graph/input.rs` (`names!`, `Intentions`) feeds riding, push, brake, slides, grabs, dark
   catch, wind-up, manual, tweak, board adjust, gestures, the off-board toggle, jump, sprint, move and
   look. It never sets these intents that SK8's input layer sets (`skate-core/src/input/*.rs`):
-  `OB_DropBoard`, `OB_ThrowBoard`, `OB_RetrieveBoard`, `OB_AirBodyTweakX/Y`, `OB_DoAirBodyTweak`,
+  `OB_AirBodyTweakX/Y`, `OB_DoAirBodyTweak`,
   `HandPlantTweakX/Y`, `Dismount`/`NewDismount`, `WipeOutRequest`, `WipeOutPushOff`, `WipeOutRecover`
   (the physics recovers on its own instead), `WipeoutControlX/Y` and `WipeoutGestureX/Y`.
 - **Fixed conditions and stubbed behaviours.** `graph/ops.rs` holds `FIXED_FALSE` (conditions pinned
   so the graph stays on the board), the no-op behaviour list and `UNSUPPORTED`. Pinned false today:
   plants (`IsFootPlanting`, `IsHandPlanting`, `HasNewHandPlantPos`, `ShouldPrepareOneFootAirForFootplant`),
-  skitching (`IsEnteringSkitch`, `IsSkitching`, `IsSkitchShimmying`, `IsSkitchingWithAbsorb`), board
-  handling (`IsDroppingSkateboard`, `IsRetrievingSkateboard`, `IsDeckFree`), `IsDroppingIn`,
-  `IsLandingOnBoard`, `IsHippyHurdling`, `IsLandingIntoGrind`, `IsGrindApproach` and the wipeout timers.
-  Stubbed behaviours: `ToggleBoard`, `LandOnBoard`, `FootPlantAbsorb`, `ScoringHandPlants`, `Shove`,
+  skitching (`IsEnteringSkitch`, `IsSkitching`, `IsSkitchShimmying`, `IsSkitchingWithAbsorb`),
+  `IsDroppingIn`, `IsHippyHurdling`, `IsLandingIntoGrind`, `IsGrindApproach` and the wipeout timers.
+  Stubbed behaviours: `FootPlantAbsorb`, `ScoringHandPlants`, `Shove`,
   `AirDismounting`, `SetScoreAugmentation`. `UNSUPPORTED` holds the three skitching behaviours, and
   `GestureType` (the wipeout body tweaks) is also logged as unsupported.
 - **Board adjust** (fixed). `Beh::BoardAdjust` (`graph/host.rs` `run`, `AdjustSeam`) now publishes its
@@ -99,8 +98,8 @@ ways:
 | Getting off and on (Y, clip-timed) | done (buggy) | `toggle_board`, `step_off`, `step_on`; switch stance on getting on is a known bug | `player/offboard/toggle_board.rs` | – |
 | Walk, run, sprint | done (animation freezes) | `skater/biped.rs` `Biped::step`, `walk`; the walk and run animation freezing is a known bug | `player/offboard/ground_*`, `cadence.rs` | – |
 | Jump on foot | done | `biped.rs` jump, `MatchAirTime` | `offboard/air_launch/` | – |
-| **Dropping and throwing the board down** (stand on it or get on rolling) | **missing** | `OB_DropBoard`/`OB_ThrowBoard`/`OB_RetrieveBoard` unfed; `IsDroppingSkateboard`, `IsRetrievingSkateboard`, `IsDeckFree` pinned; `ToggleBoard` no-op; `IsHoldingSkateboard` always true (docs/graph-runner.md "Off the board") | `input/offboard_intentions.rs` (L / R), `graph_host/motion_toggle_board.rs`, `motion_toggle_execute.rs`, `physics/offboard/board_manager`, `board_possession` | L |
-| Caveman and mid-air get-on (landing on the board from the air) | partial | mid-air get-on done (`Mount/Air`, `Skater::mount_in_air`); caveman (dropping the board from the hands onto the ground) needs a free board; `IsLandingOnBoard` pinned false; `LandOnBoard` no-op | `physics/landing_on_deck`, `player/offboard/landing_deck.rs` | M |
+| Dropping and throwing the board down (stand on it or get on rolling) | done | L / R fully in feed `OB_DropBoard` / `OB_ThrowBoard` / `OB_RetrieveBoard` (`graph/input.rs` `board_triggers`); ToggleBoard runs (`graph/toggle.rs`, `graph/host.rs` `toggle_board`: the `OFB_THROW_*` and `OFB_RETRIEVE_HIGH_*` clips on the `RetrieveBoard` channel, which the importer now converts); `IsHoldingSkateboard`, `IsDeckFree`, `IsDroppingSkateboard`, `IsRetrievingSkateboard` from the possession (`skater/possession.rs`: held, free body rolling and stopped by walls, hidden past 30 m, flying back; Skate 3's `physics_skatecontroller` values in `tuning/possession.rs`); Y next to the board gets on it where it lies (with the graphs the mount fetches it, `OB_Mounting`), further away fetches it. Tests: `skater/possession.rs`, `graph/toggle.rs` unit tests; `tests/drop_board.rs` (drop, throw, walk away and back and get on, retrieve, hidden, and with imported data the graphs' drop/throw/retrieve and mount) | `input/offboard_intentions.rs` (L / R), `graph_host/motion_offboard/toggle_board.rs`, `player/offboard/toggle_board.rs`, `board_possession` | – |
+| Caveman and mid-air get-on (landing on the board from the air) | done | mid-air get-on (`Mount/Air`, `Skater::mount_in_air`; with the board free Y fetches it first); caveman: Skate 3's landing assist onto the free board (`Possession::landing_flight`, `landing_assist_limit`), `CanLandOnBoard` from it, the physics' landing on deck started by the motion graph's `DoLandOnBoard` (`Mount/Air/IntoLandingOnBoard`, `OnBoard/LandingOnBoard`), `IsLandingOnBoard` real, `LandOnBoard` asks for the board's tail ahead (FlipBoardBackwards); missing the deck lands on foot. Tests: `tests/drop_board.rs` `caveman_running_with_it_dropped_a_jump_lands_on_it_riding`, `imported_caveman_lands_on_the_board`, `y_in_the_air_with_the_board_in_hand_still_gets_on_there` | `physics/landing_on_deck`, `player/offboard/landing_deck.rs` | – |
 | Dropping in | partial | rolling off a deck into a transition drops in (`grind.rs` drop-in admission, test `rolling_slowly_off_a_deck_drops_in...`); the on-foot drop-in at the coping is missing (`IsDroppingIn` pinned false) | `graph_host/action_conditions.rs` drop-in | M |
 | Climbing ledges | partial | steps up to 0.45 m (`biped::STEP_UP`); no climb | `physics/climbing/` (SK8's own extension, not stock Skate 3) | M (optional) |
 | Stairs' own walk cycles, obstacle steering, foot IK | missing | docs/graph-runner.md "Not done" | `offboard/movement_intent.rs`, `physics/foot_ik.rs` | M |
@@ -153,8 +152,8 @@ Feel of core skating comes first, then the two features the user named, then the
 | 2 | ~~Manual tip-out under the graph (`PhysicsWantsManualExit`)~~ done: published as Skate 3 does (it fires only without the corrective force, so Normal manuals never tip out, as in Skate 3) | a manual that never fails breaks the feel of lines | S |
 | 3 | ~~Speed wobble (`TurnInput.wobble`, `riding/speed_wobble.rs`)~~ done | core riding feel at speed | S |
 | 4 | ~~**Board adjust in the air**: publish `BoardAdjust`'s MG intents (seam handling and mirroring as SK8 does), drive `SKATEPITCH`/`SKATEYAW`, and feed the adjusted board yaw and pitch to grind contact and landing~~ done | user-named; lines up grinds and landings; the S part (publishing) unblocks the clips at once | M |
-| 5 | **Drop and throw the board** (`OB_DropBoard`/`OB_ThrowBoard`/`OB_RetrieveBoard`, a free board body, `IsDeckFree`/`IsDroppingSkateboard`, `ToggleBoard`) | user-named; also needed for caveman | L |
-| 6 | Caveman and landing on the board from the air (`Mount/Air`, `LandOnBoard`, `IsLandingOnBoard`) | follows from 1 and 5 | M |
+| 5 | ~~**Drop and throw the board** (`OB_DropBoard`/`OB_ThrowBoard`/`OB_RetrieveBoard`, a free board body, `IsDeckFree`/`IsDroppingSkateboard`, `ToggleBoard`)~~ done | user-named; also needed for caveman | L |
+| 6 | ~~Caveman and landing on the board from the air (`Mount/Air`, `LandOnBoard`, `IsLandingOnBoard`)~~ done | follows from 1 and 5 | M |
 | 7 | Grind balance as a rigid board, then grind grabs | grinds are half of street skating | L, then M |
 | 8 | Foot plants (boneless, no-comply, fastplant, wallplant) | common Skate 3 street moves; the graph states are already there | M |
 | 9 | Combos and lines, plus fuller trick scoring | gives the tricks a goal | M |

@@ -50,6 +50,16 @@ Off the board (Y), with the board in hand:
 | A (hold) | Sprint: a burst that fades while held |
 | B | Jump |
 | Y | Back on the board, rolling the way the rider faces at his speed, in the stance he got off in. In the air (after B): he puts the board under his feet and lands on it |
+| L (fully in) | Drop the board beside him (Skate 3's LT off the board) |
+| R (fully in) | Throw the board down ahead of him, rolling (Skate 3's RT) |
+
+With the board out of his hands (dropped or thrown):
+
+| Input | Action |
+|---|---|
+| L or R (fully in) | Pick it back up: it flies back to his hands, from 30 m at most (further away it is out of sight) |
+| Y | Get on: next to it, onto it where it lies (with Skate 3's graphs it is fetched into his hands for the mount); further away it is fetched first |
+| B over it (running alongside it) | Jump onto it and ride away (the caveman): Skate 3's landing assist brings him down on its deck |
 | START | Pause menu (see Menus) |
 | HOME (Wii Remote) or START + Z | Quit to the Homebrew Channel at once |
 
