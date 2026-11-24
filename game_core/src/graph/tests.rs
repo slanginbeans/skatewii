@@ -1637,3 +1637,96 @@ mod board_adjust {
         }
     }
 }
+
+/// The foot plant's conditions and FootPlantAbsorb, on a synthetic motion graph shaped like Skate 3's
+/// one-foot air: `Footplant` (entered while the free foot will meet something in 0.1 to 0.5 s) with its
+/// `Into` (held) and `Absorb` (while the physics swings over the planted foot, handing the swing's time
+/// to the absorb clips).
+mod foot_plant {
+    use super::*;
+    use crate::graph::host::Runner;
+    use crate::graph::ops::{Beh, Cond, Op};
+
+    fn c(name: &str) -> Element {
+        Element::of("condition", &[("name", name), ("mask", "always")], vec![])
+    }
+
+    fn graphs() -> Vec<u8> {
+        let action = st("Action", &[], vec![]);
+        let motion = st(
+            "Motion",
+            &[],
+            vec![
+                st(
+                    "Absorb",
+                    &[],
+                    vec![
+                        when(vec![c("IsFootPlanting")]),
+                        Element::of("behaviour", &[("name", "FootPlantAbsorb")], vec![]),
+                    ],
+                ),
+                st(
+                    "Footplant",
+                    &[],
+                    vec![when(vec![c("ShouldPrepareOneFootAirForFootplant")])],
+                ),
+                st("Idle", &[], vec![]),
+            ],
+        );
+        compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn the_foot_plant_states_follow_the_manager_and_absorb_its_swing() {
+        let bytes = graphs();
+        let lib = crate::motion::tests::lib();
+        let db = crate::motion::MotionDb::parse(&lib).unwrap();
+        let pack = Pack::parse(&bytes).unwrap();
+        let mut typed: Vec<Vec<Op>> = pack
+            .graphs
+            .iter()
+            .map(|g| crate::graph::ops::parse(&pack, g, Some(&db)))
+            .collect();
+        let ops: Vec<&Op> = typed.iter().flatten().collect();
+        assert!(ops.contains(&&Op::Cond(Cond::FootPlanting)));
+        assert!(ops.contains(&&Op::Cond(Cond::PrepareFootplant)));
+        assert!(ops.contains(&&Op::Beh(Beh::FootPlantAbsorb(None))));
+        // The test library has no `absorblength`: hand the behaviour one of its names.
+        let vel = db.name_id("VEL").unwrap();
+        for o in typed.iter_mut().flatten() {
+            if let Op::Beh(Beh::FootPlantAbsorb(n)) = o {
+                *n = Some(vel);
+            }
+        }
+        let code = crate::graph::opcode::encode(bytes.len(), &typed);
+        assert_eq!(
+            crate::graph::opcode::decode(&code, bytes.len()).as_ref(),
+            Some(&typed)
+        );
+        let mut r = Runner::with_ops(Pack::parse(&bytes).unwrap(), Some(&db), Some(typed)).unwrap();
+        let dt = 1.0 / 60.0;
+        r.update(Some(&db), dt);
+        assert_eq!(r.motion_state(), "Idle");
+        // The free foot meets the wall in 0.6 s: not yet; in 0.3 s: prepare.
+        r.s.world.footplant_contact = 0.6;
+        r.update(Some(&db), dt);
+        assert_eq!(r.motion_state(), "Idle");
+        r.s.world.footplant_contact = 0.3;
+        r.update(Some(&db), dt);
+        assert_eq!(r.motion_state(), "Footplant");
+        // Planted, but the swing's time not set yet: not planting.
+        r.s.world.footplant_contact = 0.01;
+        r.s.world.foot_planting = true;
+        r.update(Some(&db), dt);
+        assert_eq!(r.motion_state(), "Idle");
+        r.s.world.footplant_length = 0.18;
+        r.update(Some(&db), dt);
+        assert_eq!(r.motion_state(), "Absorb");
+        let param = r.s.player.params.iter().find(|p| p.name == vel);
+        assert_eq!(param.map(|p| p.value), Some(0.18));
+    }
+}

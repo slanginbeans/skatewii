@@ -189,6 +189,16 @@ pub struct World {
     /// The posed deck's yaw and pitch against the rider ([`deck_angles`] of the last pose's board nose;
     /// SK8 Skeleton536/540): what SetDeckPitchAndYaw hands its trees.
     pub deck_yaw_pitch: [f32; 2],
+    /// The foot plant (`skater::plant`): swinging over a planted foot (`IsFootPlanting`), the swing's
+    /// time (s, -1 none: `FootPlantAbsorb`'s), and in how long the free foot meets something (s, -1
+    /// none: `ShouldPrepareOneFootAirForFootplant`).
+    pub foot_planting: bool,
+    pub footplant_length: f32,
+    pub footplant_contact: f32,
+    /// The posed rider's centre of mass over the board on the ground as well as in the air (the imported
+    /// rider's last pose; SK8 PhysOutAnimation's `animation_height`): what
+    /// `IsCrouchedEnoughForBlendToGrabCycle` reads. `None` without the imported rider.
+    pub pose_com: Option<f32>,
 }
 
 impl Default for World {
@@ -262,6 +272,10 @@ impl Default for World {
             feet: [[0.0; 2]; 2],
             wobble: 0.0,
             deck_yaw_pitch: [0.0; 2],
+            foot_planting: false,
+            footplant_length: -1.0,
+            footplant_contact: -1.0,
+            pose_com: None,
         }
     }
 }
@@ -1225,6 +1239,12 @@ impl Host<'_, '_> {
             }
             Cond::ManualOutTimer => s.manual_out_timer > 0.0,
             Cond::WantsManualExit => w.wants_manual_exit,
+            // SK8 motion_gameplay_conditions.rs: Air448 with Air212 set, and the contact time's window.
+            Cond::FootPlanting => w.foot_planting && w.footplant_length >= 0.0,
+            Cond::PrepareFootplant => {
+                let (lo, hi) = crate::skater::plant::PREPARE_WINDOW;
+                (lo..=hi).contains(&w.footplant_contact)
+            }
             Cond::WantsRunout => w.wants_runout,
             Cond::WantsWipeout => w.wants_wipeout,
             Cond::Dark => s.dark,
@@ -1258,7 +1278,9 @@ impl Host<'_, '_> {
             Cond::LandingType(t) => w.landing_type == t,
             Cond::CanLandOnBoard => w.can_land,
             // SK8 IsCrouchedEnoughForBlendToGrabCycle: the centre of mass under 0.6 m over the board.
-            Cond::CrouchedForGrab => s.com_height < 0.6,
+            // SK8 motion_stock_conditions.rs: the physical rider's height over the board (a ground grab
+            // crouches under it, so a push from one is a boneless or fastplant).
+            Cond::CrouchedForGrab => w.pose_com.unwrap_or(s.com_height) < 0.6,
             // The physics decides powerslides (flatground's Skate 3 rules); the graph's side is the
             // rider's, flipped when rolling fakie (SK8 CanEnterSlide).
             Cond::ShouldLeaveSlide { .. } => w.slide == 0 || w.slide_ending,
@@ -2088,6 +2110,15 @@ impl Host<'_, '_> {
                 }
                 _ => {}
             },
+            // SK8 motion_tricks.rs (TU3 `0x82BBE4E0`): the manager's swing time as `absorblength`.
+            Beh::FootPlantAbsorb(n) => {
+                if let Some(n) = *n
+                    && phase < 2
+                {
+                    let v = self.s.world.footplant_length.max(0.0);
+                    self.s.player.set_param(n, v, false);
+                }
+            }
             Beh::Nothing => {}
             Beh::Unsupported(n) => self.s.unsupported(*n),
         }

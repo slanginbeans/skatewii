@@ -194,6 +194,12 @@ pub enum Cond {
     /// Off the board in the air, and coming down onto ground he can land on.
     BipedAir,
     CanBipedLand,
+    /// `IsFootPlanting`: the physics is swinging over a planted foot (SK8 Air448 and Air212: the foot
+    /// plant manager performing or planted, with its swing's time set).
+    FootPlanting,
+    /// `ShouldPrepareOneFootAirForFootplant`: the free foot will meet something in 0.1 to 0.5 s (SK8
+    /// `0x82BBD7F0`, the manager's contact time).
+    PrepareFootplant,
     /// Conditions of systems flatground doesn't have, with the value they take here.
     Fixed(bool),
     Unsupported(Str),
@@ -442,6 +448,9 @@ pub enum Beh {
     GrindCrouch(Option<NameId>),
     /// CreateGrindAttributes: the grind's name and which way the rider faces as packet values.
     GrindAttributes,
+    /// FootPlantAbsorb (SK8 motion_tricks.rs, TU3 `0x82BBE4E0`): the foot plant's swing time as the
+    /// absorb clips' `absorblength`.
+    FootPlantAbsorb(Option<NameId>),
     /// Behaviours with nothing to do in flatground (hand services, debug text, off-board helpers).
     Nothing,
     Unsupported(Str),
@@ -636,7 +645,6 @@ pub mod slope {
 const FIXED_FALSE: &[&str] = &[
     "IsDroppingIn",
     "IsDropInWithoutTransition",
-    "IsFootPlanting",
     "IsGrabbingObject",
     "IsHandPlanting",
     "IsInLocomotion",
@@ -655,7 +663,6 @@ const FIXED_FALSE: &[&str] = &[
     "IsBipedCommittedToMotion",
     "HasNewHandPlantPos",
     "ShouldPlayHandPlantAnim",
-    "ShouldPrepareOneFootAirForFootplant",
     "IsArmChannelPlaying",
     "OBTrajTime",
     "MongoPushFootToFar",
@@ -722,6 +729,8 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
         "HasTweak" => Cond::HasTweak(n()),
         "ManualOutTimerIsActive" => Cond::ManualOutTimer,
         "PhysicsWantsManualExit" => Cond::WantsManualExit,
+        "IsFootPlanting" => Cond::FootPlanting,
+        "ShouldPrepareOneFootAirForFootplant" => Cond::PrepareFootplant,
         "PhysicsWantsRunout" => Cond::WantsRunout,
         "PhysicsWantsWipeOut" | "IsPhysicsWiping" => Cond::WantsWipeout,
         "IsDark" => Cond::Dark,
@@ -813,7 +822,6 @@ const NOTHING: &[&str] = &[
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
     "UpdateIsWeightOnNose",
-    "FootPlantAbsorb",
     "SetHandPlantAnticLength",
     "ScoringHandPlants",
     "AirDismounting",
@@ -1100,6 +1108,7 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
                 pitch: name("skatepitch"),
             }
         }
+        "FootPlantAbsorb" => Beh::FootPlantAbsorb(lib("absorblength")),
         _ if NOTHING.contains(&name) => Beh::Nothing,
         _ if UNSUPPORTED.contains(&name) => Beh::Unsupported(NONE),
         _ => Beh::Unsupported(NONE),

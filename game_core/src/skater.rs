@@ -28,6 +28,7 @@ mod board;
 pub mod flip;
 mod grind;
 mod landing;
+pub mod plant;
 pub mod possession;
 mod respawn;
 pub mod wobble;
@@ -57,6 +58,7 @@ use crate::park::Park;
 use crate::park::Terrain;
 use crate::tuning::Tuning;
 use biped::{Biped, BipedInput};
+use plant::{AirPlant, GroundPlant, PlantKind};
 
 /// Highest ledge a bailed rider walks up (m).
 pub const STEP: f32 = 0.12;
@@ -133,6 +135,8 @@ const GRAB_POINTS: u32 = 200;
 /// Points per whole body flip turn (ours).
 const BODY_FLIP_POINTS: u32 = 600;
 const GRAB_POINTS_PER_S: f32 = 150.0;
+/// A foot plant in the air on top of its grab's points (flatground's).
+const FOOTPLANT_POINTS: u32 = 300;
 /// Both push buttons pressed within this of each other wind up a hippie jump.
 const HIPPY_CHORD: f32 = 0.08;
 const HIPPY_POINTS: u32 = 150;
@@ -670,6 +674,11 @@ pub enum Event {
     /// Got off the board to walk (Y), and back on it.
     SteppedOff,
     SteppedOn,
+    /// Jumped off a foot planted on the ground (a boneless, fastplant or no-comply).
+    FootJump(plant::PlantKind),
+    /// Planted a foot in the air (on a ledge, the coping, a wall), and flew off it.
+    FootPlanted,
+    FootReleased,
 }
 
 /// Stance and how the rider took off (for names), the surface left and whether the pop was re-aimed up
@@ -875,6 +884,21 @@ pub struct Skater {
     /// (`CanLandOnBoard`): the landing on it starts once the motion graph's `DoLandOnBoard` says so (at
     /// once without the graphs).
     pub deck_assist: bool,
+    /// A foot plant on the ground (`skater::plant`): a boneless, fastplant or no-comply, from the planted
+    /// foot to the jump off it.
+    pub ground_plant: Option<plant::GroundPlant>,
+    /// The ground plant this air jumped off (scored on landing).
+    pub plant_trick: Option<plant::PlantKind>,
+    /// In the air: Skate 3's foot plant manager (running in one-foot air), the swing over a planted foot
+    /// (SK8 physical state 601), and the foot plant's scored name this air (`fsgrab_fs_footplant` ...).
+    pub footplant: plant::Manager,
+    pub air_plant: Option<plant::AirPlant>,
+    pub footplanted: Option<&'static str>,
+    /// The one-foot grab without the graphs: the grab's front hand and the free foot's push (true: the
+    /// right foot's, A) as Skate 3's action graph names them (frontside grab, frontside foot).
+    one_foot: Option<(bool, bool)>,
+    /// Seconds since take-off, or since the last foot plant flew off (Skate 3's air state's clock).
+    plant_clock: f32,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -962,6 +986,16 @@ pub struct GraphControl {
     /// and the 5-0's free end they hold up (`PhysGrindGrabMinHeight`, 0 when none).
     pub grind_grab: Option<&'static str>,
     pub grind_grab_min_height: f32,
+    /// Foot plants on the ground: the playing clips have the board in hand (`ANIMSKATEBOARD`: SK8's
+    /// physical state 602) and jump off the planted foot (`FOOTJUMP`, on its first tick), as the plant the
+    /// graph scores (its `PushTrick` states' `ScoringTrick`).
+    pub anim_skateboard: bool,
+    pub foot_jump: bool,
+    pub plant: Option<plant::PlantKind>,
+    /// In the air: a one-foot grab (the `OneFootAir` attribute: the foot plant manager runs) and the
+    /// clips reaching for a foot plant (`FootPlanting`).
+    pub one_foot_air: bool,
+    pub foot_planting: bool,
 }
 
 /// A trick the state graph is animating in the air.
@@ -1156,6 +1190,13 @@ impl Skater {
             possession: possession::Possession::new(),
             trig_full: [false; 2],
             deck_assist: false,
+            ground_plant: None,
+            plant_trick: None,
+            footplant: plant::Manager::default(),
+            air_plant: None,
+            footplanted: None,
+            one_foot: None,
+            plant_clock: 0.0,
         }
     }
 
@@ -2061,9 +2102,16 @@ impl Skater {
         if self.mode != Mode::Rolling {
             return;
         }
+        // Foot plants (a boneless, fastplant or no-comply): no push, brake or pop until the jump off the
+        // planted foot.
+        if self.update_ground_plant(pad, flick, dt, events) {
+            return;
+        }
+        let planting = self.ground_plant.is_some();
         // With the state graphs, a push only drives while the push clip's foot is down, and the foot
         // brake only once the brake clip's foot touches.
         let push_target = match self.graph {
+            _ if planting => None,
             Some(g) if g.push_posed => {
                 // Skate 3 (SK8 contact_events.rs, push.rs): while the push clip's foot is down the
                 // board chases the posed trajectory's speed, within the push's change a tick.
@@ -2094,6 +2142,7 @@ impl Skater {
 
         // The trick to pop: the state graph's (its takeoff clip reached the jump), else the flick.
         let pop = match self.graph {
+            _ if planting => None,
             Some(g) => g.pop,
             None => flick.flick.map(|f| {
                 (
@@ -2720,9 +2769,213 @@ impl Skater {
             lean: 0.0,
         };
         self.trick = f.map(ActiveTrick::new);
+        self.ground_plant = None;
+        self.plant_trick = None;
+        self.footplant = plant::Manager::default();
+        self.air_plant = None;
+        self.footplanted = None;
+        self.one_foot = None;
+        self.plant_clock = 0.0;
         self.air_com = self.body_com;
         self.air_lift = 0.0;
         self.air_lift_rate = 0.0;
+    }
+
+    /// The rider's centre of mass over the board's point (m, along the board's up).
+    fn com_height(&self) -> f32 {
+        DECK_HEIGHT + self.body_com.unwrap_or(air::COM_TO_DECK)
+    }
+
+    /// Skate 3's foot plants on the ground (`skater::plant`). With the graphs their clips time them: the
+    /// board in hand while they carry `ANIMSKATEBOARD` (SK8's physical state 602), the jump off the
+    /// planted foot on their `FOOTJUMP`. Without them a ground grab (one trigger fully in) and a push
+    /// button start a boneless or fastplant (Skate 3's action graph's table), a flick while a push's foot
+    /// is still coming down a no-comply, timed as Skate 3's clips are. True: jumped off.
+    fn update_ground_plant(
+        &mut self,
+        pad: &Pad,
+        flick: &FlickOut,
+        dt: f32,
+        events: &mut Vec<Event>,
+    ) -> bool {
+        if let Some(g) = self.graph {
+            let kind = g.plant.or(self.ground_plant.map(|p| p.kind));
+            if g.foot_jump
+                && let Some(kind) = kind
+            {
+                self.foot_jump_off(kind, events);
+                return true;
+            }
+            if g.anim_skateboard {
+                let p = self.ground_plant.get_or_insert(GroundPlant {
+                    kind: kind.unwrap_or(PlantKind::FsBoneless),
+                    time: 0.0,
+                    lifted: true,
+                });
+                p.time += dt;
+            } else {
+                self.ground_plant = None;
+            }
+            return false;
+        }
+        if self.ground_plant.is_none() && self.manual.is_none() && self.hippy.is_none() {
+            use crate::graph::input::TRIGGER_FULL;
+            let full = (pad.trig_l >= TRIGGER_FULL, pad.trig_r >= TRIGGER_FULL);
+            let (a, b) = (pad.was_pressed(btn::A), pad.was_pressed(btn::B));
+            let kind = if full.0 != full.1 && a != b {
+                Some(PlantKind::from_grab(full.0, a, self.mirrored()))
+            } else if flick.flick.is_some() && self.push.is_some_and(|p| p.stage().0 == 0) {
+                Some(PlantKind::NoComply)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                self.ground_plant = Some(GroundPlant {
+                    kind,
+                    time: 0.0,
+                    lifted: false,
+                });
+                self.push = None;
+                self.brake = None;
+                self.slide = None;
+            }
+        }
+        let Some(p) = &mut self.ground_plant else {
+            return false;
+        };
+        p.time += dt;
+        let (plant, lift) = p.kind.timing();
+        p.lifted = p.time >= plant;
+        if p.time >= plant + lift {
+            let kind = p.kind;
+            self.foot_jump_off(kind, events);
+            return true;
+        }
+        false
+    }
+
+    /// The jump off the planted foot (SK8 boneless.rs, the `FOOTJUMP` launch).
+    fn foot_jump_off(&mut self, kind: PlantKind, events: &mut Vec<Event>) {
+        self.end_manual(events);
+        let up = self.contact_n;
+        let travel = if self.speed < 0.0 {
+            self.fwd * -1.0
+        } else {
+            self.fwd
+        };
+        let forward = tangent(travel, up);
+        let current = self.vel;
+        let v = plant::foot_jump(&self.tuning.plant, up, current, current, forward);
+        self.pos += up * 0.02;
+        self.take_off(None);
+        self.vel = v;
+        self.plant_trick = Some(kind);
+        events.push(Event::FootJump(kind));
+    }
+
+    /// In the air: the one-foot grab (Skate 3's `OneFootAir`: a grab and a push button; with the graphs
+    /// their one-foot states) runs the foot plant manager; when the free foot meets something it plants
+    /// and the swing over it starts (SK8 known/footplant.rs, footplant/update.rs, pose.rs).
+    fn update_footplant(
+        &mut self,
+        park: &dyn Terrain,
+        pad: &Pad,
+        now: f32,
+        events: &mut Vec<Event>,
+    ) {
+        let one_foot = match self.graph {
+            Some(g) => g.one_foot_air,
+            None => {
+                let pushing = pad.is_held(btn::A) || pad.is_held(btn::B);
+                let new = pad.was_pressed(btn::A) || pad.was_pressed(btn::B);
+                if self.grab.is_none() || !pushing {
+                    self.one_foot = None;
+                } else if self.one_foot.is_none() && new {
+                    // Skate 3's action graph: the left hand's grab is its FSGrab and the right foot's
+                    // push its RightOneFootAir, for the unmirrored rider.
+                    let left = pad.trig_l > 0.0 && pad.trig_l >= pad.trig_r;
+                    let m = self.mirrored();
+                    self.one_foot = Some((left != m, pad.is_held(btn::A) != m));
+                }
+                self.one_foot.is_some()
+            }
+        };
+        let runs = one_foot
+            && self.plant_clock > plant::MIN_AIR_TIME
+            && !(self.takeoff.hippy || self.takeoff.mount || self.takeoff.onto_free);
+        if !runs {
+            self.footplant = plant::Manager::default();
+            return;
+        }
+        let t = self.tuning;
+        let com = self.pos + self.normal * self.com_height();
+        let (landing_normal, landing_time) = match &self.plan {
+            Some(p) => (p.normal, p.remaining(now)),
+            None => (Vec3::UP, 1.0),
+        };
+        let frame = plant::Frame {
+            com,
+            vel: self.vel,
+            gravity: t.gravity,
+            up: self.normal,
+            landing_normal,
+            landing_time,
+            candidate: true,
+            // Without the graphs the clips would reach for it as soon as it is near.
+            planting: self.graph.is_none_or(|g| g.foot_planting),
+        };
+        self.footplant.update(&t.plant, park, &frame);
+        if !self.footplant.perform {
+            return;
+        }
+        let m = self.footplant;
+        self.air_plant = Some(AirPlant::start(
+            &t.plant, com, self.vel, m.contact, m.normal,
+        ));
+        self.footplanted = Some(match self.graph.and_then(|g| g.grab_name) {
+            Some(n) if n.ends_with("footplant") => n,
+            _ => {
+                let (fs_grab, fs_foot) = self.one_foot.unwrap_or((true, true));
+                plant::footplant_name(fs_grab, fs_foot)
+            }
+        });
+        self.plan = None;
+        self.selector = air::Selector::default();
+        self.air_assist = None;
+        events.push(Event::FootPlanted);
+    }
+
+    /// The swing over the planted foot (SK8 physical state 601): the centre of mass on its curve, the
+    /// board under it; too fast down or across wipes out; at its end the flight off the foot.
+    fn swing_over_plant(&mut self, time: f32, dt: f32, events: &mut Vec<Event>) {
+        let Some(mut p) = self.air_plant else {
+            return;
+        };
+        let (com, released) = p.step(dt);
+        let to = com - self.normal * self.com_height();
+        self.vel = (to - self.pos) * (1.0 / dt.max(1e-4));
+        self.pos = to;
+        if let Some(reason) = plant::plant_wipeout(&self.tuning.plant, self.vel) {
+            self.air_plant = None;
+            self.bail(reason, events);
+            return;
+        }
+        if released {
+            self.air_plant = None;
+            self.vel = p.release;
+            self.pos = p.anchor
+                + p.normal * 0.02
+                + Vec3::UP * (plant::RELEASE_LIFT - plant::RELEASE_BOARD_DROP);
+            self.footplant = plant::Manager::default();
+            self.one_foot = None;
+            self.plant_clock = 0.0;
+            self.plan = None;
+            self.selector = air::Selector::default();
+            events.push(Event::FootReleased);
+        } else {
+            self.air_plant = Some(p);
+        }
+        self.mode = Mode::Air { time };
     }
 
     /// The landing prediction (SK8 PhysicsAir / trajectory selector): while no landing is known, a
@@ -2768,6 +3021,11 @@ impl Skater {
     ) {
         let t = self.tuning;
         let now = time - dt;
+        self.plant_clock += dt;
+        if self.air_plant.is_some() {
+            self.swing_over_plant(time, dt, events);
+            return;
+        }
         self.update_prediction(park, now);
 
         // Body spin (Skate 3's controller): the stick, its wind-up, a let-go spin carrying on; with a
@@ -2876,6 +3134,11 @@ impl Skater {
             }
         }
         self.update_grab(pad, flick, dt);
+        self.update_footplant(park, pad, now, events);
+        if self.air_plant.is_some() {
+            self.mode = Mode::Air { time };
+            return;
+        }
 
         // A flight steered onto a rail: the grind air assist moves and turns the board towards it.
         if let Some(target) = self.plan.as_ref().and_then(|p| p.grind) {
@@ -3000,6 +3263,9 @@ impl Skater {
         if let Some(tr) = &self.trick {
             return Some((tr.name(), tr.points()));
         }
+        if let Some(k) = self.plant_trick {
+            return Some((String::from(k.name()), k.points()));
+        }
         self.takeoff
             .hippy
             .then(|| (String::from("HIPPIE JUMP"), HIPPY_POINTS))
@@ -3072,6 +3338,9 @@ impl Skater {
         self.hippy = None;
         self.collide = None;
         self.plan = None;
+        self.ground_plant = None;
+        self.air_plant = None;
+        self.footplant = plant::Manager::default();
         self.recovery = Recovery::default();
         events.push(Event::Bailed);
     }
@@ -3352,6 +3621,9 @@ impl Skater {
         // Half-turns spun with the body, named frontside or backside for the rider's stance.
         let halves = libm::roundf(self.spin / PI) as i32;
         let grab = self.grabbed.take();
+        // A foot plant this air is scored as Skate 3 names it (`fsgrab_fs_footplant` ...), for its grab.
+        let footplant = self.footplanted.take();
+        let grab_name = footplant.or(grab.map(|g| g.name));
         let mut label = self.trick_label();
         if let Some((front, turns)) = self.flipped.take() {
             let flip = match (front, turns) {
@@ -3370,11 +3642,16 @@ impl Skater {
             label.as_ref().map(|l| l.0.as_str()),
             halves,
             fs,
-            grab.map(|g| g.name),
+            grab_name,
         ) {
             let base = label.map_or(0, |l| l.1);
             let spin_bonus = halves.unsigned_abs() * 150;
-            let grab_bonus = grab.map_or(0, |g| GRAB_POINTS + (g.time * GRAB_POINTS_PER_S) as u32);
+            let grab_bonus = grab.map_or(0, |g| GRAB_POINTS + (g.time * GRAB_POINTS_PER_S) as u32)
+                + if footplant.is_some() {
+                    FOOTPLANT_POINTS
+                } else {
+                    0
+                };
             let air_bonus = 1.0 + air_time.min(2.0);
             let mut points = ((base + spin_bonus + grab_bonus) as f32 * air_bonus) as u32;
             let name = if matches!(kind, LandKind::Sketchy { .. }) {
@@ -3387,6 +3664,7 @@ impl Skater {
         }
         self.mode = Mode::Rolling;
         self.trick = None;
+        self.plant_trick = None;
         self.spin = 0.0;
         self.spin_rate = 0.0;
         self.plan = None;
