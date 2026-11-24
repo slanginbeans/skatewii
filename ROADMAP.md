@@ -175,6 +175,10 @@ content second.
 - [x] Grind rail classes checked against SK8's probes on BlackBoxPark (handrails thin, ledges ledge), the
   far probes' reach from the disc's truck distance
 - [ ] Skater animation (skinned, original)
-- [ ] Session goals, combo system, replay
+- [x] Combo system (Skate 3's multiplier, line timer and bail factor; `game_core::scoring`)
+- [x] Session markers (Z + d-pad up / down, Skate 3's hold and spot check; `game_core::marker`) and the
+  replay (the last 30 s as drawn: play, pause, scrub, slow motion, game / tripod / orbit cameras;
+  `game_core::replay`, 1.2 MB with Skate 3's skater)
+- [ ] Session goals
 - [ ] Sound (ASND): rolling, pop, landing
 - [ ] Classic Controller and Wii Remote + Nunchuk control schemes
