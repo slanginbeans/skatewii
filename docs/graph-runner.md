@@ -74,9 +74,14 @@ With `motion/graph` loaded (`Game::graph`), each tick:
      come from the disc through the rules pack) and raised to the `JumpHeightOverride` packet value
      (flick strength x 0.2; 0.27 out of a manual, 1.0 out of a grind);
    - manuals engage and end where the graph's Manual states are (`ManualEngageTime` over 0.2 s, brake,
-     out) and never tip over: a held stick holds a manual as long as it is held; the deck pitch servoes (SK8's PID) to
-     (0.25 + 0.75 lean) of the most tilt, or to the brake angle (`PhysicsWantsManualExit` stays false:
-     the servo has no opposing motion to report);
+     out), as Skate 3's do: a held stick holds a manual as long as it is held; the deck pitch servoes
+     (SK8's PID) to (0.25 + 0.75 lean) of the most tilt, or to the brake angle. `PhysicsWantsManualExit`
+     is the physics' `Skater::manual_exit` (SK8 manual/controller.rs `apply_correction`): set while
+     dragging the tail or nose with the board rolling against the manual's balance direction (tail -1,
+     nose +1, against the speed along the board) and the physics mode's corrective force
+     (`physics_mode/normal/Hash_F8CBC0F5FEF2240E`) off. Skate 3's Normal and Hardcore have it on (Easy
+     off), so with the stock rules a Normal manual drags its tail and never tips out; with it off the
+     graph's `Brake` and `Cycle` states let go of the manual (scripted in `tests/manual_wobble.rs`);
    - in the air the board does what the clips do: a late flip, finger flip, under flip or dark catch
      becomes the trick (its look and flips from the graph's `ScoringTrick`, `Kickflip2`..`4` for held
      multi-flips; the graph's `TimeToLand` thresholds read the physics' landing prediction, below), a
@@ -561,13 +566,15 @@ ragdoll to tweak).
 Approximations to revisit: the push speed is where the push coefficients' blended clips end, not the
 trajectory bone's speed sampled from the posed clips; how long the push foot stays down still comes
 from the push sets' contact time; the manual's deck pitch runs SK8's PID servo (with the rules pack's
-`physics_manual` gains), but on flatground's kinematic board, and `PhysicsWantsManualExit` never fires
-(held manuals don't tip out); a landing in the danger zone is judged on the speed
+`physics_manual` gains), but on flatground's kinematic board, without the corrective drag Normal
+pushes at the dragging truck (the tail brake stands in) or the no-contact torque bleed (the manual
+ends on leaving the ground instead); a landing in the danger zone is judged on the speed
 into the ground only (Skate 3's closing-velocity check also has a sideways part); shoves don't run;
 the wipeout's lean and twist come from the drawn bail, not a ragdoll's hips; the d-pad's gestures are
 a fixed set (Skate 3's are the player's pick). The
 turn conditioner reads the physics' smoothed steering and a centripetal lean instead of Skate 3's
-processed turn and reckoning lean, with no speed wobble; Crouching has no board or ground absorption
+processed turn and reckoning lean, and the speed wobble's amplitude (`World::wobble`, Skate 3's
+`SpeedWobble` from `skater/wobble.rs`); Crouching has no board or ground absorption
 force (only its restoring force) and no deck-angle crouch; the powerslide's side for SetTurning is the
 physics' slide.
 

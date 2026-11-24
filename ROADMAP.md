@@ -23,7 +23,7 @@ content second.
   rider round), held and mongo pushes, foot/tail/nose brakes, powerslides, kick turns, deck-tilt steering,
   rolling resistance, all from Skate 3's tuning when the player's disc supplies it
 - [x] Controls laid out like Skate 3's Xbox 360 pad by button position
-- [ ] Speed wobble
+- [x] Speed wobble (Skate 3's `physics_speed_wobble`: the trucks shake above 15 m/s plus tightness and crouch)
 - [x] Landings classified as Skate 3 does (straight, sketchy with a magnitude, spin landings that keep
   pivoting; nothing judged under 2 m/s); the graphs pick their landing clips by it
 - [x] Slope matching on landing: the board's up arrives at the landing surface 3 ticks before touchdown

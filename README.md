@@ -6,7 +6,7 @@ tricks on the C-stick, played on a GameCube controller. Runs from the Homebrew C
 Status: **skeleton**. One placeholder park (kicker, funbox, ledge, manual pad, bank), or six skate parks
 converted from your own disc (chosen in a start menu, changed from the pause menu), and Skate 3-style
 riding: goofy or regular, fakie and switch, held pushes and mongo pushes, foot and tail brakes,
-powerslides and reverts, kick turns, 30 flick tricks (every flip, shove-it and varial, and their nollie
+powerslides and reverts, kick turns, Skate 3's speed wobble when riding very fast, 30 flick tricks (every flip, shove-it and varial, and their nollie
 versions), held double and triple kickflips, air spins that reward a wind-up, grabs, manuals, hippie jumps.
 The board follows any surface under its trucks: banks, curved transitions and vert (air out over the
 coping, land back in fakie), wallrides across steep faces, pumping, and grinds and slides chosen by how the
@@ -34,7 +34,7 @@ X, Y). The default stance is goofy, as in Skate 3.
 | ... roll a quarter round, then flick across | Varial kickflip / heelflip, hardflip, inward heelflip |
 | ... roll three quarters round, then flick across | 360 flip, laser flip, 360 hardflip, 360 inward heelflip |
 | C-stick: push forward, then flick back | Nollie, and the nollie version of each trick |
-| C-stick held lightly back / forward while rolling | Manual / nose manual (keep the balance marker centred); fully over drags the tail or nose to brake |
+| C-stick held lightly back / forward while rolling | Manual / nose manual (keep the balance marker centred; with Skate 3's motion graphs a manual lasts as long as the stick is held, as in Skate 3); fully over drags the tail or nose to brake |
 | L / R in the air | Left-hand / right-hand grab (indy, melon; both: mute) |
 | Come down onto a rail | The grind or slide comes from how the board meets it: along it a 50-50 (C-stick held back: 5-0, forward: nosegrind), angled a crooked, willy, feeble or smith, across it a boardslide, lipslide, noseslide or tailslide. Flick to pop off |
 | C-stick held back on a transition, then let go | Pump (gain speed) |
