@@ -30,7 +30,7 @@ mod grind;
 mod landing;
 pub mod plant;
 pub mod possession;
-mod respawn;
+pub mod respawn;
 pub mod wobble;
 
 use alloc::format;
@@ -675,6 +675,11 @@ pub enum Event {
     /// Planted a foot in the air (on a ledge, the coping, a wall), and flew off it.
     FootPlanted,
     FootReleased,
+    /// A session marker went down where the rider is (`crate::marker`), or could not go down here.
+    MarkerSet,
+    MarkerRefused,
+    /// Back at the session marker.
+    MarkerReturned,
 }
 
 /// Stance and how the rider took off (for names), the surface left and whether the pop was re-aimed up
@@ -1250,6 +1255,20 @@ impl Skater {
         self.speed = speed;
         self.vel = self.ground_velocity();
         self.since_spawn = FAKIE_GRACE;
+    }
+
+    /// Back at a session marker (`crate::marker`), as a respawn puts him back: at `pos` (on the ground
+    /// there), facing `heading`, in the stance he had (`switch`), at rest, on the board or on foot with the
+    /// board in hand, keeping the tuning, clip timing, stance and checkpoints.
+    pub fn return_to(&mut self, park: &dyn Terrain, m: &crate::marker::Marker) {
+        self.put_at(park, m.pos, m.heading, 0.0);
+        self.switch = m.switch;
+        if !m.on_board {
+            self.biped = Biped::new(m.heading, Vec3::ZERO, self.normal);
+            self.mode = Mode::Walk;
+            self.possession.hold();
+            self.sync_walk();
+        }
     }
 
     /// Seconds until the board lands: the known landing's, else straight down onto the ground below.

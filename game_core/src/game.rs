@@ -14,11 +14,13 @@ use crate::gesture;
 use crate::gfx::{Gfx, MeshBuilder, SCREEN_H, SCREEN_W, Vertex, rgb};
 use crate::hud;
 use crate::input::{Pad, PadRaw, btn, flag};
+use crate::marker::{Chord, ChordOut, Markers};
 use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
 use crate::menu::{Choice, Location, Menu, Request};
 use crate::model::Models;
 use crate::pack::Pack;
 use crate::park::{Park, Terrain};
+use crate::replay::{Figure, Header, Player, Recording, View as ReplayView};
 use crate::rider::Rider;
 use crate::scoring::{Frame as ScoreFrame, Scoring};
 use crate::skater::{ClipTiming, Event, Mode, Skater, Stance};
@@ -42,6 +44,12 @@ pub const TICK: f32 = 1.0 / 60.0;
 const WHEEL_LIFT_MAX: f32 = 0.04;
 /// A drawn skater further than this (m) from where it was a tick ago was teleported: not blended.
 const TELEPORT: f32 = 2.0;
+/// How white the screen goes at the end of the hold back to the marker.
+const MARKER_FLASH: f32 = 0.7;
+/// The replay's tripod and orbit cameras look this high over the rider's board (m); the orbit stays this
+/// far from that point (m).
+const REPLAY_LOOK_HEIGHT: f32 = 0.9;
+const REPLAY_ORBIT: f32 = 3.5;
 
 /// What is drawn of one simulation tick: the board's frame and the camera.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,6 +147,8 @@ pub struct SectionTimes {
     /// one took since the platform last cleared `cam_peak_us`.
     pub cam_us: u32,
     pub cam_peak_us: u32,
+    /// Recording the frame for the replay (packing the posed skeleton).
+    pub replay_us: u32,
 }
 
 struct Popup {
@@ -250,6 +260,20 @@ pub struct Game {
     /// until they are let go, so the A that chose a location is not a push.
     menu_prev: u32,
     blocked: u32,
+    /// The session marker (Z + d-pad up to put it down, Z + d-pad down held to go back to it) and the
+    /// Z + d-pad chord that reads it ([`crate::marker`]).
+    pub markers: Markers,
+    chord: Chord,
+    /// The last 30 s as drawn, and the replay when it is being watched (Z + d-pad left;
+    /// [`crate::replay`]): the riding waits meanwhile.
+    pub recording: Recording,
+    pub replay: Option<Player>,
+    /// What the replay shows this frame: the rider and the camera.
+    replay_shown: Option<(Figure, crate::gfx::Camera)>,
+    /// The live skeleton and its skin's light and mirroring, put back on leaving the replay, and the
+    /// replay's posing buffer.
+    replay_saved: (Vec<crate::character::Rows>, crate::math::Vec3, bool),
+    replay_pose: Vec<crate::character::Rows>,
 }
 
 /// Lines kept while nobody takes them.
@@ -333,6 +357,13 @@ impl Game {
             loading: None,
             menu_prev: 0,
             blocked: 0,
+            markers: Markers::default(),
+            chord: Chord::default(),
+            recording: Recording::new(),
+            replay: None,
+            replay_shown: None,
+            replay_saved: (Vec::new(), crate::math::Vec3::UP, false),
+            replay_pose: Vec::new(),
         }
     }
 
@@ -434,6 +465,11 @@ impl Game {
             g.runner.reset(Some(&lib.db));
             g.input.reset();
         }
+        // A marker and a recording belong to the park they were made in.
+        self.markers.clear();
+        self.recording.clear();
+        self.replay = None;
+        self.replay_shown = None;
     }
 
     /// The places to ride (from the platform's location index). The demo park is added at the end; the
@@ -710,6 +746,9 @@ impl Game {
         if let World::District(d) = &mut self.world {
             let at = if self.district_wait {
                 d.spawn().0
+            } else if let (Some(_), Some((f, _))) = (&self.replay, &self.replay_shown) {
+                // Watching the replay: the cells around where the rider was then.
+                f.body.pos
             } else {
                 self.skater.pos
             };
@@ -744,6 +783,11 @@ impl Game {
         if self.loading.is_some() {
             return;
         }
+        // The replay takes the pad, and the riding waits.
+        if self.replay.is_some() {
+            self.replay_frame(raw, dt);
+            return;
+        }
         if pressed & btn::START != 0 {
             self.menu = Some(Menu::pause(raw.buttons, self.draw_distance as u16));
             return;
@@ -754,15 +798,28 @@ impl Game {
             ..*raw
         };
         let raw = &unblocked;
+        // Z + d-pad: markers and the replay (not in the air, where Z is the dark catch).
+        let air = self.skater.is_airborne() || self.skater.biped.air.is_some();
+        let (buttons, mut chord) = self.chord.read(raw.buttons, !air);
+        let seen = PadRaw { buttons, ..*raw };
+        let raw = &seen;
+        if chord.replay && !self.recording.is_empty() {
+            self.open_replay(buttons);
+            return;
+        }
         if held {
             return;
         }
         self.ahead -= dt;
+        let mut ran = 0;
         // A little slack so float error never runs (or skips) a tick at 60 Hz.
         while self.ahead < -1e-4 {
             self.prev_view = Some(self.view());
             let turned = self.skater.frame_turned;
-            self.tick(raw);
+            self.tick(raw, chord);
+            // A marker goes down once a press, whatever the frame's ticks.
+            chord.place = false;
+            ran += 1;
             self.ahead += TICK;
             if self.skater.frame_turned != turned
                 && let Some(p) = &mut self.prev_view
@@ -803,6 +860,10 @@ impl Game {
         }
         let t2 = now(self.timer);
         self.times.skin_us = t2.wrapping_sub(t1);
+        if ran > 0 {
+            self.record_frame(dt);
+            self.times.replay_us = now(self.timer).wrapping_sub(t2);
+        }
         let (render_us, park_draws, park_verts) = self.render_times.get();
         self.times.render_us = render_us;
         self.times.world_us = self.world_us.get();
@@ -837,6 +898,19 @@ impl Game {
                         time: 0.0,
                     });
                 }
+                Event::MarkerSet | Event::MarkerRefused => {
+                    let set = *e == Event::MarkerSet;
+                    self.popup = Some(Popup {
+                        title: if set { "MARKER SET" } else { "NO MARKER HERE" }.into(),
+                        detail: String::new(),
+                        rgba: if set {
+                            rgb(120, 230, 160)
+                        } else {
+                            rgb(255, 120, 100)
+                        },
+                        time: 0.0,
+                    });
+                }
                 _ => {}
             }
         }
@@ -850,12 +924,28 @@ impl Game {
 
     /// One fixed 1/60 s step of the simulation: input, flick reader (so flicks are sampled at 60 Hz, as
     /// Skate 3 reads them), skater, camera, log.
-    fn tick(&mut self, raw: &PadRaw) {
+    fn tick(&mut self, raw: &PadRaw, chord: ChordOut) {
         let dt = TICK;
         let pad = Pad::from_raw(raw, self.prev_held);
         self.prev_held = raw.buttons;
         self.clock += dt;
         self.ticks += 1;
+        let mut events = Vec::new();
+        // Session markers: down where the rider is, or (held) back to it, before the tick's riding.
+        if chord.place {
+            let ground: &dyn Terrain = terrain(&self.world, &self.park);
+            match Markers::here(&self.skater.tuning, ground, &self.skater) {
+                Some(m) => {
+                    self.markers.marker = Some(m);
+                    events.push(Event::MarkerSet);
+                }
+                None => events.push(Event::MarkerRefused),
+            }
+        }
+        if self.markers.tick(chord.back, &self.skater) {
+            self.return_to_marker();
+            events.push(Event::MarkerReturned);
+        }
         let mut flick = self.flick.update(pad.flick, self.tuning.flick_misses);
         let rolling = self.skater.mode == Mode::Rolling;
         let grinding = self.skater.mode == Mode::Grind;
@@ -942,7 +1032,6 @@ impl Game {
                 }
             }
         }
-        let mut events = Vec::new();
         let air = self.skater.is_airborne();
         let t_step = now(self.timer);
         self.skater.step(ground, &pad, &flick, dt, &mut events);
@@ -1112,7 +1201,7 @@ impl Game {
     pub fn render(&self, gfx: &mut dyn Gfx) {
         let now = || self.timer.map_or(0, |f| f());
         let t0 = now();
-        let cam = self.drawn_camera();
+        let cam = self.shown_camera();
         let streaming = self.district().filter(|_| self.district_wait).map(|d| {
             let (done, of) = d.progress(d.spawn().0);
             format!("{done} OF {of}")
@@ -1158,8 +1247,12 @@ impl Game {
             }
         };
         self.world_us.set(now().wrapping_sub(tw));
-        self.draw_skater(gfx);
-        self.draw_hud(gfx);
+        self.draw_skater(gfx, &self.shown_figure());
+        if self.replay.is_some() {
+            self.draw_replay_hud(gfx);
+        } else {
+            self.draw_hud(gfx);
+        }
         // Before end_frame: that waits for the GPU and the TV, which the platform measures itself.
         self.render_times
             .set((now().wrapping_sub(t0), draws, verts));
@@ -1243,13 +1336,15 @@ impl Game {
         lift.clamp(0.0, WHEEL_LIFT_MAX)
     }
 
-    fn draw_skater(&self, gfx: &mut dyn Gfx) {
-        if let Some(r) = &self.rider {
-            let m = self.imported_xform().to_mat34();
-            for p in &r.character.parts {
-                gfx.draw_indexed(&p.out, &p.indices, p.texture.as_ref(), &m);
-            }
-            return;
+    /// What is drawn of the rider now (live): the imported character's placement, or the placeholder's
+    /// rider and board.
+    pub fn figure(&self) -> Figure {
+        if self.rider.is_some() {
+            return Figure {
+                body: self.imported_xform(),
+                board: None,
+                tucked: false,
+            };
         }
         let s = &self.skater;
         let base = self.drawn_base();
@@ -1280,15 +1375,14 @@ impl Game {
             .then(&Xform::new(Mat3::IDENTITY, v3(0.0, -pivot, 0.0)));
         // The board off the feet where its own body is; on foot the placeholder rider has no board to
         // carry.
-        if let Some((pos, up, nose, _)) = self.free_board_frame() {
-            let free = Xform::new(
+        let board = if let Some((pos, up, nose, _)) = self.free_board_frame() {
+            Some(Xform::new(
                 Mat3::from_cols(up.cross(nose), up, nose),
                 pos - up * crate::skater::DECK_HEIGHT,
-            );
-            gfx.draw_tris(&self.models.board, &free.to_mat34());
-        } else if s.mode != Mode::Walk {
-            gfx.draw_tris(&self.models.board, &board.to_mat34());
-        }
+            ))
+        } else {
+            (s.mode != Mode::Walk).then_some(board)
+        };
 
         // Rider: tucks with the board, falls over on a bail.
         let (rider_pos, rider_rot) = match s.mode {
@@ -1305,14 +1399,281 @@ impl Game {
         } else {
             Mat3::IDENTITY
         };
-        let rider = base.then(&Xform::new(stance.mul(&rider_rot), rider_pos));
-        let tucked = s.crouch > 0.5 || (s.is_airborne() && lift > 0.05);
-        let mesh = if tucked {
+        Figure {
+            body: base.then(&Xform::new(stance.mul(&rider_rot), rider_pos)),
+            board,
+            tucked: s.crouch > 0.5 || (s.is_airborne() && lift > 0.05),
+        }
+    }
+
+    /// What is drawn of the rider this frame: the replay's when it is being watched, else the live one.
+    pub fn shown_figure(&self) -> Figure {
+        match (&self.replay, &self.replay_shown) {
+            (Some(_), Some((f, _))) => *f,
+            _ => self.figure(),
+        }
+    }
+
+    /// The camera this frame is drawn with: the replay's when it is being watched, else the game's.
+    pub fn shown_camera(&self) -> crate::gfx::Camera {
+        match (&self.replay, &self.replay_shown) {
+            (Some(_), Some((_, c))) => *c,
+            _ => self.drawn_camera(),
+        }
+    }
+
+    /// The imported skater's posed bones (character space), as drawn.
+    pub fn rider_bones(&self) -> Option<&[crate::character::Rows]> {
+        self.rider.as_ref().map(|r| r.character.world())
+    }
+
+    fn draw_skater(&self, gfx: &mut dyn Gfx, f: &Figure) {
+        if let Some(r) = &self.rider {
+            let m = f.body.to_mat34();
+            for p in &r.character.parts {
+                gfx.draw_indexed(&p.out, &p.indices, p.texture.as_ref(), &m);
+            }
+            return;
+        }
+        if let Some(b) = &f.board {
+            gfx.draw_tris(&self.models.board, &b.to_mat34());
+        }
+        let mesh = if f.tucked {
             &self.models.rider_crouched
         } else {
             &self.models.rider
         };
-        gfx.draw_tris(mesh, &rider.to_mat34());
+        gfx.draw_tris(mesh, &f.body.to_mat34());
+    }
+
+    /// Back at the session marker (Z + d-pad down held), as a respawn puts the rider back: the camera
+    /// cut to him, the flick reader and the state graphs started over, the line ended.
+    fn return_to_marker(&mut self) {
+        let Some(m) = self.markers.marker else {
+            return;
+        };
+        let ground: &dyn Terrain = terrain(&self.world, &self.park);
+        self.skater.return_to(ground, &m);
+        self.flick.reset();
+        self.cam.request_reset();
+        self.scoring.teleport();
+        if let (Some(g), Some(lib)) = (&mut self.graph, &self.motion) {
+            g.runner.reset(Some(&lib.db));
+            g.input.reset();
+        }
+    }
+
+    /// The frame just posed into the recording (once a frame that ran a tick).
+    fn record_frame(&mut self, dt: f32) {
+        let mirror = self
+            .rider
+            .as_ref()
+            .is_some_and(|r| r.character.last_skin().1);
+        self.recording.push(Header {
+            tick: self.ticks,
+            dt,
+            figure: self.figure(),
+            cam: self.drawn_camera(),
+            mirror,
+        });
+        let world = self.rider.as_ref().map_or(&[][..], |r| r.character.world());
+        self.recording.pose(world);
+    }
+
+    /// Opens the replay on the latest frame (paused), keeping the live skeleton to put back.
+    fn open_replay(&mut self, held: u32) {
+        if self.recording.is_empty() {
+            return;
+        }
+        self.replay = Some(Player::open(self.recording.len(), held));
+        self.replay_shown = None;
+        if let Some(r) = &self.rider {
+            let (light, mirror) = r.character.last_skin();
+            self.replay_saved.0.clear();
+            self.replay_saved.0.extend_from_slice(r.character.world());
+            self.replay_saved.1 = light;
+            self.replay_saved.2 = mirror;
+        }
+        self.show_replay();
+    }
+
+    /// Leaves the replay: the live skeleton back as it was, the buttons still held ignored by the riding
+    /// until let go. Nothing of the simulation changed meanwhile.
+    fn close_replay(&mut self, held: u32) {
+        self.replay = None;
+        self.replay_shown = None;
+        if let Some(r) = &mut self.rider
+            && self.replay_saved.0.len() == r.character.bones()
+        {
+            r.character.set_world(&self.replay_saved.0);
+            r.character.skin(self.replay_saved.1, self.replay_saved.2);
+        }
+        self.blocked = held;
+    }
+
+    /// One displayed frame of the replay: its controls, then what it shows.
+    fn replay_frame(&mut self, raw: &PadRaw, dt: f32) {
+        let (buttons, chord) = self.chord.read(raw.buttons, true);
+        let len = self.recording.len();
+        let Some(p) = &mut self.replay else {
+            return;
+        };
+        let at = (p.cursor as usize).min(len.saturating_sub(1));
+        let frame_dt = self.recording.header(at).map_or(TICK, |h| h.dt);
+        let pad = Pad::from_raw(&PadRaw { buttons, ..*raw }, 0);
+        if p.control(&pad, buttons, dt, len, frame_dt) || chord.replay {
+            self.close_replay(raw.buttons);
+            return;
+        }
+        self.show_replay();
+    }
+
+    /// Where the replay's playhead is: the rider and the camera between the two frames around it, and
+    /// the imported skater posed from the recording.
+    fn show_replay(&mut self) {
+        let Some(p) = &mut self.replay else {
+            return;
+        };
+        let rec = &self.recording;
+        let last = rec.len().saturating_sub(1);
+        let i = (libm::floorf(p.cursor.max(0.0)) as usize).min(last);
+        let j = (i + 1).min(last);
+        let (Some(a), Some(b)) = (rec.header(i), rec.header(j)) else {
+            return;
+        };
+        let k = p.cursor - i as f32;
+        // A teleport (a respawn, the marker) or a camera cut is not blended.
+        let cut = (b.figure.body.pos - a.figure.body.pos).length() > TELEPORT
+            || (b.cam.eye - a.cam.eye).length() > TELEPORT;
+        let k = if cut || j == i {
+            0.0
+        } else {
+            k.clamp(0.0, 1.0)
+        };
+        let (fa, fb) = (&a.figure, &b.figure);
+        let figure = if k <= 0.0 {
+            *fa
+        } else {
+            Figure {
+                body: blend_xform(&fa.body, &fb.body, k),
+                board: match (fa.board, fb.board) {
+                    (Some(x), Some(y)) => Some(blend_xform(&x, &y, k)),
+                    (x, _) => x,
+                },
+                tucked: if k < 0.5 { fa.tucked } else { fb.tucked },
+            }
+        };
+        let game = if k <= 0.0 {
+            a.cam
+        } else {
+            crate::gfx::Camera {
+                eye: a.cam.eye.lerp(b.cam.eye, k),
+                target: a.cam.target.lerp(b.cam.target, k),
+                up: a.cam.up.lerp(b.cam.up, k).normalize_or(b.cam.up),
+                fov_y_deg: a.cam.fov_y_deg + (b.cam.fov_y_deg - a.cam.fov_y_deg) * k,
+                ..a.cam
+            }
+        };
+        let look_at = figure.body.pos + crate::math::Vec3::UP * REPLAY_LOOK_HEIGHT;
+        let cam = match p.view {
+            ReplayView::Game => game,
+            ReplayView::Tripod(eye) => {
+                // Put down where the camera was when chosen.
+                let eye = eye.unwrap_or_else(|| self.replay_shown.map_or(game.eye, |(_, c)| c.eye));
+                p.view = ReplayView::Tripod(Some(eye));
+                crate::gfx::Camera {
+                    eye,
+                    target: look_at,
+                    up: crate::math::Vec3::UP,
+                    ..game
+                }
+            }
+            ReplayView::Orbit { yaw, pitch } => {
+                // Round the rider from behind the gameplay camera's view, turned by the C-stick.
+                let look = (game.target - game.eye).horizontal();
+                let yaw = crate::math::atan2f(look.x, look.z) + yaw;
+                let (sp, cp) = (sinf(pitch), libm::cosf(pitch));
+                let back = crate::math::yaw_dir(yaw) * (-cp * REPLAY_ORBIT)
+                    + crate::math::Vec3::UP * (sp * REPLAY_ORBIT);
+                crate::gfx::Camera {
+                    eye: look_at + back,
+                    target: look_at,
+                    up: crate::math::Vec3::UP,
+                    ..game
+                }
+            }
+        };
+        if let Some(r) = &mut self.rider
+            && rec.bone_count() == r.character.bones()
+            && rec.bone_count() > 0
+        {
+            let (ba, bb) = (rec.bones(i), rec.bones(j));
+            self.replay_pose.clear();
+            self.replay_pose.extend(
+                ba.iter()
+                    .zip(bb)
+                    .map(|(x, y)| crate::replay::unpack_blend(x, y, k)),
+            );
+            r.character.set_world(&self.replay_pose);
+            let c = &figure.body.rot.cols;
+            let sun = crate::gfx::SUN;
+            r.character
+                .skin(v3(c[0].dot(sun), c[1].dot(sun), c[2].dot(sun)), a.mirror);
+        }
+        self.replay_shown = Some((figure, cam));
+    }
+
+    /// The replay's screen: what it is doing, where in the 30 s, and its controls.
+    fn draw_replay_hud(&self, gfx: &mut dyn Gfx) {
+        let Some(p) = &self.replay else {
+            return;
+        };
+        let mut m = MeshBuilder::new();
+        let white = rgb(255, 255, 255);
+        let yellow = rgb(255, 230, 90);
+        hud::text(&mut m, 24.0, 22.0, 4.0, "REPLAY", yellow);
+        let speed = match p.speed {
+            0 => "1X",
+            1 => "1/2X",
+            _ => "1/4X",
+        };
+        let state = format!(
+            "{}  {}  {}",
+            if p.playing { "PLAYING" } else { "PAUSED" },
+            speed,
+            p.view.name()
+        );
+        hud::text(
+            &mut m,
+            SCREEN_W - 24.0 - hud::text_width(&state, 3.0),
+            26.0,
+            3.0,
+            &state,
+            white,
+        );
+        let len = self.recording.len();
+        let at = (p.cursor as usize).min(len.saturating_sub(1));
+        let frame_dt = self.recording.header(at).map_or(TICK, |h| h.dt);
+        let behind = (len.saturating_sub(1) as f32 - p.cursor).max(0.0) * frame_dt;
+        let (x, y, w) = (40.0, 410.0, SCREEN_W - 80.0);
+        m.rect_2d(x, y, w, 8.0, rgb(30, 30, 30));
+        let k = if len > 1 {
+            p.cursor / (len - 1) as f32
+        } else {
+            1.0
+        };
+        m.rect_2d(x, y, w * k.clamp(0.0, 1.0), 8.0, rgb(90, 220, 170));
+        let time = format!("-{behind:.1} S");
+        hud::text(&mut m, x, y - 26.0, 3.0, &time, white);
+        hud::text_centered(
+            &mut m,
+            SCREEN_W / 2.0,
+            434.0,
+            2.0,
+            "A PLAY  L/R SCRUB  D-PAD STEP / SPEED  Y CAMERA  X EXIT",
+            white,
+        );
+        gfx.draw_2d(&m.verts);
     }
 
     fn draw_hud(&self, gfx: &mut dyn Gfx) {
@@ -1322,6 +1683,12 @@ impl Game {
         let dark = self.skater.recovery.darkness(&self.tuning);
         if dark > 0.0 {
             m.rect_2d(0.0, 0.0, SCREEN_W, SCREEN_H, (dark * 255.0) as u32 & 0xff);
+        }
+        // Going back to the marker: the screen washes out as the hold fills (Skate 3's teleport effect).
+        let back = self.markers.progress;
+        if back > 0.0 {
+            let a = (back * MARKER_FLASH * 255.0) as u32 & 0xff;
+            m.rect_2d(0.0, 0.0, SCREEN_W, SCREEN_H, 0xffff_ff00 | a);
         }
         hud::text(
             &mut m,

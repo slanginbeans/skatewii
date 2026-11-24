@@ -196,6 +196,15 @@ impl DevLog {
                     s.footplant.normal.y,
                     s.footplant.normal.z
                 )),
+                Event::MarkerSet => out.push(format!(
+                    "marker: set at ({:.1}, {:.1}, {:.1})",
+                    s.pos.x, s.pos.y, s.pos.z
+                )),
+                Event::MarkerRefused => out.push(String::from("marker: can't set one here")),
+                Event::MarkerReturned => out.push(format!(
+                    "marker: back at ({:.1}, {:.1}, {:.1})",
+                    s.pos.x, s.pos.y, s.pos.z
+                )),
                 Event::FootReleased => out.push(format!(
                     "foot plant: off the foot at {:.1} m/s, up {:.2} m/s",
                     s.vel.horizontal().length(),

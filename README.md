@@ -14,6 +14,7 @@ board meets the rail (50-50, 5-0, nosegrind, crooked, willy, feeble, smith, boar
 tailslide). Bails come from what the board hits: walls, hard or off-axis landings. Tricks score as in
 Skate 3 (its points, repetition penalty, grind, manual and grab curves, air height and spin), and linked
 tricks build a line with Skate 3's multiplier and line timer (shown under the score); a bail ends the line.
+Session markers (Z + d-pad) take you back to a spot, and a replay plays back the last 30 s.
 With your own Skate 3 disc the build also takes Skate 3's own riding numbers, trick points and
 flick shapes from it. Tested on the PC and on an emulated Wii CPU. **Not yet run on a Wii or in Dolphin.**
 Plan: [ROADMAP.md](ROADMAP.md).
@@ -49,6 +50,11 @@ X, Y). The default stance is goofy, as in Skate 3.
 | C-stick held back on a transition, then let go | Pump (gain speed) |
 | Rolling tail first (fakie), push | The rider turns round and pushes switch |
 | Y | Get off the board (on the ground), and back on it |
+| Z in the air (with Skate 3's motion graphs) | Dark catch |
+| Z + d-pad up | Put a session marker down where the rider is: riding on the ground with the board upright, or standing on foot, on ground a checkpoint could go on (Skate 3's rules; one marker, a new one replaces it) |
+| Z + d-pad down, held | Back to the marker: after Skate 3's hold (0.2 s up to 100 m away, up to 1 s from 1 km; the screen washes out as it fills) the rider is put there at rest, facing the way he was, on the board or on foot as he was, as a respawn puts him back: the line ends. Not mid-bail or in the air (the hold waits) |
+| Z + d-pad left | Replay of the last 30 s (see below) |
+| D-pad | Character gestures (with Skate 3's motion graphs) |
 
 Off the board (Y), with the board in hand:
 
@@ -70,6 +76,24 @@ With the board out of his hands (dropped or thrown):
 | B over it (running alongside it) | Jump onto it and ride away (the caveman): Skate 3's landing assist brings him down on its deck |
 | START | Pause menu (see Menus) |
 | HOME (Wii Remote) or START + Z | Quit to the Homebrew Channel at once |
+
+**Z with the d-pad.** A d-pad press while Z is held, with the rider on the ground or on foot (not in the
+air), is a chord: it goes to the marker or the replay, not to the gestures, and the Z of the chord then
+counts as let go for the riding until you really let it go, so it can't dark-catch a flip off the next
+pop. In the air the chord isn't taken: Z is the dark catch there and the d-pad its gestures. Z alone, and
+the d-pad without Z, work as before.
+
+**Replay** (Z + d-pad left): the last 30 s as they were drawn, opened paused on the latest moment; the
+riding waits meanwhile and goes on exactly where it stopped when you leave.
+
+| Input | Action |
+|---|---|
+| A | Play / pause (at the end: play from the start) |
+| L / R (analog) | Scrub back / forward (up to four times real speed) |
+| D-pad left / right | One frame back / on |
+| D-pad down / up | Slower / faster: full speed, 1/2, 1/4 |
+| Y | Next camera: the gameplay camera, a tripod (stays where the camera was, turns to follow the rider), an orbit round the rider (C-stick turns it) |
+| X (Skate 3's B), START or Z + d-pad left | Back to the game |
 
 The flick directions are for a goofy rider; regular and switch mirror them (a goofy kickflip flick is a
 heelflip for a regular rider), as in Skate 3.
@@ -105,6 +129,8 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
   tuning.rs        every riding number (built in, or Skate 3's from the player's disc)
   skater.rs        board physics, stance, pushing, braking, landing rules, what each landed trick was
   scoring/         Skate 3's trick scoring: its trick catalogue, rewards, combo multiplier and lines
+  marker.rs        session markers and the Z + d-pad chord
+  replay.rs        the 30 s replay: the rolling recording of what was drawn, and its player
   camera/          Skate 3's camera: shots and blends, the camera graph's choice, rig, collision, framing
   park.rs          height-field park made of blocks and ramps (placeholder geometry in code)
   game.rs          update + render loop; draws only through gfx::Gfx

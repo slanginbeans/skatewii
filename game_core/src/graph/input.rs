@@ -7,7 +7,8 @@
 //! - A: push (right foot, `RightPush`), B: mongo push (`LeftPush`); both at once is the hippie jump:
 //!   the graphs see both pushes and wind it up themselves (`OnBoard/HippyJump`), as in Skate 3.
 //! - X: foot brake (`Brake`).
-//! - Z: dark catch (`DarkCatch`) and world grab (`GrabWorld`).
+//! - Z: dark catch (`DarkCatch`) and world grab (`GrabWorld`). Z with the d-pad on the ground is the
+//!   session marker and replay chord (`crate::marker::Chord`): the game hides it from here.
 //! - L / R: grabs (`LeftAirGrab` / `RightAirGrab`; fully in: the ground grabs) and crouch. Off the board
 //!   (Skate 3's LT / RT there), pressed fully in: drop the board (`OB_DropBoard`, L) or throw it down
 //!   ahead (`OB_ThrowBoard`, R), either one `OB_RetrieveBoard` (picks it back up when it isn't in hand).
