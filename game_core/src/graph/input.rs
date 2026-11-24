@@ -4,8 +4,8 @@
 //! gesture_input.rs), on a GameCube pad. The thresholds here are flatground's own round numbers.
 //!
 //! Buttons map by position on the pad (Xbox A -> GC A, X -> B, B -> X, Y -> Y, RB -> Z, LT/RT -> L/R):
-//! - A: push (right foot, `RightPush`), B: mongo push (`LeftPush`); both at once is the hippie jump and
-//!   pushes neither.
+//! - A: push (right foot, `RightPush`), B: mongo push (`LeftPush`); both at once is the hippie jump:
+//!   the graphs see both pushes and wind it up themselves (`OnBoard/HippyJump`), as in Skate 3.
 //! - X: foot brake (`Brake`).
 //! - Z: dark catch (`DarkCatch`) and world grab (`GrabWorld`).
 //! - L / R: grabs (`LeftAirGrab` / `RightAirGrab`; fully in: the ground grabs) and crouch.
@@ -200,13 +200,12 @@ impl Intentions {
                 self.since[k] + dt
             };
         }
-        // Pushes: A right foot, B mongo; both together is the hippie jump.
-        let (mut right, mut left) = (held & btn::A != 0, held & btn::B != 0);
-        let mut new_right = right && self.since[0] < PRESS_MEMORY;
-        let mut new_left = left && self.since[1] < PRESS_MEMORY;
-        if (right || new_right) && (left || new_left) {
-            (right, left, new_right, new_left) = (false, false, false, false);
-        }
+        // Pushes: A right foot, B mongo. Both together is the hippie jump: SK8's riding intentions pass
+        // both on (they're dropped only while an actor flag blocks pushing), and the action graph takes
+        // the pair as the hippie jump's wind-up.
+        let (right, left) = (held & btn::A != 0, held & btn::B != 0);
+        let new_right = right && self.since[0] < PRESS_MEMORY;
+        let new_left = left && self.since[1] < PRESS_MEMORY;
         if held & btn::X != 0 {
             put(id.brake, 1.0);
         }

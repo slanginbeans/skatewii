@@ -634,7 +634,6 @@ const FIXED_FALSE: &[&str] = &[
     "ShouldPlayHandPlantAnim",
     "ShouldPrepareOneFootAirForFootplant",
     "IsArmChannelPlaying",
-    "OBTimeToLand",
     "OBTrajTime",
     "MongoPushFootToFar",
     "IsProSkater",
@@ -690,7 +689,8 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
         },
         "PhysicsSpeedAndSlopeCompare" => Cond::SpeedAndSlope(n()),
         "TimeSinceLastInput" => Cond::TimeSinceLastInput(n()),
-        "TimeToLand" => Cond::TimeToLand(n()),
+        // Off the board in the air (a hippie jump, Skate 3's LandingOnDeck): the same time to land.
+        "TimeToLand" | "OBTimeToLand" => Cond::TimeToLand(n()),
         "DisablePushBrake" => Cond::DisablePushBrake,
         "HasGestureIntent" => match Group::parse(a.text("group").unwrap_or("")) {
             Some(g) => Cond::Gesture(g),

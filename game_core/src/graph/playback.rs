@@ -119,19 +119,20 @@ impl Node {
         }
     }
 
-    pub fn advance(&mut self, dt: f32, result: &mut Advance) {
+    /// `phase`: the phase-controlled clips' time (0..1: the walker's step cadence).
+    pub fn advance(&mut self, dt: f32, phase: f32, result: &mut Advance) {
         match self {
-            Node::Tree(t) => t.play.advance(dt, 0.0, result),
+            Node::Tree(t) => t.play.advance(dt, phase, result),
             Node::Transition(t) => {
                 let mut discard = Advance::default();
                 if t.def.kind == 4 {
                     if t.sequence_done {
-                        t.to.advance(dt, result);
+                        t.to.advance(dt, phase, result);
                     } else {
-                        t.from.advance(dt, &mut discard);
+                        t.from.advance(dt, phase, &mut discard);
                         if discard.crossed_end {
                             t.sequence_done = true;
-                            t.to.advance(discard.overshoot.max(0.0), result);
+                            t.to.advance(discard.overshoot.max(0.0), phase, result);
                         } else {
                             result.crossed_end = false;
                             result.remaining_before_wrap =
@@ -141,7 +142,7 @@ impl Node {
                     return;
                 }
                 if t.def.matching != 1 {
-                    t.from.advance(dt, &mut discard);
+                    t.from.advance(dt, phase, &mut discard);
                 }
                 if t.def.matching == 3 {
                     let time = t.from.time().min(t.to.length());
@@ -151,7 +152,7 @@ impl Node {
                     let l = t.to.length();
                     t.to.set_time(l * f);
                 } else {
-                    t.to.advance(dt, result);
+                    t.to.advance(dt, phase, result);
                 }
                 t.elapsed += dt;
             }
@@ -593,6 +594,9 @@ pub struct Channel {
 #[derive(Default)]
 pub struct Player {
     pub current: Option<Node>,
+    /// The phase-controlled clips' time this tick (0..1: Skate 3's animation phase, set from the
+    /// walker's step cadence).
+    pub phase: f32,
     /// Channels over it, lowest priority first.
     pub channels: Vec<Channel>,
     /// The last advance (WillExpire, ExpireInTime).
@@ -671,7 +675,7 @@ impl Player {
             let mut c = c.collapse();
             c.set_parameters(db, &self.params);
             let mut r = Advance::default();
-            c.advance(dt, &mut r);
+            c.advance(dt, self.phase, &mut r);
             self.property = Some(r);
             self.current = Some(c);
         }
@@ -683,7 +687,7 @@ impl Player {
             c.node.set_parameters(db, &self.params);
             if c.fade.advance(dt, c.node.length() - c.node.time()) {
                 let mut r = Advance::default();
-                c.node.advance(dt, &mut r);
+                c.node.advance(dt, self.phase, &mut r);
                 c.fade.crossed_end = r.crossed_end;
             }
         }

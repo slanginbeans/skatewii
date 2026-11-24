@@ -36,6 +36,8 @@ pub const STEP_DOWN: f32 = 0.35;
 /// The clips' speeds (m/s: walk, run and sprint cycles' travel over their length), for walk / run /
 /// sprint: Skate 3's NB_WALK_FWD_CYC, NB_RUN_FWD_CYC, NB_SPRINT_FWD_CYC.
 pub const CLIP_SPEEDS: [f32; 3] = [1.683_4, 5.369_8, 9.101_9];
+/// Those cycles' lengths (s): one step cycle travels its clip speed times this.
+pub const CYCLE_TIMES: [f32; 3] = [56.0 / 60.0, 38.0 / 60.0, 30.0 / 60.0];
 /// Below this (m/s) the rider stands.
 const STAND_SPEED: f32 = 0.01;
 
@@ -75,6 +77,10 @@ pub struct Biped {
     pub takeoff: Vec3,
     pub air_remaining: f32,
     pub air_travel: Vec3,
+    /// Skate 3's step cadence (SK8 offboard/cadence.rs, `BipedPhase`): where the walk, run or sprint
+    /// cycle is (0..1). It moves on by the distance covered over the cycle's own travel, so the feet
+    /// keep pace with the ground; the phase-controlled locomotion clips are drawn at it.
+    pub phase: f32,
 }
 
 /// What the controller reads each tick.
@@ -225,6 +231,38 @@ impl Biped {
         self.walk(gravity, park, pos, dt);
         self.speed = self.vel.length();
         self.loco = loco_for(self.speed);
+        self.step_cadence(dt);
+    }
+
+    /// The step cadence on the ground (SK8 BipedCadence::update): on by the speed over the cycle's
+    /// travel; standing, it settles at the nearer of the cycle's two standing points (0 and 0.5) at 5 a
+    /// second.
+    fn step_cadence(&mut self, dt: f32) {
+        let i = match self.loco {
+            Loco::Stand => {
+                let target = if (self.phase - 0.5).abs() < 0.25 {
+                    0.5
+                } else {
+                    0.0
+                };
+                let mut d = target - self.phase;
+                if d > 0.5 {
+                    d -= 1.0;
+                } else if d < -0.5 {
+                    d += 1.0;
+                }
+                let step = 5.0 * dt;
+                let next = self.phase + d.clamp(-step, step);
+                self.phase = next - libm::floorf(next);
+                return;
+            }
+            Loco::Walk => 0,
+            Loco::Run => 1,
+            Loco::Sprint => 2,
+        };
+        let travel = CLIP_SPEEDS[i] * CYCLE_TIMES[i];
+        let next = self.phase + self.speed / travel * dt;
+        self.phase = next - libm::floorf(next);
     }
 
     /// Skate 3's jump (SK8 air_launch/jump.rs): up for `jump_height`, ahead with the ground speed's
@@ -343,6 +381,43 @@ mod tests {
     use super::*;
 
     const T: BipedTuning = BipedTuning::BUILT_IN;
+
+    #[test]
+    fn the_step_cadence_covers_a_cycle_per_cycle_of_travel_and_settles_standing() {
+        // Running at the run clip's own speed: one cycle per cycle length, the feet keeping pace.
+        let mut b = Biped {
+            speed: CLIP_SPEEDS[1],
+            loco: Loco::Run,
+            phase: 0.25,
+            ..Biped::default()
+        };
+        let ticks = libm::roundf(CYCLE_TIMES[1] * 60.0) as usize;
+        let mut wrapped = 0;
+        for _ in 0..ticks {
+            let before = b.phase;
+            b.step_cadence(TICK);
+            wrapped += usize::from(b.phase < before);
+        }
+        assert!((b.phase - 0.25).abs() < 0.02 && wrapped == 1, "{}", b.phase);
+        // Twice as fast: twice the cycles.
+        b.speed *= 2.0;
+        for _ in 0..ticks {
+            b.step_cadence(TICK);
+        }
+        assert!((b.phase - 0.25).abs() < 0.03, "{}", b.phase);
+        // Standing: to the nearer standing point (0.25 is between, 0.3 goes to 0.5), then holds.
+        b.loco = Loco::Stand;
+        b.phase = 0.3;
+        for _ in 0..60 {
+            b.step_cadence(TICK);
+        }
+        assert!((b.phase - 0.5).abs() < 1e-4, "{}", b.phase);
+        b.phase = 0.9;
+        for _ in 0..60 {
+            b.step_cadence(TICK);
+        }
+        assert!(b.phase < 1e-4 || b.phase > 1.0 - 1e-4, "{}", b.phase);
+    }
 
     #[test]
     fn the_stick_ahead_moves_without_turning_and_back_turns_hard() {

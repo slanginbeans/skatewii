@@ -117,6 +117,11 @@ impl Driver {
     pub fn world(&self, s: &Skater, time_to_land: Option<f32>, idle: f32) -> World {
         let phys = match s.mode {
             Mode::Rolling => phys::GROUND,
+            // A hippie jump is Skate 3's LandingOnDeck: the rider off the board above it (an off-board
+            // physics state), the board rolling on underneath. Getting on in the air stays its BipedAir
+            // (off-board air) until he is down on the board.
+            Mode::Air { .. } if s.hippie_air() => phys::OFFBOARD,
+            Mode::Air { .. } if s.landing_on_deck() => phys::OFFBOARD_AIR,
             Mode::Air { .. } => phys::AIR,
             Mode::Grind => phys::GRIND,
             Mode::Bailed { .. } | Mode::Runout { .. } => phys::WIPEOUT,
@@ -557,6 +562,7 @@ fn walking(w: &mut World, s: &Skater) {
     let slope = libm::asinf(dir.y.clamp(-1.0, 1.0)) * (180.0 / crate::math::PI);
     let side = Vec3::UP.cross(f);
     w.loco = b.loco as u8;
+    w.cadence = b.phase;
     w.holding_board = true;
     w.biped_air = b.air.is_some();
     // In the air with ground to come down on (flatground has no jumps into walls), and not onto the

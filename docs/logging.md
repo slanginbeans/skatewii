@@ -70,9 +70,10 @@ While playing:
   <z> could not be read` (it isn't tried again). The `frame:` line's heap shows what the district holds.
 - `settings: draw distance <m> m` when the pause menu's draw distance was changed (written to `settings.txt`
   as the menu closes).
-- `board: turned <deg> deg under the rider <n> frames after <trick> (graph <state>, fakie, frame turned)` if the
-  drawn board swings round under the rider's feet in the 45 frames after a landing (more than 90 degrees
-  against the way he travels). Not seen off the Wii yet: the line says which trick and state it follows.
+- `board: turned <deg> deg under the rider <n> frames after <trick> (graph <state>, fakie, frame turned, switch,
+  speed <at landing> -> <now> m/s)` if the drawn board swings round under the rider's feet in the 45 frames
+  after a landing (more than 90 degrees against the way he travels). Not seen off the Wii yet: the line says
+  which trick and state it follows, and whether the board's speed fell through zero (a reversal).
 - `status:` once a second: the skater's mode, position, heading, speed, stance (switch, fakie), the camera's
   distance and how often a wall pulled it in, and the range each stick axis and trigger reached (for tuning the
   C-stick, whose range differs between pads).

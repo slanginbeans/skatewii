@@ -150,6 +150,8 @@ struct Popup {
 /// After a landing: the drawn board's yaw against the rider's travel, unwrapped (radians), for the log.
 struct BoardWatch {
     trick: String,
+    /// The board's speed along its nose at the landing (m/s; negative rolling tail first).
+    speed: f32,
     frames: u32,
     last: Option<f32>,
     turned: f32,
@@ -498,8 +500,14 @@ impl Game {
                 .map(|g| g.runner.motion_state())
                 .unwrap_or_default();
             let line = format!(
-                "board: turned {swing:.0} deg under the rider {} frames after {} (graph {state}, fakie {}, frame turned {})",
-                w.frames, w.trick, self.skater.fakie, self.skater.frame_turned
+                "board: turned {swing:.0} deg under the rider {} frames after {} (graph {state}, fakie {}, frame turned {}, switch {}, speed {:.1} -> {:.1} m/s)",
+                w.frames,
+                w.trick,
+                self.skater.fakie,
+                self.skater.frame_turned,
+                self.skater.switch,
+                w.speed,
+                self.skater.speed
             );
             if self.log.len() < LOG_CAP {
                 self.log.push(line);
@@ -760,6 +768,13 @@ impl Game {
             let mut posed = false;
             if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
             {
+                // A hippie jump (Skate 3's LandingOnDeck): the rider flies off the board and it rolls on
+                // along the ground under him, where his clips' board (which follows him) isn't. (Getting on
+                // in the air, his clips put the board under his feet themselves.)
+                r.set_board_floor(
+                    s.hippie_air()
+                        .then(|| ground.ground(s.pos.x, s.pos.z, s.pos.y + 0.5).height - s.pos.y),
+                );
                 g.runner.pose(&mut self.pose);
                 posed = r.update_graph(lib, &self.pose, rot, self.skater.frame_turned);
             }
@@ -781,6 +796,7 @@ impl Game {
                 Event::Landed { name, points } => {
                     self.board_watch = Some(BoardWatch {
                         trick: name.clone(),
+                        speed: self.skater.speed,
                         frames: 0,
                         last: None,
                         turned: 0.0,
@@ -1474,7 +1490,10 @@ mod tests {
         let mut o = Overlay::default();
         g.render(&mut o);
         // No controls list: nothing drawn in the bottom third, where the skater stands.
-        assert!(o.0.iter().all(|v| v.pos[1] < SCREEN_H * 0.66), "text in the lower screen");
+        assert!(
+            o.0.iter().all(|v| v.pos[1] < SCREEN_H * 0.66),
+            "text in the lower screen"
+        );
         g.popup = Some(Popup {
             title: "FAKIE BS 360 NOLLIE 360 INWARD HEELFLIP".into(),
             detail: "+1234".into(),

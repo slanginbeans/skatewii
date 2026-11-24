@@ -531,7 +531,7 @@ mod runner {
             &mut rec,
         );
         assert!(r.s.ag.has(r.pack.find("RightPush").unwrap()));
-        // A and B together is the hippie jump: no push.
+        // A and B together: both pushes, which the action graph takes as the hippie jump.
         let pad = Pad {
             held: btn::A | btn::B,
             ..Pad::default()
@@ -544,7 +544,7 @@ mod runner {
             &mut r.s.ag,
             &mut rec,
         );
-        assert!(!r.s.ag.has(r.pack.find("RightPush").unwrap()));
+        assert!(r.s.ag.has(r.pack.find("RightPush").unwrap()));
     }
 
     #[test]

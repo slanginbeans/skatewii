@@ -330,36 +330,41 @@ fn imported_graphs_get_off_walk_and_get_back_on() {
 }
 
 #[test]
-fn y_in_the_air_off_the_board_gets_on_at_landing() {
+fn y_in_the_air_off_the_board_gets_on_there() {
     let mut g = on_foot(LANE, 0.0);
     run(&mut g, 30, [0, 100], 0);
     run(&mut g, 1, [0, 100], btn::B);
-    run(&mut g, 3, [0, 100], 0);
+    run(&mut g, 8, [0, 100], 0);
     assert!(g.skater.biped.air.is_some(), "jumping");
-    // Y in the air: nothing yet, and the graphs aren't told (the physics doesn't take it now)...
+    // Y in the air: on the board at once, coming down onto it (Skate 3's air mount)...
     let pad = game_core::input::Pad::from_raw(&pad([0, 0], btn::Y), 0);
-    assert_eq!(g.skater.board_toggle_intent(&pad), (false, false));
+    assert_eq!(g.skater.board_toggle_intent(&pad), (true, true));
     run(&mut g, 1, [0, 0], btn::Y);
-    assert_eq!(g.skater.mode, Mode::Walk);
-    assert!(g.skater.board_toggle.is_none());
-    // ...it gets on as he lands.
+    assert!(g.events.contains(&Event::SteppedOn));
+    assert!(
+        matches!(g.skater.mode, Mode::Air { .. }) && g.skater.landing_on_deck(),
+        "{:?}",
+        g.skater.mode
+    );
+    // ...and riding once down, still going his way, with no trick scored for it.
+    let mut scored = false;
     let mut on = None;
     for i in 0..60 {
         run(&mut g, 1, [0, 0], 0);
+        scored |= g.events.iter().any(|e| matches!(e, Event::Landed { .. }));
         if g.skater.mode == Mode::Rolling {
             on = Some(i);
             break;
         }
     }
-    assert!(on.is_some(), "on the board after landing");
-    // A Y long before landing is forgotten.
-    let mut g = on_foot(LANE, 0.0);
-    g.skater.biped.air = None;
-    run(&mut g, 1, [0, 0], btn::B);
-    run(&mut g, 1, [0, 0], btn::Y);
-    g.skater.pos.y += 30.0;
-    run(&mut g, 200, [0, 0], 0);
-    assert_eq!(g.skater.mode, Mode::Walk, "a Y from 3 s before landing");
+    assert!(on.is_some(), "riding after coming down");
+    assert!(!scored);
+    assert!(g.skater.speed > 1.0, "{}", g.skater.speed);
+    assert!(
+        wrap_angle(g.skater.heading).abs() < 0.1,
+        "{}",
+        g.skater.heading
+    );
 }
 
 /// With the player's imported data: however Y is pressed around a jump off the board, the physics and the
@@ -446,4 +451,123 @@ fn imported_getting_on_switch_stays_switch() {
         assert_eq!(g.skater.mirrored(), mirrored, "tick {i}");
     }
     assert!(on && g.skater.switch, "riding switch");
+}
+
+fn imported(dir: &std::path::Path) -> Game {
+    let mut g = Game::new();
+    g.load_rules(&std::fs::read(dir.join("rules.fgpak")).unwrap())
+        .unwrap();
+    g.load_skater(leak(dir.join("skater.fgpak"))).unwrap();
+    g.load_motion(leak(dir.join("motion.fgpak"))).unwrap();
+    g
+}
+
+/// With the player's imported data: Y in the air off the board plays Skate 3's air mount (`Mount/Air`:
+/// the board from the hand to under the feet) and rides on after coming down, never wiping out.
+#[test]
+fn imported_y_in_the_air_plays_the_air_mount() {
+    let Some(dir) = data_dir() else {
+        eprintln!("offboard: no imported data (FG_DATA): skipped");
+        return;
+    };
+    let path = |g: &Game| g.graph.as_ref().unwrap().runner.motion_state();
+    for at in [3, 15, 30] {
+        let mut g = imported(&dir);
+        g.place_rider(LANE, 0.0, 3.0);
+        run(&mut g, 30, [0, 0], 0);
+        run(&mut g, 1, [0, 0], btn::Y);
+        run(&mut g, 120, [0, 0], 0);
+        if g.skater.mode != Mode::Walk {
+            eprintln!("offboard: the motion pack has no off-board clips: skipped");
+            return;
+        }
+        g.skater.pos = LANE;
+        run(&mut g, 40, [0, 100], 0);
+        run(&mut g, 1, [0, 100], btn::B);
+        run(&mut g, at, [0, 0], 0);
+        run(&mut g, 1, [0, 0], btn::Y);
+        let (mut mounted, mut riding) = (false, false);
+        for _ in 0..120 {
+            run(&mut g, 1, [0, 0], 0);
+            let p = path(&g);
+            assert!(!p.starts_with("WipeOut"), "Y {at} ticks up: {p}");
+            mounted |= p.starts_with("Mount/Air");
+            riding |= g.skater.mode == Mode::Rolling && p.starts_with("OnBoard/");
+        }
+        assert!(mounted && riding, "Y {at} ticks up: {}", path(&g));
+    }
+}
+
+/// With the player's imported data: walking and running, Skate 3's phase-controlled locomotion cycles
+/// play through (they stood frozen on their first frame while the rider slid along).
+#[test]
+fn imported_the_walk_and_run_cycles_play_through() {
+    let Some(dir) = data_dir() else {
+        eprintln!("offboard: no imported data (FG_DATA): skipped");
+        return;
+    };
+    let mut g = imported(&dir);
+    g.place_rider(LANE, 0.0, 0.0);
+    run(&mut g, 30, [0, 0], 0);
+    run(&mut g, 1, [0, 0], btn::Y);
+    run(&mut g, 120, [0, 0], 0);
+    if g.skater.mode != Mode::Walk {
+        eprintln!("offboard: the motion pack has no off-board clips: skipped");
+        return;
+    }
+    g.skater.pos = LANE;
+    for (stick, what) in [(40, "walking"), (100, "running")] {
+        run(&mut g, 40, [0, stick], 0);
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for _ in 0..60 {
+            run(&mut g, 1, [0, stick], 0);
+            let f = g.rider().and_then(|r| r.feet()).expect("posed feet");
+            // One foot along the facing, against the other.
+            let d = f[0][0] - f[1][0];
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        assert!(hi - lo > 0.3, "{what}: the feet stay put ({lo}..{hi})");
+    }
+}
+
+/// With the player's imported data: A and B together wind up Skate 3's own hippie jump (`OnBoard/
+/// HippyJump`: its wind-up clips), and letting go jumps the rider off the board while it rolls on along
+/// the ground under him (it used to rise with his feet as in an ollie); he comes down onto it riding.
+#[test]
+fn imported_hippie_jump_winds_up_and_leaves_the_board_rolling() {
+    let Some(dir) = data_dir() else {
+        eprintln!("offboard: no imported data (FG_DATA): skipped");
+        return;
+    };
+    let path = |g: &Game| g.graph.as_ref().unwrap().runner.motion_state();
+    let mut g = imported(&dir);
+    g.place_rider(LANE, 0.0, 5.0);
+    run(&mut g, 40, [0, 0], 0);
+    let mut wound = false;
+    for _ in 0..40 {
+        run(&mut g, 1, [0, 0], btn::A | btn::B);
+        wound |= path(&g).starts_with("OnBoard/HippyJump/Antic");
+        assert_eq!(g.skater.mode, Mode::Rolling, "winding up on the board");
+    }
+    assert!(wound, "the wind-up plays: {}", path(&g));
+    let (mut top, mut board_hi, mut landed) = (0.0f32, f32::MIN, false);
+    for _ in 0..90 {
+        run(&mut g, 1, [0, 0], 0);
+        let p = path(&g);
+        assert!(!p.starts_with("WipeOut"), "{p}");
+        if g.skater.landing_on_deck() {
+            top = top.max(g.skater.pos.y);
+            board_hi = board_hi.max(g.drawn_board().y);
+        }
+        landed |= g
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Landed { name, .. } if name.contains("HIPPIE")));
+    }
+    assert!(top > 0.5, "the rider jumps: {top}");
+    assert!(board_hi < 0.15, "the board stays on the ground: {board_hi}");
+    assert!(landed, "lands the hippie jump");
+    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(path(&g).starts_with("OnBoard/"), "{}", path(&g));
 }

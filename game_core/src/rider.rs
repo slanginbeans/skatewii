@@ -458,6 +458,9 @@ pub struct Rider {
     torso_bones: Vec<usize>,
     mirror: bool,
     graph_posed: bool,
+    /// Draw the board this high (metres, along the world's up) over the character's origin, whatever
+    /// the clips do with it: during a hippie jump it rolls on along the ground under the rider.
+    board_floor: Option<f32>,
     a: Vec<Local>,
     b: Vec<Local>,
     /// The state graphs' pose stack: poses and their bones' channel weights (see
@@ -517,6 +520,7 @@ impl Rider {
             torso_bones,
             mirror: false,
             graph_posed: false,
+            board_floor: None,
             a: vec![Local::IDENTITY; n],
             b: vec![Local::IDENTITY; n],
             stack: Vec::new(),
@@ -737,8 +741,21 @@ impl Rider {
         let ch = &mut self.character;
         ch.pose(&self.a);
         let c = &rot.cols;
+        if let (Some(b), Some(h)) = (self.board_bone, self.board_floor) {
+            // The world's up in the character's space, and the board's height along it now.
+            let up = v3(c[0].y, c[1].y, c[2].y);
+            let at = ch.world()[b][3];
+            let now = v3(at[0], at[1], at[2]).dot(up);
+            ch.shift_subtree(b, up * (h - now));
+        }
         ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), false);
         true
+    }
+
+    /// Draws the board at this height over the character's origin (world metres) from the next pose on,
+    /// or where the clips put it (`None`).
+    pub fn set_board_floor(&mut self, h: Option<f32>) {
+        self.board_floor = h;
     }
 
     /// The last pose came from the state graphs' clips (mirrored per tree, not at skin time).
