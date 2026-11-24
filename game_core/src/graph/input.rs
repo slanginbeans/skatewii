@@ -85,6 +85,10 @@ names! {
     hp_tweak_x = "HandPlantTweakX", hp_tweak_y = "HandPlantTweakY",
     hp_dismount = "HandPlantDismount", hp_one_right = "HandPlantOneFootRight",
     hp_one_left = "HandPlantOneFootLeft",
+    wipe_request = "WipeOutRequest", wipe_push_off = "WipeOutPushOff",
+    wipe_recover = "WipeOutRecover", wipe_control_x = "WipeoutControlX",
+    wipe_control_y = "WipeoutControlY", wipe_gesture_x = "WipeoutGestureX",
+    wipe_gesture_y = "WipeoutGestureY",
 }
 
 /// A trigger this far in is fully in (Skate 3 reads a trigger at 1.0: a ground grab riding, a drop or a
@@ -99,6 +103,12 @@ pub fn board_triggers(pad: &Pad, prev: &mut [bool; 2]) -> [bool; 2] {
     let new = [full[0] && !prev[0], full[1] && !prev[1]];
     *prev = full;
     new
+}
+
+/// Both triggers as Skate 3's wipeout intentions read them: fully in (L, R; SK8 `wipeout_intentions.rs`
+/// wants the exact end of their travel, here [`TRIGGER_FULL`]).
+pub fn wipe_triggers(pad: &Pad) -> [bool; 2] {
+    [pad.trig_l >= TRIGGER_FULL, pad.trig_r >= TRIGGER_FULL]
 }
 
 /// Gates from the game (SK8's actor flags): what the rider may do right now.
@@ -252,7 +262,34 @@ impl Intentions {
         }
         // L fully in drops the board, R throws it; either picks it back up (SK8: both publish
         // `OB_RetrieveBoard`; ToggleBoard decides by whether the board is in hand).
+        let was_full = self.full;
         let [drop, throw] = board_triggers(pad, &mut self.full);
+        // The wipeout (SK8 wipeout_intentions.rs, by position): the C-stick is the gesture (both always
+        // published), the main stick the control (when off centre), A or B new (Skate 3's A or X) the
+        // recover; both triggers fully in with Z (Skate 3's both stick clicks), any of them new, the bail
+        // request; R going fully in the push off.
+        put(id.wipe_gesture_x, pad.flick[0]);
+        put(id.wipe_gesture_y, pad.flick[1]);
+        if pad.stick[0] != 0.0 {
+            put(id.wipe_control_x, pad.stick[0]);
+        }
+        if pad.stick[1] != 0.0 {
+            put(id.wipe_control_y, pad.stick[1]);
+        }
+        if new & (btn::A | btn::B) != 0 {
+            put(id.wipe_recover, 1.0);
+        }
+        let full = self.full;
+        if full[0]
+            && full[1]
+            && held & btn::Z != 0
+            && (!was_full[0] || !was_full[1] || new & btn::Z != 0)
+        {
+            put(id.wipe_request, 1.0);
+        }
+        if throw {
+            put(id.wipe_push_off, 1.0);
+        }
         if gates.off_board {
             if drop {
                 put(id.ob_drop, 1.0);

@@ -180,8 +180,16 @@ pub struct World {
     pub ground_acc: [f32; 2],
     /// The body's lean (about the travel) and twist (about up) while wiping out (rad).
     pub hips: [f32; 2],
-    /// The main stick while wiping out (the wipeout gesture), none otherwise.
+    /// The C-stick while wiping out (Skate 3's `WipeoutGestureX/Y` intents: its right stick), none
+    /// otherwise.
     pub wipe_stick: Option<[f32; 2]>,
+    /// The wipeout (`skater::wipeout`): the control profile the gesture picked, the body's predicted
+    /// fall to the ground and time since it touched anything (s), and the bail request this tick
+    /// (`WipeOutRequest`, which lets the Wipeout behaviour take the gesture at once).
+    pub wipe_profile: u8,
+    pub wipe_time_to_land: f32,
+    pub wipe_since_contact: f32,
+    pub wipe_request: bool,
     /// The pushing feet against the deck (along its nose, up; m): left, right (PushOut).
     pub feet: [[f32; 2]; 2],
     /// The speed wobble's amplitude (0..1; SK8 PhysOut's Wobble+36): the turn conditioner's input.
@@ -303,6 +311,10 @@ impl Default for World {
             ground_acc: [0.0; 2],
             hips: [0.0; 2],
             wipe_stick: None,
+            wipe_profile: 0,
+            wipe_time_to_land: f32::MAX,
+            wipe_since_contact: 0.0,
+            wipe_request: false,
             feet: [[0.0; 2]; 2],
             wobble: 0.0,
             deck_yaw_pitch: [0.0; 2],
@@ -1368,6 +1380,9 @@ impl Host<'_, '_> {
                 libm::sqrtf(x * x + z * z) > m.bump_min
             }
             Cond::DoneWipingOut => w.phys != phys::WIPEOUT,
+            Cond::GestureType(g) => w.phys == phys::WIPEOUT && w.wipe_profile == g,
+            Cond::WipeTimeToLand(n) => n.matches(w.wipe_time_to_land),
+            Cond::WipeSinceContact(n) => n.matches(w.wipe_since_contact),
             Cond::LocoState(l) => matches!(w.phys, phys::OFFBOARD) && w.loco == l,
             Cond::HoldingBoard => w.holding_board,
             Cond::DeckFree => w.deck_free,
@@ -2299,7 +2314,7 @@ impl Host<'_, '_> {
                 gesture = [0.0; 2];
             }
             1 => {
-                if i.n > 80 {
+                if i.n > 80 || w.wipe_request {
                     i.on = true;
                 }
                 if enabled {

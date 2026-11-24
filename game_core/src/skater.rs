@@ -30,10 +30,13 @@ pub mod flip;
 mod grind;
 pub mod handplant;
 mod landing;
+pub mod meat;
 pub mod plant;
 pub mod possession;
+pub mod ragdoll;
 pub mod respawn;
 pub mod stall;
+pub mod wipeout;
 pub mod wobble;
 
 use alloc::format;
@@ -926,6 +929,16 @@ pub struct Skater {
     hand_plant_name: Option<&'static str>,
     /// The stall the last grind was (`skater::stall`), if it was one.
     pub stalled: Option<stall::Stall>,
+    /// The body in a bail (`skater::wipeout`: Skate 3's ragdoll wipeout), and Hall of Meat's injuries.
+    pub wipeout: wipeout::Wipeout,
+    /// Where the drawn rider's ragdoll points are (world), set by the game from the imported rider's
+    /// pose each frame: a bail starts the body there (else from the placeholder's standing pose).
+    pub pose_seed: Option<[Vec3; ragdoll::POINTS]>,
+    /// The triggers fully in last tick (Skate 3's bail request and push off read their edges), and
+    /// whether the bail request (`WipeOutRequest`) and the push off (`WipeOutPushOff`) came this tick.
+    wipe_full: [bool; 2],
+    pub wipe_request: bool,
+    pub wipe_push_off: bool,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -971,6 +984,9 @@ pub struct GraphControl {
     /// The motion graph went to its `WipeOut` state on its own (a grab tweaked into the landing): the
     /// physics bails with it.
     pub wipeout: bool,
+    /// The wipeout gesture the motion graph's `Wipeout` behaviour blended (`WipeoutGestureX/Y`): the
+    /// physics picks its control profile from it.
+    pub wipe_gesture: [f32; 2],
     /// The grab's scored name (`ScoringGrabs`: the variant the C-stick picks), and the tweak's size
     /// (`TweakX`, `TweakY`).
     pub grab_name: Option<&'static str>,
@@ -1242,6 +1258,11 @@ impl Skater {
             hand_plant_feet: handplant::Feet::Both,
             hand_plant_name: None,
             stalled: None,
+            wipeout: wipeout::Wipeout::default(),
+            pose_seed: None,
+            wipe_full: [false; 2],
+            wipe_request: false,
+            wipe_push_off: false,
         }
     }
 
@@ -1435,6 +1456,11 @@ impl Skater {
         (reach, b.nose.dot(facing) < 0.0)
     }
 
+    /// In a bail with the ragdoll (`skater::wipeout`).
+    pub fn ragdoll_active(&self) -> bool {
+        self.wipeout.active && matches!(self.mode, Mode::Bailed { .. })
+    }
+
     /// The drawn rider is the mirror image of the clips (they are authored goofy).
     pub fn mirrored(&self) -> bool {
         (self.stance == Stance::Regular) != self.switch
@@ -1608,6 +1634,7 @@ impl Skater {
             }
         }
         let triggers = crate::graph::input::board_triggers(pad, &mut self.trig_full);
+        self.read_wipe_buttons(pad, events);
         self.toggle_board(park, pad, dt, events);
         self.step_mode(park, pad, flick, dt, events);
         self.update_possession(park, triggers, dt, events);
@@ -1664,6 +1691,22 @@ impl Skater {
             Mode::Air { time } => self.fly(park, pad, flick, time + dt, dt, events),
             Mode::Grind => self.slide_rail(park, pad, flick, dt, events),
             Mode::Walk => self.walk(park, pad, dt),
+            Mode::Bailed { time } if self.wipeout.active => {
+                let time = time + dt;
+                self.step_wipeout(park, pad, dt);
+                // Skate 3's push buttons (A, B: `WipeOutRecover`) put the rider back early once settled.
+                let press = pad.was_pressed(btn::A) || pad.was_pressed(btn::B);
+                let t = self.tuning;
+                if self
+                    .recovery
+                    .update_settled(&t, time, self.wipeout.over, press, dt)
+                {
+                    self.respawn(park);
+                    events.push(Event::Respawned);
+                } else {
+                    self.mode = Mode::Bailed { time };
+                }
+            }
             Mode::Bailed { time } | Mode::Runout { time } => {
                 let time = time + dt;
                 let h = self.vel.horizontal() * (1.0 - smooth(3.0, dt));
@@ -3459,7 +3502,96 @@ impl Skater {
         self.handplant = handplant::Manager::default();
         self.drop_in = None;
         self.recovery = Recovery::default();
+        self.start_wipeout();
         events.push(Event::Bailed);
+    }
+
+    /// The bail's body: the ragdoll from the drawn rider's pose (the game's seed from the imported
+    /// rider, else the placeholder standing on the board), moving as the rider did; the board lets go
+    /// and goes its own way (Skate 3's wipeout frees the board's drives).
+    fn start_wipeout(&mut self) {
+        let points = match self.pose_seed {
+            Some(p) => p,
+            None => {
+                let place = crate::math::Xform::new(self.board_frame(), self.pos);
+                wipeout::built_in_pose(&place, self.mirrored())
+            }
+        };
+        self.wipeout.start(&points, self.vel, 1.0 / 60.0);
+        let rider = self.rider_frame();
+        match self.possession.hold {
+            possession::Hold::Underfoot => {
+                self.possession
+                    .release_with(rider, self.board_frame(), self.vel)
+            }
+            possession::Hold::Held => self.possession.release_with(
+                rider,
+                crate::math::Mat3::from_cols(v3(1.0, 0.0, 0.0), Vec3::UP, v3(0.0, 0.0, 1.0)),
+                self.vel,
+            ),
+            _ => {}
+        }
+    }
+
+    /// Skate 3's wipeout buttons (SK8 `input/wipeout_intentions.rs`, by position on the pad): both
+    /// triggers fully in with Z (its LT and RT fully in with both sticks clicked in, which the
+    /// GameCube pad hasn't got), new on any of them, bail on purpose (`WipeOutRequest`); in a bail R
+    /// going fully in pushes off (its RT, `WipeOutPushOff`).
+    fn read_wipe_buttons(&mut self, pad: &Pad, events: &mut Vec<Event>) {
+        let full = crate::graph::input::wipe_triggers(pad);
+        let new = [full[0] && !self.wipe_full[0], full[1] && !self.wipe_full[1]];
+        self.wipe_full = full;
+        self.wipe_request = full[0]
+            && full[1]
+            && pad.is_held(btn::Z)
+            && (new[0] || new[1] || pad.was_pressed(btn::Z));
+        self.wipe_push_off = new[1];
+        let can = matches!(
+            self.mode,
+            Mode::Rolling | Mode::Air { .. } | Mode::Grind | Mode::Walk
+        ) && self.drop_in.is_none();
+        if self.wipe_request && can {
+            if self.mode == Mode::Walk {
+                self.vel = self.biped.vel;
+            }
+            self.bail("bailed on purpose", events);
+        }
+    }
+
+    /// A tick of the bail's body: the sticks and the push off into it, then the rider's place
+    /// (where the camera and the reset look) follows the pelvis.
+    fn step_wipeout(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32) {
+        let control = biped::world_stick(pad.stick, self.cam_yaw);
+        let gesture = match self.graph {
+            Some(g) => g.wipe_gesture,
+            None => {
+                let m = &self.tuning.moves;
+                let blend = [m.wipe_gesture_x_blend, m.wipe_gesture_y_blend];
+                self.wipeout
+                    .gesture_from_stick(pad.flick, self.wipe_request, blend);
+                self.wipeout.gesture
+            }
+        };
+        let input = wipeout::Input {
+            control,
+            gesture,
+            push_off: self.wipe_push_off,
+        };
+        let t = self.tuning;
+        self.wipeout.step(park, &t, input, dt);
+        let pelvis = self.wipeout.body.pos[ragdoll::PELVIS];
+        let g = park.ground(pelvis.x, pelvis.z, pelvis.y + 0.1);
+        let low = pelvis.y - ragdoll::REST[ragdoll::PELVIS].y;
+        self.pos = v3(
+            pelvis.x,
+            if g.height > f32::MIN / 2.0 {
+                g.height.max(low)
+            } else {
+                low
+            },
+            pelvis.z,
+        );
+        self.vel = self.wipeout.body.com_vel(dt);
     }
 
     /// Stepped off the board after a hit the rider could run out of: no bail, back on the board where it

@@ -30,6 +30,8 @@ pub const GRAPH: &str = "Camera";
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Conditions {
     pub wiping_out: bool,
+    /// The wipeout's body tweak (`IsWipeoutBodyTweak`: 0 free fall .. 4 torpedo).
+    pub wipe_tweak: u32,
     pub off_board: bool,
     /// Off the board in the air (Skate 3's `IsAirOffboard`: physics state 501, the walker's jump).
     pub air_off_board: bool,
@@ -121,7 +123,7 @@ enum Op {
     /// `IsCameraTypeActive`: 0 the low camera, 1 the high.
     Type(u32),
     Previous(Vec<u64>),
-    /// `IsWipeoutBodyTweak`: none of the named tweaks happen in flatground's wipeouts.
+    /// `IsWipeoutBodyTweak`: the wipeout's body tweak (its control profile) is this one.
     Tweak(u32),
     Choose {
         name: String,
@@ -419,7 +421,7 @@ impl Host for CamHost<'_> {
             }),
             Op::Type(t) => *t == c.camera_type,
             Op::Previous(keys) => c.shot.is_some_and(|k| keys.contains(&k)),
-            Op::Tweak(t) => *t == 0,
+            Op::Tweak(t) => *t == c.wipe_tweak,
             _ => false,
         }
     }

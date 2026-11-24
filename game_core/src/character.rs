@@ -444,6 +444,61 @@ impl Character {
         }
     }
 
+    /// A bone's left/right partner (`None` for a bone in the middle).
+    pub fn mirror_partner(&self, bone: usize) -> Option<usize> {
+        let m = self.skeleton.mirror(bone);
+        (m >= 0 && (m as usize) < self.world.len() && m as usize != bone).then_some(m as usize)
+    }
+
+    /// A bone's parent (-1 for a root).
+    pub fn parent(&self, bone: usize) -> i16 {
+        self.skeleton.parent(bone)
+    }
+
+    /// Mirrors a local pose left for right in place, as a mirrored state-graph tree is (`scratch`
+    /// keeps the samples between calls).
+    pub fn mirror_locals(&self, local: &mut [Local], scratch: &mut Vec<crate::anim::Sample>) {
+        scratch.clear();
+        scratch.extend(local.iter().map(|l| crate::anim::Sample {
+            rotation: l.q,
+            translation: l.t,
+            scale: [1.0; 3],
+        }));
+        crate::anim::mirror_pose(scratch, &self.parents, &self.partners, 1);
+        for (l, s) in local.iter_mut().zip(scratch.iter()) {
+            *l = Local {
+                q: s.rotation,
+                t: s.translation,
+            };
+        }
+    }
+
+    /// Where a bone's joint is drawn (character space) with the last skin: a mirrored skin draws each
+    /// bone where its left/right partner is, reflected across x.
+    pub fn drawn_position(&self, bone: usize) -> Vec3 {
+        let mirror = self.skinned.1;
+        let m = self.skeleton.mirror(bone);
+        let b = if mirror && m >= 0 && (m as usize) < self.world.len() {
+            m as usize
+        } else {
+            bone
+        };
+        let t = self.world.get(b).map_or([0.0; 3], |w| w[3]);
+        if mirror {
+            Vec3 {
+                x: -t[0],
+                y: t[1],
+                z: t[2],
+            }
+        } else {
+            Vec3 {
+                x: t[0],
+                y: t[1],
+                z: t[2],
+            }
+        }
+    }
+
     pub fn world(&self) -> &[Rows] {
         &self.world
     }

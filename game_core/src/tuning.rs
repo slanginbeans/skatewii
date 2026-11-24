@@ -18,6 +18,7 @@ pub mod handplant;
 pub mod moves;
 pub mod plant;
 pub mod possession;
+pub mod wipeout;
 pub mod wobble;
 pub use camera::CamTuning;
 pub use grind::GrindTuning;
@@ -493,6 +494,8 @@ pub struct Tuning {
     pub biped: biped::BipedTuning,
     /// The board off the feet: dropped, thrown, picked up, landed on (`tuning::possession`).
     pub possession: possession::PossessionTuning,
+    /// The wipeout's ragdoll and its control profiles (`tuning::wipeout`).
+    pub wipeout: wipeout::WipeoutTuning,
 }
 
 /// What the state graphs' riding behaviours (`graph::riding`, ports of SK8's SetTurning, the physics'
@@ -764,6 +767,8 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .chain(possession::PATHS.iter())
         .chain(plant::PATHS.iter())
         .chain(handplant::PATHS.iter())
+        .chain(wipeout::PATHS.iter())
+        .chain(wipeout::PROFILE_PATHS.iter().flatten())
         .copied()
 }
 
@@ -1358,6 +1363,7 @@ impl Tuning {
         handplant: handplant::HandPlantTuning::BUILT_IN,
         biped: biped::BipedTuning::BUILT_IN,
         possession: possession::PossessionTuning::BUILT_IN,
+        wipeout: wipeout::WipeoutTuning::BUILT_IN,
     };
 
     /// Takes over every value a `rules/tuning` entry carries. Unknown names and malformed values are
@@ -1721,6 +1727,7 @@ impl Tuning {
                     || self.possession.set(name, f, c())
                     || self.plant.set(name, f, c(), v)
                     || self.handplant.set(name, f, c())
+                    || self.wipeout.set(name, f, c(), v)
             }
         }
     }
@@ -1974,6 +1981,40 @@ mod tests {
         assert_eq!(t.wobble.speed_range, 9.0);
         assert_eq!(t.wobble.amplitude_vs_speed.eval(0.5), 0.25);
         assert!(!t.manual_corrective);
+    }
+
+    #[test]
+    fn the_wipeout_body_and_its_profiles_come_through_the_rules_entry() {
+        let data = encode(&[
+            ("physics_wipeout/default/TimeToRemoveDrives", vec![2.0]),
+            ("physics_skeleton/default/FrictionRagdoll", vec![0.5]),
+            ("physics_wipeout_control/swan_dive/DriftFactorX", vec![7.0]),
+            ("physics_wipeout_control/torpedo/RollOnGround", vec![0.0]),
+            (
+                "physics_wipeout_control/judo_kick/AlignAxisEuler",
+                vec![10.0, 20.0, 0.0, 0.0],
+            ),
+            (
+                "physics_wipeout_control/cannon_ball/SpinVsTime",
+                vec![0.0, 1.0, 0.5, 1.0],
+            ),
+        ]);
+        let mut t = Tuning::BUILT_IN;
+        // Skate 3's stock values built in.
+        assert_eq!(t.wipeout.remove_drives_time, 1.5);
+        assert_eq!(t.wipeout.profiles[3].drift_sideways, 4.0);
+        assert!(t.wipeout.profiles[4].roll_on_ground);
+        assert_eq!(t.apply(&data), 6);
+        assert_eq!(t.wipeout.remove_drives_time, 2.0);
+        assert_eq!(t.wipeout.friction, 0.5);
+        assert_eq!(t.wipeout.profiles[3].drift_sideways, 7.0);
+        assert!(!t.wipeout.profiles[4].roll_on_ground);
+        assert_eq!(t.wipeout.profiles[2].align_euler, [10.0, 20.0]);
+        assert_eq!(t.wipeout.profiles[1].spin_vs_time.eval(0.5), 0.75);
+        // Every profile path is exported.
+        let paths: alloc::vec::Vec<&str> = all_paths().collect();
+        assert!(paths.contains(&"physics_wipeout_control/torpedo/Hash_7E6B3A99C0A33ABC"));
+        assert!(paths.contains(&"physics_skeleton_joints/default/TwistRagdollScalar"));
     }
 
     #[test]

@@ -251,8 +251,10 @@ impl Driver {
                 [a.dot(side), a.dot(s.fwd)]
             },
             hips: match s.mode {
-                // flatground's bail tips the body over sideways (as drawn) and keeps its heading
-                // against the travel.
+                // The ragdoll's hips against the surface (SK8 wipeout `output`).
+                Mode::Bailed { .. } if s.wipeout.active => s.wipeout.hips(),
+                // A runout tips the body over sideways (as drawn) and keeps its heading against the
+                // travel.
                 Mode::Bailed { time } | Mode::Runout { time } => {
                     let lean = -(time * 5.0).min(1.0) * crate::math::PI * 0.48;
                     let v = s.vel.horizontal();
@@ -266,6 +268,10 @@ impl Driver {
                 }
                 _ => [0.0; 2],
             },
+            wipe_profile: s.wipeout.profile as u8,
+            wipe_time_to_land: s.wipeout.predicted_time,
+            wipe_since_contact: s.wipeout.no_support_time,
+            wipe_request: s.wipe_request,
             toggling_board: s.board_toggle.is_some() || s.drop_in.is_some(),
             // The board off the feet (`skater::possession`).
             holding_board: s.possession.held(),
@@ -490,6 +496,7 @@ impl Driver {
                 end - r.s.player.time() > DANGER_GRACE
             });
         c.dark = r.s.dark;
+        c.wipe_gesture = r.s.wipe_gesture;
         // The wind-up states' `IsAnticipating` (Skate 3's anticipating flag, which its camera reads as
         // `IsPreparingToJump`).
         c.anticipating = r.flag(super::ops::Flag::Anticipating);

@@ -37,6 +37,8 @@ pub struct Figure {
     pub body: Xform,
     pub board: Option<Xform>,
     pub tucked: bool,
+    /// The placeholder is its ragdoll in a bail (its parts are the frame's bones, round `body`).
+    pub ragdoll: bool,
 }
 
 /// One recorded frame, apart from the bones.
@@ -445,6 +447,7 @@ mod tests {
                 body: Xform::new(Mat3::IDENTITY, v3(tick as f32, 0.0, 0.0)),
                 board: None,
                 tucked: false,
+                ragdoll: false,
             },
             cam: Camera {
                 eye: v3(0.0, 2.0, -4.0),

@@ -45,6 +45,8 @@ pub struct Subject {
     pub grinding: bool,
     pub ground: bool,
     pub wiping_out: bool,
+    /// The wipeout's body tweak (its control profile: 0 free fall .. 4 torpedo).
+    pub wipe_tweak: u32,
     pub off_board: bool,
     /// Off the board in the air (the walker's jump or a fall).
     pub air_off_board: bool,
@@ -259,6 +261,7 @@ impl SubjectHistory {
             grinding: s.mode == Mode::Grind,
             ground: s.mode == Mode::Rolling,
             wiping_out: matches!(s.mode, Mode::Bailed { .. }),
+            wipe_tweak: s.wipeout.profile as u32,
             off_board: matches!(s.mode, Mode::Runout { .. } | Mode::Walk) || s.hippie_air(),
             air_off_board: s.mode == Mode::Walk && s.biped.air.is_some(),
             pushing: s.push.is_some(),

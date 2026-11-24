@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 struct W(Vec<u8>);
 
@@ -449,6 +449,18 @@ fn cond(w: &mut W, c: &Cond) {
             w.u8(31);
             w.u8(phase);
         }
+        Cond::GestureType(g) => {
+            w.u8(32);
+            w.u8(g);
+        }
+        Cond::WipeTimeToLand(n) => {
+            w.u8(33);
+            w.num(n);
+        }
+        Cond::WipeSinceContact(n) => {
+            w.u8(34);
+            w.num(n);
+        }
         // Every field-less condition was written above.
         _ => w.u8(255),
     }
@@ -507,6 +519,9 @@ fn read_cond(r: &mut R) -> Option<Cond> {
             dir: r.u8()?,
         },
         31 => Cond::PlayHandPlant(r.u8()?),
+        32 => Cond::GestureType(r.u8()?),
+        33 => Cond::WipeTimeToLand(r.num()?),
+        34 => Cond::WipeSinceContact(r.num()?),
         _ => return None,
     })
 }

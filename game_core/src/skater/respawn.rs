@@ -206,6 +206,10 @@ impl Recovery {
         let settled = speed < t.settled_speed && time > t.settled_min_time;
         self.ever_settled |= settled;
         self.settled_time = if settled { self.settled_time + dt } else { 0.0 };
+        self.decide(t, time, reset_pressed, dt)
+    }
+
+    fn decide(&mut self, t: &Tuning, time: f32, reset_pressed: bool, dt: f32) -> bool {
         if let Some(n) = &mut self.countdown {
             if *n == 0 {
                 return true;
@@ -228,6 +232,21 @@ impl Recovery {
             self.fade = Some(t.reset_fade);
         }
         false
+    }
+
+    /// [`Recovery::update`] with the settling decided by the body (the ragdoll's `over`, SK8
+    /// `post_physics`).
+    pub fn update_settled(
+        &mut self,
+        t: &Tuning,
+        time: f32,
+        settled: bool,
+        reset_pressed: bool,
+        dt: f32,
+    ) -> bool {
+        self.ever_settled |= settled;
+        self.settled_time = if settled { self.settled_time + dt } else { 0.0 };
+        self.decide(t, time, reset_pressed, dt)
     }
 
     /// How dark the screen is (0..1) while fading out for a reset.
