@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 
 struct W(Vec<u8>);
 
@@ -262,7 +262,7 @@ fn read_op(r: &mut R) -> Option<Op> {
 }
 
 /// Conditions without fields, by tag.
-const PLAIN_CONDS: [Cond; 37] = [
+const PLAIN_CONDS: [Cond; 40] = [
     Cond::Mirrored,
     Cond::RidingFakie,
     Cond::RidingGoofy,
@@ -300,6 +300,9 @@ const PLAIN_CONDS: [Cond; 37] = [
     Cond::LandingOnBoard,
     Cond::FootPlanting,
     Cond::PrepareFootplant,
+    Cond::DroppingIn,
+    Cond::DropInFlat,
+    Cond::NewHandPlantPos,
 ];
 
 fn cond(w: &mut W, c: &Cond) {
@@ -437,6 +440,15 @@ fn cond(w: &mut W, c: &Cond) {
             w.u8(28);
             w.u16(s);
         }
+        Cond::HandPlanting { air, dir } => {
+            w.u8(30);
+            w.b(air);
+            w.u8(dir);
+        }
+        Cond::PlayHandPlant(phase) => {
+            w.u8(31);
+            w.u8(phase);
+        }
         // Every field-less condition was written above.
         _ => w.u8(255),
     }
@@ -490,6 +502,11 @@ fn read_cond(r: &mut R) -> Option<Cond> {
         27 => Cond::DistToEdge(r.num()?),
         28 => Cond::Unsupported(r.u16()?),
         29 => Cond::LocoState(r.u8()?),
+        30 => Cond::HandPlanting {
+            air: r.b()?,
+            dir: r.u8()?,
+        },
+        31 => Cond::PlayHandPlant(r.u8()?),
         _ => return None,
     })
 }
@@ -822,6 +839,21 @@ fn beh(w: &mut W, b: &Beh) {
             w.u8(38);
             w.o16(*n);
         }
+        Beh::ScoringHandPlants(g) => {
+            w.u8(39);
+            w.u16(g.base);
+            for d in g.dirs {
+                w.u16(d);
+            }
+            w.u16(g.x);
+            w.u16(g.y);
+        }
+        Beh::HandPlantAntic { attr, normal, late } => {
+            w.u8(40);
+            w.o16(*attr);
+            w.f(*normal);
+            w.f(*late);
+        }
         // Every field-less behaviour was written above.
         _ => w.u8(255),
     }
@@ -996,6 +1028,19 @@ fn read_beh(r: &mut R) -> Option<Beh> {
             gesture_y: r.o16()?,
         },
         38 => Beh::FootPlantAbsorb(r.o16()?),
+        39 => Beh::ScoringHandPlants(GrabScore {
+            base: r.u16()?,
+            dirs: [r.u16()?, r.u16()?, r.u16()?, r.u16()?],
+            x: r.u16()?,
+            y: r.u16()?,
+            invert_y: false,
+            polar: false,
+        }),
+        40 => Beh::HandPlantAntic {
+            attr: r.o16()?,
+            normal: r.f()?,
+            late: r.f()?,
+        },
         _ => return None,
     })
 }

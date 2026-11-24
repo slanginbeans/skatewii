@@ -25,12 +25,15 @@ mod air;
 pub mod balance;
 pub mod biped;
 mod board;
+pub mod dropin;
 pub mod flip;
 mod grind;
+pub mod handplant;
 mod landing;
 pub mod plant;
 pub mod possession;
 pub mod respawn;
+pub mod stall;
 pub mod wobble;
 
 use alloc::format;
@@ -675,6 +678,14 @@ pub enum Event {
     /// Planted a foot in the air (on a ledge, the coping, a wall), and flew off it.
     FootPlanted,
     FootReleased,
+    /// Dropping in on foot (`skater::dropin`): the board's tail set on the coping, then let go into the
+    /// transition; or stepped away from the edge again.
+    DropInSet,
+    DroppedIn,
+    DropInCancelled,
+    /// A hand plant (`skater::handplant`): the hand on the coping, and let go.
+    HandPlanted,
+    HandReleased,
     /// A session marker went down where the rider is (`crate::marker`), or could not go down here.
     MarkerSet,
     MarkerRefused,
@@ -900,6 +911,21 @@ pub struct Skater {
     one_foot: Option<(bool, bool)>,
     /// Seconds since take-off, or since the last foot plant flew off (Skate 3's air state's clock).
     plant_clock: f32,
+    /// Off the board: the edge ahead of the feet (`skater::dropin::find_edge`, Skate 3's `DistToEdge`),
+    /// and a drop-in on foot under way.
+    pub edge: Option<dropin::Edge>,
+    pub drop_in: Option<dropin::DropIn>,
+    /// Hand plants (`skater::handplant`): the manager looking for a coping riding up a ramp with the
+    /// world grab held, the plant itself (SK8 physical state 600) and, without the graphs, the tweak and
+    /// the feet held in it.
+    pub handplant: handplant::Manager,
+    pub hand_plant: Option<handplant::Plant>,
+    hand_plant_tweak: [f32; 2],
+    hand_plant_feet: handplant::Feet,
+    /// The name the graphs score the hand plant under, latched while they play it.
+    hand_plant_name: Option<&'static str>,
+    /// The stall the last grind was (`skater::stall`), if it was one.
+    pub stalled: Option<stall::Stall>,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -997,6 +1023,16 @@ pub struct GraphControl {
     /// clips reaching for a foot plant (`FootPlanting`).
     pub one_foot_air: bool,
     pub foot_planting: bool,
+    /// Hand plants: the motion graph attaches the world grab (Skate 3's RB: the physics looks for a
+    /// coping while it is held), its hand plant is committed (`AnimCommittedHandPlant`), and the plant's
+    /// scored name (`fs_handplant_up`, `BS_handplant_nofoot` ...).
+    pub grab_world: bool,
+    pub handplant_committed: bool,
+    pub handplant_name: Option<&'static str>,
+    /// Dropping in on foot: the motion graph stands at the edge (`IntoDropIn/Cycle`), and plays the
+    /// board held on the coping (`Grinding/DroppingIn`).
+    pub drop_in_stand: bool,
+    pub drop_in_grinding: bool,
 }
 
 /// A trick the state graph is animating in the air.
@@ -1198,6 +1234,14 @@ impl Skater {
             footplanted: None,
             one_foot: None,
             plant_clock: 0.0,
+            edge: None,
+            drop_in: None,
+            handplant: handplant::Manager::default(),
+            hand_plant: None,
+            hand_plant_tweak: [0.0; 2],
+            hand_plant_feet: handplant::Feet::Both,
+            hand_plant_name: None,
+            stalled: None,
         }
     }
 
@@ -1607,8 +1651,16 @@ impl Skater {
         dt: f32,
         events: &mut Vec<Event>,
     ) {
+        if self.drop_in.is_some() {
+            self.step_drop_in(park, pad, dt, events);
+            return;
+        }
         match self.mode {
-            Mode::Rolling => self.roll(park, pad, flick, dt, events),
+            Mode::Rolling => {
+                if !self.update_handplant(park, pad, events) {
+                    self.roll(park, pad, flick, dt, events)
+                }
+            }
             Mode::Air { time } => self.fly(park, pad, flick, time + dt, dt, events),
             Mode::Grind => self.slide_rail(park, pad, flick, dt, events),
             Mode::Walk => self.walk(park, pad, dt),
@@ -1659,6 +1711,19 @@ impl Skater {
     /// the state graphs the clips time it: off once the dismount clip starts walking the rider
     /// (`OB_TRAJ`), on once the mount clip's `OB_TRAJ` is over; without them at once.
     fn toggle_board(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
+        if self.drop_in.is_some() {
+            return;
+        }
+        if self.toggle_starts(pad)
+            && let Some(edge) = self.drop_in_edge()
+        {
+            // Standing at an edge with the board in hand, Y drops in (Skate 3's `IntoDropIn`, the first
+            // of its ground mounts).
+            self.drop_in = Some(dropin::DropIn::start(self.pos, edge));
+            self.board_toggle = None;
+            self.mount_traj = false;
+            return;
+        }
         if self.toggle_starts(pad) {
             self.board_toggle = Some(0.0);
             self.mount_traj = false;
@@ -1726,7 +1791,7 @@ impl Skater {
     /// landing, off the board), and allowed where the rider is. The graphs hear Y only then
     /// ([`Skater::board_toggle_intent`]), so they and the physics always agree on it.
     fn toggle_starts(&self, pad: &Pad) -> bool {
-        if self.board_toggle.is_some() || !pad.was_pressed(btn::Y) {
+        if self.board_toggle.is_some() || self.drop_in.is_some() || !pad.was_pressed(btn::Y) {
             return false;
         }
         match self.mode {
@@ -1743,7 +1808,9 @@ impl Skater {
     /// down (in the air, on steep ground) doesn't start the clips without it.
     pub fn board_toggle_intent(&self, pad: &Pad) -> (bool, bool) {
         let new = self.toggle_starts(pad);
-        let held = new || (self.board_toggle.is_some() && pad.held & btn::Y != 0);
+        let toggling = self.board_toggle.is_some()
+            || self.drop_in.is_some_and(|d| d.phase != dropin::Phase::Out);
+        let held = new || (toggling && pad.held & btn::Y != 0);
         (held, new)
     }
 
@@ -1971,6 +2038,12 @@ impl Skater {
             .step(&tuning.biped, tuning.gravity, park, &mut pos, input, dt);
         self.pos = pos;
         self.sync_walk();
+        // The edge ahead (Skate 3's off-board `DistToEdge`).
+        self.edge = if self.biped.air.is_none() {
+            dropin::find_edge(park, self.pos, self.biped.forward())
+        } else {
+            None
+        };
         if self.pos.y < park.kill_height() {
             self.respawn(park);
         }
@@ -3056,6 +3129,10 @@ impl Skater {
             self.swing_over_plant(time, dt, events);
             return;
         }
+        if self.hand_plant.is_some() {
+            self.in_hand_plant(pad, time, dt, events);
+            return;
+        }
         self.update_prediction(park, now);
 
         // Body spin (Skate 3's controller): the stick, its wind-up, a let-go spin carrying on; with a
@@ -3378,6 +3455,9 @@ impl Skater {
         self.ground_plant = None;
         self.air_plant = None;
         self.footplant = plant::Manager::default();
+        self.hand_plant = None;
+        self.handplant = handplant::Manager::default();
+        self.drop_in = None;
         self.recovery = Recovery::default();
         events.push(Event::Bailed);
     }

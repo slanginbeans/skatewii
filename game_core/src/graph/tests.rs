@@ -1730,3 +1730,161 @@ mod foot_plant {
         assert_eq!(param.map(|p| p.value), Some(0.18));
     }
 }
+
+/// Dropping in and hand plants: their conditions and behaviours on a synthetic motion graph shaped like
+/// Skate 3's (`Grinding/DroppingIn` entered with `IsDroppingIn`; `HandPlantGround` with the ground hand
+/// plant and its antic's time, `HandPlantAir/FS` and `/BS` with the plant, scoring by the tweak).
+mod transition {
+    use super::*;
+    use crate::graph::host::Runner;
+    use crate::graph::ops::{Beh, Cond, Op};
+
+    fn c(name: &str, attrs: &[(&str, &str)]) -> Element {
+        let mut a = vec![("name", name), ("mask", "always")];
+        a.extend_from_slice(attrs);
+        Element::of("condition", &a, vec![])
+    }
+
+    fn graphs() -> Vec<u8> {
+        let action = st("Action", &[], vec![]);
+        let motion = st(
+            "Motion",
+            &[],
+            vec![
+                st("DroppingIn", &[], vec![when(vec![c("IsDroppingIn", &[])])]),
+                st(
+                    "FlatDrop",
+                    &[],
+                    vec![when(vec![c("IsDropInWithoutTransition", &[])])],
+                ),
+                st(
+                    "AirFS",
+                    &[],
+                    vec![
+                        when(vec![c(
+                            "IsHandPlanting",
+                            &[("state", "air"), ("dir", "FS")],
+                        )]),
+                        Element::of(
+                            "behaviour",
+                            &[
+                                ("name", "ScoringHandPlants"),
+                                ("intentX", "HandPlantTweakX"),
+                                ("intentY", "HandPlantTweakY"),
+                                ("handplantname", "FS_handplant"),
+                                ("up", "FS_handplant_up"),
+                                ("left", "FS_handplant_left"),
+                                ("down", "FS_handplant_down"),
+                                ("right", "FS_handplant_right"),
+                            ],
+                            vec![],
+                        ),
+                    ],
+                ),
+                st(
+                    "AirBS",
+                    &[],
+                    vec![when(vec![c(
+                        "IsHandPlanting",
+                        &[("state", "air"), ("dir", "BS")],
+                    )])],
+                ),
+                st(
+                    "NewPos",
+                    &[],
+                    vec![when(vec![c("HasNewHandPlantPos", &[])])],
+                ),
+                st(
+                    "Antic",
+                    &[],
+                    vec![
+                        when(vec![
+                            c("IsHandPlanting", &[("state", "ground")]),
+                            c("ShouldPlayHandPlantAnim", &[("anim", "antic")]),
+                        ]),
+                        Element::of("behaviour", &[("name", "SetHandPlantAnticLength")], vec![]),
+                    ],
+                ),
+                st("Idle", &[], vec![]),
+            ],
+        );
+        compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn drop_in_and_hand_plant_states_follow_the_physics() {
+        let bytes = graphs();
+        let lib = crate::motion::tests::lib();
+        let db = crate::motion::MotionDb::parse(&lib).unwrap();
+        let pack = Pack::parse(&bytes).unwrap();
+        let typed: Vec<Vec<Op>> = pack
+            .graphs
+            .iter()
+            .map(|g| crate::graph::ops::parse(&pack, g, Some(&db)))
+            .collect();
+        let ops: Vec<&Op> = typed.iter().flatten().collect();
+        for want in [
+            Cond::DroppingIn,
+            Cond::DropInFlat,
+            Cond::NewHandPlantPos,
+            Cond::HandPlanting { air: true, dir: 1 },
+            Cond::HandPlanting { air: true, dir: 0 },
+            Cond::HandPlanting { air: false, dir: 2 },
+            Cond::PlayHandPlant(2),
+        ] {
+            assert!(ops.contains(&&Op::Cond(want)), "{want:?}");
+        }
+        assert!(
+            ops.iter()
+                .any(|o| matches!(o, Op::Beh(Beh::ScoringHandPlants(_))))
+        );
+        // The test library has no antic clips: the antic length is left alone.
+        assert!(ops.contains(&&Op::Beh(Beh::HandPlantAntic {
+            attr: None,
+            normal: 0.0,
+            late: 0.0
+        })));
+        let code = crate::graph::opcode::encode(bytes.len(), &typed);
+        assert_eq!(
+            crate::graph::opcode::decode(&code, bytes.len()).as_ref(),
+            Some(&typed)
+        );
+        let mut r = Runner::with_ops(Pack::parse(&bytes).unwrap(), Some(&db), Some(typed)).unwrap();
+        let dt = 1.0 / 60.0;
+        let step = |r: &mut Runner, f: &dyn Fn(&mut crate::graph::host::World)| {
+            r.s.world = crate::graph::host::World::default();
+            f(&mut r.s.world);
+            r.update(Some(&db), dt);
+            r.motion_state()
+        };
+        assert_eq!(step(&mut r, &|_| {}), "Idle");
+        assert_eq!(step(&mut r, &|w| w.dropping_in = true), "DroppingIn");
+        assert_eq!(step(&mut r, &|w| w.drop_in_flat = true), "FlatDrop");
+        // Found on the ground: the antic plays once the apex is nearer than its threshold (0.75 s).
+        let found = |w: &mut crate::graph::host::World, time: f32| {
+            w.handplant.found = true;
+            w.handplant.time = time;
+        };
+        assert_eq!(step(&mut r, &|w| found(w, 1.0)), "Idle");
+        assert_eq!(step(&mut r, &|w| found(w, 0.6)), "Antic");
+        assert_eq!(
+            step(&mut r, &|w| {
+                found(w, 0.6);
+                w.handplant.new_pos = true;
+            }),
+            "NewPos"
+        );
+        // In the plant: by its side.
+        let air = |w: &mut crate::graph::host::World, fs: bool| {
+            w.handplant.air = true;
+            w.handplant.frontside = fs;
+        };
+        assert_eq!(step(&mut r, &|w| air(w, false)), "AirBS");
+        assert_eq!(step(&mut r, &|w| air(w, true)), "AirFS");
+        assert_eq!(r.s.handplant_score, pack.find("FS_handplant").unwrap());
+    }
+}

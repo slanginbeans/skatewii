@@ -62,6 +62,8 @@ pub enum Scored {
     Grind {
         into: Option<Air>,
         id: Option<u16>,
+        /// What Skate 3 scores it as when `id` has no record (a stall: the grind it is).
+        base: Option<u16>,
         held: f32,
     },
     /// A manual, revert or powerslide, held this long (s).
@@ -408,11 +410,17 @@ impl Scoring {
                 }
                 self.air(air, &flight) * k
             }
-            Scored::Grind { into, id, held } => {
+            Scored::Grind {
+                into,
+                id,
+                base,
+                held,
+            } => {
                 let into = into.map_or(0.0, |a| {
                     let flight = self.into;
                     self.air(&a, &flight) * self.stance_factor(frame) * r.land_grind
                 });
+                let id = id.filter(|i| self.catalog.get(*i).is_some()).or(*base);
                 into + id.map_or(0.0, |id| self.held_trick(id, *held, true))
             }
             Scored::Ground { id, held } => id.map_or(0.0, |id| self.held_trick(id, *held, false)),
@@ -729,6 +737,7 @@ mod tests {
             &Scored::Grind {
                 into: None,
                 id: catalog::id("fs_50_50"),
+                base: None,
                 held: 0.5,
             },
             &ground(0.0),
@@ -753,6 +762,37 @@ mod tests {
     }
 
     #[test]
+    fn a_stall_without_a_record_scores_as_the_grind_it_is() {
+        // Skate 3's catalogue has `fakie_rock` but the disc gives it no record: the rock scores as its
+        // grind (a lipslide); with a record for it, as itself.
+        let score = |catalog: Catalog| {
+            let mut s = Scoring::new();
+            s.catalog = catalog;
+            roll(&mut s, 5);
+            s.credit(
+                "ROCK TO FAKIE",
+                &Scored::Grind {
+                    into: None,
+                    id: catalog::id("fakie_rock"),
+                    base: catalog::id("fs_lip"),
+                    held: 0.5,
+                },
+                &ground(0.0),
+            )
+        };
+        let as_lip = score(Catalog::built_in());
+        assert!(as_lip > 0.0);
+        assert_eq!(
+            Catalog::built_in().get(catalog::id("fakie_rock").unwrap()),
+            None
+        );
+        let rock = catalog::id("fakie_rock").unwrap();
+        let with = Catalog::parse(&catalog::encode(&[(rock, 500, 0.2)])).unwrap();
+        assert!(with.get(rock).is_some());
+        assert!(score(with) > as_lip);
+    }
+
+    #[test]
     fn grinds_and_manuals_score_by_time_and_distance() {
         let mut s = Scoring::new();
         roll(&mut s, 5);
@@ -774,6 +814,7 @@ mod tests {
             &Scored::Grind {
                 into: None,
                 id: catalog::id("fs_50_50"),
+                base: None,
                 held: 2.0,
             },
             &ground(8.0),

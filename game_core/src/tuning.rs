@@ -14,6 +14,7 @@ pub mod adjust;
 pub mod biped;
 pub mod camera;
 pub mod grind;
+pub mod handplant;
 pub mod moves;
 pub mod plant;
 pub mod possession;
@@ -485,6 +486,8 @@ pub struct Tuning {
     pub adjust: adjust::AdjustTuning,
     /// Foot plants: the FootJump launch and the air foot plant (`tuning::plant`).
     pub plant: plant::PlantTuning,
+    /// Hand plants (inverts): the coping search and the plant (`tuning::handplant`).
+    pub handplant: handplant::HandPlantTuning,
 
     // Walking off the board (`tuning::biped`).
     pub biped: biped::BipedTuning,
@@ -760,6 +763,7 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .chain(biped::PATHS.iter())
         .chain(possession::PATHS.iter())
         .chain(plant::PATHS.iter())
+        .chain(handplant::PATHS.iter())
         .copied()
 }
 
@@ -1351,6 +1355,7 @@ impl Tuning {
         wobble: wobble::WobbleTuning::BUILT_IN,
         adjust: adjust::AdjustTuning::BUILT_IN,
         plant: plant::PlantTuning::BUILT_IN,
+        handplant: handplant::HandPlantTuning::BUILT_IN,
         biped: biped::BipedTuning::BUILT_IN,
         possession: possession::PossessionTuning::BUILT_IN,
     };
@@ -1715,6 +1720,7 @@ impl Tuning {
                     || self.biped.set(name, f, c())
                     || self.possession.set(name, f, c())
                     || self.plant.set(name, f, c(), v)
+                    || self.handplant.set(name, f, c())
             }
         }
     }
@@ -1913,6 +1919,36 @@ mod tests {
         assert_eq!(t.plant.leg_length, 0.9);
         assert_eq!(t.plant.max_duration, 0.3);
         assert!(all_paths().any(|p| p == "physics_footplantmanager/default/DeckBB"));
+    }
+
+    #[test]
+    fn the_hand_plants_come_through_the_rules_entry() {
+        let data = encode(&[
+            (
+                "physics_handplantmanager/default/Hash_63303CA6C611DC79",
+                vec![0.7],
+            ),
+            ("anim_handplant/default/Hash_673F3B1BD056C39E", vec![0.8]),
+            (
+                "Hash_55B5940075F78842/default/Hash_FF0DE8A42210E8C0",
+                vec![0.0, 7.0, 3.0, 3.0],
+            ),
+            (
+                "Hash_55B5940075F78842/default/Hash_A046D0516C0BD62B",
+                vec![0.9],
+            ),
+        ]);
+        let mut t = Tuning::BUILT_IN;
+        assert_eq!(t.handplant.min_speed, 0.5, "Skate 3's");
+        assert_eq!(t.handplant.anim, [0.1, 0.53, 0.75], "Skate 3's");
+        assert_eq!(t.apply(&data), 4);
+        assert_eq!(t.handplant.min_speed, 0.7);
+        assert_eq!(t.handplant.anim[2], 0.8);
+        assert_eq!(t.handplant.window[0].eval(2.0), 3.0);
+        // The window's drop and the manager's apex radius share a field name in different classes.
+        assert_eq!(t.handplant.window_drop, 0.9);
+        assert_eq!(t.handplant.apex_radius, 0.8);
+        assert!(all_paths().any(|p| p == "anim_handplant/default/Hash_B9012B86EB5258FE"));
     }
 
     #[test]

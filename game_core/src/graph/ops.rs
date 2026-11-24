@@ -200,6 +200,23 @@ pub enum Cond {
     /// `ShouldPrepareOneFootAirForFootplant`: the free foot will meet something in 0.1 to 0.5 s (SK8
     /// `0x82BBD7F0`, the manager's contact time).
     PrepareFootplant,
+    /// `IsDroppingIn`: the physics holds the board's tail on the coping for a drop-in (SK8 grind output
+    /// byte 324, the tip slide's drop-in flag: `skater::dropin` on foot, a drop-in entry rolling).
+    DroppingIn,
+    /// `IsDropInWithoutTransition`: the edge dropped in from has no transition under it (a ledge).
+    DropInFlat,
+    /// `IsHandPlanting` (SK8 `0x82BA55A8`): `air` the physics in its hand plant (physical state 600),
+    /// else a hand plant found on the ground (`HandPlantManager` flag 31); `dir` 1 frontside, 0
+    /// backside (the manager's flag 29), 2 either.
+    HandPlanting {
+        air: bool,
+        dir: u8,
+    },
+    /// `HasNewHandPlantPos` (SK8 `0x82BBDB98`): the manager's coping moved more than 0.15 m (flag 30).
+    NewHandPlantPos,
+    /// `ShouldPlayHandPlantAnim` (SK8 `0x82BBDA98`): the hand plant's time to its apex, less a tick,
+    /// under the clip's threshold (`anim_handplant`): phase 0 out (under minus it), 1 into, 2 antic.
+    PlayHandPlant(u8),
     /// Conditions of systems flatground doesn't have, with the value they take here.
     Fixed(bool),
     Unsupported(Str),
@@ -451,6 +468,17 @@ pub enum Beh {
     /// FootPlantAbsorb (SK8 motion_tricks.rs, TU3 `0x82BBE4E0`): the foot plant's swing time as the
     /// absorb clips' `absorblength`.
     FootPlantAbsorb(Option<NameId>),
+    /// ScoringHandPlants (SK8 motion_tricks.rs, TU3 `0x82BBF758`): the hand plant's scored name, picked
+    /// by its tweak intents with ScoringGrabs' windows.
+    ScoringHandPlants(GrabScore),
+    /// SetHandPlantAnticLength (SK8 motion_tricks.rs, TU3 `0x82BBE5D0`): how late the antic starts, as
+    /// the into clip's `antic_length`: from the antic clips' lengths (normal, late) and the time to the
+    /// apex.
+    HandPlantAntic {
+        attr: Option<NameId>,
+        normal: f32,
+        late: f32,
+    },
     /// Behaviours with nothing to do in flatground (hand services, debug text, off-board helpers).
     Nothing,
     Unsupported(Str),
@@ -640,13 +668,10 @@ pub mod slope {
     }
 }
 
-/// Conditions that belong to systems flatground leaves out (off-board walking, skitching, hand plants,
+/// Conditions that belong to systems flatground leaves out (off-board walking, skitching,
 /// water, moving objects, debug), with the value that keeps the graph on the board.
 const FIXED_FALSE: &[&str] = &[
-    "IsDroppingIn",
-    "IsDropInWithoutTransition",
     "IsGrabbingObject",
-    "IsHandPlanting",
     "IsInLocomotion",
     "PhysicsRequestsDismount",
     "IsEnteringSkitch",
@@ -661,8 +686,6 @@ const FIXED_FALSE: &[&str] = &[
     "IsHippyHurdling",
     "IsBipedGroundThin",
     "IsBipedCommittedToMotion",
-    "HasNewHandPlantPos",
-    "ShouldPlayHandPlantAnim",
     "IsArmChannelPlaying",
     "OBTrajTime",
     "MongoPushFootToFar",
@@ -730,6 +753,22 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
         "ManualOutTimerIsActive" => Cond::ManualOutTimer,
         "PhysicsWantsManualExit" => Cond::WantsManualExit,
         "IsFootPlanting" => Cond::FootPlanting,
+        "IsDroppingIn" => Cond::DroppingIn,
+        "IsDropInWithoutTransition" => Cond::DropInFlat,
+        "IsHandPlanting" => Cond::HandPlanting {
+            air: a.text("state") != Some("ground"),
+            dir: match a.text("dir") {
+                Some("FS") => 1,
+                Some("BS") => 0,
+                _ => 2,
+            },
+        },
+        "HasNewHandPlantPos" => Cond::NewHandPlantPos,
+        "ShouldPlayHandPlantAnim" => Cond::PlayHandPlant(match a.text("anim") {
+            Some("antic") => 2,
+            Some("into") => 1,
+            _ => 0,
+        }),
         "ShouldPrepareOneFootAirForFootplant" => Cond::PrepareFootplant,
         "PhysicsWantsRunout" => Cond::WantsRunout,
         "PhysicsWantsWipeOut" | "IsPhysicsWiping" => Cond::WantsWipeout,
@@ -822,8 +861,6 @@ const NOTHING: &[&str] = &[
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
     "UpdateIsWeightOnNose",
-    "SetHandPlantAnticLength",
-    "ScoringHandPlants",
     "AirDismounting",
     "InitMovingObjects",
     "MovingObject",
@@ -1109,6 +1146,26 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
             }
         }
         "FootPlantAbsorb" => Beh::FootPlantAbsorb(lib("absorblength")),
+        "ScoringHandPlants" => Beh::ScoringHandPlants(GrabScore {
+            base: a.str("handplantname"),
+            dirs: [a.str("up"), a.str("left"), a.str("down"), a.str("right")],
+            x: a.str("intentX"),
+            y: a.str("intentY"),
+            invert_y: false,
+            polar: false,
+        }),
+        // SK8 motion_tricks.rs: the shared antic clips' lengths (the frontside ones serve both sides).
+        "SetHandPlantAnticLength" => {
+            let length = |n: &str| {
+                db.and_then(|d| d.clip_index(n))
+                    .map_or(0.0, |i| db.map_or(0.0, |d| d.clip(i).length()))
+            };
+            Beh::HandPlantAntic {
+                attr: lib("antic_length"),
+                normal: length("INVERT_HANDPLANT_FS_0_ANTIC"),
+                late: length("INVERT_HANDPLANT_FS_0_ANTIC_LATE"),
+            }
+        }
         _ if NOTHING.contains(&name) => Beh::Nothing,
         _ if UNSUPPORTED.contains(&name) => Beh::Unsupported(NONE),
         _ => Beh::Unsupported(NONE),

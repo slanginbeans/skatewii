@@ -205,6 +205,27 @@ impl DevLog {
                     "marker: back at ({:.1}, {:.1}, {:.1})",
                     s.pos.x, s.pos.y, s.pos.z
                 )),
+                Event::DropInSet => out.push(String::from(
+                    "drop-in: the board's tail on the coping, standing on it",
+                )),
+                Event::DroppedIn => out.push(format!(
+                    "drop-in: let go into the transition at {:.1} m/s",
+                    s.speed
+                )),
+                Event::DropInCancelled => {
+                    out.push(String::from("drop-in: stepped away from the edge"))
+                }
+                Event::HandPlanted => out.push(format!(
+                    "hand plant: on the coping at ({:.2}, {:.2}, {:.2})",
+                    s.handplant.candidate.map_or(0.0, |c| c.point.x),
+                    s.handplant.candidate.map_or(0.0, |c| c.point.y),
+                    s.handplant.candidate.map_or(0.0, |c| c.point.z)
+                )),
+                Event::HandReleased => out.push(format!(
+                    "hand plant: let go at {:.1} m/s, up {:.2} m/s",
+                    s.vel.length(),
+                    s.vel.y
+                )),
                 Event::FootReleased => out.push(format!(
                     "foot plant: off the foot at {:.1} m/s, up {:.2} m/s",
                     s.vel.horizontal().length(),

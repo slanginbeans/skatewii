@@ -831,8 +831,11 @@ impl Game {
         };
         let raw = &unblocked;
         // Z + d-pad: markers and the replay; Z + C-stick: the free look (not in the air, where Z is the
-        // dark catch and the C-stick flicks).
-        let air = self.skater.is_airborne() || self.skater.biped.air.is_some();
+        // dark catch and the C-stick flicks, nor in a hand plant: Z found its coping, the C-stick tweaks
+        // it).
+        let air = self.skater.is_airborne()
+            || self.skater.biped.air.is_some()
+            || self.skater.handplanting();
         let (seen, mut chord) = self.chord.read_pad(raw, !air);
         let buttons = seen.buttons;
         let raw = &seen;
@@ -1020,8 +1023,16 @@ impl Game {
             let walking = s.mode == Mode::Walk;
             let ob_world = crate::skater::biped::world_stick(pad.stick, s.cam_yaw);
             let (toggle_board, toggle_board_new) = s.board_toggle_intent(&pad);
-            let (ob_mag, ob_steer) =
+            let (mut ob_mag, ob_steer) =
                 crate::skater::biped::read_stick(&s.tuning.biped, s.biped.heading, ob_world);
+            // Standing at the edge to drop in, the stick back from the edge is Skate 3's negative
+            // `OB_SteerMagnitude` (its `TryToLeave` steps away at -0.5).
+            if let Some(d) = s.drop_in {
+                let along = ob_world[0] * d.edge.dir.x + ob_world[1] * d.edge.dir.z;
+                if along < 0.0 {
+                    ob_mag = along;
+                }
+            }
             // The known landing's time (the trajectory selector), else straight down.
             let land_in = matches!(s.mode, Mode::Air { .. }).then(|| s.time_to_land(ground));
             let mut world = g.world(s, land_in, g.input.idle());

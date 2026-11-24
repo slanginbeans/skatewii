@@ -391,7 +391,10 @@ Writes `imported/rules.fgpak` (about 80 KB) with what makes the skating feel lik
   (`game_core::tuning::camera::PATHS`: `camera_tracker`, `camera/dynamics`, `camera/rotation`,
   `camera/subject_tracker`, `camera_compass`, `camera_positioner`, `camera_droppredictor`,
   `camera_lag_profile`, `camera/freecam`, `camera_shake`, `slowmotion_controller`) and the grinds' numbers (`game_core::tuning::grind::PATHS`: `physics_grinds`, `physics_grinds_air`, grind
-  targeting, grind wipeouts, the board's dimensions, the grind trees' twist and height), and the scoring
+  targeting, grind wipeouts, the board's dimensions, the grind trees' twist and height), the foot and
+  hand plants' (`game_core::tuning::plant::PATHS`, `game_core::tuning::handplant::PATHS`: the FootJump
+  launch, `physics_footplantmanager`, the hand plant's search window `Hash_55B5940075F78842`,
+  `physics_handplantmanager`, `anim_handplant`), and the scoring
   module's numbers (`game_core::scoring::rules::PATHS`: the line and combo timers, the multiplier's levels,
   the repetition and announcement curves, the bail and unannounced factors, the collectors' time, distance,
   air and grab curves and their landing and take-off factors).
