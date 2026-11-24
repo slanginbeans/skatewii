@@ -288,6 +288,14 @@ pub struct Game {
     replay_pose: Vec<crate::character::Rows>,
     /// Hall of Meat: the last bail's injuries, and seconds since it ended (shown a while after).
     pub meat: Option<(crate::skater::meat::Meat, f32)>,
+    /// The sounds: Skate 3's from a sound pack, else the built-in placeholders ([`crate::sound`]).
+    pub sounds: crate::sound::Bank,
+    /// The sound event layer: what plays, decided after each frame (it never touches the simulation).
+    pub director: crate::sound::Director,
+    /// The master volume, 0..=[`crate::sound::VOLUME_STEPS`] (the pause menu's setting).
+    volume: u8,
+    /// The last frame's shown time (s), for the sound layer.
+    frame_dt: f32,
 }
 
 /// Lines kept while nobody takes them.
@@ -382,7 +390,49 @@ impl Game {
             replay_saved: (Vec::new(), crate::math::Vec3::UP, false),
             replay_pose: Vec::new(),
             meat: None,
+            sounds: crate::sound::Bank::builtin(),
+            director: crate::sound::Director::new(),
+            volume: crate::sound::DEFAULT_VOLUME,
+            frame_dt: 0.0,
         }
+    }
+
+    /// Uses a sound pack (`fg_import`'s `sound.fgpak`): Skate 3's sounds replace the placeholders of every
+    /// cue it has. Returns how many cues and clips it supplied. The bytes stay borrowed (read in place).
+    pub fn load_sounds(
+        &mut self,
+        pack: &'static [u8],
+    ) -> Result<(usize, usize), crate::pack::Error> {
+        self.sounds.load(pack)
+    }
+
+    /// The master volume, 0..=10 (the pause menu's setting).
+    pub fn volume(&self) -> u8 {
+        self.volume
+    }
+
+    pub fn set_volume(&mut self, v: u8) {
+        self.volume = v.min(crate::sound::VOLUME_STEPS);
+    }
+
+    /// The frame's sound: call after [`Game::update`] (and before or after `render`). The director reads
+    /// the frame's events and the rider's state and hands its commands to `out`, the platform's mixer.
+    pub fn sound(&mut self, out: &mut dyn crate::sound::Audio) {
+        let paused = self.menu.is_some()
+            || self.loading.is_some()
+            || self.replay.is_some()
+            || self.district_wait;
+        let scene = crate::sound::director::Scene {
+            skater: &self.skater,
+            events: &self.events,
+            terrain: terrain(&self.world, &self.park),
+            ear: crate::sound::director::Ear::of(&self.drawn_camera()),
+            dt: self.frame_dt,
+            paused,
+        };
+        self.director.frame(&scene, &self.sounds);
+        let master = self.volume as f32 / crate::sound::VOLUME_STEPS as f32;
+        out.frame(&self.sounds, &self.director.commands, master);
     }
 
     /// Uses an imported skater pack (`fg_import skater`) instead of the placeholder model. The bytes stay
@@ -521,6 +571,7 @@ impl Game {
             Choice::Ride(i) => self.request = Some(Request::Load(i.min(self.locations.len() - 1))),
             Choice::DrawDistance(d) => self.set_draw_distance(d as f32),
             Choice::Camera(a) => self.set_camera_angle(a),
+            Choice::Volume(v) => self.set_volume(v),
         }
     }
 
@@ -770,6 +821,7 @@ impl Game {
     /// [`TICK`]s as it takes to reach the frame's time (one at 60 Hz; one or two at 50 Hz), then poses the
     /// rider once. A PAL50 frame is drawn between the last two ticks.
     pub fn update(&mut self, raw: &PadRaw, dt: f32) {
+        self.frame_dt = dt;
         self.connected = raw.flags & flag::CONNECTED != 0;
         self.events.clear();
         let pressed = raw.buttons & !self.menu_prev;
@@ -813,6 +865,10 @@ impl Game {
                     self.set_camera_angle(a);
                     self.settings_changed = true;
                 }
+                Some(Choice::Volume(v)) => {
+                    self.set_volume(v);
+                    self.settings_changed = true;
+                }
                 Some(c) => self.choose(c, raw.buttons),
                 None => {}
             }
@@ -829,6 +885,7 @@ impl Game {
         if pressed & btn::START != 0 {
             let mut menu = Menu::pause(raw.buttons, self.draw_distance as u16);
             menu.camera = self.camera_angle();
+            menu.volume = self.volume;
             self.menu = Some(menu);
             return;
         }

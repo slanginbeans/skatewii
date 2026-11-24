@@ -15,7 +15,7 @@ const SRC_HASH: &str = env!("FG_IMPORT_SRC_HASH");
 
 /// One converted output: what the game loads from the app folder's `data/`.
 struct Job {
-    /// Which converter runs it (`skater`, `motion`, `rules`, `park`).
+    /// Which converter runs it (`skater`, `motion`, `rules`, `sound`, `park`).
     kind: &'static str,
     /// The job's stamp is `<name>.stamp` (a park's sits next to its pack: `parks/<park>.stamp`).
     name: String,
@@ -97,6 +97,7 @@ fn jobs(default: &'static str) -> Vec<Job> {
         one("skater", vec!["--lod".into(), "2".into()]),
         one("motion", Vec::new()),
         one("rules", Vec::new()),
+        one("sound", Vec::new()),
     ];
     jobs.extend(locations(default).into_iter().map(park_job));
     if with_districts() {
@@ -354,6 +355,7 @@ fn convert(iso: &Path, job: &Job, out: &Path) -> Res<()> {
         "skater" => skater::run(&mut disc, &args),
         "park" => park::run(&mut disc, &args),
         "rules" => crate::rules::run(&mut disc, &args),
+        "sound" => crate::sound::run(&mut disc, &args),
         "motion" => crate::motion::run(&mut disc, &args),
         "district" => {
             let mut args = job.args.clone();
@@ -374,7 +376,17 @@ pub fn run(args: &[String]) -> Res<()> {
     }
     println!("[assets] Disc image: {}", iso.display());
     let default = default_park()?;
+    // Sound needs FFmpeg's XMA2 decoder (Skate 3's audio is Xbox 360 XMA); without one the game keeps its
+    // placeholder sounds.
+    let can_sound = crate::sound::decoder_available();
     for job in &jobs(default) {
+        if job.kind == "sound" && !can_sound {
+            println!(
+                "[assets] sound: skipped, no FFmpeg with an XMA2 decoder found (install FFmpeg or set \
+                 FG_FFMPEG; docs/importing.md): the game plays its built-in sounds"
+            );
+            continue;
+        }
         let want = stamp(&iso, job)?;
         if up_to_date(&o.cache, job, &want) {
             println!("[assets] {}: up to date", job.name);

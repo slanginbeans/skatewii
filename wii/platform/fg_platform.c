@@ -121,6 +121,8 @@ void fg_platform_init(void) {
     GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
     GX_SetAlphaUpdate(GX_TRUE);
     GX_SetColorUpdate(GX_TRUE);
+
+    fg_audio_init();
 }
 
 uint32_t fg_frame_refreshes(void) {
@@ -498,7 +500,7 @@ void fg_frame_stats(FgFrameStats *out) {
     out->mem1_free = (u32)SYS_GetArena1Hi() - (u32)SYS_GetArena1Lo();
     out->mem2_free = (u32)SYS_GetArena2Hi() - (u32)SYS_GetArena2Lo();
     out->heap_used = (u32)mi.uordblks;
-    out->_pad = 0;
+    out->audio_underruns = fg_audio_underruns();
 }
 
 // The log's background writer: a low-priority thread that writes buffered lines to the card every couple of

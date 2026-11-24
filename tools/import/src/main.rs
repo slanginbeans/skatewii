@@ -25,6 +25,7 @@ mod rw4;
 mod scoring;
 mod skater;
 mod skin;
+mod sound;
 mod starts;
 mod stategraph;
 mod texture;
@@ -77,6 +78,12 @@ const USAGE: &str = "usage:
       --cap <KiB>       largest cell pack; bigger cells get smaller textures (default 3072)
       --out <dir>       output directory (default: imported/city)
   fg_import rules    <disc.iso> [--out <dir>]     Skate 3's riding tuning and flick shapes as rules.fgpak
+  fg_import sound    <disc.iso> [options]         Skate 3's sounds (pops, landings, rolling, grinds, steps...)
+                                                  as sound.fgpak: 32 kHz mono DSP-ADPCM; EA-XMA is decoded
+                                                  by FFmpeg (installed by you; docs/importing.md)
+      --ffmpeg <path>   the FFmpeg to use (default: $FG_FFMPEG, then ffmpeg on the PATH)
+      --list <asset>    list an asset's sound streams instead
+      --out <dir>       output directory (default: imported)
   fg_import skater   <disc.iso> [options]         the default skater as skinned meshes + textures
       --lod <0|2>       model detail (default 0)
       --png             front/side previews; --clip <name> [--frame <n>] also renders that clip
@@ -224,6 +231,7 @@ fn run(args: &[String]) -> Res<()> {
         "city" => city::run(&mut disc, &rest[1..])?,
         "district" => district::run(&mut disc, &rest[1..])?,
         "rules" => rules::run(&mut disc, &rest[1..])?,
+        "sound" => sound::run(&mut disc, &rest[1..])?,
         _ => return Err(USAGE.into()),
     }
     Ok(())

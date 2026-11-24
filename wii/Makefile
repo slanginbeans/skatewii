@@ -30,7 +30,7 @@ RUSTLIB     := ../target/$(RUST_TARGET)/$(RUST_PROFILE)/libfg_game.a
 BUILD_ID    ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo dev)
 
 BUILD := build
-OBJS  := $(BUILD)/main.o $(BUILD)/fg_platform.o $(BUILD)/fg_log.o $(BUILD)/fg_read.o
+OBJS  := $(BUILD)/main.o $(BUILD)/fg_platform.o $(BUILD)/fg_log.o $(BUILD)/fg_read.o $(BUILD)/fg_audio.o
 
 .PHONY: all package assets run clean rustlib
 all: $(BUILD)/flatground.dol

@@ -11,6 +11,15 @@
 *.big
 *.rx2
 *.fgpak
+# Audio from the disc (EA banks, streams, grains, XMA) and anything decoded from it.
+*.abk
+*.bnk
+*.snr
+*.sns
+*.grain
+*.sek
+*.xma
+*.wav
 
 # Local build settings (your disc image path), see docs/importing.md.
 /fg_local.txt

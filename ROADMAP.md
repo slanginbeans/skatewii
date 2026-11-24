@@ -191,5 +191,7 @@ content second.
   replay (the last 30 s as drawn: play, pause, scrub, slow motion, game / tripod / orbit cameras;
   `game_core::replay`, 1.2 MB with Skate 3's skater)
 - [ ] Session goals
-- [ ] Sound (ASND): rolling, pop, landing
+- [x] Sound (mixed in Rust, played by the audio interface): rolling by surface and speed, pop, catch, landings, grinds and slides, powerslides, the
+  foot brake, pushes, footsteps, bails, the board on its own; Skate 3's sounds from the disc (`fg_import sound`)
+  or built-in placeholders; master volume in the pause menu (`game_core::sound`)
 - [ ] Classic Controller and Wii Remote + Nunchuk control schemes

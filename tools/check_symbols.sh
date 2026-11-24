@@ -7,6 +7,8 @@ lib=${1:?usage: check_symbols.sh <libfg_game.a>}
 nm_bin=${NM:-powerpc-linux-gnu-nm}
 
 # calloc: LLVM fuses malloc + zero-fill (vec![0; n]) into one calloc call; newlib provides it.
+# fg_*: the platform layer (fg_platform.h), sound included: fg_audio_wanted and fg_audio_submit (fg_audio.c,
+# the audio interface's DMA). The mixer itself is Rust (game_core::sound::mix) and needs no C maths (libm crate).
 allowed='^(fg_[a-z0-9_]+|malloc|calloc|free|realloc|memalign|memcpy|memmove|memset|memcmp|bcmp|fmodf|fminf|fmaxf|_Unwind_Resume|rust_eh_personality)$'
 
 defined=$(mktemp)

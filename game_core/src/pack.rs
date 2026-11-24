@@ -37,6 +37,8 @@ pub enum Kind {
     MotionDb = 7,
     /// `game_core::graph` compiled state graphs (`motion/graph`)
     StateGraph = 8,
+    /// `game_core::sound::bank::Clip` (`sound/<cue>/<n>`)
+    Sound = 9,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

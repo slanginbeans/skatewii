@@ -171,13 +171,15 @@ impl CameraAngle {
 }
 
 /// What the settings file in the app folder (`settings.txt`) remembers: `location <id>`, the last location
-/// chosen, `draw_distance <m>`, a district's draw distance, and `camera low|high`, the camera angle. A
-/// line it doesn't know is skipped and one it lacks keeps the default, so older files still load.
+/// chosen, `draw_distance <m>`, a district's draw distance, `camera low|high`, the camera angle, and
+/// `volume <0..10>`, the master volume. A line it doesn't know is skipped and one it lacks keeps the
+/// default, so older files still load.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub location: Option<String>,
     pub draw_distance: Option<u16>,
     pub camera: Option<CameraAngle>,
+    pub volume: Option<u8>,
 }
 
 pub fn parse_settings(text: &str) -> Settings {
@@ -189,15 +191,26 @@ pub fn parse_settings(text: &str) -> Settings {
             (Some("draw_distance"), Some(d)) => s.draw_distance = d.parse().ok(),
             (Some("camera"), Some("low")) => s.camera = Some(CameraAngle::Low),
             (Some("camera"), Some("high")) => s.camera = Some(CameraAngle::High),
+            (Some("volume"), Some(v)) => {
+                s.volume = v
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|v| *v <= crate::sound::VOLUME_STEPS)
+            }
             _ => {}
         }
     }
     s
 }
 
-pub fn write_settings(location: &str, draw_distance: u16, camera: CameraAngle) -> String {
+pub fn write_settings(
+    location: &str,
+    draw_distance: u16,
+    camera: CameraAngle,
+    volume: u8,
+) -> String {
     format!(
-        "# flatground settings\nlocation {location}\ndraw_distance {draw_distance}\ncamera {}\n",
+        "# flatground settings\nlocation {location}\ndraw_distance {draw_distance}\ncamera {}\nvolume {volume}\n",
         camera.name()
     )
 }
@@ -231,6 +244,8 @@ pub enum Choice {
     DrawDistance(u16),
     /// The camera angle was changed to this; the menu stays open.
     Camera(CameraAngle),
+    /// The master volume was changed to this (0..=10); the menu stays open.
+    Volume(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,11 +258,12 @@ pub enum Screen {
     Locations,
 }
 
-pub const PAUSE_ITEMS: [&str; 6] = [
+pub const PAUSE_ITEMS: [&str; 7] = [
     "RESUME",
     "CHANGE LOCATION",
     "DRAW DISTANCE",
     "CAMERA",
+    "VOLUME",
     "RESPAWN",
     "QUIT TO LOADER",
 ];
@@ -255,6 +271,9 @@ pub const PAUSE_ITEMS: [&str; 6] = [
 const DISTANCE_ROW: usize = 2;
 /// The camera angle row: left, right or A switch between Low and High.
 const CAMERA_ROW: usize = 3;
+/// The master volume row: left and right step it by one (0..=10).
+const VOLUME_ROW: usize = 4;
+const RESPAWN_ROW: usize = 5;
 pub const DISTANCE_STEP: u16 = 10;
 
 /// Holding a direction moves again after this long (s), then every [`REPEAT`].
@@ -280,6 +299,8 @@ pub struct Menu {
     side: i8,
     /// The camera angle shown.
     pub camera: CameraAngle,
+    /// The master volume shown (0..=10).
+    pub volume: u8,
 }
 
 impl Menu {
@@ -295,6 +316,7 @@ impl Menu {
             draw_distance: crate::world::DRAW_DISTANCE as u16,
             side: 0,
             camera: CameraAngle::default(),
+            volume: crate::sound::DEFAULT_VOLUME,
         }
     }
 
@@ -380,6 +402,13 @@ impl Menu {
                 return Some(Choice::DrawDistance(d));
             }
         }
+        if self.screen == Screen::Pause && self.cursor == VOLUME_ROW && turned {
+            let v = (self.volume as i32 + side as i32).clamp(0, crate::sound::VOLUME_STEPS as i32);
+            if v as u8 != self.volume {
+                self.volume = v as u8;
+                return Some(Choice::Volume(self.volume));
+            }
+        }
         if self.screen == Screen::Pause && self.cursor == CAMERA_ROW && (turned || accept) {
             self.camera = self.camera.other();
             return Some(Choice::Camera(self.camera));
@@ -402,8 +431,8 @@ impl Menu {
                     self.cursor = current.min(locations.saturating_sub(1));
                     None
                 }
-                DISTANCE_ROW | CAMERA_ROW => None,
-                4 => Some(Choice::Respawn),
+                DISTANCE_ROW | CAMERA_ROW | VOLUME_ROW => None,
+                RESPAWN_ROW => Some(Choice::Respawn),
                 _ => Some(Choice::Quit),
             },
             Screen::Pause => None,
@@ -423,6 +452,8 @@ impl Menu {
                             format!("< {s} {} M >", self.draw_distance)
                         } else if i == CAMERA_ROW {
                             format!("< {s} {} >", self.camera.name().to_ascii_uppercase())
+                        } else if i == VOLUME_ROW {
+                            format!("< {s} {} >", self.volume)
                         } else {
                             s.to_string()
                         }
@@ -653,7 +684,7 @@ mod tests {
         assert_eq!(tap(&mut m, btn::A, 4, 2), Some(Choice::Ride(1)));
         // Respawn and quit.
         let mut m = Menu::pause(0, 90);
-        for _ in 0..4 {
+        for _ in 0..RESPAWN_ROW {
             tap(&mut m, btn::DPAD_DOWN, 4, 0);
         }
         assert_eq!(tap(&mut m, btn::A, 4, 0), Some(Choice::Respawn));
@@ -703,6 +734,29 @@ mod tests {
         let mut other = MeshBuilder::new();
         Menu::pause(0, 120).draw(&mut other, &[], 0);
         assert_ne!(mesh.verts, other.verts);
+    }
+
+    #[test]
+    fn the_volume_row_steps_from_0_to_10() {
+        let mut m = Menu::pause(0, 90);
+        assert_eq!(m.volume, crate::sound::DEFAULT_VOLUME);
+        for _ in 0..VOLUME_ROW {
+            tap(&mut m, btn::DPAD_DOWN, 4, 0);
+        }
+        assert_eq!(m.cursor, VOLUME_ROW);
+        assert_eq!(tap(&mut m, btn::DPAD_RIGHT, 4, 0), Some(Choice::Volume(9)));
+        assert_eq!(tap(&mut m, btn::DPAD_RIGHT, 4, 0), Some(Choice::Volume(10)));
+        assert_eq!(tap(&mut m, btn::DPAD_RIGHT, 4, 0), None, "10 is the most");
+        m.volume = 0;
+        assert_eq!(tap(&mut m, btn::DPAD_LEFT, 4, 0), None, "0 is the least");
+        // A does nothing on it; the row shows the level.
+        assert_eq!(tap(&mut m, btn::A, 4, 0), None);
+        let mut a = MeshBuilder::new();
+        m.draw(&mut a, &[], 0);
+        m.volume = 7;
+        let mut b = MeshBuilder::new();
+        m.draw(&mut b, &[], 0);
+        assert_ne!(a.verts, b.verts);
     }
 
     #[test]
@@ -807,13 +861,16 @@ mod tests {
 
     #[test]
     fn settings_and_the_start_location() {
-        let text = write_settings("MegaPark", 70, CameraAngle::High);
+        let text = write_settings("MegaPark", 70, CameraAngle::High, 3);
         let s = parse_settings(&text);
         assert_eq!(s.location.as_deref(), Some("MegaPark"));
         assert_eq!(s.draw_distance, Some(70));
         assert_eq!(s.camera, Some(CameraAngle::High));
+        assert_eq!(s.volume, Some(3));
+        assert_eq!(parse_settings("volume 11\n").volume, None, "out of range");
+        assert_eq!(parse_settings("volume 0\n").volume, Some(0));
         assert_eq!(
-            parse_settings(&write_settings("A", 90, CameraAngle::Low)).camera,
+            parse_settings(&write_settings("A", 90, CameraAngle::Low, 8)).camera,
             Some(CameraAngle::Low)
         );
         assert_eq!(
@@ -829,6 +886,11 @@ mod tests {
         // And one from before the camera setting: the default camera.
         let old = parse_settings("# flatground settings\nlocation DownTown\ndraw_distance 70\n");
         assert_eq!((old.draw_distance, old.camera), (Some(70), None));
+        // And one from before the volume setting: the default volume.
+        let old = parse_settings(
+            "# flatground settings\nlocation DownTown\ndraw_distance 70\ncamera high\n",
+        );
+        assert_eq!((old.camera, old.volume), (Some(CameraAngle::High), None));
         let list = vec![
             Location {
                 id: "A".into(),

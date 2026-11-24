@@ -96,6 +96,9 @@ rem ---- 2/3. build and package ------------------------------------------------
 rem "fast": the Cargo profile without LTO (passed to make as RUST_PROFILE).
 set "MAKEARGS="
 if "%FAST%"=="1" set "MAKEARGS=RUST_PROFILE=dolphin"
+rem fg_import decodes Skate 3's sounds with FFmpeg (docs/importing.md). devkitPro's shell starts
+rem with its own PATH, so hand it the FFmpeg on the Windows PATH (unless FG_FFMPEG names one).
+if not defined FG_FFMPEG for /f "delims=" %%F in ('where ffmpeg 2^>nul') do if not defined FG_FFMPEG set "FG_FFMPEG=%%F"
 rem devkitPro's Windows installer puts its tools under X:\devkitPro\msys2 (any drive), and its
 rem make has to run inside that shell, so it usually isn't on the normal PATH.
 set "DKP="

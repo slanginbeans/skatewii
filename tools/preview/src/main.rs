@@ -463,6 +463,62 @@ impl game_core::reader::Reader for Disk {
     unsafe fn free(&mut self, _data: &'static [u8]) {}
 }
 
+/// The run's sound: the game's commands through the shared mixer, a frame's worth of 32 kHz stereo at a
+/// time, written as `sound.wav` at the end (to listen to what the Wii would play).
+struct WavOut {
+    mixer: game_core::sound::Mixer,
+    pcm: Vec<i16>,
+    /// Stereo frames owed (a 60 Hz frame is 533.3 of them).
+    owed: f64,
+}
+
+impl WavOut {
+    fn new() -> WavOut {
+        WavOut {
+            mixer: game_core::sound::Mixer::new(),
+            pcm: Vec::new(),
+            owed: 0.0,
+        }
+    }
+
+    fn save(&self, path: &Path) {
+        let rate = game_core::sound::RATE;
+        let data: Vec<u8> = self.pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut w = Vec::with_capacity(44 + data.len());
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        w.extend_from_slice(b"WAVEfmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&2u16.to_le_bytes());
+        w.extend_from_slice(&rate.to_le_bytes());
+        w.extend_from_slice(&(rate * 4).to_le_bytes());
+        w.extend_from_slice(&4u16.to_le_bytes());
+        w.extend_from_slice(&16u16.to_le_bytes());
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        w.extend_from_slice(&data);
+        fs::write(path, w).expect("write sound.wav");
+    }
+}
+
+impl game_core::sound::Audio for WavOut {
+    fn frame(
+        &mut self,
+        bank: &game_core::sound::Bank,
+        commands: &[game_core::sound::Command],
+        master: f32,
+    ) {
+        self.mixer.apply(bank, commands);
+        self.owed += game_core::sound::RATE as f64 / 60.0;
+        let n = self.owed as usize;
+        self.owed -= n as f64;
+        let at = self.pcm.len();
+        self.pcm.resize(at + n * 2, 0);
+        self.mixer.mix(bank, &mut self.pcm[at..], master);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let wide = args.iter().any(|a| a == "--wide");
@@ -488,6 +544,7 @@ fn main() {
                             | "--motion"
                             | "--district"
                             | "--start"
+                            | "--sound"
                     ))
         })
         .map(|(_, a)| PathBuf::from(a))
@@ -510,6 +567,12 @@ fn main() {
     }
     if args.iter().any(|a| a == "--regular") {
         game.set_stance(game_core::skater::Stance::Regular);
+    }
+    // --sound: Skate 3's sounds (fg_import sound) instead of the placeholders.
+    if let Some(path) = value("--sound") {
+        let bytes: &'static [u8] = Vec::leak(fs::read(path).expect("read sound pack"));
+        let (cues, clips) = game.load_sounds(bytes).expect("sound pack");
+        println!("using sounds {path}: {cues} cues, {clips} clips");
     }
     if let Some(path) = skater {
         // Leaked like the Wii does: the pack stays loaded for the whole game.
@@ -800,6 +863,7 @@ fn main() {
     game.timer = Some(host_us);
     let mut kicker = KickerRun::new();
     let mut trick_tour = TrickTour::new();
+    let mut wav = WavOut::new();
     let mut done_at: Option<u32> = None;
     let dt = 1.0 / 60.0;
 
@@ -889,6 +953,7 @@ fn main() {
             }
         }
         game.update(&pad, dt);
+        game.sound(&mut wav);
         if std::env::var_os("FG_CAMDBG").is_some() {
             let c = game.camera();
             let r = &c.rig;
@@ -978,6 +1043,14 @@ fn main() {
         }
     }
     println!("score: {}", game.score);
+    let sound = out.join("sound.wav");
+    wav.save(&sound);
+    println!(
+        "wrote {} ({:.1} s, {} voices started)",
+        sound.display(),
+        wav.pcm.len() as f32 / 2.0 / game_core::sound::RATE as f32,
+        wav.mixer.started
+    );
 }
 
 /// The rails' classes, with each segment's probes (the importer's classification, `rails::classify`),
