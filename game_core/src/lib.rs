@@ -33,6 +33,7 @@ pub mod model;
 pub mod motion;
 pub mod pack;
 pub mod park;
+pub mod physics;
 pub mod rails;
 pub mod reader;
 pub mod replay;
