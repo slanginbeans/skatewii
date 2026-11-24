@@ -27,6 +27,7 @@ pub mod flip;
 mod grind;
 mod landing;
 mod respawn;
+pub mod wobble;
 
 use alloc::format;
 use alloc::string::String;
@@ -782,6 +783,12 @@ pub struct Skater {
     manual_engage: f32,
     /// After tipping out of a manual, the stick has to come back before another starts.
     manual_lock: bool,
+    /// The physics asks the state graph to end the manual (`PhysicsWantsManualExit`): dragging the
+    /// tail or nose while the board rolls against the manual's balance direction, with the physics
+    /// mode's corrective force off (SK8 manual/controller.rs `apply_correction`).
+    pub manual_exit: bool,
+    /// Skate 3's speed wobble on the ground (`skater::wobble`).
+    pub wobble: wobble::SpeedWobble,
     pub grab: Option<Grab>,
     /// The longest grab of this jump that was let go of (scored on landing).
     grabbed: Option<Grab>,
@@ -1065,6 +1072,8 @@ impl Skater {
             manual: None,
             manual_engage: 0.0,
             manual_lock: false,
+            manual_exit: false,
+            wobble: wobble::SpeedWobble::default(),
             grab: None,
             grabbed: None,
             grind: None,
@@ -1440,6 +1449,8 @@ impl Skater {
             self.approach.ride(pose);
         } else {
             self.riding_ticks = 0;
+            // Off the ground: Skate 3 resets the wobble on entering it again.
+            self.wobble.reset();
         }
         self.sync_heading();
     }
@@ -2251,6 +2262,7 @@ impl Skater {
     /// Manuals from the C-stick: held lightly back (towards the player) or forward, for a moment. The
     /// stick past the manual zone drags the tail (or nose) to brake: returns whether it is.
     fn update_manual(&mut self, flick: &FlickOut, dt: f32, events: &mut Vec<Event>) -> bool {
+        self.manual_exit = false;
         if let Some(g) = self.graph {
             return self.graph_manual(g.manual, dt, events);
         }
@@ -2307,9 +2319,18 @@ impl Skater {
         braking
     }
 
-    /// A manual the state graph holds (engaged and left as the graph says; it never tips over): the deck
-    /// pitch servoes to a target that grows with the stick's lean (SK8's manual controller aims at
-    /// (0.25 + 0.75 lean) of the most tilt), or to the brake angle while dragging.
+    /// A manual the state graph holds (engaged and left as the graph says): the deck pitch servoes to a
+    /// target that grows with the stick's lean (SK8's manual controller aims at (0.25 + 0.75 lean) of
+    /// the most tilt), or to the brake angle while dragging.
+    ///
+    /// Skate 3 ends a manual only through the graph: the stick let go (or past into a revert or a trick),
+    /// leaving the ground, or `PhysicsWantsManualExit`. The physics raises that one (SK8
+    /// manual/controller.rs `apply_correction`, the `opposing_motion_without_correction` flag) while
+    /// dragging the tail or nose with the board rolling against the manual's balance direction (the
+    /// tail's is -1, the nose's +1, against the speed along the board), and only when the physics mode's
+    /// corrective force is off (Skate 3's Easy; Normal pushes a corrective drag at the dragging truck there instead, which flatground's tail brake stands in for, so a
+    /// Normal manual never tips out). The no-contact torque bleed (`TorqueBleedOffWithNoContact`) needs
+    /// the manual's wheels off the ground, which ends a manual here anyway (`take_off`).
     fn graph_manual(
         &mut self,
         want: Option<(bool, f32, bool)>,
@@ -2331,6 +2352,8 @@ impl Skater {
             self.push = None;
             self.brake = None;
         }
+        let balance = if nose { 1.0 } else { -1.0 };
+        self.manual_exit = brake && !self.tuning.manual_corrective && self.speed * balance < 0.0;
         let t = &self.tuning;
         let speed = libm::fabsf(self.speed);
         let m = self.manual.as_mut().unwrap();
@@ -5608,6 +5631,73 @@ mod tests {
         s.graph = Some(GraphControl::default());
         steps(&mut s, &park, &Pad::default(), None, 1);
         assert!(s.manual.is_none(), "the graph ended it");
+    }
+
+    #[test]
+    fn a_graph_manual_brake_asks_out_only_without_the_corrective_force() {
+        let park = flat();
+        let drag = |nose: bool, speed: f32, corrective: bool, brake: bool| {
+            let mut s = spawn(&park);
+            s.tuning.manual_corrective = corrective;
+            s.speed = speed;
+            s.graph = Some(GraphControl {
+                manual: Some((nose, 1.0, brake)),
+                ..GraphControl::default()
+            });
+            steps(&mut s, &park, &Pad::default(), None, 1);
+            s.manual_exit
+        };
+        // Skate 3's Normal (corrective force on): dragging never asks the manual to end.
+        assert!(!drag(false, 4.0, true, true));
+        assert!(!drag(true, -4.0, true, true));
+        // Easy (off): the tail dragged rolling forwards, the nose rolling backwards, ask out.
+        assert!(drag(false, 4.0, false, true));
+        assert!(drag(true, -4.0, false, true));
+        // Rolling the manual's own way, stopped, or not dragging: no.
+        assert!(!drag(true, 4.0, false, true));
+        assert!(!drag(false, 0.0, false, true));
+        assert!(!drag(false, 4.0, false, false));
+        // Off the manual the flag clears.
+        let mut s = spawn(&park);
+        s.tuning.manual_corrective = false;
+        s.speed = 4.0;
+        s.graph = Some(GraphControl {
+            manual: Some((false, 1.0, true)),
+            ..GraphControl::default()
+        });
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        assert!(s.manual_exit);
+        s.graph = Some(GraphControl::default());
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        assert!(!s.manual_exit && s.manual.is_none());
+    }
+
+    #[test]
+    fn riding_fast_wobbles_the_steering_and_slowing_down_stops_it() {
+        let park = flat();
+        let mut s = spawn(&park);
+        let onset = wobble::SpeedWobble::onset(&s.tuning.wobble, s.riding_com(), 0.7);
+        s.speed = onset + 4.0;
+        steps(&mut s, &park, &Pad::default(), None, 30);
+        assert!(
+            s.wobble.active && s.wobble.amplitude > 0.0,
+            "{:?}",
+            s.wobble
+        );
+        assert!(
+            s.deck_tilt.abs() > 1e-4,
+            "the wobble tilts the deck straight ahead"
+        );
+        s.speed = onset - 2.0;
+        steps(&mut s, &park, &Pad::default(), None, 2);
+        assert!(!s.wobble.active && s.wobble.amplitude == 0.0);
+        // In the air it is reset.
+        s.speed = onset + 4.0;
+        steps(&mut s, &park, &Pad::default(), None, 10);
+        assert!(s.wobble.active);
+        s.take_off(None);
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        assert!(!s.wobble.active);
     }
 
     #[test]

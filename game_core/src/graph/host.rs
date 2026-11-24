@@ -112,6 +112,7 @@ pub struct World {
     /// Predicted seconds until landing (in the air).
     pub time_to_land: Option<f32>,
     pub apex: bool,
+    /// The physics wants the manual over (`PhysicsWantsManualExit`; `Skater::manual_exit`).
     pub wants_manual_exit: bool,
     pub wants_runout: bool,
     pub wants_wipeout: bool,
@@ -173,6 +174,8 @@ pub struct World {
     pub wipe_stick: Option<[f32; 2]>,
     /// The pushing feet against the deck (along its nose, up; m): left, right (PushOut).
     pub feet: [[f32; 2]; 2],
+    /// The speed wobble's amplitude (0..1; SK8 PhysOut's Wobble+36): the turn conditioner's input.
+    pub wobble: f32,
 }
 
 impl Default for World {
@@ -239,6 +242,7 @@ impl Default for World {
             hips: [0.0; 2],
             wipe_stick: None,
             feet: [[0.0; 2]; 2],
+            wobble: 0.0,
         }
     }
 }
@@ -890,7 +894,7 @@ impl<'a> Runner<'a> {
         self.s.turn_out = self.s.conditioner.update(
             TurnInput {
                 speed: w.speed,
-                wobble: 0.0,
+                wobble: w.wobble,
                 lean: w.lean,
                 turn: w.turn,
                 ground: w.phys == phys::GROUND,

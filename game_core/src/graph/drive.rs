@@ -150,6 +150,9 @@ impl Driver {
             com_vel: [s.slip, s.vel.y, s.speed],
             wants_runout: matches!(s.mode, Mode::Runout { .. }),
             wants_wipeout: matches!(s.mode, Mode::Bailed { .. }),
+            wants_manual_exit: s.manual_exit,
+            // The speed wobble's amplitude, what Skate 3's animation turn conditioner reads.
+            wobble: s.wobble.amplitude,
             grind: s.grind.as_ref().map_or(super::NONE, |g| {
                 let name = g.graph_name();
                 GRAPH_NAMES
