@@ -17,7 +17,9 @@ Skate 3 (its points, repetition penalty, grind, manual and grab curves, air heig
 tricks build a line with Skate 3's multiplier and line timer (shown under the score); a bail ends the line.
 Session markers (Z + d-pad) take you back to a spot, and a replay plays back the last 30 s. The camera is
 Skate 3's: its Low or High camera (pause menu), free look on foot (Z + C-stick), shake on landings and
-slow motion through long airs.
+slow motion through long airs. It has sound: the wheels rolling (by surface and speed), pops, catches, landings, grinds, slides,
+powerslides, the foot brake, pushes, footsteps and bails, placed by the camera; simple built-in sounds, or Skate 3's
+own converted from your disc.
 With your own Skate 3 disc the build also takes Skate 3's own riding numbers, trick points and
 flick shapes from it. Tested on the PC and on an emulated Wii CPU. **Not yet run on a Wii or in Dolphin.**
 Plan: [ROADMAP.md](ROADMAP.md).
@@ -143,13 +145,14 @@ With parks converted from your own disc, the game starts in a **start menu** lis
 skate parks the build converted, then the built-in demo park), with the last one you chose highlighted
 (`settings.txt` in the app folder remembers it; the first time, the build's default). Up/down on the d-pad or
 the control stick moves, A (or START) rides. **START** while riding opens the **pause menu**: Resume, Change
-location (the same list; B goes back), Draw distance, Camera, Respawn (back to the park's start), Quit to
+location (the same list; B goes back), Draw distance, Camera, Volume, Respawn (back to the park's start), Quit to
 loader. B or START resumes. **Draw distance** (left/right, 40 to 120 m in steps of 10, 90 by default) sets how
 far a city district is drawn and read from the card, with the fog following it: shorter runs faster on a
 real Wii. **Camera** (left/right or A) is Skate 3's Camera Angle: **Low** (the default, as Skate 3's camera
 preferences start; close behind the board and nearly level with it) or **High** (Skate 3's high camera,
-about 3 to 4.4 m back and 17 to 30 degrees up). `settings.txt` remembers both (a file from an older build
-still loads, with the default camera).
+about 3 to 4.4 m back and 17 to 30 degrees up). **Volume** (left/right, 0 to 10, 8 by default) is the master
+volume of all sound. `settings.txt` remembers them all (a file from an older build still loads, with the
+default camera and volume).
 While a menu is open the riding waits and the pad only drives the menu (the d-pad's gestures don't fire, and
 the A that chose an item is not a push until you let go of it). Changing location shows a loading screen
 while the park is read from the SD card (Dolphin reads the biggest, 4.2 MB, in well under a second; a real
@@ -186,9 +189,11 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
   reader.rs        background file reads (the Wii's reader thread; an in-memory one for tests)
   character.rs     imported skinned character: pack parsing, clip sampling, CPU skinning
   rider.rs         picks and crossfades the imported skater's clips from the game state
+  sound/           sound: the event layer (what plays when), the Audio trait, the shared mixer, DSP-ADPCM,
+                   the sound bank (imported or the synthesised placeholders)
 wii/
   game/            Rust staticlib for the Wii: Gfx over the C layer, allocator, panic screen
-  platform/        C layer over libogc (video/GX, pads, panic console) + main()
+  platform/        C layer over libogc (video/GX, pads, sound output on ASND, panic console) + main()
   Makefile         links flatground.dol with devkitPPC
 tools/preview/     PC tool: runs the game with scripted input through a software rasteriser to PNGs
 tools/import/      PC tool: converts assets from your own Skate 3 disc image into Wii packs (docs/importing.md)

@@ -27,7 +27,11 @@ folder, or one folder down. `build.bat` (or `make -C wii package`) then runs `fg
   Downtown 2, ...), so each start is a location in the menu (which scrolls when the list is long). On by default; it runs in
   Dolphin but hasn't been tried on a real Wii yet ("Riding a district" below).
 
-All of it is about 37 MB (the motion library 20 MB, the six parks 12.5 MB). Copy `dist/apps/flatground` to
+- converts Skate 3's sounds into `data/sound.fgpak` (about 1.9 MB, below) when an FFmpeg with an XMA2 decoder
+  is found (`FG_FFMPEG`, else `ffmpeg` on the PATH); without one it says so and the game plays its built-in
+  sounds.
+
+All of it is about 39 MB (the motion library 20 MB, the six parks 12.5 MB, the sounds 1.9 MB). Copy `dist/apps/flatground` to
 the SD card's `apps` folder and the game finds its packs at
 `sd:/apps/flatground/data/` (or `usb:/`). `FG_NO_ASSETS=1` skips all of this. The Docker route only sees files
 inside the repo folder, so put the image there (`*.iso` is git-ignored) or point `FG_ISO` at a path inside it.
@@ -38,8 +42,8 @@ looked for in the usual places, then `FG_DOLPHIN`, then `dolphin=<path>` in `fg_
 `build.bat fast` builds without link-time optimisation (Cargo profile `dolphin`): much quicker, a little slower
 to run, good for testing. `tools\dolphin_test.ps1` does a whole scripted test run (docs/logging.md).
 
-The game shows on start-up whether the imported skater, park, rules and motion library loaded (`RULES: DISC`
-or `BUILT-IN`), and its CPU time per frame (average and the
+The game shows on start-up whether the imported skater, park, rules, motion library and sounds loaded
+(`RULES: DISC` or `BUILT-IN`, `SOUND: DISC` or `BUILT-IN`), and its CPU time per frame (average and the
 worst frame of the last second; the budget at 60 Hz is 16.7 ms) in the top left corner.
 
 ## By hand
@@ -424,6 +428,37 @@ camera shots and shot choice (`game_core::camera::builtin`, `select::built_in`).
 Skate 3's stock numbers built in (`game_core::scoring::rules::Rules::BUILT_IN`) and Skate 3's points for the
 tricks flatground can do (`scoring::catalog`).
 
+### Sound
+```bash
+cargo run --release -p fg_import -- sound path/to/skate3.iso [--ffmpeg <path>]
+cargo run --release -p fg_import -- sound path/to/skate3.iso --list data/audio/audiofiles.big::data/audio/GRINDS.abk
+```
+Writes `imported/sound.fgpak` (about 1.9 MB): the 148 clips of the game's 23 sound cues (`game_core::sound::Cue`),
+104 s of 32 kHz mono DSP-ADPCM (the GameCube / Wii 4-bit ADPCM, a quarter of PCM16's size), converted in a few
+seconds. The game keeps the whole pack loaded (in the C heap, MEM2) and decodes clips as they play, so nothing
+streams from the card while riding; with the placeholders it holds 430 KB of PCM instead.
+
+What it reads (format knowledge from SK8-ENGINE/skate-3-rust-engine, `crates/skate-audio/src/formats/snr.rs` and
+`tools/asset_pipeline/audio_formats.py`): Skate 3's sounds are EA Audio Core ("SNR") streams in `data/audio/`:
+SPLC patch banks (`audiofiles.big`'s `.bnk`: a stream count at 0x18, then the streams back to back), ABKC module
+banks (`.abk`), the rolling grains (`grains.big`: an offset, a duration, a seek table, one stream) and the wheel
+spins (`wheels.big`). A stream is an SNR header (codec, channels, rate, samples, loop) and blocks; every one on the
+disc is codec 3, EA-XMA: each block holds, per stereo pair, a sub-block (`u32 size << 2 | flags`) of 2048-byte
+XMA2 packets. The converter puts each stream's packets into a standard XMA2 WAVE file and has **FFmpeg** decode it
+(its `xma2` decoder, mixing to mono and resampling to 32 kHz); FFmpeg is not part of flatground, you install it
+(https://ffmpeg.org; `--ffmpeg`, `FG_FFMPEG` or the PATH). Then, in the converter: leading silence trimmed from
+one-shots, loops cross-faded end into start (80 ms), each grain's slow-to-fast sweep cut into six 1.5 s speed-band
+loops, and everything encoded to DSP-ADPCM by `game_core::sound::adpcm` (8 coefficient pairs per clip clustered from
+its frames' own predictors; a loop is encoded from its own end so it wraps cleanly).
+
+Which recordings play for what are SK8's play-tested picks (sample n of a bank is its n-th stream):
+`Skate_Collisions.bnk` 1074-1078 pop, 1088-1092 landing, 1097-1100 heavy landing, 530-535 and 548-552 the catch's
+deck knocks, 422-426 getting on, 0-2 the board on its own; `GRINDS.abk` 54-56 metal grinds, 9 and 11 ledges;
+`board_scrapes.abk` 0-9 a slide's scrape on; `WHEEL_SKID_BANK.abk` 0-7 skids; `FOOT_DRAG.abk` 36-39, 44-47 the foot
+brake; `fstep_skateshoe1_sm.abk` 74-84 steps and pushes, 6-17 running; `Bodyslide.abk` 0-14 bails (three tiers);
+`Sk8_Air_Flip_Tricks.abk` 1-3 the flip; `Whls_spins_Jump_1` (3 s) the wheels spinning; the seven hard-wheel grains
+for rolling. A sound that fails to convert is reported and its cue keeps the placeholder.
+
 ### Water and menu tables (from the executable)
 Two tables exist only inside the game's code: the ocean PCA water animation and the front-end menu tables.
 **fg_import never decrypts executables and contains no console keys.** It reads them from an image you
@@ -482,7 +517,9 @@ plenty for an offline converter.
   draw distance setting are not measured there yet. Water has no collision, so riding off Skate School's
   island lands on the seabed.
 - The executable tables are tested on synthetic images only, until run on a real decrypted image.
-- Audio: EA-XMA has no free decoder, so this would need a separate PCM/ADPCM conversion step.
+- Sound: EA-XMA is decoded by an FFmpeg you install, not by flatground itself (an XMA2 / WMA Pro decoder needs
+  its codebooks; not written yet). Not converted: ambience beds, music, speech, world emitters, the soft-wheel
+  grains, Skate 3's AEMS patch programs and MixMap (which pick and shape samples at run time in the original).
 - Riding: Skate 3 turns, pumps and wipes out through rigid-body truck and ragdoll physics; flatground keeps
   a simpler board model and uses Skate 3's numbers where they carry over (see `game_core::tuning`). The
   board-sideways, late-flip and finger-flip shapes are converted but not used yet, nor dark catches.
