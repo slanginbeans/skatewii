@@ -510,6 +510,9 @@ pub enum Flag {
     Anticipating,
     SlideCandidate,
     NoPumping,
+    /// `UpdateIsWeightOnNose`: the rider's weight is on the nose while it runs (SK8
+    /// motion_tricks.rs, the skater animation's bit 28).
+    WeightOnNose,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -870,7 +873,6 @@ const NOTHING: &[&str] = &[
     "MatchCadence",
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
-    "UpdateIsWeightOnNose",
     "AirDismounting",
     "InitMovingObjects",
     "MovingObject",
@@ -992,6 +994,7 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         "IsAnticipating" => Beh::Flag(Flag::Anticipating),
         "InCandidateSlidingState" => Beh::Flag(Flag::SlideCandidate),
         "DisallowPumping" => Beh::Flag(Flag::NoPumping),
+        "UpdateIsWeightOnNose" => Beh::Flag(Flag::WeightOnNose),
         "SetDark" => Beh::SetDark,
         "MonitorUnderflip" => Beh::MonitorUnderflip,
         "ChooseRandomLanding" => Beh::ChooseRandomLanding(a.f("numlandings", 1.0).max(1.0) as u8),

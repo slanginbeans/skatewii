@@ -161,7 +161,7 @@ const GROUPS: [Group; 7] = [
     Group::NoseN90,
     Group::TailN90,
 ];
-const FLAGS: [Flag; 7] = [
+const FLAGS: [Flag; 8] = [
     Flag::Trick,
     Flag::Manual,
     Flag::PowerSlide,
@@ -169,6 +169,7 @@ const FLAGS: [Flag; 7] = [
     Flag::Anticipating,
     Flag::SlideCandidate,
     Flag::NoPumping,
+    Flag::WeightOnNose,
 ];
 
 fn group_code(g: Group) -> u8 {

@@ -508,6 +508,7 @@ impl Driver {
         // The wind-up states' `IsAnticipating` (Skate 3's anticipating flag, which its camera reads as
         // `IsPreparingToJump`).
         c.anticipating = r.flag(super::ops::Flag::Anticipating);
+        c.weight_on_nose = r.flag(super::ops::Flag::WeightOnNose);
         // A body flip the motion graph hands the physics (`AttachIntent FrontFlip` / `BackFlip`) and
         // the grab it reads with it.
         c.body_flip = if r.packet_named("FrontFlip").is_some_and(|v| v != 0.0) {
