@@ -15,12 +15,13 @@ fn kickflip_off_the_kicker_lands() {
         seen.extend(game.events.iter().cloned());
     }
     let landed = seen.iter().find_map(|e| match e {
-        Event::Landed { name, points } => Some((name.clone(), *points)),
+        Event::Landed { name, points, .. } => Some((name.clone(), *points)),
         _ => None,
     });
     let (name, points) = landed.unwrap_or_else(|| panic!("no landing: {seen:?}"));
     assert_eq!(name, "KICKFLIP", "{seen:?}");
-    assert!(points >= 300);
-    assert_eq!(game.score, points);
+    // Skate 3's kickflip: 100 points, x1.1 landed clean, and the air's own reward.
+    assert!(points >= 110, "{points}");
+    assert_eq!(game.score, points, "the line banked");
     assert!(!seen.contains(&Event::Bailed), "{seen:?}");
 }
