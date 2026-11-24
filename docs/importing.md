@@ -389,7 +389,10 @@ Writes `imported/rules.fgpak` (about 80 KB) with what makes the skating feel lik
 
 - `rules/tuning`: the riding numbers flatground's skating reads (`game_core::tuning::PATHS`), taken from
   the game's tuning database (`data/big/db.big`: `data/db/skaterschema` and `skatercollections`, EA's
-  AttribSys vault format, read by `attrib.rs`). Push strength and top push speed, rolling resistance, foot
+  AttribSys vault format, read by `attrib.rs`). The difficulty-dependent ones come from all three of Skate 3's
+  physics modes (`physics_mode/easy`, `/normal`, `/hardcore`: `game_core::tuning::mode::PATHS`), so the pause
+  menu's Difficulty can switch between them; a rules pack from before that carries Normal's only, and Easy and
+  Hardcore then use Skate 3's values built in. Push strength and top push speed, rolling resistance, foot
   and tail brakes, steering against stick and speed, jump heights, the air spin curves, the landing limits,
   the flick recogniser's tolerance, the camera's trackers, collision, avoidance, drop predictor and push lag
   (`game_core::tuning::camera::PATHS`: `camera_tracker`, `camera/dynamics`, `camera/rotation`,

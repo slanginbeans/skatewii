@@ -80,8 +80,8 @@ With `motion/graph` loaded (`Game::graph`), each tick:
      dragging the tail or nose with the board rolling against the manual's balance direction (Skate 3's
      balance is +1 on the tail, -1 on the nose, against the speed along the board: a nose drag rolling
      forwards, a tail drag rolling backwards) and the physics mode's corrective force
-     (`physics_mode/normal/Hash_F8CBC0F5FEF2240E`) off. Skate 3's Normal and Hardcore have it on (Easy
-     off): there the same drag, over the mode's speed (`Hash_84CB2F459F3FC811`, Normal 5 m/s) and with
+     (`physics_mode/<mode>/Hash_F8CBC0F5FEF2240E`, the mode the pause menu's Difficulty selects,
+     `tuning::mode`) off. Skate 3's Normal and Hardcore have it on (Easy off): there the same drag, over the mode's speed (`Hash_84CB2F459F3FC811`, Normal 5 m/s) and with
      the deck within a degree of the brake angle, takes the corrective drag instead (-400 N s/m of the
      velocity at the dragging truck, in place of that tick's brake and the deck's turn; on flatground's
      one-body board it moves 12.3 kg, so the tick keeps 46% of the speed as SK8's deck does). With the

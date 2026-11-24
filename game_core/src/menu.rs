@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 use crate::gfx::{MeshBuilder, SCREEN_H, SCREEN_W, rgb};
 use crate::hud;
 use crate::input::{MAIN_RANGE, PadRaw, btn};
+use crate::tuning::Difficulty;
+use crate::tuning::mode::{DEFAULT_TRUCK_TIGHTNESS, TRUCK_TIGHTNESS_STEPS};
 
 /// One place to ride: an imported park pack, a streamed district (its index pack), or the built-in demo
 /// park (no file).
@@ -172,14 +174,17 @@ impl CameraAngle {
 
 /// What the settings file in the app folder (`settings.txt`) remembers: `location <id>`, the last location
 /// chosen, `draw_distance <m>`, a district's draw distance, `camera low|high`, the camera angle, and
-/// `volume <0..10>`, the master volume. A line it doesn't know is skipped and one it lacks keeps the
-/// default, so older files still load.
+/// `volume <0..10>`, the master volume, `difficulty easy|normal|hardcore`, Skate 3's Play Mode, and
+/// `trucks <0..10>`, the truck tightness in tenths. A line it doesn't know is skipped and one it lacks
+/// keeps the default (Skate 3's Normal, trucks 0.7), so older files still load.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub location: Option<String>,
     pub draw_distance: Option<u16>,
     pub camera: Option<CameraAngle>,
     pub volume: Option<u8>,
+    pub difficulty: Option<Difficulty>,
+    pub trucks: Option<u8>,
 }
 
 pub fn parse_settings(text: &str) -> Settings {
@@ -197,6 +202,10 @@ pub fn parse_settings(text: &str) -> Settings {
                     .ok()
                     .filter(|v| *v <= crate::sound::VOLUME_STEPS)
             }
+            (Some("difficulty"), Some(d)) => s.difficulty = Difficulty::parse(d),
+            (Some("trucks"), Some(t)) => {
+                s.trucks = t.parse::<u8>().ok().filter(|t| *t <= TRUCK_TIGHTNESS_STEPS)
+            }
             _ => {}
         }
     }
@@ -208,10 +217,13 @@ pub fn write_settings(
     draw_distance: u16,
     camera: CameraAngle,
     volume: u8,
+    difficulty: Difficulty,
+    trucks: u8,
 ) -> String {
     format!(
-        "# flatground settings\nlocation {location}\ndraw_distance {draw_distance}\ncamera {}\nvolume {volume}\n",
-        camera.name()
+        "# flatground settings\nlocation {location}\ndraw_distance {draw_distance}\ncamera {}\nvolume {volume}\ndifficulty {}\ntrucks {trucks}\n",
+        camera.name(),
+        difficulty.key()
     )
 }
 
@@ -246,6 +258,10 @@ pub enum Choice {
     Camera(CameraAngle),
     /// The master volume was changed to this (0..=10); the menu stays open.
     Volume(u8),
+    /// The difficulty was changed to this; the menu stays open.
+    Difficulty(Difficulty),
+    /// The truck tightness was changed to this (tenths, 0..=10); the menu stays open.
+    Trucks(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,12 +274,14 @@ pub enum Screen {
     Locations,
 }
 
-pub const PAUSE_ITEMS: [&str; 7] = [
+pub const PAUSE_ITEMS: [&str; 9] = [
     "RESUME",
     "CHANGE LOCATION",
     "DRAW DISTANCE",
     "CAMERA",
     "VOLUME",
+    "DIFFICULTY",
+    "TRUCKS",
     "RESPAWN",
     "QUIT TO LOADER",
 ];
@@ -273,7 +291,12 @@ const DISTANCE_ROW: usize = 2;
 const CAMERA_ROW: usize = 3;
 /// The master volume row: left and right step it by one (0..=10).
 const VOLUME_ROW: usize = 4;
-const RESPAWN_ROW: usize = 5;
+/// Skate 3's Play Mode row: left and right step Easy, Normal, Hardcore, wrapping round as Skate 3's
+/// does.
+const DIFFICULTY_ROW: usize = 5;
+/// The truck tightness (Skate 3's board setup): left and right step it by 0.1 (0..=1).
+const TRUCKS_ROW: usize = 6;
+const RESPAWN_ROW: usize = 7;
 pub const DISTANCE_STEP: u16 = 10;
 
 /// Holding a direction moves again after this long (s), then every [`REPEAT`].
@@ -301,6 +324,10 @@ pub struct Menu {
     pub camera: CameraAngle,
     /// The master volume shown (0..=10).
     pub volume: u8,
+    /// The difficulty shown.
+    pub difficulty: Difficulty,
+    /// The truck tightness shown (tenths).
+    pub trucks: u8,
 }
 
 impl Menu {
@@ -317,6 +344,8 @@ impl Menu {
             side: 0,
             camera: CameraAngle::default(),
             volume: crate::sound::DEFAULT_VOLUME,
+            difficulty: Difficulty::default(),
+            trucks: DEFAULT_TRUCK_TIGHTNESS,
         }
     }
 
@@ -409,6 +438,17 @@ impl Menu {
                 return Some(Choice::Volume(self.volume));
             }
         }
+        if self.screen == Screen::Pause && self.cursor == DIFFICULTY_ROW && turned {
+            self.difficulty = self.difficulty.step(side);
+            return Some(Choice::Difficulty(self.difficulty));
+        }
+        if self.screen == Screen::Pause && self.cursor == TRUCKS_ROW && turned {
+            let t = (self.trucks as i32 + side as i32).clamp(0, TRUCK_TIGHTNESS_STEPS as i32);
+            if t as u8 != self.trucks {
+                self.trucks = t as u8;
+                return Some(Choice::Trucks(self.trucks));
+            }
+        }
         if self.screen == Screen::Pause && self.cursor == CAMERA_ROW && (turned || accept) {
             self.camera = self.camera.other();
             return Some(Choice::Camera(self.camera));
@@ -431,7 +471,7 @@ impl Menu {
                     self.cursor = current.min(locations.saturating_sub(1));
                     None
                 }
-                DISTANCE_ROW | CAMERA_ROW | VOLUME_ROW => None,
+                DISTANCE_ROW | CAMERA_ROW | VOLUME_ROW | DIFFICULTY_ROW | TRUCKS_ROW => None,
                 RESPAWN_ROW => Some(Choice::Respawn),
                 _ => Some(Choice::Quit),
             },
@@ -454,6 +494,14 @@ impl Menu {
                             format!("< {s} {} >", self.camera.name().to_ascii_uppercase())
                         } else if i == VOLUME_ROW {
                             format!("< {s} {} >", self.volume)
+                        } else if i == DIFFICULTY_ROW {
+                            format!("< {s} {} >", self.difficulty.key().to_ascii_uppercase())
+                        } else if i == TRUCKS_ROW {
+                            format!(
+                                "< {s} {}.{} >",
+                                self.trucks / TRUCK_TIGHTNESS_STEPS,
+                                self.trucks % TRUCK_TIGHTNESS_STEPS
+                            )
                         } else {
                             s.to_string()
                         }
@@ -517,7 +565,12 @@ impl Menu {
         }
         let help = match self.screen {
             Screen::Start => "UP/DOWN CHOOSE  A RIDE",
-            Screen::Pause if self.cursor == DISTANCE_ROW || self.cursor == CAMERA_ROW => {
+            Screen::Pause
+                if matches!(
+                    self.cursor,
+                    DISTANCE_ROW | CAMERA_ROW | VOLUME_ROW | DIFFICULTY_ROW | TRUCKS_ROW
+                ) =>
+            {
                 "LEFT/RIGHT CHANGE  B/START RESUME"
             }
             Screen::Pause => "A SELECT  B/START RESUME",
@@ -797,6 +850,65 @@ mod tests {
     }
 
     #[test]
+    fn the_difficulty_row_cycles_like_skate_3s_play_mode() {
+        let mut m = Menu::pause(0, 90);
+        assert_eq!(m.difficulty, Difficulty::Normal, "Skate 3's default");
+        for _ in 0..DIFFICULTY_ROW {
+            tap(&mut m, btn::DPAD_DOWN, 4, 0);
+        }
+        assert_eq!(m.cursor, DIFFICULTY_ROW);
+        let right = |m: &mut Menu| tap(m, btn::DPAD_RIGHT, 4, 0);
+        assert_eq!(
+            right(&mut m),
+            Some(Choice::Difficulty(Difficulty::Hardcore))
+        );
+        assert_eq!(
+            right(&mut m),
+            Some(Choice::Difficulty(Difficulty::Easy)),
+            "wraps"
+        );
+        assert_eq!(
+            tap(&mut m, btn::DPAD_LEFT, 4, 0),
+            Some(Choice::Difficulty(Difficulty::Hardcore))
+        );
+        // A does nothing there (Skate 3's row only takes left and right); the row shows the mode.
+        assert_eq!(tap(&mut m, btn::A, 4, 0), None);
+        let mut a = MeshBuilder::new();
+        m.draw(&mut a, &[], 0);
+        m.difficulty = Difficulty::Easy;
+        let mut b = MeshBuilder::new();
+        m.draw(&mut b, &[], 0);
+        assert_ne!(a.verts, b.verts);
+    }
+
+    #[test]
+    fn the_trucks_row_steps_by_a_tenth_from_loose_to_tight() {
+        let mut m = Menu::pause(0, 90);
+        assert_eq!(m.trucks, 7, "Skate 3's 0.7");
+        for _ in 0..TRUCKS_ROW {
+            tap(&mut m, btn::DPAD_DOWN, 4, 0);
+        }
+        assert_eq!(m.cursor, TRUCKS_ROW);
+        for t in 8..=10 {
+            assert_eq!(tap(&mut m, btn::DPAD_RIGHT, 4, 0), Some(Choice::Trucks(t)));
+        }
+        assert_eq!(
+            tap(&mut m, btn::DPAD_RIGHT, 4, 0),
+            None,
+            "1.0 is the tightest"
+        );
+        m.trucks = 0;
+        assert_eq!(tap(&mut m, btn::DPAD_LEFT, 4, 0), None, "0 is the loosest");
+        assert_eq!(tap(&mut m, btn::A, 4, 0), None);
+        let mut a = MeshBuilder::new();
+        m.draw(&mut a, &[], 0);
+        m.trucks = 7;
+        let mut b = MeshBuilder::new();
+        m.draw(&mut b, &[], 0);
+        assert_ne!(a.verts, b.verts);
+    }
+
+    #[test]
     fn menus_draw_their_items() {
         let mut m = MeshBuilder::new();
         Menu::start(0, 0).draw(&mut m, &["Black Box Park", "Demo park"], 0);
@@ -861,17 +973,49 @@ mod tests {
 
     #[test]
     fn settings_and_the_start_location() {
-        let text = write_settings("MegaPark", 70, CameraAngle::High, 3);
+        let text = write_settings(
+            "MegaPark",
+            70,
+            CameraAngle::High,
+            3,
+            Difficulty::Hardcore,
+            4,
+        );
         let s = parse_settings(&text);
         assert_eq!(s.location.as_deref(), Some("MegaPark"));
         assert_eq!(s.draw_distance, Some(70));
         assert_eq!(s.camera, Some(CameraAngle::High));
         assert_eq!(s.volume, Some(3));
+        assert_eq!(s.difficulty, Some(Difficulty::Hardcore));
+        assert_eq!(s.trucks, Some(4));
         assert_eq!(parse_settings("volume 11\n").volume, None, "out of range");
         assert_eq!(parse_settings("volume 0\n").volume, Some(0));
+        assert_eq!(parse_settings("trucks 11\n").trucks, None, "out of range");
+        assert_eq!(parse_settings("trucks 0\n").trucks, Some(0));
+        assert_eq!(parse_settings("difficulty motorized\n").difficulty, None);
+        for d in Difficulty::ALL {
+            let text = write_settings("A", 90, CameraAngle::Low, 8, d, 7);
+            assert_eq!(parse_settings(&text).difficulty, Some(d));
+        }
         assert_eq!(
-            parse_settings(&write_settings("A", 90, CameraAngle::Low, 8)).camera,
+            parse_settings(&write_settings(
+                "A",
+                90,
+                CameraAngle::Low,
+                8,
+                Difficulty::Normal,
+                7
+            ))
+            .camera,
             Some(CameraAngle::Low)
+        );
+        // A file from before the difficulty and trucks settings: Skate 3's Normal and 0.7.
+        let old = parse_settings(
+            "# flatground settings\nlocation DownTown\ndraw_distance 70\ncamera high\nvolume 6\n",
+        );
+        assert_eq!(
+            (old.volume, old.difficulty, old.trucks),
+            (Some(6), None, None)
         );
         assert_eq!(
             parse_settings("garbage\nlocation\ncamera sideways\n"),

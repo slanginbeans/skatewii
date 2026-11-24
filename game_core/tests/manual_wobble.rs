@@ -17,6 +17,7 @@ use game_core::math::{Vec3, v3};
 use game_core::park::Park;
 use game_core::skater::wobble::SpeedWobble;
 use game_core::skater::{Event, Mode, Skater};
+use game_core::tuning::Difficulty;
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -189,11 +190,11 @@ fn imported_graphs_end_a_dragged_manual_only_without_the_corrective_force() {
     // opposes it, the physics wants out and the graph leaves the manual (SK8 manual/controller.rs
     // `apply_correction`). flatground used to end the tail drag instead.
     let mut g = imported(&dir);
-    g.skater.tuning.manual_corrective = false;
+    g.set_difficulty(Difficulty::Easy);
     let (manual, state) = tail_drag(&mut g).unwrap();
     assert_eq!(manual, 60, "{state}");
     let mut g = imported(&dir);
-    g.skater.tuning.manual_corrective = false;
+    g.set_difficulty(Difficulty::Easy);
     let Some((manual, state)) = nose_drag(&mut g) else {
         return;
     };

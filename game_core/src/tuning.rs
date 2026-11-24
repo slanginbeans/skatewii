@@ -15,6 +15,7 @@ pub mod biped;
 pub mod camera;
 pub mod grind;
 pub mod handplant;
+pub mod mode;
 pub mod moves;
 pub mod plant;
 pub mod possession;
@@ -23,6 +24,7 @@ pub mod wipeout;
 pub mod wobble;
 pub use camera::CamTuning;
 pub use grind::GrindTuning;
+pub use mode::{Difficulty, ModeTuning};
 
 /// Most points a curve can hold (Skate 3's largest point graphs have 16).
 pub const CURVE_POINTS: usize = 16;
@@ -513,6 +515,12 @@ pub struct Tuning {
     pub possession: possession::PossessionTuning,
     /// The wipeout's ragdoll and its control profiles (`tuning::wipeout`).
     pub wipeout: wipeout::WipeoutTuning,
+
+    // Difficulty (`tuning::mode`).
+    /// The physics mode riding now: its values are in the fields above ([`Tuning::set_difficulty`]).
+    pub difficulty: Difficulty,
+    /// Every mode's values (`physics_mode/<mode>`), per [`Difficulty`].
+    pub modes: [ModeTuning; 3],
 }
 
 /// What the state graphs' riding behaviours (`graph::riding`, ports of SK8's SetTurning, the physics'
@@ -787,6 +795,7 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .chain(handplant::PATHS.iter())
         .chain(wipeout::PATHS.iter())
         .chain(wipeout::PROFILE_PATHS.iter().flatten())
+        .chain(mode::PATHS.iter().flatten())
         .copied()
 }
 
@@ -795,8 +804,6 @@ pub const PATHS: &[&str] = &[
     "physics_speed_conservation/default/Gravity",
     "physics_speed_conservation/default/MaxGravityAcceleration",
     "physics_push/default/MaxPushableSpeed",
-    "physics_mode/normal/MaxPushDVStart",
-    "physics_mode/normal/MaxPushDVEnd",
     "anim_motion/pushing/button_time_max",
     "anim_motion/pushing/button_time_to_dv",
     "anim_motion/pushing/last_push_out_time",
@@ -840,8 +847,6 @@ pub const PATHS: &[&str] = &[
     "physics_manual/default/ProceduralNoiseFreq",
     "physics_manual/default/ProceduralNoiseScalar",
     "physics_manual/default/NoiseVsSpeed",
-    "physics_mode/normal/Hash_F8CBC0F5FEF2240E",
-    "physics_mode/normal/Hash_84CB2F459F3FC811",
     "physics_manual/default/TorqueBleedOffWithNoContact",
     "physics_manual/default/TorqueScalarWithNoContact",
     "physics_manual/default/StartTorqueScalar",
@@ -869,7 +874,6 @@ pub const PATHS: &[&str] = &[
     "physics_collision/default/CollisionTorqueVsAngle",
     "physics_collision/default/CollisionTorqueMaxTime",
     "physics_collision/default/CollisionTorqueFadeoff",
-    "physics_mode/normal/Wipeout_GroundXZAcceleration",
     "physics_wipeout/default/Wipeout_AirXZAcceleration",
     "physics_feet/default/WallRideAntiGravityVsTime",
     "physics_feet/default/WallRideMaxDotFloorWall",
@@ -884,10 +888,7 @@ pub const PATHS: &[&str] = &[
     "physics_pumping/default/PumpVsTime",
     "physics_pumping/default/AngularSpeedDamping",
     "physics_pumping/default/PumpVsVel",
-    "physics_mode/normal/PumpEffectFactor",
     // Most pumping acceleration per second (no name in the database).
-    "physics_mode/normal/Hash_D77AFD320B6241C5",
-    "physics_mode/normal/UnintentionalPumpScalar",
     "physics_pumping/default/CompressionVsGroundAngle",
     "physics_pumping/default/MinCrouchVsGroundAngle",
     "physics_pumping/default/CompressionVsDeckAngle",
@@ -905,8 +906,6 @@ pub const PATHS: &[&str] = &[
     "physics_jump/default/AbsoluteMinHeight",
     "anim_motion/jumping/clamp_low_inclusive",
     "anim_motion/jumping/clamp_high_inclusive",
-    "physics_mode/normal/JumpMinHeight",
-    "physics_mode/normal/JumpMaxHeight",
     "physics_jump/default/MinHeightVsSpeed",
     "physics_jump/default/MaxHeightVsSpeed",
     "physics_jump/default/SpeedResponseMaxSpeed",
@@ -927,7 +926,6 @@ pub const PATHS: &[&str] = &[
     "physics_bodyspin/default/MaxDeltaForAutoVsTime",
     "physics_airstates/default/BodySpinInputFilter",
     "physics_airstates/default/MaxSpinSpeed",
-    "physics_mode/normal/MaxAutoBodySpinSpeed",
     "physics_airstates/default/MinAutoBodySpeed",
     "physics_airstates/default/MaxHeadingAdjustVsUpY",
     "physics_airstates/default/MinTargetHeadingVel",
@@ -1071,8 +1069,8 @@ impl Tuning {
         gravity: 9.8,
         max_slope_accel: 6.5,
         push_max_speed: 8.0,
-        push_tick_limit_slow: 0.5,
-        push_tick_limit_fast: 0.4,
+        push_tick_limit_slow: ModeTuning::NORMAL.push_dv_start,
+        push_tick_limit_fast: ModeTuning::NORMAL.push_dv_end,
         push_hold_time: Curve::constant(0.3),
         push_dv: Curve::new(&[(0.0, 1.0), (1.0, 4.0)]),
         push_out_max: 0.6,
@@ -1165,8 +1163,8 @@ impl Tuning {
             (10.0, 1.0),
         ]),
         // Skate 3's Normal mode.
-        manual_corrective: true,
-        manual_correction_speed: 5.0,
+        manual_corrective: ModeTuning::NORMAL.manual_corrective,
+        manual_correction_speed: ModeTuning::NORMAL.manual_correction_speed,
         manual_torque_bleed: 0.96,
         manual_torque_no_contact: 0.0,
         manual_start_torque: 0.0,
@@ -1219,7 +1217,7 @@ impl Tuning {
         ]),
         collision_torque_time: 0.4,
         collision_torque_fade: 0.92,
-        wipe_ground_closing: 7.5,
+        wipe_ground_closing: ModeTuning::NORMAL.wipe_ground_closing,
         wipe_air_closing: 3.5,
         vert_align_max_ny: 0.25,
         vert_align_min_dir_y: 0.75,
@@ -1257,9 +1255,9 @@ impl Tuning {
             (12.2, 0.157),
             (14.2, 0.007),
         ]),
-        pump_factor: 18.0,
-        pump_max_accel: 10.0,
-        pump_unintentional: 0.7,
+        pump_factor: ModeTuning::NORMAL.pump_factor,
+        pump_max_accel: ModeTuning::NORMAL.pump_max_accel,
+        pump_unintentional: ModeTuning::NORMAL.pump_unintentional,
         compression_vs_ground_angle: Curve::new(&[
             (0.0, 0.0),
             (0.072, 0.044),
@@ -1293,8 +1291,8 @@ impl Tuning {
         compression_ground_scale: -8.0,
         compression_deck_scale: -8.0,
         jump_floor: 0.9,
-        jump_low: 1.3,
-        jump_high: 1.7,
+        jump_low: ModeTuning::NORMAL.jump_low,
+        jump_high: ModeTuning::NORMAL.jump_high,
         jump_low_vs_speed: Curve::constant(1.0),
         jump_high_vs_speed: Curve::new(&[(0.0, 1.0), (0.5, 0.8), (1.0, 0.5)]),
         jump_speed_range: 25.0,
@@ -1321,7 +1319,7 @@ impl Tuning {
         spin_auto_change: Curve::new(&[(0.0, 0.8), (0.3, 0.55), (1.0, 0.4)]),
         spin_input_filter: Curve::new(&[(0.0, 0.0), (0.05, 1.0), (0.3, 0.8), (1.0, 0.45)]),
         max_spin_speed: 540.0,
-        max_auto_spin: 7.0,
+        max_auto_spin: ModeTuning::NORMAL.max_auto_spin,
         min_auto_spin: 0.12,
         heading_adjust_vs_up: Curve::new(&[(0.0, 130.0), (0.8, 125.0), (0.92, 95.0), (1.0, 90.0)]),
         min_heading_vel: 0.8,
@@ -1403,7 +1401,17 @@ impl Tuning {
         biped: biped::BipedTuning::BUILT_IN,
         possession: possession::PossessionTuning::BUILT_IN,
         wipeout: wipeout::WipeoutTuning::BUILT_IN,
+        difficulty: Difficulty::Normal,
+        modes: ModeTuning::BUILT_IN,
     };
+
+    /// Rides with `d`'s physics mode: its values (from the rules pack, else Skate 3's built in) replace
+    /// the mode-dependent ones; nothing else changes.
+    pub fn set_difficulty(&mut self, d: Difficulty) {
+        self.difficulty = d;
+        let m = self.modes[d.index()];
+        m.write(self);
+    }
 
     /// Takes over every value a `rules/tuning` entry carries. Unknown names and malformed values are
     /// skipped (the built-in value stays). Returns how many values were used.
@@ -1418,6 +1426,18 @@ impl Tuning {
     }
 
     fn set(&mut self, name: &str, v: &[f32]) -> bool {
+        // A physics mode's value goes to that mode, and to the riding tuning if it is the one riding.
+        if let Some((mode, field)) = name
+            .strip_prefix("physics_mode/")
+            .and_then(|r| r.split_once('/'))
+            && let Some(d) = Difficulty::parse(mode)
+        {
+            let used = self.modes[d.index()].set(field, v);
+            if used && d == self.difficulty {
+                self.set_difficulty(d);
+            }
+            return used;
+        }
         let f = v.first().copied().filter(|f| f.is_finite());
         let c =
             || Curve::from_values(v).filter(|c| c.y[..c.n as usize].iter().all(|y| y.is_finite()));
@@ -1449,8 +1469,6 @@ impl Tuning {
                 scalar!(self.max_slope_accel)
             }
             "physics_push/default/MaxPushableSpeed" => scalar!(self.push_max_speed),
-            "physics_mode/normal/MaxPushDVStart" => scalar!(self.push_tick_limit_slow),
-            "physics_mode/normal/MaxPushDVEnd" => scalar!(self.push_tick_limit_fast),
             "anim_motion/pushing/button_time_max" => curve!(self.push_hold_time),
             "anim_motion/pushing/button_time_to_dv" => curve!(self.push_dv),
             "anim_motion/pushing/last_push_out_time" => scalar!(self.push_out_max),
@@ -1497,15 +1515,6 @@ impl Tuning {
             "physics_manual/default/ProceduralNoiseFreq" => scalar!(self.manual_noise_freq),
             "physics_manual/default/ProceduralNoiseScalar" => scalar!(self.manual_noise_scale),
             "physics_manual/default/NoiseVsSpeed" => curve!(self.manual_noise_vs_speed),
-            // A flag byte: any non-zero value is on.
-            "physics_mode/normal/Hash_F8CBC0F5FEF2240E" => match v.first() {
-                Some(b) => {
-                    self.manual_corrective = *b != 0.0;
-                    true
-                }
-                None => false,
-            },
-            "physics_mode/normal/Hash_84CB2F459F3FC811" => scalar!(self.manual_correction_speed),
             "physics_manual/default/TorqueBleedOffWithNoContact" => {
                 scalar!(self.manual_torque_bleed)
             }
@@ -1551,9 +1560,6 @@ impl Tuning {
             "physics_collision/default/CollisionTorqueFadeoff" => {
                 scalar!(self.collision_torque_fade)
             }
-            "physics_mode/normal/Wipeout_GroundXZAcceleration" => {
-                scalar!(self.wipe_ground_closing)
-            }
             "physics_wipeout/default/Wipeout_AirXZAcceleration" => scalar!(self.wipe_air_closing),
             "physics_feet/default/WallRideAntiGravityVsTime" => curve!(self.wallride_antigravity),
             "physics_feet/default/WallRideMaxDotFloorWall" => {
@@ -1576,9 +1582,6 @@ impl Tuning {
             "physics_pumping/default/PumpVsTime" => curve!(self.pump_vs_time),
             "physics_pumping/default/AngularSpeedDamping" => scalar!(self.pump_ang_damping),
             "physics_pumping/default/PumpVsVel" => curve!(self.pump_vs_vel),
-            "physics_mode/normal/PumpEffectFactor" => scalar!(self.pump_factor),
-            "physics_mode/normal/Hash_D77AFD320B6241C5" => scalar!(self.pump_max_accel),
-            "physics_mode/normal/UnintentionalPumpScalar" => scalar!(self.pump_unintentional),
             "physics_pumping/default/CompressionVsGroundAngle" => {
                 curve!(self.compression_vs_ground_angle)
             }
@@ -1618,8 +1621,6 @@ impl Tuning {
             "physics_steering/default/PushScalarIncriment" => scalar!(self.push_steer_rise),
             "physics_steering/default/PushScalarMin" => scalar!(self.push_steer_min),
             "physics_jump/default/AbsoluteMinHeight" => scalar!(self.jump_floor),
-            "physics_mode/normal/JumpMinHeight" => scalar!(self.jump_low),
-            "physics_mode/normal/JumpMaxHeight" => scalar!(self.jump_high),
             "physics_jump/default/MinHeightVsSpeed" => curve!(self.jump_low_vs_speed),
             "physics_jump/default/MaxHeightVsSpeed" => curve!(self.jump_high_vs_speed),
             "physics_jump/default/SpeedResponseMaxSpeed" => scalar!(self.jump_speed_range),
@@ -1639,7 +1640,6 @@ impl Tuning {
             "physics_bodyspin/default/MaxDeltaForAutoVsTime" => curve!(self.spin_auto_change),
             "physics_airstates/default/BodySpinInputFilter" => curve!(self.spin_input_filter),
             "physics_airstates/default/MaxSpinSpeed" => scalar!(self.max_spin_speed),
-            "physics_mode/normal/MaxAutoBodySpinSpeed" => scalar!(self.max_auto_spin),
             "physics_airstates/default/MinAutoBodySpeed" => scalar!(self.min_auto_spin),
             "physics_airstates/default/MaxHeadingAdjustVsUpY" => curve!(self.heading_adjust_vs_up),
             "physics_airstates/default/MinTargetHeadingVel" => scalar!(self.min_heading_vel),

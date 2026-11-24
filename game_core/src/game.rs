@@ -24,7 +24,7 @@ use crate::replay::{Figure, Header, Player, Recording, View as ReplayView};
 use crate::rider::Rider;
 use crate::scoring::{Frame as ScoreFrame, Scoring};
 use crate::skater::{ClipTiming, Event, Mode, Skater, Stance};
-use crate::tuning::Tuning;
+use crate::tuning::{Difficulty, Tuning};
 use crate::world::ImportedPark;
 use alloc::boxed::Box;
 
@@ -419,6 +419,37 @@ impl Game {
         self.volume = v.min(crate::sound::VOLUME_STEPS);
     }
 
+    /// Skate 3's difficulty (the pause menu's setting): its physics mode rides from now on, without
+    /// resetting the rider (Skate 3 applies the Play Mode row at once).
+    pub fn set_difficulty(&mut self, d: Difficulty) {
+        self.tuning.set_difficulty(d);
+        self.skater.tuning.set_difficulty(d);
+        if let Some(g) = &mut self.graph {
+            g.set_tuning(&self.tuning);
+        }
+    }
+
+    pub fn difficulty(&self) -> Difficulty {
+        self.tuning.difficulty
+    }
+
+    /// Skate 3's truck tightness in tenths (0 loose ..= 10 tight; 7 by default).
+    pub fn set_truck_tightness(&mut self, tenths: u8) {
+        let t = tenths.min(crate::tuning::mode::TRUCK_TIGHTNESS_STEPS) as f32
+            / crate::tuning::mode::TRUCK_TIGHTNESS_STEPS as f32;
+        self.tuning.truck_tightness = t;
+        self.skater.tuning.truck_tightness = t;
+        if let Some(g) = &mut self.graph {
+            g.set_tuning(&self.tuning);
+        }
+    }
+
+    pub fn truck_tightness(&self) -> u8 {
+        libm::roundf(
+            self.tuning.truck_tightness * crate::tuning::mode::TRUCK_TIGHTNESS_STEPS as f32,
+        ) as u8
+    }
+
     /// The frame's sound: call after [`Game::update`] (and before or after `render`). The director reads
     /// the frame's events and the rider's state and hands its commands to `out`, the platform's mixer.
     pub fn sound(&mut self, out: &mut dyn crate::sound::Audio) {
@@ -576,6 +607,8 @@ impl Game {
             Choice::DrawDistance(d) => self.set_draw_distance(d as f32),
             Choice::Camera(a) => self.set_camera_angle(a),
             Choice::Volume(v) => self.set_volume(v),
+            Choice::Difficulty(d) => self.set_difficulty(d),
+            Choice::Trucks(t) => self.set_truck_tightness(t),
         }
     }
 
@@ -877,6 +910,14 @@ impl Game {
                     self.set_volume(v);
                     self.settings_changed = true;
                 }
+                Some(Choice::Difficulty(d)) => {
+                    self.set_difficulty(d);
+                    self.settings_changed = true;
+                }
+                Some(Choice::Trucks(t)) => {
+                    self.set_truck_tightness(t);
+                    self.settings_changed = true;
+                }
                 Some(c) => self.choose(c, raw.buttons),
                 None => {}
             }
@@ -894,6 +935,8 @@ impl Game {
             let mut menu = Menu::pause(raw.buttons, self.draw_distance as u16);
             menu.camera = self.camera_angle();
             menu.volume = self.volume;
+            menu.difficulty = self.difficulty();
+            menu.trucks = self.truck_tightness();
             self.menu = Some(menu);
             return;
         }
