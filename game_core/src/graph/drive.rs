@@ -411,7 +411,8 @@ impl Driver {
             c.manual = Some((
                 path.contains("NoseManual"),
                 lean.min(1.0),
-                path.contains("Manual/Brake") || path.contains("Manual/Out"),
+                // The tail's `TailManual/Brake/..`, the nose's `NoseManual/Holding/Brake/..`.
+                path.contains("/Brake") || path.contains("Manual/Out"),
             ));
         }
         // Turning round from fakie to switch (`Switch`, `PushFromFakie`: both play `B_SWITCH`) happens

@@ -321,3 +321,48 @@ fn the_board_stays_under_the_feet_after_every_landing() {
     }
     assert!(landings > 5, "{landings}");
 }
+
+fn cstick(y: i8) -> PadRaw {
+    PadRaw {
+        flags: flag::CONNECTED,
+        cstick_y: y,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_nose_drag_brakes_then_takes_the_corrective_drag() {
+    // SK8 (Normal) from 8.5 m/s, a nose manual then the stick all the way up: the motion graph drags
+    // the nose (`NoseManual/Holding/Brake`, `S_M_NOSEBRAKE_N_0_CYC`) and the board slows 2.90 m/s^2;
+    // once the deck is within a degree of the brake angle, over 5 m/s, the corrective drag takes 54% of
+    // the speed in one tick. flatground's nose brake used to roll on (its path wasn't read as a brake).
+    let Some(mut g) = imported_game("nose drag") else {
+        return;
+    };
+    g.place_rider(v3(-16.0, 0.0, -17.0), 0.0, 8.4);
+    for _ in 0..60 {
+        g.update(&held(0), TICK);
+    }
+    for _ in 0..40 {
+        g.update(&cstick(47), TICK);
+    }
+    let mut speeds = Vec::new();
+    let mut corrected = None;
+    for i in 0..120 {
+        g.update(&cstick(127), TICK);
+        speeds.push(g.skater.speed);
+        if corrected.is_none() && g.skater.manual.is_some_and(|m| m.correcting) {
+            corrected = Some(i);
+        }
+    }
+    let k = corrected.expect("the corrective drag acts");
+    assert!(k > 30, "after the brake has slowed it ({k} ticks)");
+    let end = 40.min(k - 1);
+    let decel = (speeds[10] - speeds[end]) / ((end - 10) as f32 * TICK);
+    assert!((decel - 2.90).abs() < 0.25, "{decel} m/s^2 (SK8 2.90)");
+    let keep = speeds[k] / speeds[k - 1];
+    assert!(
+        speeds[k - 1] > 5.0 && (keep - 0.459).abs() < 0.02,
+        "{speeds:?}"
+    );
+}

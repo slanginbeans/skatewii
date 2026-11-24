@@ -81,6 +81,11 @@ const SIDE_GRIP: f32 = 1.6;
 /// of it (measured, 0 to 7 m/s).
 pub const PUSH_TRANSFER: f32 = 0.96;
 const SIDE_DAMP: f32 = 0.4;
+/// Skate 3's manual corrective drag (N per m/s: SK8 manual/controller.rs, -400 x the ground velocity at
+/// the dragging truck) and the mass it moves (kg, ours: SK8's deck loses 54% of 5.43 m/s to it in one
+/// tick, its rider then running out).
+const MANUAL_CORRECTIVE_DRAG: f32 = 400.0;
+const MANUAL_CORRECTIVE_MASS: f32 = 12.33;
 /// The trucks may turn the board a little faster than grip lets the travel turn (a drift), up to a
 /// sideways angle of `MAX_SLIP` (rad). Ours.
 const GRIP_OVER: f32 = 1.1;
@@ -123,6 +128,9 @@ pub struct Drive {
     pub brake: f32,
     /// On two wheels.
     pub manual: bool,
+    /// A manual's Normal corrective drag acts this tick (Skate 3's `correction_active`): a drag force
+    /// against the velocity at the dragging truck replaces the brake, push and ground forces.
+    pub manual_correction: bool,
     /// Powerslide: the board's angle from travel (rad); the path keeps following the trucks.
     pub slide: Option<f32>,
     /// Seconds into the powerslide.
@@ -317,6 +325,18 @@ impl Skater {
         let along = clamp(gravity.dot(f), -t.max_slope_accel, t.max_slope_accel);
         let foot_down = d.push_target.is_some() || d.brake > 0.0;
         let before_model = self.speed.abs();
+        if d.manual_correction {
+            // Skate 3's Normal corrective drag (SK8 manual/controller.rs `apply_correction`, queued as
+            // the tick's only board force by grounded/state/ordinary.rs): -400 N s/m of the velocity at
+            // the dragging truck; no brake, push, friction or speed model this tick, gravity still.
+            let keep = (1.0 - MANUAL_CORRECTIVE_DRAG * dt / MANUAL_CORRECTIVE_MASS).max(0.0);
+            self.speed = self.speed * keep + along * dt;
+            self.slip = self.slip * keep + gravity.dot(side) * dt;
+            self.target_speed = self.speed.abs();
+            self.move_on_ground(park, d, dt, events);
+            self.model_speed = self.speed.abs();
+            return;
+        }
         let mut friction = 0.0;
         if !foot_down && d.slide.is_none() {
             let sp = self.speed.abs();

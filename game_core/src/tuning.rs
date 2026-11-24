@@ -201,6 +201,16 @@ pub struct Tuning {
     /// manual's balance direction asks the graph to end the manual (`PhysicsWantsManualExit`; SK8
     /// manual/controller.rs `apply_correction`).
     pub manual_corrective: bool,
+    /// The corrective drag's least speed along the board (m/s, the physics mode's
+    /// `Hash_84CB2F459F3FC811`: Normal 5, Easy 4, Hardcore 2).
+    pub manual_correction_speed: f32,
+    /// The manual's wheels off the ground (Skate 3's no-contact branch): the controller's correction
+    /// bleeds by `manual_torque_bleed` a tick and turns the deck by `manual_torque_no_contact` of it
+    /// (`TorqueBleedOffWithNoContact`, `TorqueScalarWithNoContact`). `manual_start_torque` seeds the
+    /// correction from the target on a manual's first tick (`StartTorqueScalar`).
+    pub manual_torque_bleed: f32,
+    pub manual_torque_no_contact: f32,
+    pub manual_start_torque: f32,
     /// Pop strength finalisation (state graphs): at or below `jump_clamp_low` a pop is the minimum hop,
     /// at or above `jump_clamp_high` full height.
     pub jump_clamp_low: f32,
@@ -823,6 +833,10 @@ pub const PATHS: &[&str] = &[
     "physics_manual/default/ProceduralNoiseScalar",
     "physics_manual/default/NoiseVsSpeed",
     "physics_mode/normal/Hash_F8CBC0F5FEF2240E",
+    "physics_mode/normal/Hash_84CB2F459F3FC811",
+    "physics_manual/default/TorqueBleedOffWithNoContact",
+    "physics_manual/default/TorqueScalarWithNoContact",
+    "physics_manual/default/StartTorqueScalar",
     "anim_motion/power_slide/slide_speed_threshold",
     "anim_motion/power_slide/slide_min_entry",
     "anim_motion/power_slide/well_into_slide_time",
@@ -1120,19 +1134,33 @@ impl Tuning {
         push_steer_rise: 0.05,
         push_steer_min: 0.5,
         steer_tilt_blend: 0.2,
-        manual_tilt: 0.5,
+        manual_tilt: 0.6,
         manual_brake_tilt: 30.0,
         manual_max_tilt: 24.0,
-        manual_p: 0.06,
-        manual_i: 0.02,
-        manual_d: -0.75,
-        manual_d_limit: 0.05,
-        manual_max_error: 0.12,
-        manual_noise_freq: 1.2,
-        manual_noise_scale: 0.04,
-        manual_noise_vs_speed: Curve::new(&[(0.0, 0.3), (8.0, 1.0)]),
+        // Skate 3's `physics_manual` (the disc's values).
+        manual_p: 0.05,
+        manual_i: 0.03,
+        manual_d: -0.8,
+        manual_d_limit: 0.04,
+        manual_max_error: 0.1,
+        manual_noise_freq: 1.5,
+        manual_noise_scale: 0.05,
+        manual_noise_vs_speed: Curve::new(&[
+            (0.0, 0.292_857_1),
+            (1.319_218, 0.378_571_4),
+            (2.524_43, 0.485_714_3),
+            (3.908_795, 0.617_857_2),
+            (5.358_305, 0.821_428_6),
+            (6.824_105, 0.95),
+            (7.850_163, 1.0),
+            (10.0, 1.0),
+        ]),
         // Skate 3's Normal mode.
         manual_corrective: true,
+        manual_correction_speed: 5.0,
+        manual_torque_bleed: 0.96,
+        manual_torque_no_contact: 0.0,
+        manual_start_torque: 0.0,
         jump_clamp_low: 0.5,
         jump_clamp_high: 0.9,
         side_friction: 60.0,
@@ -1466,6 +1494,14 @@ impl Tuning {
                 }
                 None => false,
             },
+            "physics_mode/normal/Hash_84CB2F459F3FC811" => scalar!(self.manual_correction_speed),
+            "physics_manual/default/TorqueBleedOffWithNoContact" => {
+                scalar!(self.manual_torque_bleed)
+            }
+            "physics_manual/default/TorqueScalarWithNoContact" => {
+                scalar!(self.manual_torque_no_contact)
+            }
+            "physics_manual/default/StartTorqueScalar" => scalar!(self.manual_start_torque),
             "anim_motion/jumping/clamp_low_inclusive" => scalar!(self.jump_clamp_low),
             "anim_motion/jumping/clamp_high_inclusive" => scalar!(self.jump_clamp_high),
             "anim_motion/power_slide/slide_speed_threshold" => scalar!(self.slide_speed_threshold),

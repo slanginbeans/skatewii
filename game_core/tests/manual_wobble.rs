@@ -138,24 +138,33 @@ fn cstick(y: i8) -> PadRaw {
 /// Into a tail manual with the C-stick lightly back, then all the way back (the tail drags) for a
 /// second: how many of those ticks were still a manual, and the motion graph's state at the end.
 fn tail_drag(g: &mut Game) -> Option<(u32, String)> {
+    drag(g, -1, "/TailManual/")
+}
+
+/// The same on the nose: the C-stick lightly forward, then all the way forward.
+fn nose_drag(g: &mut Game) -> Option<(u32, String)> {
+    drag(g, 1, "/NoseManual/")
+}
+
+fn drag(g: &mut Game, way: i8, manual_state: &str) -> Option<(u32, String)> {
     let state = |g: &Game| g.graph.as_ref().unwrap().runner.motion_state();
     g.place_rider(v3(-16.0, 0.0, -17.0), 0.0, 6.0);
     for _ in 0..30 {
         g.update(&cstick(0), TICK);
     }
     for _ in 0..40 {
-        g.update(&cstick(-50), TICK);
+        g.update(&cstick(50 * way), TICK);
     }
-    if !state(g).contains("/TailManual/") {
+    if !state(g).contains(manual_state) {
         eprintln!(
-            "manual_wobble: no tail manual in this motion graph ({}): skipped",
+            "manual_wobble: no {manual_state} in this motion graph ({}): skipped",
             state(g)
         );
         return None;
     }
     let mut manual = 0;
     for _ in 0..60 {
-        g.update(&cstick(-127), TICK);
+        g.update(&cstick(127 * way), TICK);
         manual += state(g).contains("/Manual/") as u32;
     }
     Some((manual, state(g)))
@@ -175,11 +184,21 @@ fn imported_graphs_end_a_dragged_manual_only_without_the_corrective_force() {
     };
     assert_eq!(manual, 60, "{state}");
     assert!(state.contains("/TailManual/Brake"), "{state}");
-    // No corrective force (Skate 3's Easy): the physics wants out and the graph leaves the manual.
+    // No corrective force (Skate 3's Easy): the tail dragged rolling forwards is the manual's own way
+    // (Skate 3's balance is positive on the tail), so it goes on; the nose dragged rolling forwards
+    // opposes it, the physics wants out and the graph leaves the manual (SK8 manual/controller.rs
+    // `apply_correction`). flatground used to end the tail drag instead.
     let mut g = imported(&dir);
     g.skater.tuning.manual_corrective = false;
     let (manual, state) = tail_drag(&mut g).unwrap();
-    assert!(manual < 10, "still manualling {manual} ticks: {state}");
+    assert_eq!(manual, 60, "{state}");
+    let mut g = imported(&dir);
+    g.skater.tuning.manual_corrective = false;
+    let Some((manual, state)) = nose_drag(&mut g) else {
+        return;
+    };
+    // (The nose's way into its brake, `NoseManual/Holding/Brake`, takes longer than the tail's.)
+    assert!(manual < 30, "still manualling {manual} ticks: {state}");
     assert!(!state.contains("/Manual/"), "{state}");
     assert!(g.skater.manual.is_none());
 }

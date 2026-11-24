@@ -77,11 +77,19 @@ With `motion/graph` loaded (`Game::graph`), each tick:
      out), as Skate 3's do: a held stick holds a manual as long as it is held; the deck pitch servoes
      (SK8's PID) to (0.25 + 0.75 lean) of the most tilt, or to the brake angle. `PhysicsWantsManualExit`
      is the physics' `Skater::manual_exit` (SK8 manual/controller.rs `apply_correction`): set while
-     dragging the tail or nose with the board rolling against the manual's balance direction (tail -1,
-     nose +1, against the speed along the board) and the physics mode's corrective force
+     dragging the tail or nose with the board rolling against the manual's balance direction (Skate 3's
+     balance is +1 on the tail, -1 on the nose, against the speed along the board: a nose drag rolling
+     forwards, a tail drag rolling backwards) and the physics mode's corrective force
      (`physics_mode/normal/Hash_F8CBC0F5FEF2240E`) off. Skate 3's Normal and Hardcore have it on (Easy
-     off), so with the stock rules a Normal manual drags its tail and never tips out; with it off the
-     graph's `Brake` and `Cycle` states let go of the manual (scripted in `tests/manual_wobble.rs`);
+     off): there the same drag, over the mode's speed (`Hash_84CB2F459F3FC811`, Normal 5 m/s) and with
+     the deck within a degree of the brake angle, takes the corrective drag instead (-400 N s/m of the
+     velocity at the dragging truck, in place of that tick's brake and the deck's turn; on flatground's
+     one-body board it moves 12.3 kg, so the tick keeps 46% of the speed as SK8's deck does). With the
+     manual's wheels off the ground while still riding (lifted over a crest) the controller's correction
+     bleeds by `TorqueBleedOffWithNoContact` (0.96) a tick and turns the deck by
+     `TorqueScalarWithNoContact` (0) of it. With it off the graph's `Brake` and `Cycle` states let go
+     of the manual (scripted in `tests/manual_wobble.rs`). The nose's brake state is
+     `NoseManual/Holding/Brake` (it used to be missed, so a nose drag rolled on unbraked);
    - in the air the board does what the clips do: a late flip, finger flip, under flip or dark catch
      becomes the trick (its look and flips from the graph's `ScoringTrick`, `Kickflip2`..`4` for held
      multi-flips; the graph's `TimeToLand` thresholds read the physics' landing prediction, below), a
@@ -819,9 +827,10 @@ ragdoll to tweak).
 Approximations to revisit: the push speed is where the push coefficients' blended clips end, not the
 trajectory bone's speed sampled from the posed clips; how long the push foot stays down still comes
 from the push sets' contact time; the manual's deck pitch runs SK8's PID servo (with the rules pack's
-`physics_manual` gains), but on flatground's kinematic board, without the corrective drag Normal
-pushes at the dragging truck (the tail brake stands in) or the no-contact torque bleed (the manual
-ends on leaving the ground instead); a landing in the danger zone is judged on the speed
+`physics_manual` gains) on flatground's kinematic board, so its deck reaches the brake angle in 0.7 s
+where SK8's rigid deck takes 1.1 s (a nose drag from 8.5 m/s takes the corrective drag at 6.4 m/s,
+SK8's at 5.4), and SK8's action graph then runs the rider out (`SS_RUNOUT_GROUND`, through its
+dismount states: no wipeout request is raised) where flatground's plays a bump and rides on; a landing in the danger zone is judged on the speed
 into the ground only (Skate 3's closing-velocity check also has a sideways part); shoves don't run;
 the wipeout's lean and twist come from the drawn bail, not a ragdoll's hips; the d-pad's gestures are
 a fixed set (Skate 3's are the player's pick). The
@@ -931,6 +940,13 @@ and let-go 180s, manuals and the tail brake, the foot brake, powerslides, a drop
 a thin-rail run, and the camera while riding and carving.
 
 Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_sk8.rs`):
+
+- **Manual drags** (`feel-parity`): the nose drag (`NoseManual/Holding/Brake`) brakes at 2.86 m/s^2
+  (SK8 2.90; it rolled on unbraked at 0.5), and over 5 m/s with the deck at the brake angle the Normal
+  corrective drag keeps 46% of the speed for the tick (SK8 5.43 to 2.49 m/s). The drag opposes the
+  travel on the nose rolling forwards (Skate 3's balance is positive on the tail); flatground had it on
+  the tail, so Easy's `PhysicsWantsManualExit` ended a forward tail drag, which SK8's never does. The
+  manual's no-contact bleed runs while the board is lifted. Tail drags are unchanged (2.9 m/s^2).
 
 - **Brake contact**: `BRAKE_CONTACT` is a value (0 in the brake's `INTO` clip, 1 in `CYC`); its presence
   was read as contact, so the foot dragged from the first tick. Now 0.23 s after the press, as SK8, at

@@ -343,6 +343,11 @@ pub struct Manual {
     /// and the filtered pitch error.
     pub correction: f32,
     pub filtered_error: f32,
+    /// This tick Skate 3's Normal corrective drag acts at the dragging truck instead of the brake
+    /// (SK8 manual/controller.rs `apply_correction`, `correction_active`).
+    pub correcting: bool,
+    /// How far the deck turned last tick (rad per 1/60 s tick: the derivative's angle change).
+    pub last_step: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2329,6 +2334,7 @@ impl Skater {
             },
             brake,
             manual: self.manual.is_some(),
+            manual_correction: self.manual.is_some_and(|m| m.correcting),
             slide: self
                 .slide
                 .as_ref()
@@ -2774,16 +2780,17 @@ impl Skater {
 
     /// A manual the state graph holds (engaged and left as the graph says): the deck pitch servoes to a
     /// target that grows with the stick's lean (SK8's manual controller aims at (0.25 + 0.75 lean) of
-    /// the most tilt), or to the brake angle while dragging.
+    /// the most tilt), or to the brake angle while dragging (SK8 manual/controller.rs `calculate`).
     ///
-    /// Skate 3 ends a manual only through the graph: the stick let go (or past into a revert or a trick),
-    /// leaving the ground, or `PhysicsWantsManualExit`. The physics raises that one (SK8
-    /// manual/controller.rs `apply_correction`, the `opposing_motion_without_correction` flag) while
-    /// dragging the tail or nose with the board rolling against the manual's balance direction (the
-    /// tail's is -1, the nose's +1, against the speed along the board), and only when the physics mode's
-    /// corrective force is off (Skate 3's Easy; Normal pushes a corrective drag at the dragging truck there instead, which flatground's tail brake stands in for, so a
-    /// Normal manual never tips out). The no-contact torque bleed (`TorqueBleedOffWithNoContact`) needs
-    /// the manual's wheels off the ground, which ends a manual here anyway (`take_off`).
+    /// Skate 3's balance is positive on the tail (the stick pulled back) and negative on the nose. While
+    /// dragging the tail or nose with the board rolling against that direction (a nose drag rolling
+    /// forwards, a tail drag rolling backwards; `apply_correction`), either the physics mode's corrective
+    /// force acts (Normal, Hardcore) or, with it off (Easy), the physics asks the graph to end the manual
+    /// (`PhysicsWantsManualExit`). The corrective force (`correcting`) needs the speed along the board
+    /// over `manual_correction_speed` and the deck within a degree of its target; it then replaces the
+    /// tick's brake and the deck's turn (SK8 grounded/state/ordinary.rs). With the manual's wheels off
+    /// the ground (lifted off a crest while still riding) the correction bleeds off
+    /// (`TorqueBleedOffWithNoContact`) and turns the deck by `TorqueScalarWithNoContact` of it.
     fn graph_manual(
         &mut self,
         want: Option<(bool, f32, bool)>,
@@ -2805,8 +2812,12 @@ impl Skater {
             self.push = None;
             self.brake = None;
         }
-        let balance = if nose { 1.0 } else { -1.0 };
-        self.manual_exit = brake && !self.tuning.manual_corrective && self.speed * balance < 0.0;
+        // Skate 3's balance sign: the tail's positive, the nose's negative.
+        let balance = if nose { -1.0 } else { 1.0 };
+        let opposing = brake && self.speed * balance < 0.0;
+        self.manual_exit = opposing && !self.tuning.manual_corrective;
+        // The manual's wheels on the ground: the board is not lifted off it (`vn`).
+        let contact = self.vn == 0.0;
         let t = &self.tuning;
         let speed = libm::fabsf(self.speed);
         let m = self.manual.as_mut().unwrap();
@@ -2822,16 +2833,34 @@ impl Skater {
             let wobble = libm::sinf(2.0 * PI * t.manual_noise_freq * m.time) * t.manual_noise_scale;
             t.manual_max_tilt * reach * PI / 180.0 + t.manual_noise_vs_speed.eval(speed) * wobble
         };
+        if !started {
+            m.correction = t.manual_start_torque * target;
+        }
         // PID on the deck pitch, per 1/60 s tick (the deck turns by the accumulated correction).
         let ticks = (dt * 60.0).max(0.0);
         let error = (target - m.pitch).clamp(-t.manual_max_error, t.manual_max_error);
         m.filtered_error = 0.95 * m.filtered_error + 0.05 * error;
-        let last_turn = if started { m.correction } else { 0.0 };
+        let last_turn = if started { m.last_step } else { 0.0 };
         let derivative = (last_turn * t.manual_d).clamp(-t.manual_d_limit, t.manual_d_limit);
-        m.correction += derivative + m.filtered_error * t.manual_i + error * t.manual_p;
-        m.pitch += m.correction * ticks;
+        let output = if contact {
+            m.correction += derivative + m.filtered_error * t.manual_i + error * t.manual_p;
+            1.0
+        } else {
+            m.correction *= t.manual_torque_bleed;
+            t.manual_torque_no_contact
+        };
+        m.correcting = opposing
+            && t.manual_corrective
+            && speed > t.manual_correction_speed
+            && libm::fabsf(target - m.pitch) * (180.0 / PI) < 1.0;
+        m.last_step = if m.correcting {
+            0.0
+        } else {
+            m.correction * output
+        };
+        m.pitch += m.last_step * ticks;
         m.balance = 0.0;
-        brake
+        brake && !m.correcting
     }
 
     /// Ends a manual on purpose (stick released, or popped out of): scores it if it was long enough.
@@ -6572,7 +6601,11 @@ mod tests {
     }
 
     #[test]
-    fn a_graph_manual_brake_asks_out_only_without_the_corrective_force() {
+    fn a_graph_manual_drag_against_the_travel_asks_out_only_without_the_corrective_force() {
+        // Skate 3's balance is positive on the tail (SK8's `Balance` packet, negated: the stick pulled
+        // back), so the drag opposes the travel on the nose rolling forwards or the tail rolling
+        // backwards (SK8 manual/controller.rs `apply_correction`; SK8's tail drag at 6.6 m/s never
+        // raises it). flatground used to test the tail rolling forwards.
         let park = flat();
         let drag = |nose: bool, speed: f32, corrective: bool, brake: bool| {
             let mut s = spawn(&park);
@@ -6586,21 +6619,21 @@ mod tests {
             s.manual_exit
         };
         // Skate 3's Normal (corrective force on): dragging never asks the manual to end.
-        assert!(!drag(false, 4.0, true, true));
-        assert!(!drag(true, -4.0, true, true));
-        // Easy (off): the tail dragged rolling forwards, the nose rolling backwards, ask out.
-        assert!(drag(false, 4.0, false, true));
-        assert!(drag(true, -4.0, false, true));
+        assert!(!drag(true, 4.0, true, true));
+        assert!(!drag(false, -4.0, true, true));
+        // Easy (off): the nose dragged rolling forwards, the tail rolling backwards, ask out.
+        assert!(drag(true, 4.0, false, true));
+        assert!(drag(false, -4.0, false, true));
         // Rolling the manual's own way, stopped, or not dragging: no.
-        assert!(!drag(true, 4.0, false, true));
-        assert!(!drag(false, 0.0, false, true));
-        assert!(!drag(false, 4.0, false, false));
+        assert!(!drag(false, 4.0, false, true));
+        assert!(!drag(true, 0.0, false, true));
+        assert!(!drag(true, 4.0, false, false));
         // Off the manual the flag clears.
         let mut s = spawn(&park);
         s.tuning.manual_corrective = false;
         s.speed = 4.0;
         s.graph = Some(GraphControl {
-            manual: Some((false, 1.0, true)),
+            manual: Some((true, 1.0, true)),
             ..GraphControl::default()
         });
         steps(&mut s, &park, &Pad::default(), None, 1);
@@ -6608,6 +6641,67 @@ mod tests {
         s.graph = Some(GraphControl::default());
         steps(&mut s, &park, &Pad::default(), None, 1);
         assert!(!s.manual_exit && s.manual.is_none());
+    }
+
+    /// The speed after each tick of a graph manual drag from `speed` (nose or tail), and whether the
+    /// corrective drag acted.
+    fn drag_run(nose: bool, speed: f32, ticks: usize) -> Vec<(f32, bool)> {
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = speed;
+        s.graph = Some(GraphControl {
+            manual: Some((nose, 1.0, true)),
+            ..GraphControl::default()
+        });
+        (0..ticks)
+            .map(|_| {
+                steps(&mut s, &park, &Pad::default(), None, 1);
+                (s.speed, s.manual.is_some_and(|m| m.correcting))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_nose_drag_rolling_forward_fast_takes_the_corrective_drag_as_sk8s() {
+        // SK8 (Normal, nose drag from 8.5 m/s): the nose brake slows the board until its deck is within
+        // a degree of the brake angle; that tick, at 5.43 m/s, the corrective drag (-400 x the
+        // velocity at the truck, in place of the brake) leaves 2.49 m/s.
+        let run = drag_run(true, 7.8, 240);
+        let k = run
+            .iter()
+            .position(|r| r.1)
+            .expect("the corrective drag acts");
+        let (before, after) = (run[k - 1].0, run[k].0);
+        assert!(before > 5.0, "only over the mode's 5 m/s: {before}");
+        let keep = after / before;
+        assert!((keep - 2.4937 / 5.4305).abs() < 0.01, "kept {keep}");
+        // Under 5 m/s the brake drags again.
+        assert!(run[k + 1..].iter().all(|r| !r.1));
+        assert!(run[k + 1].0 < after && run[k + 1].0 > after - 0.2);
+        // The tail dragged rolling forwards (SK8's manual brake) never takes it.
+        assert!(drag_run(false, 7.8, 240).iter().all(|r| !r.1));
+    }
+
+    #[test]
+    fn a_manual_lifted_off_the_ground_bleeds_its_correction() {
+        // SK8 manual/controller.rs: the manual's wheels off the ground, the correction bleeds by
+        // `TorqueBleedOffWithNoContact` (0.96) a tick and turns the deck by `TorqueScalarWithNoContact`
+        // (0) of it.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 4.0;
+        s.graph = Some(GraphControl {
+            manual: Some((false, 1.0, false)),
+            ..GraphControl::default()
+        });
+        steps(&mut s, &park, &Pad::default(), None, 10);
+        let m = s.manual.unwrap();
+        assert!(m.correction > 0.0);
+        s.vn = 0.5;
+        steps(&mut s, &park, &Pad::default(), None, 1);
+        let lifted = s.manual.unwrap();
+        assert!((lifted.correction - m.correction * 0.96).abs() < 1e-6);
+        assert_eq!(lifted.pitch, m.pitch, "the deck doesn't turn");
     }
 
     #[test]
