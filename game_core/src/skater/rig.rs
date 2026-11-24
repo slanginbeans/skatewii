@@ -433,7 +433,9 @@ impl Skater {
         let motion = vel * dt;
         let len = motion.length();
         // (Riding a transition, the rigid board meets what is ahead with its own contacts.)
-        if len > 1e-6 && n.y > 0.7 {
+        // A terrain of triangles meets the board's volumes in the solve itself (walls included).
+        let physical = park.triangles_near(self.pos, 0.0, &mut Vec::new());
+        if len > 1e-6 && n.y > 0.7 && !physical {
             let dir = motion * (1.0 / len);
             let lead = (dir.dot(f).abs() * AXLE).max(0.1);
             if let Some(h) = park.raycast(self.pos + n * 0.04, dir, len + lead)
@@ -456,6 +458,13 @@ impl Skater {
         let Some(rig) = self.rig.as_mut() else {
             return;
         };
+        if rig.board.wheels_down() == 0 && rig.ground_time > 0.0 {
+            // No wheel on the ground: the ground behaviours don't act (SK8 queues them in its ground
+            // state only); the board flies on its own physics.
+            input.forces.clear();
+            input.limited = Vec3::ZERO;
+            input.angular = Vec3::ZERO;
+        }
         rig.board.step(park, &input);
         rig.ground_time += dt;
         self.read_rig(park, d, dt, events);
