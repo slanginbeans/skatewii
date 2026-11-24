@@ -290,3 +290,34 @@ fn in_the_air_the_legs_tuck_and_reach_for_the_landing() {
     );
     assert!(flight[n - 1] > 0.85, "reaching for the landing {flight:?}");
 }
+
+/// With the player's imported data: through the whole trick tour (flips, spins to fakie, grinds, grabs), the
+/// drawn board never turns round under the rider after a landing (the game logs `board: turned ...` if it
+/// does; a player saw it on the Wii after some tricks).
+#[test]
+fn the_board_stays_under_the_feet_after_every_landing() {
+    let Some(mut g) = imported_game("board after landing") else {
+        return;
+    };
+    let mut script = game_core::autoplay::TrickTour::new();
+    let mut landings = 0;
+    for _ in 0..(60 * 90) {
+        let pad = script.next(&g);
+        if let Some(p) = script.take_place() {
+            g.place(&p);
+        }
+        g.update(&pad, TICK);
+        landings += g
+            .events
+            .iter()
+            .filter(|e| matches!(e, game_core::skater::Event::Landed { .. }))
+            .count();
+        let swung: Vec<_> = g.log.iter().filter(|l| l.starts_with("board: ")).collect();
+        assert!(swung.is_empty(), "{swung:?}");
+        g.log.clear();
+        if script.done() {
+            break;
+        }
+    }
+    assert!(landings > 5, "{landings}");
+}

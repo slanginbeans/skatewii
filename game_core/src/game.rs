@@ -145,6 +145,22 @@ struct Popup {
     time: f32,
 }
 
+/// After a landing: the drawn board's yaw against the rider's travel, unwrapped (radians), for the log.
+struct BoardWatch {
+    trick: String,
+    frames: u32,
+    last: Option<f32>,
+    turned: f32,
+    lo: f32,
+    hi: f32,
+}
+
+impl BoardWatch {
+    const FRAMES: u32 = 45;
+    /// More than this (degrees) is the board turning round, not the landing lining up with the travel.
+    const SWING: f32 = 90.0;
+}
+
 pub struct Game {
     pub park: Park,
     park_mesh: Vec<Vertex>,
@@ -200,6 +216,9 @@ pub struct Game {
     world_us: core::cell::Cell<u32>,
     /// How far a district is drawn (m): the pause menu's setting.
     draw_distance: f32,
+    /// After a landing: the drawn board's yaw against the way the rider travels, to log the board turning
+    /// under his feet (a player saw it after some tricks; not reproduced off the Wii yet).
+    board_watch: Option<BoardWatch>,
     /// The player changed a setting since the platform last saved them.
     settings_changed: bool,
     /// Simulated time minus shown time (s): ticks run until the simulation is at or just past the frame.
@@ -292,6 +311,7 @@ impl Game {
             render_times: core::cell::Cell::new((0, 0, 0)),
             world_us: core::cell::Cell::new(0),
             draw_distance: crate::world::DRAW_DISTANCE,
+            board_watch: None,
             settings_changed: false,
             ahead: 0.0,
             ticks: 0,
@@ -437,6 +457,54 @@ impl Game {
             Choice::Ride(i) => self.request = Some(Request::Load(i.min(self.locations.len() - 1))),
             Choice::DrawDistance(d) => self.set_draw_distance(d as f32),
         }
+    }
+
+    /// Follows the drawn board for [`BoardWatch::FRAMES`] frames after a landing: its yaw in the world
+    /// against the way the rider travels. Logs once if that swings more than [`BoardWatch::SWING`] degrees
+    /// (the board turning round under his feet), with what the graphs and the stance were doing.
+    fn watch_board(&mut self) {
+        let Some(mut w) = self.board_watch.take() else {
+            return;
+        };
+        w.frames += 1;
+        if w.frames > BoardWatch::FRAMES {
+            return;
+        }
+        let travel = self.skater.vel.horizontal();
+        let axes = self.board_axes_in_character();
+        let Some((_, nose)) =
+            axes.filter(|_| travel.length() >= 1.0 && self.skater.mode == Mode::Rolling)
+        else {
+            self.board_watch = Some(w);
+            return;
+        };
+        let nose = self.imported_xform().rot.apply(nose);
+        let rel = crate::math::wrap_angle(
+            crate::math::atan2f(nose.x, nose.z) - crate::math::atan2f(travel.x, travel.z),
+        );
+        if let Some(last) = w.last {
+            w.turned += crate::math::wrap_angle(rel - last);
+            w.lo = w.lo.min(w.turned);
+            w.hi = w.hi.max(w.turned);
+        }
+        w.last = Some(rel);
+        let swing = (w.hi - w.lo).to_degrees();
+        if swing > BoardWatch::SWING {
+            let state = self
+                .graph
+                .as_ref()
+                .map(|g| g.runner.motion_state())
+                .unwrap_or_default();
+            let line = format!(
+                "board: turned {swing:.0} deg under the rider {} frames after {} (graph {state}, fakie {}, frame turned {})",
+                w.frames, w.trick, self.skater.fakie, self.skater.frame_turned
+            );
+            if self.log.len() < LOG_CAP {
+                self.log.push(line);
+            }
+            return;
+        }
+        self.board_watch = Some(w);
     }
 
     /// How far a district is drawn (m, the pause menu's setting): its fog and the cells read follow it.
@@ -705,9 +773,18 @@ impl Game {
         self.times.park_draws = park_draws;
         self.times.park_verts = park_verts;
 
+        self.watch_board();
         for e in &self.events {
             match e {
                 Event::Landed { name, points } => {
+                    self.board_watch = Some(BoardWatch {
+                        trick: name.clone(),
+                        frames: 0,
+                        last: None,
+                        turned: 0.0,
+                        lo: 0.0,
+                        hi: 0.0,
+                    });
                     self.score += points;
                     self.popup = Some(Popup {
                         title: name.clone(),
@@ -889,6 +966,11 @@ impl Game {
             Some(p) => blend_xform(&p.base, &cur, self.alpha),
             None => cur,
         }
+    }
+
+    /// The posed board's up and nose in the rider's space (the imported rider's last pose).
+    pub fn board_axes_in_character(&self) -> Option<(crate::math::Vec3, crate::math::Vec3)> {
+        self.rider.as_ref().and_then(|r| r.board_axes())
     }
 
     /// The posed board's centre in the rider's space (the imported rider's last pose).
