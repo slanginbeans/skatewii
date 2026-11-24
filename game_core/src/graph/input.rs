@@ -8,7 +8,9 @@
 //!   the graphs see both pushes and wind it up themselves (`OnBoard/HippyJump`), as in Skate 3.
 //! - X: foot brake (`Brake`).
 //! - Z: dark catch (`DarkCatch`) and world grab (`GrabWorld`).
-//! - L / R: grabs (`LeftAirGrab` / `RightAirGrab`; fully in: the ground grabs) and crouch.
+//! - L / R: grabs (`LeftAirGrab` / `RightAirGrab`; fully in: the ground grabs) and crouch. Off the board
+//!   (Skate 3's LT / RT there), pressed fully in: drop the board (`OB_DropBoard`, L) or throw it down
+//!   ahead (`OB_ThrowBoard`, R), either one `OB_RetrieveBoard` (picks it back up when it isn't in hand).
 //! - Left stick: steering, kick turns, powerslides, body spin; its gestures (`skaterls`, `skaterstep`)
 //!   give reverts (SlideFs180 / SlideBs180) and body flips.
 //! - C-stick: wind-up (`AnticMag` / `AnticAngle`), manuals (`Manual`, `ManualBrake`), tweaks, board
@@ -75,6 +77,21 @@ names! {
     ob_jump = "OB_Jump", ob_sprint = "OB_Sprint", ob_mag = "OB_Mag", ob_steer = "OB_Steer",
     ob_world_x = "OB_BipedWorldX", ob_world_z = "OB_BipedWorldZ", ob_stick_mag = "OB_BipedStickMag",
     ob_look_x = "OB_LookAtX", ob_look_y = "OB_LookAtY",
+    ob_drop = "OB_DropBoard", ob_throw = "OB_ThrowBoard", ob_retrieve = "OB_RetrieveBoard",
+}
+
+/// A trigger this far in is fully in (Skate 3 reads a trigger at 1.0: a ground grab riding, a drop or a
+/// throw off the board).
+pub const TRIGGER_FULL: f32 = 0.95;
+
+/// Off the board, the triggers that went fully in this tick (L, R): SK8 offboard_intentions.rs drops on
+/// LT and throws on RT as each reaches 1.0, and either asks to pick the board back up. `prev`: last
+/// tick's fully-in state, updated.
+pub fn board_triggers(pad: &Pad, prev: &mut [bool; 2]) -> [bool; 2] {
+    let full = [pad.trig_l >= TRIGGER_FULL, pad.trig_r >= TRIGGER_FULL];
+    let new = [full[0] && !prev[0], full[1] && !prev[1]];
+    *prev = full;
+    new
 }
 
 /// Gates from the game (SK8's actor flags): what the rider may do right now.
@@ -120,6 +137,8 @@ pub struct Intentions {
     since: [f32; 2],
     held_pattern: Str,
     idle: f32,
+    /// The triggers fully in last tick ([`board_triggers`]).
+    full: [bool; 2],
 }
 
 /// The names (gesture files) each stick reads, in recognition order.
@@ -157,6 +176,7 @@ impl Intentions {
             since: [10.0; 2],
             held_pattern: NONE,
             idle: 0.0,
+            full: [false; 2],
         }
     }
 
@@ -222,6 +242,20 @@ impl Intentions {
         }
         if held & btn::A != 0 && held & btn::X == 0 {
             put(id.ob_sprint, 1.0);
+        }
+        // L fully in drops the board, R throws it; either picks it back up (SK8: both publish
+        // `OB_RetrieveBoard`; ToggleBoard decides by whether the board is in hand).
+        let [drop, throw] = board_triggers(pad, &mut self.full);
+        if gates.off_board {
+            if drop {
+                put(id.ob_drop, 1.0);
+            }
+            if throw {
+                put(id.ob_throw, 1.0);
+            }
+            if drop || throw {
+                put(id.ob_retrieve, 1.0);
+            }
         }
         // The d-pad: character gestures (Skate 3's on the Xbox pad's d-pad, the same place).
         for (b, start, hold) in [
@@ -361,7 +395,7 @@ impl Intentions {
             if t > 0.0 {
                 put(air, 1.0);
             }
-            if t >= 0.95 {
+            if t >= TRIGGER_FULL {
                 put(ground, 1.0);
             }
         }

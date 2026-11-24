@@ -15,6 +15,7 @@ pub mod biped;
 pub mod camera;
 pub mod grind;
 pub mod moves;
+pub mod possession;
 pub mod wobble;
 pub use camera::CamTuning;
 pub use grind::GrindTuning;
@@ -484,6 +485,8 @@ pub struct Tuning {
 
     // Walking off the board (`tuning::biped`).
     pub biped: biped::BipedTuning,
+    /// The board off the feet: dropped, thrown, picked up, landed on (`tuning::possession`).
+    pub possession: possession::PossessionTuning,
 }
 
 /// What the state graphs' riding behaviours (`graph::riding`, ports of SK8's SetTurning, the physics'
@@ -752,6 +755,7 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
         .chain(moves::PATHS.iter())
         .chain(wobble::PATHS.iter())
         .chain(biped::PATHS.iter())
+        .chain(possession::PATHS.iter())
         .copied()
 }
 
@@ -1343,6 +1347,7 @@ impl Tuning {
         wobble: wobble::WobbleTuning::BUILT_IN,
         adjust: adjust::AdjustTuning::BUILT_IN,
         biped: biped::BipedTuning::BUILT_IN,
+        possession: possession::PossessionTuning::BUILT_IN,
     };
 
     /// Takes over every value a `rules/tuning` entry carries. Unknown names and malformed values are
@@ -1703,6 +1708,7 @@ impl Tuning {
                     || self.moves.set(name, f, c())
                     || self.wobble.set(name, f, c())
                     || self.biped.set(name, f, c())
+                    || self.possession.set(name, f, c())
             }
         }
     }

@@ -49,6 +49,7 @@ pub mod riding;
 pub mod select;
 #[cfg(test)]
 mod tests;
+pub mod toggle;
 pub mod write;
 
 use alloc::vec::Vec;

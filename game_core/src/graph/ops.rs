@@ -177,8 +177,20 @@ pub enum Cond {
     DoneWipingOut,
     /// Off the board: Skate 3's locomotion state (0 stand, 1 walk, 2 run, 3 sprint).
     LocoState(u8),
-    /// Off the board with the board in hand (flatground's rider always carries it).
+    /// Off the board with the board in hand (`IsHoldingSkateboard`: SK8 OffBoard311, the possession's
+    /// held state).
     HoldingBoard,
+    /// The board is free, hidden or flying back (`IsDeckFree`: SK8 OffBoard312).
+    DeckFree,
+    /// `IsDroppingSkateboard`: ToggleBoard is dropping or throwing it (SK8 OffBoard322, the
+    /// `OB_DroppingBoard` attribute), or its `RetrieveBoard` channel plays.
+    DroppingBoard,
+    /// `IsRetrievingSkateboard`: ToggleBoard is picking it up (`OB_RetrievingBoard`) or it is flying
+    /// back (SK8 OffBoard323).
+    RetrievingBoard,
+    /// `IsLandingOnBoard`: the physics is coming down onto the board from the air off it (SK8 physical
+    /// state 503, LandingOnDeck).
+    LandingOnBoard,
     /// Off the board in the air, and coming down onto ground he can land on.
     BipedAir,
     CanBipedLand,
@@ -394,6 +406,15 @@ pub enum Beh {
     WipeoutGestures,
     /// CharacterGesture: the d-pad's gestures on the gesture channels.
     CharacterGesture,
+    /// ToggleBoard (SK8 motion_offboard/toggle_board.rs, skate-core player/offboard/toggle_board.rs):
+    /// off the board, `OB_DropBoard` / `OB_ThrowBoard` with the board in hand play `OFB_THROW_90` /
+    /// `OFB_THROW_0` on the `RetrieveBoard` channel (their `OB_RELEASEBOARD` / `OB_THROWBOARD` let go
+    /// of it), `OB_RetrieveBoard` without it the retrieve clips aimed at the board; it publishes
+    /// `OB_DroppingBoard`, `OB_RetrievingBoard` and, each retrieve cycle, `OB_RetrieveBoard`.
+    ToggleBoard,
+    /// LandOnBoard (SK8 motion_execute_leaf.rs, TU3 82BB95D8): coming down onto the board the wrong
+    /// way round, its begin turns the rider's frame round onto it (FlipBoardBackwards).
+    LandOnBoard,
     /// MatchAirTime (SK8 motion_offboard/match_air_time.rs): off the board in the air, the jump clip
     /// seeks to where the flight is (so it ends on landing) and its selection reads the flight's
     /// time and travel (`AnimTime`, `AnimTransX/Y/Z`, `CadenceStartPercent`).
@@ -619,7 +640,6 @@ const FIXED_FALSE: &[&str] = &[
     "IsGrabbingObject",
     "IsHandPlanting",
     "IsInLocomotion",
-    "IsLandingOnBoard",
     "PhysicsRequestsDismount",
     "IsEnteringSkitch",
     "IsSkitching",
@@ -630,8 +650,6 @@ const FIXED_FALSE: &[&str] = &[
     "IsMovingObject",
     "IsStandingOnMovingObject",
     "IsInDebugAnimationsMode",
-    "IsDroppingSkateboard",
-    "IsRetrievingSkateboard",
     "IsHippyHurdling",
     "IsBipedGroundThin",
     "IsBipedCommittedToMotion",
@@ -649,7 +667,6 @@ const FIXED_FALSE: &[&str] = &[
     "HasTiltToLargeForPreland",
     "IsPushOffEnabled",
     "DisableDismount",
-    "IsDeckFree",
 ];
 const FIXED_TRUE: &[&str] = &["EnoughDistToObstacle"];
 
@@ -744,6 +761,10 @@ fn cond(a: &A, name: &str, bound: StateId, db: Option<&MotionDb>) -> Cond {
             _ => 0,
         }),
         "IsHoldingSkateboard" => Cond::HoldingBoard,
+        "IsDeckFree" => Cond::DeckFree,
+        "IsDroppingSkateboard" => Cond::DroppingBoard,
+        "IsRetrievingSkateboard" => Cond::RetrievingBoard,
+        "IsLandingOnBoard" => Cond::LandingOnBoard,
         "IsInBipedAir" => Cond::BipedAir,
         "CanBipedLand" => Cond::CanBipedLand,
         "AllowedToTrick" => Cond::AllowedToTrick,
@@ -802,9 +823,7 @@ const NOTHING: &[&str] = &[
     "MaintainShove",
     "Shove",
     "HippyJumpAntic",
-    "LandOnBoard",
     "AddRunoutAttribs",
-    "ToggleBoard",
     "ResetSkaterAnimation",
     "ResetToGivenStance",
     "EndShimmy",
@@ -1054,6 +1073,8 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         },
         "EnableWipeoutGestures" => Beh::WipeoutGestures,
         "CharacterGesture" => Beh::CharacterGesture,
+        "ToggleBoard" => Beh::ToggleBoard,
+        "LandOnBoard" => Beh::LandOnBoard,
         "MatchAirTime" => Beh::MatchAirTime,
         "FakieHeadChannel" => Beh::FakieHead,
         "BodySpin" => Beh::BodySpin,

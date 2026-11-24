@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 struct W(Vec<u8>);
 
@@ -262,7 +262,7 @@ fn read_op(r: &mut R) -> Option<Op> {
 }
 
 /// Conditions without fields, by tag.
-const PLAIN_CONDS: [Cond; 31] = [
+const PLAIN_CONDS: [Cond; 35] = [
     Cond::Mirrored,
     Cond::RidingFakie,
     Cond::RidingGoofy,
@@ -294,6 +294,10 @@ const PLAIN_CONDS: [Cond; 31] = [
     Cond::HoldingBoard,
     Cond::BipedAir,
     Cond::CanBipedLand,
+    Cond::DeckFree,
+    Cond::DroppingBoard,
+    Cond::RetrievingBoard,
+    Cond::LandingOnBoard,
 ];
 
 fn cond(w: &mut W, c: &Cond) {
@@ -489,7 +493,7 @@ fn read_cond(r: &mut R) -> Option<Cond> {
 }
 
 /// Behaviours without fields, by tag.
-const PLAIN_BEHS: [Beh; 20] = [
+const PLAIN_BEHS: [Beh; 22] = [
     Beh::JumpInto,
     Beh::ClearTrickAttr,
     Beh::SetDark,
@@ -510,6 +514,8 @@ const PLAIN_BEHS: [Beh; 20] = [
     Beh::WipeoutGestures,
     Beh::CharacterGesture,
     Beh::MatchAirTime,
+    Beh::ToggleBoard,
+    Beh::LandOnBoard,
 ];
 
 fn beh(w: &mut W, b: &Beh) {

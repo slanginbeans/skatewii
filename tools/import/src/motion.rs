@@ -263,6 +263,15 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
             named.push((game_core::graph::host::gesture_clip(d, stage), AREAS.len()));
         }
     }
+    // Dropping, throwing and picking up the board off the board (ToggleBoard plays them by name), with
+    // the off-board clips.
+    let off_area = AREAS
+        .iter()
+        .position(|(n, _)| *n == OFF_AREA)
+        .unwrap_or(AREAS.len());
+    for clip in game_core::graph::toggle::CLIPS {
+        named.push((clip.to_string(), off_area));
+    }
     for (name, ar) in &named {
         if m.contains(name) {
             let e = roots.entry(name.to_ascii_uppercase()).or_insert(*ar);

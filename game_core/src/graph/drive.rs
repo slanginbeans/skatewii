@@ -32,6 +32,10 @@ struct Clips {
     switch: Option<NameId>,
     /// Off-board clips' `OB_TRAJ`: Skate 3's physics walks the rider while it is on.
     ob_traj: Option<NameId>,
+    /// ToggleBoard's throw clips letting go of the board (SK8 extended_attributes.rs: `OB_ReleaseBoard`,
+    /// `OB_ThrowBoard`).
+    release: Option<NameId>,
+    throw: Option<NameId>,
 }
 
 pub struct Driver {
@@ -96,6 +100,8 @@ impl Driver {
                 mirrored: db.name_id("MIRRORED"),
                 switch: db.name_id("SWITCH"),
                 ob_traj: db.name_id("OB_TRAJ"),
+                release: db.name_id("OB_RELEASEBOARD"),
+                throw: db.name_id("OB_THROWBOARD"),
             },
             jumping: false,
             last_path: String::new(),
@@ -245,8 +251,21 @@ impl Driver {
                 _ => [0.0; 2],
             },
             toggling_board: s.board_toggle.is_some(),
+            // The board off the feet (`skater::possession`).
+            holding_board: s.possession.held(),
+            deck_free: s.possession.free(),
+            board_returning: s.possession.hold == crate::skater::possession::Hold::Returning,
+            board_angle: s.possession.angle(s.rider_frame()),
+            landing_on_board: s.landing_on_deck(),
             ..World::default()
         };
+        // Coming down onto the free board (the caveman): `CanLandOnBoard` while the feet will meet its
+        // deck, and whether it lies the wrong way round.
+        if s.landing_on_free_board() {
+            let (reach, turning) = s.free_board_landing(time_to_land.unwrap_or(0.0));
+            w.can_land = reach;
+            w.landing_turning = turning;
+        }
         if s.mode == Mode::Walk {
             walking(&mut w, s);
         }
@@ -318,6 +337,28 @@ impl Driver {
             kickturn: r.s.kickturn,
             // Off the board: the clips walking the rider (`OB_TRAJ`), getting off or on.
             ob_traj: has(self.clips.ob_traj),
+            // ToggleBoard's throw clips on their channel: a throw's `OB_THROWBOARD`, a drop's
+            // `OB_RELEASEBOARD` (or, without the clips, at once).
+            release_board: {
+                let on = |n: Option<NameId>| {
+                    n.is_some_and(|n| {
+                        r.s.player
+                            .channel_attribute(db, super::host::CHANNEL_RETRIEVE, n)
+                            .is_some()
+                    })
+                };
+                if on(self.clips.throw) {
+                    Some(true)
+                } else if on(self.clips.release) {
+                    Some(false)
+                } else {
+                    r.s.release_now
+                }
+            },
+            retrieve_board: r.s.retrieve_pulse,
+            land_on_board: r.packet_named("DoLandOnBoard").is_some(),
+            ob_mounting: r.packet_named("OB_Mounting").is_some(),
+            land_backwards: r.s.land_backwards,
             dismounting: r.mg_state_root() == Some("Dismount"),
             mounting: r.mg_state_root() == Some("Mount"),
             // The action graph publishing the stick and the motion graph in its board-adjust states
@@ -578,13 +619,12 @@ fn walking(w: &mut World, s: &Skater) {
     let side = Vec3::UP.cross(f);
     w.loco = b.loco as u8;
     w.cadence = b.phase;
-    w.holding_board = true;
+    w.holding_board = s.possession.held();
     w.biped_air = b.air.is_some();
-    // In the air with ground to come down on (flatground has no jumps into walls), and not onto the
-    // board: flatground's walker never lands on it (Skate 3's `CanLandOnBoard` needs the board under
-    // the feet).
+    // In the air with ground to come down on (flatground has no jumps into walls). Onto the board only
+    // once the landing assist has taken the flight down onto the free board (`Mode::Air`, the caveman).
     w.can_biped_land = b.air.is_some();
-    w.can_land = false;
+    w.can_land = s.deck_assist && s.free_board_landing(b.air_remaining).0;
     w.biped_slope = super::ops::slope::biped(slope, false);
     w.speed = b.speed;
     w.forward_speed = b.vel.dot(f);
