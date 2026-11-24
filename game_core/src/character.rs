@@ -394,6 +394,21 @@ impl Character {
         }
     }
 
+    /// Moves a posed bone and everything under it by `by` (the character's space), before skinning.
+    pub fn shift_subtree(&mut self, bone: usize, by: Vec3) {
+        let mut moved = alloc::vec![false; self.world.len()];
+        for b in bone..self.world.len() {
+            let p = self.skeleton.parent(b);
+            moved[b] = b == bone || (p >= 0 && moved.get(p as usize).copied().unwrap_or(false));
+            if moved[b] {
+                let t = &mut self.world[b][3];
+                t[0] += by.x;
+                t[1] += by.y;
+                t[2] += by.z;
+            }
+        }
+    }
+
     pub fn world(&self) -> &[Rows] {
         &self.world
     }

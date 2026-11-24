@@ -77,6 +77,9 @@ impl Intents {
 pub struct World {
     /// [`phys`] category.
     pub phys: u8,
+    /// Off the board: the walker's step cadence (0..1, Skate 3's `BipedCadence`), the time of the
+    /// phase-controlled locomotion clips.
+    pub cadence: f32,
     /// Off the board: Skate 3's locomotion state (0 stand, 1 walk, 2 run, 3 sprint), the board in hand,
     /// in the air and about to land on ground, and the slope class walked on (`ops::slope`).
     pub loco: u8,
@@ -175,6 +178,7 @@ pub struct World {
 impl Default for World {
     fn default() -> Self {
         World {
+            cadence: 0.0,
             phys: phys::GROUND,
             loco: 0,
             holding_board: false,
@@ -938,6 +942,9 @@ impl<'a> Runner<'a> {
             self.mg_ctl.update(g, dt, &mut h);
         }
         if let Some(db) = db {
+            // Skate 3's BipedCadence: the animation's phase is the walker's (its phase-controlled
+            // locomotion cycles are drawn there, not by a clock).
+            self.s.player.phase = self.s.world.cadence;
             self.s.player.advance(db, dt);
         }
     }

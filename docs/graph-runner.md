@@ -469,7 +469,7 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 | Y | `ToggleOffBoardState` (held), `NewToggleOffBoardState` (pressed) | off the board and back on (below) |
 | A | `RightPush`, `Pushing`, `NewPush` | push (a press is remembered for 0.3 s); after a bail, back on the board once settled (Skate 3's `WipeOutRecover`) |
 | B | `LeftPush`, `Pushing`, `NewPush` | mongo push; after a bail, as A |
-| A and B | neither push | hippie jump (flatground's physics) |
+| A and B | both pushes | the hippie jump: the action graph takes the pair as its wind-up (`OnBoard/HippyJump`), as SK8's riding intentions pass both on |
 | X | `Brake` | foot brake |
 | Z | `DarkCatch`, `NewDarkCatch`, `GrabWorld` | dark catch. SK8 also reads Xbox B for it; on the GameCube that is X, the foot brake, so only Z |
 | d-pad | `GestureLeft/Right/Up/DownStart`, `...Held` | character gestures (shrug, peace, shaka, surf's up) |
@@ -535,14 +535,14 @@ Left as no-ops on purpose:
 |---|---|
 | `HandBusy`, `EndGesture` | hand services (hand IK, holding things): on the board flatground's hands are always free; gestures end through CharacterGesture's own stages |
 | `SetScoreAugmentation`, `JuiceHook`, `PrintText2D` | scoring augmentations, effects and debug text: no effect on riding |
-| `BipedCadence`, `MatchCadence`, `MatchAirTime`, `OffboardBodyTweakBlend`, `AirDismounting`, `ToggleBoard` | off the board (walking, running, carrying the board) |
+| `BipedCadence`, `MatchCadence`, `MatchAirTime`, `OffboardBodyTweakBlend`, `AirDismounting`, `ToggleBoard` | off the board (walking, running, carrying the board). The runner always hands the walker's step cadence (`Biped::phase`) to the animation as `BipedCadence` does, so the phase-controlled walk, run and sprint cycles play at it |
 | `InitMovingObjects`, `MovingObject`, `UpdateStandingOnCar`, `Shove`, `MaintainShove`, `EndShimmy` | moving objects, shoving people, skitching: systems flatground doesn't have |
 | `FootPlantAbsorb`, `SetHandPlantAnticLength`, `ScoringHandPlants` | foot and hand plants (not in flatground) |
 | `AddRunoutAttribs`, `LandOnBoard`, `HippyJumpAntic` | the physics owns runouts, getting back on and the hippie jump |
 | `ForcePhysics` | flatground's physics always owns the board (no animation-driven board) |
 | `UpdateTimeSinceTeleport`, `UpdateTimeSinceKickturn`, `UpdateRidingFakie` | the runner counts the times every tick; riding fakie is the physics' rolling direction |
 | `ResetSkaterAnimation`, `ResetToGivenStance` | the runner starts the graphs over when the physics puts the rider back on |
-| conditions of absent systems (fixed): skitching, water, moving objects, biped/off-board states and landings, hand and foot plants, debug animations, holding/dropping/retrieving the board, `IsProSkater` (no pro skaters), `DisableDismount`, `IsDeckFree`, `EnoughDistToObstacle`, `OBTimeToLand`, `OBTrajTime`, `LocoState` | false (true for `EnoughDistToObstacle`), keeping the graph on the board |
+| conditions of absent systems (fixed): skitching, water, moving objects, biped/off-board states and landings, hand and foot plants, debug animations, holding/dropping/retrieving the board, `IsProSkater` (no pro skaters), `DisableDismount`, `IsDeckFree`, `EnoughDistToObstacle`, `OBTrajTime`, `LocoState` | false (true for `EnoughDistToObstacle`), keeping the graph on the board |
 
 Left, and they do touch the pose (the unset-parameter log names them; their blends sit at the neutral
 point or SK8's first child):

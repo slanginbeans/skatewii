@@ -99,9 +99,6 @@ const RUNOUT_TIME: f32 = 1.2;
 const DISMOUNT_MIN_UP: f32 = 0.64;
 /// Y's request lapses if the graphs haven't got off (or on) the board by then (s).
 const TOGGLE_WAIT: f32 = 2.0;
-/// Y pressed in the air off the board gets on the board on landing if it is this recent (s): a whole jump
-/// off the board (about a second), not a long fall.
-const TOGGLE_BUFFER: f32 = 1.5;
 /// How long a landing is remembered (drawn: the landing clip), and how long after it a revert counts
 /// (flatground's own rules; with the state graphs the revert gesture decides).
 const LANDING_SHOW: f32 = 1.5;
@@ -678,6 +675,8 @@ struct Takeoff {
     fakie: bool,
     switch: bool,
     hippy: bool,
+    /// Got on the board in the air off it (Y jumping off the board): coming down onto it.
+    mount: bool,
     ground: Option<Vec3>,
     on_vert: bool,
     lean: f32,
@@ -852,8 +851,6 @@ pub struct Skater {
     pub board_toggle: Option<f32>,
     /// The mount clip's `OB_TRAJ` has started (the rider is on the board when it ends).
     mount_traj: bool,
-    /// Y pressed while jumping off the board, seconds ago: it gets on the board on landing.
-    toggle_buffered: Option<f32>,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -1106,7 +1103,6 @@ impl Skater {
             cam_yaw: heading,
             board_toggle: None,
             mount_traj: false,
-            toggle_buffered: None,
         }
     }
 
@@ -1240,6 +1236,12 @@ impl Skater {
     /// In the air from a hippie jump.
     pub fn hippie_air(&self) -> bool {
         self.is_airborne() && self.takeoff.hippy
+    }
+
+    /// In the air off the board above it, coming down onto it (Skate 3's LandingOnDeck): a hippie jump,
+    /// or getting on the board in the air. The board rolls along the ground underneath.
+    pub fn landing_on_deck(&self) -> bool {
+        self.is_airborne() && (self.takeoff.hippy || self.takeoff.mount)
     }
 
     /// The drawn rider is the mirror image of the clips (they are authored goofy).
@@ -1502,27 +1504,17 @@ impl Skater {
     /// the state graphs the clips time it: off once the dismount clip starts walking the rider
     /// (`OB_TRAJ`), on once the mount clip's `OB_TRAJ` is over; without them at once.
     fn toggle_board(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
-        // Y in the air off the board waits for the landing.
-        if self.mode == Mode::Walk && self.biped.air.is_some() && pad.was_pressed(btn::Y) {
-            self.toggle_buffered = Some(0.0);
-        }
         if self.toggle_starts(pad) {
             self.board_toggle = Some(0.0);
             self.mount_traj = false;
-            self.toggle_buffered = None;
         }
-        self.toggle_buffered = match self.toggle_buffered {
-            Some(b) if b + dt <= TOGGLE_BUFFER && self.mode == Mode::Walk => Some(b + dt),
-            _ => None,
-        };
         let Some(t) = self.board_toggle else {
             return;
         };
-        // Getting on is for the ground: leaving it (stepping off a ledge mid-mount) calls it off, so the
-        // rider isn't put on the board in the air while the clips have moved on.
+        // In the air off the board (a jump, or stepping off a ledge mid-mount), Y gets on it there: the
+        // rider comes down onto the board under him (Skate 3's air mount, its `Mount/Air` clips).
         if self.mode == Mode::Walk && self.biped.air.is_some() {
-            self.board_toggle = None;
-            self.mount_traj = false;
+            self.mount_in_air(events);
             return;
         }
         let t = t + dt;
@@ -1556,15 +1548,14 @@ impl Skater {
     /// landing, off the board), and allowed where the rider is. The graphs hear Y only then
     /// ([`Skater::board_toggle_intent`]), so they and the physics always agree on it.
     fn toggle_starts(&self, pad: &Pad) -> bool {
-        if self.board_toggle.is_some()
-            || !(pad.was_pressed(btn::Y) || self.toggle_buffered.is_some())
-        {
+        if self.board_toggle.is_some() || !pad.was_pressed(btn::Y) {
             return false;
         }
         match self.mode {
             // SK8 DisableDismount: not on ground steeper than this.
             Mode::Rolling => self.contact_n.y >= DISMOUNT_MIN_UP,
-            Mode::Walk => self.biped.air.is_none(),
+            // On the ground or in the air: in the air the rider gets on the board as he comes down.
+            Mode::Walk => true,
             _ => false,
         }
     }
@@ -1576,6 +1567,26 @@ impl Skater {
         let new = self.toggle_starts(pad);
         let held = new || (self.board_toggle.is_some() && pad.held & btn::Y != 0);
         (held, new)
+    }
+
+    /// On the board in the air off it: its nose the way the rider faces, flying as he was, to come down
+    /// onto it (no points, as no trick).
+    fn mount_in_air(&mut self, events: &mut Vec<Event>) {
+        let vel = self.biped.vel;
+        self.contact_n = Vec3::UP;
+        self.normal = Vec3::UP;
+        self.fwd = tangent(self.biped.forward(), Vec3::UP);
+        self.fakie = false;
+        self.fakie_timer = 0.0;
+        self.take_off(None);
+        self.takeoff.mount = true;
+        self.vel = vel;
+        self.speed = vel.dot(self.fwd).max(0.0);
+        self.slip = 0.0;
+        self.board_toggle = None;
+        self.mount_traj = false;
+        self.sync_heading();
+        events.push(Event::SteppedOn);
     }
 
     /// Off the board, facing the way it was going (or its nose, standing).
@@ -1598,7 +1609,8 @@ impl Skater {
         events.push(Event::SteppedOff);
     }
 
-    /// Back on the board, its nose the way the rider faces, rolling at his speed that way.
+    /// Back on the board, its nose the way the rider faces, rolling at his speed that way, in the stance
+    /// he got off in.
     fn step_on(&mut self, park: &dyn Terrain, events: &mut Vec<Event>) {
         let n = park
             .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
@@ -1613,7 +1625,9 @@ impl Skater {
         self.vel = self.fwd * along;
         self.fakie = false;
         self.fakie_timer = 0.0;
-        self.switch = false;
+        // The stance stays: off the board after riding switch, the graphs get him on switch (the mount
+        // clips' switch versions), so he rides on switch. Setting it back to natural here turned the rider
+        // round a moment after getting on.
         self.spin = 0.0;
         self.spin_rate = 0.0;
         self.mode = Mode::Rolling;
@@ -2423,6 +2437,7 @@ impl Skater {
             fakie: self.fakie,
             switch: self.switch,
             hippy: false,
+            mount: false,
             ground: Some(self.contact_n),
             on_vert: false,
             lean: 0.0,
@@ -2559,7 +2574,13 @@ impl Skater {
         // The legs: the board follows the animated centre of mass's height over it, as fast as the
         // rider's body follows its animation (SK8's physical rider; measured, 0.15 of the gap a tick).
         let lift_before = self.air_lift;
-        if let (Some(c0), Some(d)) = (self.air_com, self.body_com) {
+        if self.takeoff.hippy || self.takeoff.mount {
+            // A hippie jump or getting on in the air: the rider is off the board above it while it rolls
+            // on along the ground (Skate 3's LandingOnDeck). He lands when he comes back down onto it,
+            // not when the board his clips' legs leave behind touches the ground.
+            self.air_lift = 0.0;
+            self.air_lift_rate = 0.0;
+        } else if let (Some(c0), Some(d)) = (self.air_com, self.body_com) {
             self.air_lift_rate = (c0 - d - self.air_lift) / dt.max(1e-4);
             self.air_lift = c0 - d;
         }
@@ -2584,7 +2605,10 @@ impl Skater {
         // Rolled off an edge without a pop, the board is still tipping over it on its back wheels for a
         // moment (SK8's rigid board stays on the ground pivoting): a rail it meets is ridden onto, not
         // landed on from the air (a slow roll off a deck drops in rather than stopping on the coping).
-        let category = if self.trick.is_none() && !self.takeoff.hippy && now < ROLL_OFF_TIME {
+        let category = if self.trick.is_none()
+            && !(self.takeoff.hippy || self.takeoff.mount)
+            && now < ROLL_OFF_TIME
+        {
             Category::Ground
         } else {
             Category::Air

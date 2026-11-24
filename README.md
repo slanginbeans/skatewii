@@ -23,7 +23,7 @@ X, Y). The default stance is goofy, as in Skate 3.
 |---|---|
 | A (hold for a stronger push; keep holding to keep pushing) | Push |
 | B | Mongo push |
-| A + B, then let go | Hippie jump (hold longer to jump higher) |
+| A + B, then let go | Hippie jump: the rider jumps off the board and lands back on it as it rolls on (hold longer to jump higher) |
 | X | Foot brake |
 | Control stick | Steer (pushed far to the side and a little back: hard turn); spin in the air (a quick wind-up just before the pop spins faster) |
 | Control stick fully back and to one side | Powerslide; just after landing, a revert |
@@ -48,7 +48,7 @@ Off the board (Y), with the board in hand:
 | Control stick | Walk and run where the stick points, seen from the camera (pushed fully: run). Pulled back: turn round |
 | A (hold) | Sprint: a burst that fades while held |
 | B | Jump |
-| Y | Back on the board, rolling the way the rider faces at his speed |
+| Y | Back on the board, rolling the way the rider faces at his speed, in the stance he got off in. In the air (after B): he puts the board under his feet and lands on it |
 | START | Pause menu (see Menus) |
 | HOME (Wii Remote) or START + Z | Quit to the Homebrew Channel at once |
 
