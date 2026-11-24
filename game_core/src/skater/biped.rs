@@ -348,6 +348,14 @@ impl Biped {
         self.loco = loco_for(self.speed);
     }
 
+    /// In the air: a new flight from here (Skate 3's landing assist onto the board replacing the jump's).
+    pub fn set_flight(&mut self, vel: Vec3, gravity: f32, park: &dyn Terrain, pos: Vec3) {
+        if self.air.is_some() {
+            self.vel = vel;
+            self.predict(gravity, park, pos);
+        }
+    }
+
     /// The flight's time left and travel to the ground under the feet (a fall straight down to it:
     /// flatground's own estimate of Skate 3's landing prediction).
     fn predict(&mut self, gravity: f32, park: &dyn Terrain, pos: Vec3) {

@@ -471,14 +471,60 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   sprint; when its `OB_TRAJ` window ends the rider is on the board, its nose the way he faced, rolling at
   his forward speed, and the graph goes on to `OnBoard`. Without the state graphs Y gets off and on at once.
 - **What the graphs read** (`drive::walking`): `PhysFilteredState` offboard / offboardair, `LocoState`,
-  `IsHoldingSkateboard` (always: flatground's rider never drops or throws the board), `IsInBipedAir`,
-  `CanBipedLand` (in the air), `CanLandOnBoard` (never on foot), `GroundSlopeType`'s ramp classes (5 and
+  `IsHoldingSkateboard` (the board in the hands: `skater::possession`), `IsDeckFree` (free, hidden or
+  flying back), `IsDroppingSkateboard` / `IsRetrievingSkateboard` (below), `IsInBipedAir`,
+  `CanBipedLand` (in the air), `CanLandOnBoard` (on foot only once the landing assist has taken a flight
+  onto the free board, below), `IsLandingOnBoard` (coming down onto the board from the air: the hippie
+  jump, the air mount and the caveman; SK8's physical state 503), `GroundSlopeType`'s ramp classes (5 and
   25 degrees; flatground doesn't tell stairs apart yet), `ComVelCompare` in the facing's frame.
 - **Drawn**: the off-board clips' origin is the ground under the feet (the riding clips' is the deck's
   centre); the drawing moves between the two over 0.2 s while getting off or on.
-- **Not done**: dropping, throwing and picking up the board (`OB_DropBoard`, `OB_ThrowBoard`,
-  `OB_RetrieveBoard`, L / R in Skate 3), moving objects, standing on cars, hippie hurdles, stairs' own clips,
-  jumping onto the board from the air (`Mount/Air`), the obstacle steering of `movement_intent.rs`, foot IK.
+- **Dropping, throwing and picking up the board** (`skater/possession.rs`, Skate 3's SkateboardController
+  possession as SK8 ports it: skate-core player/offboard/board_possession, skate-game
+  physics/offboard/board_manager; the animation side is `graph/toggle.rs`, SK8's ToggleBoard). Off the
+  board, L fully in is `OB_DropBoard` and R fully in `OB_ThrowBoard` (SK8 offboard_intentions.rs: LT / RT
+  reaching 1.0, by position on the pad), either also `OB_RetrieveBoard`; the action graph's `OffBoard`
+  passes them to the motion graph (`CreateMGIntentFromAGIntent`), whose `OffBoard` ToggleBoard plays, with
+  the board in hand, `OFB_THROW_90` (drop) or `OFB_THROW_0` (throw) on the `RetrieveBoard` channel
+  (`IsDroppingSkateboard` while it plays, which keeps the `Mount` states out), and without it the
+  `OFB_RETRIEVE_HIGH_FRONT/BACK_INTO`, `_CYC`, `_OUT` trees aimed (`yaw`, at most 5 degrees an update) at
+  the board (`IsRetrievingSkateboard`). The physics lets go at the throw clips' `OB_RELEASEBOARD` /
+  `OB_THROWBOARD` (about 0.4 s in) and flies the board back at each cycle's `OB_RetrieveBoard`. The board
+  then is its own body: a drop keeps the hands' velocity, a throw goes 18 degrees up from the facing
+  (`ThrownSkateboardLaunchPitch`) at the rider's speed plus `ThrownSkateboardVelocity` of it (3 m/s
+  standing), turned for 8 ticks towards `ThrownSkateboardPitchTarget` and its heading (the yaw, pitch and
+  roll scalars); it falls, lands on its wheels (restitution 0, friction 0.36: the released board's
+  material, `physics_wipeout/SkateboardFriction`), rolls along its nose with the riding board's rolling
+  resistance without input and the slope, slides sideways against that friction, and stops at walls.
+  Further than `MaxDistance` (30 m) from the rider it is hidden (drawn out of sight). Picked up, it flies
+  from where it is (or from `DistanceForBoardReturn`, 30 m, away) to the hands over `RetrievalTimeVsDist`
+  of the distance, weighted by `RetrievalSpeedCurve`. Getting on (`OB_Mounting`, the mount states'
+  attribute from `OB_Mount`) fetches a free board the same way from at most `DistanceForMountedReturn` (5
+  m) in at most `MinTimeToRetrieveBoardWhileMounting` (0.1 s), so the mount clips (board in hand) play as
+  in Skate 3; without the graphs Y next to the board (within 5 m) steps onto it where it lies, at its
+  rolling speed, its nose or tail ahead, further away fetches it first. The board off the feet is drawn
+  where its body is (the imported board's bones placed there, blended back into the clips' board as it
+  reaches the hands; the placeholder board likewise). The physics' possession values are Skate 3's
+  (`physics_skatecontroller`, `tuning/possession.rs`), with the rules pack's taking over.
+- **The caveman** (landing on the board from the air off it; SK8 physics/landing_on_deck, skate-core
+  player/offboard/landing_deck). In the air off the board with the board free (dropped running, rolling
+  alongside), each tick Skate 3's landing assist looks for a flight from the feet down onto its deck (the
+  later time the rider meets it, against gravity, or half gravity while the board is in the air too; that
+  time stretched to 0.75..1.3 of itself towards the free fall's), and takes it when it is at least 0.4 s
+  and within `landing_assist_limit` of the jump's own (3.5 m/s at take-off, 0.5 m/s from 0.19 s: biped_air
+  orientation.rs) and the board is upright (`DeckMinUprightness`). That is `CanLandOnBoard`: the motion
+  graph goes from `OffBoard/OBAir/InAir` into `Mount/Air/IntoLandingOnBoard`, whose `DoLandOnBoard` starts
+  the landing on deck in the physics (at once without the graphs), then `OnBoard/LandingOnBoard`
+  (LandOnBoard: coming down onto the board the wrong way round, it asks for its tail to be taken ahead,
+  Skate 3's FlipBoardBackwards; flatground takes the board's frame that way rather than turning the
+  rider). Touching down with the feet within 0.55 m of the deck rides on it from where it is, keeping the
+  speed along it; missing it (`!CanLandOnBoard`: `Dismount/Air/HippyRunout`) he lands on foot; faster than
+  `MaxSpeedLandingOnBoard` (11.5 m/s) a bail. Y in the air with the board in hand is still the air mount
+  (`Skater::mount_in_air`); with it free, Y fetches it (`OB_Mounting`) and mounts once it is in hand.
+- **Not done**: moving objects, standing on cars, hippie hurdles, stairs' own clips, the obstacle steering
+  of `movement_intent.rs`, foot IK; the free board has no rigid rotation of its own (it keeps its nose,
+  pitched only by the throw, and lands on its wheels whatever way it falls) and doesn't collide with the
+  rider; the retrieve hands (SK8's hand contact that catches the board early) aren't modelled.
 - **Camera**: walking is `IsOffboard` and the walker's air `IsAirOffboard` (both read by Skate 3's camera
   graph).
 
@@ -489,6 +535,7 @@ Buttons map by position on the pad: Xbox A to GC A, X to B, B to X, Y to Y, RB t
 | GC | Intents | Does |
 |---|---|---|
 | Y | `ToggleOffBoardState` (held), `NewToggleOffBoardState` (pressed) | off the board and back on (below) |
+| L / R fully in, off the board | `OB_DropBoard` / `OB_ThrowBoard`, either `OB_RetrieveBoard` | drop the board, throw it down ahead; out of the hands, pick it back up (above, "Off the board") |
 | A | `RightPush`, `Pushing`, `NewPush` | push (a press is remembered for 0.3 s); after a bail, back on the board once settled (Skate 3's `WipeOutRecover`) |
 | B | `LeftPush`, `Pushing`, `NewPush` | mongo push; after a bail, as A |
 | A and B | both pushes | the hippie jump: the action graph takes the pair as its wind-up (`OnBoard/HippyJump`), as SK8's riding intentions pass both on |
@@ -561,14 +608,14 @@ Left as no-ops on purpose:
 |---|---|
 | `HandBusy`, `EndGesture` | hand services (hand IK, holding things): on the board flatground's hands are always free; gestures end through CharacterGesture's own stages |
 | `SetScoreAugmentation`, `JuiceHook`, `PrintText2D` | scoring augmentations, effects and debug text: no effect on riding |
-| `BipedCadence`, `MatchCadence`, `MatchAirTime`, `OffboardBodyTweakBlend`, `AirDismounting`, `ToggleBoard` | off the board (walking, running, carrying the board). The runner always hands the walker's step cadence (`Biped::phase`) to the animation as `BipedCadence` does, so the phase-controlled walk, run and sprint cycles play at it |
+| `BipedCadence`, `MatchCadence`, `MatchAirTime`, `OffboardBodyTweakBlend`, `AirDismounting` | off the board (walking, running, carrying the board). The runner always hands the walker's step cadence (`Biped::phase`) to the animation as `BipedCadence` does, so the phase-controlled walk, run and sprint cycles play at it |
 | `InitMovingObjects`, `MovingObject`, `UpdateStandingOnCar`, `Shove`, `MaintainShove`, `EndShimmy` | moving objects, shoving people, skitching: systems flatground doesn't have |
 | `FootPlantAbsorb`, `SetHandPlantAnticLength`, `ScoringHandPlants` | foot and hand plants (not in flatground) |
-| `AddRunoutAttribs`, `LandOnBoard`, `HippyJumpAntic` | the physics owns runouts, getting back on and the hippie jump |
+| `AddRunoutAttribs`, `HippyJumpAntic` | the physics owns runouts and the hippie jump |
 | `ForcePhysics` | flatground's physics always owns the board (no animation-driven board) |
 | `UpdateTimeSinceTeleport`, `UpdateTimeSinceKickturn`, `UpdateRidingFakie` | the runner counts the times every tick; riding fakie is the physics' rolling direction |
 | `ResetSkaterAnimation`, `ResetToGivenStance` | the runner starts the graphs over when the physics puts the rider back on |
-| conditions of absent systems (fixed): skitching, water, moving objects, biped/off-board states and landings, hand and foot plants, debug animations, holding/dropping/retrieving the board, `IsProSkater` (no pro skaters), `DisableDismount`, `IsDeckFree`, `EnoughDistToObstacle`, `OBTrajTime`, `LocoState` | false (true for `EnoughDistToObstacle`), keeping the graph on the board |
+| conditions of absent systems (fixed): skitching, water, moving objects, biped/off-board states and landings, hand and foot plants, debug animations, `IsProSkater` (no pro skaters), `DisableDismount`, `EnoughDistToObstacle`, `OBTrajTime`, `LocoState` | false (true for `EnoughDistToObstacle`), keeping the graph on the board |
 
 Left, and they do touch the pose (the unset-parameter log names them; their blends sit at the neutral
 point or SK8's first child):

@@ -762,6 +762,7 @@ impl Game {
         let t1 = now(self.timer);
         if self.rider.is_some() {
             let rot = self.imported_xform().rot;
+            let place = self.board_place();
             let s = &self.skater;
             let ground: &dyn Terrain = terrain(&self.world, &self.park);
             let land_in = s.time_to_land(ground);
@@ -775,10 +776,13 @@ impl Game {
                     s.hippie_air()
                         .then(|| ground.ground(s.pos.x, s.pos.z, s.pos.y + 0.5).height - s.pos.y),
                 );
+                // The board off the feet is drawn where its own body is.
+                r.set_board_place(place);
                 g.runner.pose(&mut self.pose);
                 posed = r.update_graph(lib, &self.pose, rot, self.skater.frame_turned);
             }
             if !posed && let Some(r) = &mut self.rider {
+                r.set_board_place(place);
                 r.update(&self.skater, self.clock, land_in, dt, rot);
             }
         }
@@ -1011,6 +1015,44 @@ impl Game {
             .map_or(x.pos, |b| x.point(b))
     }
 
+    /// The board off the feet in the world: its centre, up and nose (a thrown board pitched as it
+    /// flies), and how much of the drawing it takes over from the clips' board (1 free; flying back,
+    /// less as it reaches the hands). `None` in the hands or under the feet.
+    pub fn free_board_frame(
+        &self,
+    ) -> Option<(crate::math::Vec3, crate::math::Vec3, crate::math::Vec3, f32)> {
+        use crate::skater::possession::Hold;
+        let p = &self.skater.possession;
+        let weight = match p.hold {
+            Hold::Free | Hold::Hidden => 1.0,
+            Hold::Returning => 1.0 - p.weight,
+            Hold::Held | Hold::Underfoot => return None,
+        };
+        let b = p.board;
+        let (s, c) = (sinf(p.pitch), libm::cosf(p.pitch));
+        let nose = b.nose * c + b.up * s;
+        let up = b.up * c - b.nose * s;
+        // Hidden: out of sight, as Skate 3 parks it.
+        let pos = if p.hold == Hold::Hidden {
+            b.pos - crate::math::Vec3::UP * self.skater.tuning.possession.hide_offset
+        } else {
+            b.pos
+        };
+        Some((pos, up, nose, weight))
+    }
+
+    /// [`Game::free_board_frame`] in the imported character's space, for [`Rider::set_board_place`].
+    fn board_place(&self) -> Option<(crate::character::Rows, f32)> {
+        let (pos, up, nose, weight) = self.free_board_frame()?;
+        let x = self.imported_xform();
+        let c = &x.rot.cols;
+        let local = |v: crate::math::Vec3| [c[0].dot(v), c[1].dot(v), c[2].dot(v)];
+        Some((
+            [[0.0; 3], local(up), local(nose), local(pos - x.pos)],
+            weight,
+        ))
+    }
+
     /// The camera to draw with (blended like the skater).
     pub fn drawn_camera(&self) -> crate::gfx::Camera {
         let cur = self.cam.camera();
@@ -1207,8 +1249,15 @@ impl Game {
         let board = base
             .then(&Xform::new(board_rot, v3(0.0, pivot + lift, 0.0)))
             .then(&Xform::new(Mat3::IDENTITY, v3(0.0, -pivot, 0.0)));
-        // (On foot the placeholder rider has no board to carry.)
-        if s.mode != Mode::Walk {
+        // The board off the feet where its own body is; on foot the placeholder rider has no board to
+        // carry.
+        if let Some((pos, up, nose, _)) = self.free_board_frame() {
+            let free = Xform::new(
+                Mat3::from_cols(up.cross(nose), up, nose),
+                pos - up * crate::skater::DECK_HEIGHT,
+            );
+            gfx.draw_tris(&self.models.board, &free.to_mat34());
+        } else if s.mode != Mode::Walk {
             gfx.draw_tris(&self.models.board, &board.to_mat34());
         }
 

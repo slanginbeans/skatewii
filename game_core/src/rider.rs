@@ -461,6 +461,9 @@ pub struct Rider {
     /// Draw the board this high (metres, along the world's up) over the character's origin, whatever
     /// the clips do with it: during a hippie jump it rolls on along the ground under the rider.
     board_floor: Option<f32>,
+    /// Draw the board here instead (character space: the board off the feet, `skater::possession`), by
+    /// this much over where the clips put it (1: all the way).
+    board_place: Option<(crate::character::Rows, f32)>,
     a: Vec<Local>,
     b: Vec<Local>,
     /// The state graphs' pose stack: poses and their bones' channel weights (see
@@ -521,6 +524,7 @@ impl Rider {
             mirror: false,
             graph_posed: false,
             board_floor: None,
+            board_place: None,
             a: vec![Local::IDENTITY; n],
             b: vec![Local::IDENTITY; n],
             stack: Vec::new(),
@@ -748,6 +752,8 @@ impl Rider {
             let now = v3(at[0], at[1], at[2]).dot(up);
             ch.shift_subtree(b, up * (h - now));
         }
+        self.place_board(false);
+        let ch = &mut self.character;
         ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), false);
         true
     }
@@ -756,6 +762,57 @@ impl Rider {
     /// or where the clips put it (`None`).
     pub fn set_board_floor(&mut self, h: Option<f32>) {
         self.board_floor = h;
+    }
+
+    /// Draws the board at this frame (character space) from the next pose on, blended over where the
+    /// clips put it by `weight` (the board off the feet), or where the clips put it (`None`).
+    pub fn set_board_place(&mut self, place: Option<(crate::character::Rows, f32)>) {
+        self.board_place = place;
+    }
+
+    /// The board's subtree moved to [`Rider::set_board_place`]'s frame. `mirror`: the skin mirrors the
+    /// pose after this (the frame is mirrored first, so it ends where it was asked for).
+    fn place_board(&mut self, mirror: bool) {
+        let (Some(b), Some((mut to, w))) = (self.board_bone, self.board_place) else {
+            return;
+        };
+        if mirror {
+            for row in &mut to {
+                row[0] = -row[0];
+            }
+        }
+        let ch = &mut self.character;
+        let Some(&from) = ch.world().get(b) else {
+            return;
+        };
+        let w = w.clamp(0.0, 1.0);
+        let lerp = |a: [f32; 3], b: [f32; 3]| -> Vec3 {
+            v3(
+                a[0] + (b[0] - a[0]) * w,
+                a[1] + (b[1] - a[1]) * w,
+                a[2] + (b[2] - a[2]) * w,
+            )
+        };
+        let up = lerp(from[1], to[1]).normalize_or(v3(0.0, 1.0, 0.0));
+        let nose = lerp(from[2], to[2]);
+        let nose = (nose - up * nose.dot(up)).normalize_or(v3(0.0, 0.0, 1.0));
+        let x = v3(from[0][0], from[0][1], from[0][2]);
+        let handed = x.dot(
+            v3(from[1][0], from[1][1], from[1][2]).cross(v3(from[2][0], from[2][1], from[2][2])),
+        );
+        let side = if handed < 0.0 {
+            nose.cross(up)
+        } else {
+            up.cross(nose)
+        };
+        let at = lerp(from[3], to[3]);
+        let rows = [
+            [side.x, side.y, side.z],
+            [up.x, up.y, up.z],
+            [nose.x, nose.y, nose.z],
+            [at.x, at.y, at.z],
+        ];
+        ch.place_subtree(b, &rows);
     }
 
     /// The last pose came from the state graphs' clips (mirrored per tree, not at skin time).
@@ -795,9 +852,11 @@ impl Rider {
             }
         }
         ch.pose(&self.a);
+        self.place_board(self.mirror);
         // The sun in the character's own space: R^T * sun.
         let c = &rot.cols;
-        ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), self.mirror);
+        self.character
+            .skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), self.mirror);
     }
 }
 

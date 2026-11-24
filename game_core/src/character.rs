@@ -23,6 +23,22 @@ pub const IDENTITY: Rows = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [
 const PREFIX: &str = "skater/";
 const CLIP_PREFIX: &str = "skater/clip/";
 
+/// The inverse of a rigid transform (orthonormal axes).
+pub fn rigid_inverse(a: &Rows) -> Rows {
+    let mut o = [[0.0; 3]; 4];
+    for (r, row) in o.iter_mut().enumerate().take(3) {
+        for (c, v) in row.iter_mut().enumerate() {
+            *v = a[c][r];
+        }
+    }
+    let t = a[3];
+    let rows = [o[0], o[1], o[2]];
+    for (c, v) in o[3].iter_mut().enumerate() {
+        *v = -(t[0] * rows[0][c] + t[1] * rows[1][c] + t[2] * rows[2][c]);
+    }
+    o
+}
+
 /// `a * b` (apply `a`, then `b`).
 pub fn mul(a: &Rows, b: &Rows) -> Rows {
     let mut o = [[0.0; 3]; 4];
@@ -405,6 +421,22 @@ impl Character {
                 t[0] += by.x;
                 t[1] += by.y;
                 t[2] += by.z;
+            }
+        }
+    }
+
+    /// Moves `bone`'s subtree rigidly so the bone's transform (character space) becomes `to`.
+    pub fn place_subtree(&mut self, bone: usize, to: &Rows) {
+        let Some(from) = self.world.get(bone) else {
+            return;
+        };
+        let d = mul(&rigid_inverse(from), to);
+        let mut moved = alloc::vec![false; self.world.len()];
+        for b in bone..self.world.len() {
+            let p = self.skeleton.parent(b);
+            moved[b] = b == bone || (p >= 0 && moved.get(p as usize).copied().unwrap_or(false));
+            if moved[b] {
+                self.world[b] = mul(&self.world[b], &d);
             }
         }
     }

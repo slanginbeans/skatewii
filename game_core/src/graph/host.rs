@@ -21,6 +21,7 @@ use super::riding::{
     BodyTilt, Conditioner, Crouch, CrouchIntents, CrouchPhysical, GrindFade, LandingStore,
     ManualAngle, TurnContext, TurnInput, TurnOutput, Turning,
 };
+use super::toggle::{self, ToggleBoard};
 use super::{Controller, Frame, Graph, NONE, OpId, Pack, Str};
 use crate::motion::tree::{Attr, Playback, PoseCommand};
 use crate::motion::{KIND_CURVE, KIND_SCALAR, MotionDb, NameId};
@@ -84,6 +85,15 @@ pub struct World {
     /// in the air and about to land on ground, and the slope class walked on (`ops::slope`).
     pub loco: u8,
     pub holding_board: bool,
+    /// The board off the feet (`skater::possession`): free, hidden or flying back (`IsDeckFree`), flying
+    /// back, and its direction from the rider (rad, + to his right: what the retrieve clips aim at).
+    pub deck_free: bool,
+    pub board_returning: bool,
+    pub board_angle: f32,
+    /// Coming down onto the board from the air off it (`IsLandingOnBoard`), with the board the wrong way
+    /// round for the rider (LandOnBoard turns him onto it).
+    pub landing_on_board: bool,
+    pub landing_turning: bool,
     pub biped_air: bool,
     pub can_biped_land: bool,
     pub biped_slope: u8,
@@ -188,6 +198,11 @@ impl Default for World {
             phys: phys::GROUND,
             loco: 0,
             holding_board: false,
+            deck_free: false,
+            board_returning: false,
+            board_angle: 0.0,
+            landing_on_board: false,
+            landing_turning: false,
             biped_air: false,
             can_biped_land: false,
             biped_slope: 0,
@@ -431,6 +446,18 @@ pub struct Shared {
     /// The d-pad gesture playing (CharacterGesture): direction (0 left, 1 right, 2 up, 3 down) and
     /// stage (0 into, 1 cycle, 2 out).
     pub gesture: Option<(u8, u8)>,
+    /// ToggleBoard's sequences, by operation.
+    pub toggle: Vec<(OpId, ToggleBoard)>,
+    /// What ToggleBoard published (`OB_DroppingBoard`, `OB_RetrievingBoard`): last update's (what the
+    /// conditions read, as Skate 3's come back through the physics) and this update's; and this update's
+    /// `OB_RetrieveBoard` pulse.
+    pub board_dropping: [bool; 2],
+    pub board_retrieving: [bool; 2],
+    pub retrieve_pulse: bool,
+    /// The throw clips can't play: let go of the board this update anyway (true: thrown).
+    pub release_now: Option<bool>,
+    /// LandOnBoard asked for the board to be taken the other way round (FlipBoardBackwards).
+    pub land_backwards: bool,
 }
 
 impl Shared {
@@ -670,6 +697,8 @@ pub const CHANNEL_FAKIE: u16 = NONE - 1;
 pub const CHANNEL_PUMP: u16 = NONE - 10;
 pub const PUMP_CHANNELS: u16 = 5;
 pub const CHANNEL_GESTURE: u16 = NONE - 20;
+/// ToggleBoard's channel (Skate 3's `RetrieveBoard`).
+pub const CHANNEL_RETRIEVE: u16 = NONE - 30;
 pub use super::ops::{GESTURE_STAGES, GESTURES, PUMP_TREE, gesture_clip};
 pub const MOTION: &str = "MotionGraph_OnBoard";
 
@@ -869,6 +898,12 @@ impl<'a> Runner<'a> {
                 wipe_gestures: false,
                 wipe_gesture: [0.0; 2],
                 gesture: None,
+                toggle: Vec::new(),
+                board_dropping: [false; 2],
+                board_retrieving: [false; 2],
+                retrieve_pulse: false,
+                release_now: None,
+                land_backwards: false,
             },
             names,
             gestures,
@@ -903,6 +938,14 @@ impl<'a> Runner<'a> {
     /// One tick: `ag` must already hold this tick's action-graph intents (from the pad).
     pub fn update(&mut self, db: Option<&MotionDb>, dt: f32) {
         self.s.packet.clear();
+        // ToggleBoard's publications come back a tick later (through the physics, in Skate 3).
+        self.s.board_dropping = [self.s.board_dropping[1], false];
+        self.s.board_retrieving = [self.s.board_retrieving[1], false];
+        self.s.retrieve_pulse = false;
+        self.s.release_now = None;
+        if !self.s.world.landing_on_board {
+            self.s.land_backwards = false;
+        }
         self.s.grab_score = NONE;
         self.s.kickturn = None;
         self.s.tricks_disabled = (self.s.tricks_disabled - dt).max(0.0);
@@ -1246,6 +1289,12 @@ impl Host<'_, '_> {
             Cond::DoneWipingOut => w.phys != phys::WIPEOUT,
             Cond::LocoState(l) => matches!(w.phys, phys::OFFBOARD) && w.loco == l,
             Cond::HoldingBoard => w.holding_board,
+            Cond::DeckFree => w.deck_free,
+            Cond::DroppingBoard => {
+                self.s.board_dropping[0] || self.s.player.has_channel(CHANNEL_RETRIEVE)
+            }
+            Cond::RetrievingBoard => self.s.board_retrieving[0] || w.board_returning,
+            Cond::LandingOnBoard => w.landing_on_board,
             Cond::BipedAir => w.biped_air,
             Cond::CanBipedLand => w.can_biped_land,
             Cond::Fixed(v) => v,
@@ -1996,6 +2045,13 @@ impl Host<'_, '_> {
                 }
             }
             Beh::CharacterGesture => self.character_gesture(phase),
+            Beh::ToggleBoard => self.toggle_board(op, phase),
+            Beh::LandOnBoard => {
+                // Begin only (SK8: its update and end are empty).
+                if phase == 0 && self.s.world.landing_turning {
+                    self.s.land_backwards = true;
+                }
+            }
             Beh::MatchAirTime => match phase {
                 // Begin: the first update only publishes (SK8 skips its seek).
                 0 => self.set_riding(op, RidingInst::Value(1.0)),
@@ -2172,6 +2228,139 @@ impl Host<'_, '_> {
             for (n, v) in names.into_iter().zip(values) {
                 if let Some(n) = n {
                     self.s.player.set_param(n, v, false);
+                }
+            }
+        }
+    }
+
+    /// ToggleBoard (SK8 motion_offboard/toggle_board.rs; the sequence is `graph::toggle`): the motion
+    /// graph's `OB_DropBoard`, `OB_ThrowBoard` and `OB_RetrieveBoard` against the possession, its clips on
+    /// the `RetrieveBoard` channel, its flags for the conditions and the physics, the retrieve trees'
+    /// `yaw` and `pitch`.
+    fn toggle_board(&mut self, op: OpId, phase: u8) {
+        let i = match self.s.toggle.iter().position(|(o, _)| *o == op) {
+            Some(i) => i,
+            None => {
+                self.s.toggle.push((op, ToggleBoard::default()));
+                self.s.toggle.len() - 1
+            }
+        };
+        if phase == 0 {
+            self.s.toggle[i].1.begin();
+            return;
+        }
+        // The end leaves the channel playing (SK8).
+        if phase != 1 {
+            return;
+        }
+        let pack = self.p;
+        let has = |s: &Shared, n: &str| pack.find(n).is_some_and(|id| s.mg.has(id));
+        let w = self.s.world;
+        let input = toggle::Input {
+            holding_board: w.holding_board,
+            retrieval_active: w.board_returning,
+            drop_requested: has(self.s, "OB_DropBoard"),
+            throw_requested: has(self.s, "OB_ThrowBoard"),
+            retrieve_requested: has(self.s, "OB_RetrieveBoard"),
+            yaw_radians: w.board_angle,
+            pitch_radians: 0.0,
+            mirrored: w.mirrored,
+        };
+        let player = &self.s.player;
+        let channel = toggle::Channel {
+            exists: player.has_channel(CHANNEL_RETRIEVE),
+            remaining: player.channel_remaining(CHANNEL_RETRIEVE),
+            elapsed: player.channel_time(CHANNEL_RETRIEVE),
+        };
+        let out = self.s.toggle[i].1.update(input, channel);
+        let emit = |s: &mut Shared, n: &str| {
+            if let Some(id) = pack.find(n) {
+                s.emit(id, 1.0);
+            }
+        };
+        if out.retrieving {
+            self.s.board_retrieving[1] = true;
+            emit(self.s, "OB_RetrievingBoard");
+        }
+        if out.dropping {
+            self.s.board_dropping[1] = true;
+            emit(self.s, "OB_DroppingBoard");
+        }
+        match out.channel {
+            Some(toggle::Command::Stop { blend_seconds }) => self
+                .s
+                .player
+                .end_channel_with(CHANNEL_RETRIEVE, blend_seconds),
+            Some(command) => {
+                let (clip, sequence) = match command {
+                    toggle::Command::BlendTo(c) => (c, false),
+                    toggle::Command::SequenceTo(c) => (c, true),
+                    toggle::Command::Stop { .. } => unreachable!(),
+                };
+                let out_clip = matches!(clip, toggle::Clip::FrontOut | toggle::Clip::BackOut);
+                let hold = sequence || out_clip;
+                let played = self.db.and_then(|db| {
+                    let node = db.find(clip.name())?;
+                    let play = Playback::build_node(db, node, &Vec::new(), &mut Vec::new()).ok()?;
+                    let tree = Tree {
+                        play,
+                        mirror: w.mirrored,
+                        turned: w.frame_turned,
+                        name: NONE,
+                    };
+                    let settings = ChannelSettings {
+                        priority: 0,
+                        keep_alive: false,
+                        speed: 1.0,
+                        blend_in: 0.25,
+                        hold_in: hold,
+                        blend_out: 0.25,
+                        hold_out: hold,
+                    };
+                    let blend = ops::TransitionDef {
+                        kind: if sequence { 4 } else { 2 },
+                        seconds: if sequence { 0.0 } else { 0.25 },
+                        under: false,
+                        matching: 0,
+                        channels_from_weights: false,
+                    };
+                    self.s.player.transition_channel(
+                        db,
+                        CHANNEL_RETRIEVE,
+                        tree,
+                        settings,
+                        blend,
+                        true,
+                        !sequence && !out_clip,
+                    );
+                    Some(())
+                });
+                if played.is_none() {
+                    // Not in the library (a motion pack imported before these clips): reported once,
+                    // and the physics lets go of the board, or flies it back, at once.
+                    if let Some(id) = pack.find("ToggleBoard") {
+                        self.s.unsupported(id);
+                    }
+                    match clip {
+                        toggle::Clip::Throw => self.s.release_now = Some(true),
+                        toggle::Clip::Drop => self.s.release_now = Some(false),
+                        toggle::Clip::FrontInto | toggle::Clip::BackInto => {
+                            self.s.retrieve_pulse = true
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            None => {}
+        }
+        if out.retrieve {
+            self.s.retrieve_pulse = true;
+            emit(self.s, "OB_RetrieveBoard");
+        }
+        if let (Some([yaw, pitch]), Some(db)) = (out.yaw_pitch, self.db) {
+            for (n, v) in [("yaw", yaw), ("pitch", pitch)] {
+                if let Some(id) = db.name_id(n) {
+                    self.s.player.set_param(id, v, false);
                 }
             }
         }

@@ -27,6 +27,7 @@ mod board;
 pub mod flip;
 mod grind;
 mod landing;
+pub mod possession;
 mod respawn;
 pub mod wobble;
 
@@ -679,6 +680,9 @@ struct Takeoff {
     hippy: bool,
     /// Got on the board in the air off it (Y jumping off the board): coming down onto it.
     mount: bool,
+    /// Coming down onto the free board (`skater::possession`) from a jump off the board: Skate 3's
+    /// landing on deck, the caveman.
+    onto_free: bool,
     ground: Option<Vec3>,
     on_vert: bool,
     lean: f32,
@@ -861,6 +865,15 @@ pub struct Skater {
     mount_traj: bool,
     /// Board adjust (`skater::adjust`): the deck's yaw and pitch against the body, in the air only.
     pub deck_adjust: adjust::DeckAdjust,
+    /// Where the board is when it isn't under the feet: in the hands, free in the park, hidden, flying
+    /// back (`skater::possession`).
+    pub possession: possession::Possession,
+    /// The triggers fully in last tick (drop and throw, off the board).
+    trig_full: [bool; 2],
+    /// Off the board in the air, Skate 3's landing assist has taken a flight down onto the free board
+    /// (`CanLandOnBoard`): the landing on it starts once the motion graph's `DoLandOnBoard` says so (at
+    /// once without the graphs).
+    pub deck_assist: bool,
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
@@ -928,6 +941,19 @@ pub struct GraphControl {
     /// The action graph is adjusting the board (its BoardAdjust behaviour publishes the C-stick to the
     /// motion graph's board-adjust clips).
     pub board_adjust: bool,
+    /// Off the board, ToggleBoard's throw clip let go of the board this tick (`OB_RELEASEBOARD`: a drop,
+    /// `Some(false)`; `OB_THROWBOARD`: a throw, `Some(true)`).
+    pub release_board: Option<bool>,
+    /// ToggleBoard published `OB_RetrieveBoard`: the board flies back to the hands.
+    pub retrieve_board: bool,
+    /// LandOnBoard asked for the board to be taken the other way round (its tail ahead).
+    pub land_backwards: bool,
+    /// The motion graph's `OB_Mounting` (its mount states, from the `OB_Mount` intent): Skate 3's physics
+    /// fetches a free board into the hands for the mount.
+    pub ob_mounting: bool,
+    /// The motion graph's `DoLandOnBoard` (its `IntoLandingOnBoard` and `LandingOnBoard` states): the
+    /// physics comes down onto the board (SK8: biped air into LandingOnDeck).
+    pub land_on_board: bool,
     /// The posed board's nose in the rider's frame (x `up x nose`, y up, z ahead) from the imported
     /// rider's last pose: where the clips have put the deck. `None` without the imported rider.
     pub pose_deck: Option<Vec3>,
@@ -1122,6 +1148,9 @@ impl Skater {
             board_toggle: None,
             mount_traj: false,
             deck_adjust: adjust::DeckAdjust::NONE,
+            possession: possession::Possession::new(),
+            trig_full: [false; 2],
+            deck_assist: false,
         }
     }
 
@@ -1261,6 +1290,44 @@ impl Skater {
     /// or getting on the board in the air. The board rolls along the ground underneath.
     pub fn landing_on_deck(&self) -> bool {
         self.is_airborne() && (self.takeoff.hippy || self.takeoff.mount)
+    }
+
+    /// Coming down onto the free board (the caveman: Skate 3's landing on deck from a jump off it).
+    pub fn landing_on_free_board(&self) -> bool {
+        self.is_airborne() && self.takeoff.onto_free
+    }
+
+    /// The rider as the possession reads him: on foot the walker's facing and velocity.
+    pub fn rider_frame(&self) -> possession::RiderFrame {
+        let forward = if self.mode == Mode::Walk {
+            self.biped.forward()
+        } else {
+            self.fwd
+        };
+        possession::RiderFrame {
+            pos: self.pos,
+            forward: forward.horizontal().normalize_or(yaw_dir(self.heading)),
+            vel: self.vel,
+        }
+    }
+
+    /// Coming down onto the free board: whether the feet will land on its deck (Skate 3's
+    /// `CanLandOnBoard`: the landing within reach of where the board will be), and whether it is the
+    /// wrong way round for the rider (its nose against his travel).
+    pub fn free_board_landing(&self, time_to_land: f32) -> (bool, bool) {
+        let b = self.possession.board;
+        let t = time_to_land.max(0.0);
+        let feet = self.pos + self.vel.horizontal() * t;
+        let deck = b.pos + b.vel.horizontal() * t;
+        let reach = (feet - deck).horizontal().length() < possession::LAND_REACH
+            && self.possession.hold == possession::Hold::Free;
+        let travel = self.vel.horizontal();
+        let facing = if travel.length() > 0.3 {
+            travel
+        } else {
+            self.fwd
+        };
+        (reach, b.nose.dot(facing) < 0.0)
     }
 
     /// The drawn rider is the mirror image of the clips (they are authored goofy).
@@ -1435,8 +1502,10 @@ impl Skater {
                 self.regrind_block = None;
             }
         }
+        let triggers = crate::graph::input::board_triggers(pad, &mut self.trig_full);
         self.toggle_board(park, pad, dt, events);
         self.step_mode(park, pad, flick, dt, events);
+        self.update_possession(park, triggers, dt, events);
         if self.mode == Mode::Rolling {
             // The drawn board follows the ground smoothly; the velocity is the ground's.
             let k = 1.0
@@ -1537,15 +1606,38 @@ impl Skater {
             return;
         };
         // In the air off the board (a jump, or stepping off a ledge mid-mount), Y gets on it there: the
-        // rider comes down onto the board under him (Skate 3's air mount, its `Mount/Air` clips).
+        // rider comes down onto the board under him (Skate 3's air mount, its `Mount/Air` clips). A board
+        // out of the hands is picked up first (Skate 3's `OB_Mounting` retrieves it, quickly).
         if self.mode == Mode::Walk && self.biped.air.is_some() {
-            self.mount_in_air(events);
+            match self.possession.hold {
+                possession::Hold::Held | possession::Hold::Underfoot => self.mount_in_air(events),
+                possession::Hold::Returning => {}
+                _ => {
+                    let rider = self.rider_frame();
+                    self.possession.retrieve(&self.tuning, rider, true);
+                }
+            }
             return;
         }
         let t = t + dt;
         self.board_toggle = Some(t);
         let go = match (self.mode, self.graph) {
-            (Mode::Rolling | Mode::Walk, None) => true,
+            (Mode::Rolling, None) => true,
+            // Without the state graphs: on at once with the board in hand; next to the free board, onto it
+            // where it is; further away, once it has flown back (getting on retrieves it).
+            (Mode::Walk, None) => match self.possession.hold {
+                possession::Hold::Held | possession::Hold::Underfoot => true,
+                possession::Hold::Free if self.free_board_in_reach() => {
+                    self.step_onto_free_board(park, events);
+                    return;
+                }
+                possession::Hold::Free | possession::Hold::Hidden => {
+                    let rider = self.rider_frame();
+                    self.possession.retrieve(&self.tuning, rider, true);
+                    false
+                }
+                possession::Hold::Returning => false,
+            },
             (Mode::Rolling, Some(g)) => g.ob_traj && g.dismounting,
             (Mode::Walk, Some(g)) => {
                 if g.mounting && g.ob_traj {
@@ -1594,6 +1686,144 @@ impl Skater {
         (held, new)
     }
 
+    /// The free board is close enough to step onto where it lies (Skate 3 retrieves from at most
+    /// `DistanceForMountedReturn` getting on), on its wheels.
+    fn free_board_in_reach(&self) -> bool {
+        let b = &self.possession.board;
+        self.possession.hold == possession::Hold::Free
+            && b.on_ground
+            && b.up.y > self.tuning.possession.deck_min_up
+            && (b.pos - self.pos).horizontal().length()
+                <= self.tuning.possession.mounted_return_distance
+    }
+
+    /// Without the state graphs, getting on next to the free board: the rider steps onto it where it is,
+    /// riding it on at its own speed, its nose (or tail) the end nearer the way he faces.
+    fn step_onto_free_board(&mut self, park: &dyn Terrain, events: &mut Vec<Event>) {
+        let b = self.possession.board;
+        let g = park.ground(b.pos.x, b.pos.z, b.pos.y + STEP);
+        let n = if g.height > f32::MIN / 2.0 {
+            g.normal
+        } else {
+            b.up
+        };
+        self.pos = v3(b.pos.x, g.height.max(b.pos.y - DECK_HEIGHT - STEP), b.pos.z);
+        let facing = self.biped.forward();
+        let nose = if b.nose.dot(facing) < 0.0 {
+            -b.nose
+        } else {
+            b.nose
+        };
+        self.contact_n = n;
+        self.normal = n;
+        self.fwd = tangent(nose, n);
+        self.speed = b.vel.dot(self.fwd);
+        self.slip = 0.0;
+        self.vn = 0.0;
+        self.vel = self.fwd * self.speed;
+        self.fakie = false;
+        self.fakie_timer = 0.0;
+        self.spin = 0.0;
+        self.spin_rate = 0.0;
+        self.mode = Mode::Rolling;
+        self.board_toggle = None;
+        self.possession.under_feet();
+        self.sync_heading();
+        events.push(Event::SteppedOn);
+    }
+
+    /// The board off the feet each tick: off the board, L fully in drops it and R throws it ahead
+    /// (Skate 3's LT / RT); with it out of the hands either picks it back up. With the state graphs their
+    /// ToggleBoard times it (the throw clips' release, the retrieve cycle), and getting on (`Mount`)
+    /// retrieves a free board; then the board's own body moves on. In the air off the board over the
+    /// free board, Skate 3's landing assist may bring the rider down onto it (the caveman).
+    fn update_possession(
+        &mut self,
+        park: &dyn Terrain,
+        triggers: [bool; 2],
+        dt: f32,
+        events: &mut Vec<Event>,
+    ) {
+        if matches!(self.mode, Mode::Rolling | Mode::Grind) {
+            self.possession.under_feet();
+        }
+        let rider = self.rider_frame();
+        let t = self.tuning;
+        if self.mode == Mode::Walk {
+            let p = &mut self.possession;
+            match self.graph {
+                None => {
+                    let [drop, throw] = triggers;
+                    if p.held() && (drop || throw) {
+                        p.let_go(&t, rider, throw);
+                    } else if (drop || throw)
+                        && matches!(p.hold, possession::Hold::Free | possession::Hold::Hidden)
+                    {
+                        p.retrieve(&t, rider, false);
+                    }
+                }
+                Some(g) => {
+                    if let Some(throw) = g.release_board {
+                        p.let_go(&t, rider, throw);
+                    }
+                    if g.retrieve_board {
+                        p.retrieve(&t, rider, false);
+                    }
+                    if g.ob_mounting {
+                        p.retrieve(&t, rider, true);
+                    }
+                }
+            }
+        }
+        self.possession.step(&t, park, rider, dt);
+        // Off the board in the air over the free board: Skate 3's landing assist (SK8 biped_air
+        // update.rs, landing_deck `assist`) takes a flight down onto its deck when it is near enough to
+        // the jump's own (by `landing_assist_limit` of the time in the air) and long enough (0.4 s); the
+        // motion graph then starts the landing on it (`DoLandOnBoard`), or at once without the graphs.
+        if self.mode != Mode::Walk || self.biped.air.is_none() {
+            self.deck_assist = false;
+            return;
+        }
+        if self.possession.hold != possession::Hold::Free {
+            self.deck_assist = false;
+        }
+        if !self.deck_assist
+            && let Some(air) = self.biped.air
+            && self.board_toggle.is_none()
+            && let Some((flight, time)) =
+                self.possession.landing_flight(&t, self.pos, self.biped.vel)
+            && time > 0.4
+            && (flight - self.biped.vel).length() < possession::landing_assist_limit(air)
+        {
+            self.biped.set_flight(flight, t.gravity, park, self.pos);
+            self.sync_walk();
+            self.deck_assist = true;
+        }
+        if self.deck_assist && self.graph.is_none_or(|g| g.land_on_board) {
+            self.deck_assist = false;
+            let flight = self.biped.vel;
+            self.land_on_free_board_from(flight, events);
+        }
+    }
+
+    /// Into the flight down onto the free board (Skate 3's LandingOnDeck): the rider off the board in
+    /// the air, its nose the way he faces.
+    fn land_on_free_board_from(&mut self, flight: Vec3, events: &mut Vec<Event>) {
+        let _ = events;
+        self.contact_n = Vec3::UP;
+        self.normal = Vec3::UP;
+        self.fwd = tangent(self.biped.forward(), Vec3::UP);
+        self.fakie = false;
+        self.fakie_timer = 0.0;
+        self.take_off(None);
+        self.takeoff.mount = true;
+        self.takeoff.onto_free = true;
+        self.vel = flight;
+        self.speed = flight.dot(self.fwd);
+        self.slip = 0.0;
+        self.sync_heading();
+    }
+
     /// On the board in the air off it: its nose the way the rider faces, flying as he was, to come down
     /// onto it (no points, as no trick).
     fn mount_in_air(&mut self, events: &mut Vec<Event>) {
@@ -1625,6 +1855,8 @@ impl Skater {
         self.biped = Biped::new(heading, self.vel, self.contact_n);
         self.mode = Mode::Walk;
         self.board_toggle = None;
+        // The board into the hands.
+        self.possession.hold();
         self.manual = None;
         self.slide = None;
         self.kickturn = None;
@@ -1657,6 +1889,8 @@ impl Skater {
         self.spin_rate = 0.0;
         self.mode = Mode::Rolling;
         self.board_toggle = None;
+        // From the hands (or wherever the mount's retrieval had it) under the feet.
+        self.possession.under_feet();
         self.sync_heading();
         events.push(Event::SteppedOn);
     }
@@ -2475,6 +2709,7 @@ impl Skater {
             switch: self.switch,
             hippy: false,
             mount: false,
+            onto_free: false,
             ground: Some(self.contact_n),
             on_vert: false,
             lean: 0.0,
@@ -2983,6 +3218,9 @@ impl Skater {
     /// surface is kept (gaining on transitions), and the landing is classified as Skate 3 does.
     fn land(&mut self, normal: Vec3, surface: u16, air_time: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
+        if self.takeoff.onto_free && !self.land_on_free_board(normal, events) {
+            return;
+        }
         // The board lands as the rider lined it up (board adjust): its nose is the landing's.
         self.bake_deck_adjust();
         self.air_com = None;
@@ -3148,6 +3386,57 @@ impl Skater {
         self.spin_rate = 0.0;
         self.plan = None;
         self.takeoff.hippy = false;
+    }
+
+    /// Touching down from the flight onto the free board (the caveman). On its deck: onto the board
+    /// where it is, its nose the rider's way (or its tail, when LandOnBoard turns him onto it the wrong
+    /// way round), only the speed along it kept (its wheels take the rest); then an ordinary landing
+    /// (true). Missed (or the board went): on his feet beside it (Skate 3's `HippyRunout`); faster than
+    /// `MaxSpeedLandingOnBoard`: a bail (false either way).
+    fn land_on_free_board(&mut self, normal: Vec3, events: &mut Vec<Event>) -> bool {
+        self.takeoff.onto_free = false;
+        self.takeoff.mount = false;
+        let n = normal.normalize_or(Vec3::UP);
+        if !self.possession.under(self.pos) {
+            let travel = self.vel.horizontal();
+            let heading = if travel.length() > 0.3 {
+                atan2f(travel.x, travel.z)
+            } else {
+                self.heading
+            };
+            self.biped = Biped::new(heading, self.vel - n * self.vel.dot(n), n);
+            self.mode = Mode::Walk;
+            self.trick = None;
+            self.plan = None;
+            self.sync_walk();
+            return false;
+        }
+        if self.vel.length() > self.tuning.possession.max_landing_speed {
+            self.vel = self.vel - n * self.vel.dot(n);
+            self.possession.under_feet();
+            self.bail("came down onto the board too fast", events);
+            return false;
+        }
+        let b = self.possession.board;
+        self.pos.x = b.pos.x;
+        self.pos.z = b.pos.z;
+        let (reversed, asked) = match self.graph {
+            Some(g) => (g.land_backwards, true),
+            None => (false, false),
+        };
+        let facing = self.fwd;
+        let nose = if (asked && reversed) || (!asked && b.nose.dot(facing) < 0.0) {
+            -b.nose
+        } else {
+            b.nose
+        };
+        let axis = tangent(nose, n);
+        let vt = self.vel - n * self.vel.dot(n);
+        self.vel = axis * vt.dot(axis) + n * self.vel.dot(n);
+        self.fwd = axis;
+        self.normal = n;
+        self.possession.under_feet();
+        true
     }
 }
 

@@ -777,6 +777,34 @@ impl Player {
         }
     }
 
+    /// Ends the channel, fading out over `seconds` (SK8 `end_with`).
+    pub fn end_channel_with(&mut self, name: u16, seconds: f32) {
+        if let Some(c) = self.channels.iter_mut().find(|c| c.name == name) {
+            if c.fade.can_transition(false) {
+                c.fade.settings.blend_out = seconds;
+            }
+            c.fade.end();
+        }
+    }
+
+    /// Seconds into the channel's tree (0 without the channel).
+    pub fn channel_time(&self, name: u16) -> f32 {
+        self.channels
+            .iter()
+            .find(|c| c.name == name)
+            .map_or(0.0, |c| c.node.time())
+    }
+
+    /// An attribute of the channel's playing tree (as [`Player::attribute`] for the base).
+    pub fn channel_attribute(&self, db: &MotionDb, channel: u16, name: NameId) -> Option<Attr> {
+        let mut out = Attr::scalar(name, 0.0);
+        self.channels
+            .iter()
+            .find(|c| c.name == channel)
+            .filter(|c| c.node.query_attribute(db, name, 15, &mut out))
+            .map(|_| out)
+    }
+
     /// This frame's pose: the base, then each channel with weight over it (see [`PoseOp`]).
     pub fn program(&mut self, out: &mut PoseProgram, scratch: &mut Vec<PoseCommand>) {
         out.clear();
