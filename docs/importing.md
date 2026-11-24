@@ -390,7 +390,7 @@ Writes `imported/rules.fgpak` (about 80 KB) with what makes the skating feel lik
   the flick recogniser's tolerance, the camera's trackers, collision, avoidance, drop predictor and push lag
   (`game_core::tuning::camera::PATHS`: `camera_tracker`, `camera/dynamics`, `camera/rotation`,
   `camera/subject_tracker`, `camera_compass`, `camera_positioner`, `camera_droppredictor`,
-  `camera_lag_profile`) and the grinds' numbers (`game_core::tuning::grind::PATHS`: `physics_grinds`, `physics_grinds_air`, grind
+  `camera_lag_profile`, `camera/freecam`, `camera_shake`, `slowmotion_controller`) and the grinds' numbers (`game_core::tuning::grind::PATHS`: `physics_grinds`, `physics_grinds_air`, grind
   targeting, grind wipeouts, the board's dimensions, the grind trees' twist and height), and the scoring
   module's numbers (`game_core::scoring::rules::PATHS`: the line and combo timers, the multiplier's levels,
   the repetition and announcement curves, the bail and unannounced factors, the collectors' time, distance,
@@ -407,7 +407,11 @@ Writes `imported/rules.fgpak` (about 80 KB) with what makes the skating feel lik
 - `rules/camera/shots`: every shot that graph chooses and the children of its blend shots (156 on the
   US/EU disc): the `camera_shots` collections of the tuning database, found by the hash of their names
   and, for a blend's children, by the name hashes in its `BlendShot` references
-  (`game_core::camera::shot` has the layout). Shots the graph names but the database lacks are listed.
+  (`game_core::camera::shot` has the layout; option 64 is `OptionUseFreeCamStick`, the shots free look
+  works in). Shots the graph names but the database lacks are listed.
+- `rules/camera/shake`: the camera shake's sample loop (`data/camera/1.shk` in `miscload.big`, 136 samples
+  on the US/EU disc), centred as Skate 3 loads it (`game_core::camera::shake` has the layout). Without it the
+  game uses its own loop.
 - `rules/gestures/<file>`: the flick-stick shapes from `data/joystick/*.pat` in `miscload.big`
   (`skater.pat` drives the ground flick tricks; the rest are kept for later: board sideways, late flips,
   finger flips, the left stick).

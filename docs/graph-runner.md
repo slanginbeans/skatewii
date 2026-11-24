@@ -762,7 +762,7 @@ field of view).
   side), in Skate 3 as here; ridden straight for a moment first, the camera is behind (within 15
   degrees about 0.3 s after a 90-degree carve at 6 m/s, never past about 41 degrees in it; the
   `--carve-ollie` preview and `tests/camera_carve.rs`).
-- **Choosing**: Skate 3's camera graph (`Default_cameragraph`, the low camera) runs on the graph runner
+- **Choosing**: Skate 3's camera graph (`Default_cameragraph`, its low and high cameras) runs on the graph runner
   (`select.rs`). Its conditions read the camera's own state: `IsWipingOut` (a bail), `IsOffboard` (a
   run-out, a hippie jump), `SkaterIsGrinding` / `SkaterWasGrinding` / `IsPlayerSkateboardOnGround` (the
   rig's mode: riding, a flight, a grind, and the one before), `PredictedAirTime` (the known landing's
@@ -777,9 +777,14 @@ field of view).
   `Right`. Skate 3 marks ledge shots with painted world regions; flatground reads the ledge's high side
   (`camera::subject::ledge_side`). Conditions about things flatground doesn't have (skitching, plants,
   bonelesses, moving objects, roads, volumes, security guards, broken-bone slow motion, body-tweak
-  wipeouts) are false; `SlowMotionController` is not run. Without the disc's graph flatground chooses
-  itself (`select::built_in`): wipeout, run-out, grind exit, grind (ledge side), long air or small air,
-  manual, hard turn, riding.
+  wipeouts) are false. `IsCameraTypeActive` reads the pause menu's Camera setting (0 Low, 1 High), and
+  `SlowMotionController` runs Skate 3's slow motion on long airs (`camera::slow_motion`). Without the
+  disc's graph flatground chooses itself (`select::built_in`): wipeout, run-out, grind exit, grind (ledge
+  side), long air or small air, manual, hard turn, riding, on the high camera's shots when High.
+- **Free look, shake, slow motion**: the look stick (Z + C-stick) offsets the arm's elevation in shots
+  with `OptionUseFreeCamStick` (`camera::look`); the view shakes with speed and on landings
+  (`camera::shake`); the graph's slow motion asks `Game::update` for fewer ticks a second
+  (`CameraMan::rate`). Details in docs/feature-audit.md.
 - **Rig** (`rig.rs`): the shot's heading turns with a compass north: the movement heading moves 90% a
   tick towards the velocity's direction above 0.5 m/s (no dead zone) and, stopped for 0.05 s, lines up
   behind the board at 50% a tick; it is frozen through a flight and turns towards the flight's direction
@@ -811,8 +816,7 @@ field of view).
   (`fg_begin_frame`).
 - **Log**: `camera: <shot> (<graph state>)` when the shot changes, at most every quarter second;
   `camera graph: unsupported <name>` for graph names flatground doesn't know.
-- Not done: the free-look stick, camera shake, Skate 3's slow motion on long airs, the high camera
-  (`cameragraph_high`), off-board walking shots beyond the run-out and hippie jumps, special wipeout
+- Not done: off-board walking shots beyond the run-out and hippie jumps, special wipeout
   shots (no body tweaks), moving obstacles in the avoidance (flatground's parks are static), the
   avoidance's swept paths (straight rays), `TransitionTimeUnits` 2 uses the distance to the new shot's arm.
   Fat lines are rays with the radius taken off the hit distance.

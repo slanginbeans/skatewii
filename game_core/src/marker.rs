@@ -11,9 +11,9 @@
 //! marker nothing happens.
 //!
 //! The pad: Z + d-pad (see [`Chord`]): up puts the marker down, down (held) goes back to it, left opens
-//! the replay.
+//! the replay. Z + C-stick is the camera's free look (the same chord, [`Chord::read_pad`]).
 
-use crate::input::btn;
+use crate::input::{Pad, PadRaw, btn};
 use crate::math::{Vec3, v3};
 use crate::park::Terrain;
 use crate::skater::{Mode, Skater, respawn};
@@ -148,6 +148,9 @@ pub struct ChordOut {
     pub back: bool,
     /// Z + d-pad left went down: open (or, in the replay, close) the replay.
     pub replay: bool,
+    /// Z + C-stick: the free look's stick (each axis -1..1, the C-stick's conditioning), [0, 0] when not
+    /// looking.
+    pub look: [f32; 2],
 }
 
 const DPAD: u32 = btn::DPAD_UP | btn::DPAD_DOWN | btn::DPAD_LEFT | btn::DPAD_RIGHT;
@@ -156,6 +159,12 @@ const DPAD: u32 = btn::DPAD_UP | btn::DPAD_DOWN | btn::DPAD_LEFT | btn::DPAD_RIG
 /// chord: it never reaches the character gestures, and from then on Z reads as let go for the riding
 /// until it really is (so the Z used for the chord can't dark-catch a flip). In the air Z stays the dark
 /// catch and the d-pad its gestures. Without Z the d-pad is the gestures, as before.
+///
+/// The C-stick goes the same way ([`Chord::read_pad`]): pushed off centre while Z is held, not in the
+/// air, it is the free look's stick until it comes back to centre, never a flick, a manual or a board
+/// adjust, and that Z is hidden from the riding until let go (no dark catch). Letting Z go ends the look
+/// (the camera eases back); the stick stays the look's, doing nothing, until centred. A C-stick already
+/// off centre when Z goes down stays the riding's (a wind-up is not cut short).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Chord {
     prev: u32,
@@ -163,6 +172,9 @@ pub struct Chord {
     z_taken: bool,
     /// D-pad directions taken by the chord, hidden until let go.
     dpad_taken: u32,
+    /// The C-stick was off centre last frame, and is the look's until centred.
+    c_out: bool,
+    c_taken: bool,
 }
 
 impl Chord {
@@ -188,12 +200,38 @@ impl Chord {
             place: new & btn::DPAD_UP != 0,
             back: z && self.dpad_taken & btn::DPAD_DOWN != 0,
             replay: new & btn::DPAD_LEFT != 0,
+            look: [0.0; 2],
         };
         let mut seen = buttons & !self.dpad_taken;
         if self.z_taken {
             seen &= !btn::Z;
         }
         (seen, out)
+    }
+
+    /// A frame of the whole pad: [`Chord::read`] for the buttons, and the C-stick's free look. Returns the
+    /// pad the riding sees (the look's C-stick centred, its Z let go) and what the chord asks for.
+    pub fn read_pad(&mut self, raw: &PadRaw, allowed: bool) -> (PadRaw, ChordOut) {
+        let stick = Pad::from_raw(raw, 0).flick;
+        let out = stick != [0.0, 0.0];
+        let z = raw.buttons & btn::Z != 0;
+        if !out {
+            self.c_taken = false;
+        } else if z && allowed && !self.c_out {
+            self.c_taken = true;
+            self.z_taken = true;
+        }
+        self.c_out = out;
+        let (buttons, mut chord) = self.read(raw.buttons, allowed);
+        let mut seen = PadRaw { buttons, ..*raw };
+        if self.c_taken {
+            seen.cstick_x = 0;
+            seen.cstick_y = 0;
+            if z {
+                chord.look = stick;
+            }
+        }
+        (seen, chord)
     }
 
     /// Forgets what was held (a menu or the replay took the pad), keeping what is held now as held.
@@ -325,5 +363,46 @@ mod tests {
         assert!(!(0..60).any(|_| m.tick(true, &s)));
         s.mode = Mode::Rolling;
         assert!((0..60).any(|_| m.tick(true, &s)));
+    }
+
+    #[test]
+    fn z_and_the_c_stick_are_the_free_look_and_never_a_flick_or_a_dark_catch() {
+        let pad = |buttons: u32, cx: i8, cy: i8| PadRaw {
+            buttons,
+            cstick_x: cx,
+            cstick_y: cy,
+            ..PadRaw::default()
+        };
+        let mut c = Chord::default();
+        // The C-stick alone is the riding's (flicks).
+        let (seen, out) = c.read_pad(&pad(0, 0, 80), true);
+        assert_eq!((seen.cstick_y, out.look), (80, [0.0, 0.0]));
+        c.read_pad(&pad(0, 0, 0), true);
+        // Z, then the C-stick pushed: the look's; neither reaches the riding.
+        assert_eq!(c.read_pad(&pad(btn::Z, 0, 0), true).0.buttons, btn::Z);
+        let (seen, out) = c.read_pad(&pad(btn::Z, 0, 80), true);
+        assert_eq!((seen.buttons, seen.cstick_x, seen.cstick_y), (0, 0, 0));
+        assert!(out.look[1] > 0.8, "{:?}", out.look);
+        // Z let go with the stick still up: the look ends, the stick stays hidden until centred.
+        let (seen, out) = c.read_pad(&pad(0, 0, 80), true);
+        assert_eq!((seen.cstick_y, out.look), (0, [0.0, 0.0]));
+        assert_eq!(c.read_pad(&pad(0, 0, 0), true).0.cstick_y, 0);
+        assert_eq!(c.read_pad(&pad(0, 0, 80), true).0.cstick_y, 80);
+        c.read_pad(&pad(0, 0, 0), true);
+        // A C-stick already off centre when Z goes down stays the riding's (and Z is still seen).
+        c.read_pad(&pad(0, -80, 0), true);
+        let (seen, out) = c.read_pad(&pad(btn::Z, -80, 0), true);
+        assert_eq!(
+            (seen.cstick_x, seen.buttons, out.look),
+            (-80, btn::Z, [0.0, 0.0])
+        );
+        c.read_pad(&pad(0, 0, 0), true);
+        // In the air Z is the dark catch and the C-stick flicks.
+        c.read_pad(&pad(btn::Z, 0, 0), false);
+        let (seen, out) = c.read_pad(&pad(btn::Z, 0, 80), false);
+        assert_eq!(
+            (seen.buttons, seen.cstick_y, out.look),
+            (btn::Z, 80, [0.0, 0.0])
+        );
     }
 }

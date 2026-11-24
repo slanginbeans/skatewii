@@ -484,13 +484,14 @@ fn load_location(game: &mut Game, places: &mut Places, i: usize, show: bool) -> 
     ok
 }
 
-/// Remembers the location the player chose and the draw distance (`settings.txt` in the app folder).
+/// Remembers the location the player chose, the draw distance and the camera angle (`settings.txt` in the
+/// app folder).
 fn save_settings(game: &Game, places: &Places, id: &str) {
     let Some(dir) = places.data_dir.map(app_dir) else {
         return;
     };
     let path = format!("{dir}{SETTINGS_FILE}");
-    let text = menu::write_settings(id, game.draw_distance() as u16);
+    let text = menu::write_settings(id, game.draw_distance() as u16, game.camera_angle());
     if !save(&path, text.as_bytes()) {
         log(false, &format!("settings: could not write {path}"));
     }
@@ -636,6 +637,9 @@ pub extern "C" fn fg_rust_init() {
     if let Some(d) = settings.draw_distance {
         game.set_draw_distance(d as f32);
     }
+    if let Some(c) = settings.camera {
+        game.set_camera_angle(c);
+    }
     game.set_locations(index.locations);
     let start = menu::start_location(&game.locations, settings.location.as_deref(), index.default);
     let mut places = Places {
@@ -771,14 +775,18 @@ pub unsafe extern "C" fn fg_rust_frame(pad: *const PadRaw, dt: f32) -> i32 {
         }
         None => {}
     }
-    // A setting changed in the pause menu (the draw distance): written when the menu closes, not on every
+    // A setting changed in the pause menu (the draw distance, the camera angle): written when the menu closes, not on every
     // step.
     if game.menu.is_none() && game.take_settings_changed() {
         let id = game.locations[game.location].id.clone();
         save_settings(game, places, &id);
         log(
             false,
-            &format!("settings: draw distance {} m", game.draw_distance()),
+            &format!(
+                "settings: draw distance {} m, camera {}",
+                game.draw_distance(),
+                game.camera_angle().name()
+            ),
         );
     }
     // Autoplay visiting every location in turn.

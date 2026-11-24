@@ -1709,7 +1709,7 @@ impl Tuning {
             _ => {
                 self.grind.set(name, f, c())
                     || self.anim.set(name, f, c(), v)
-                    || self.cam.set(name, f, c())
+                    || self.cam.set(name, f, c(), v)
                     || self.moves.set(name, f, c())
                     || self.wobble.set(name, f, c())
                     || self.biped.set(name, f, c())
@@ -1853,7 +1853,11 @@ mod tests {
         for p in all_paths() {
             let mut t = Tuning::BUILT_IN;
             // A two-point curve (or a four-value vector) also counts as a scalar (its first value).
-            assert!(t.set(p, &[0.0, 1.0, 1.0, 1.0]) || t.set(p, &[1.0]), "{p}");
+            // The shake's Bezier points are a 4 x 4 matrix.
+            assert!(
+                t.set(p, &[0.0, 1.0, 1.0, 1.0]) || t.set(p, &[1.0]) || t.set(p, &[0.5; 16]),
+                "{p}"
+            );
         }
     }
 

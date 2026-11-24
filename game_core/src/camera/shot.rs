@@ -15,8 +15,8 @@
 //! "FGCS", u32 version (1), u32 shot count, then per shot 160 bytes:
 //!   u64 key (Skate 3's collection name hash, `name_hash`), u8 kind (0 shot, 1 blend), u8 blend type,
 //!   u8 transition units, u8 options (1 follow in air, 2 mirror for stance, 4 use previous shot,
-//!   8 use drop predictor, 16 avoidance override, 32 snap to reference), u8 anchor, u8 compass north,
-//!   u8 collision hint, u8 0, u16 children[3] (indices, 0xFFFF none), u16 0,
+//!   8 use drop predictor, 16 avoidance override, 32 snap to reference, 64 free camera stick), u8 anchor,
+//!   u8 compass north, u8 collision hint, u8 0, u16 children[3] (indices, 0xFFFF none), u16 0,
 //!   f32[34]: distance, lens, smoothing direction/elevation/yaw/pitch, reference weights[10], board
 //!   offset, heading, elevation, framing roll, yaw, pitch (degrees), transition time, blend points[3],
 //!   blend value, blend smoothing, world heading (deg), blur, transition blur, opacity, 0, 0
@@ -40,6 +40,8 @@ pub const OPT_PREVIOUS: u8 = 4;
 pub const OPT_DROP: u8 = 8;
 pub const OPT_AVOID: u8 = 16;
 pub const OPT_SNAP: u8 = 32;
+/// Skate 3's `OptionUseFreeCamStick`: the look stick moves the camera (free look) in this shot.
+pub const OPT_LOOK: u8 = 64;
 
 /// Reference points a shot's look-at mixes (`ReferenceWeight*`, in Skate 3's order).
 pub const REF_HEAD: usize = 0;

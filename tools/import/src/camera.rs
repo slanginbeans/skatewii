@@ -1,17 +1,21 @@
 //! Skate 3's gameplay camera for the rules pack: its camera graph (`Default_cameragraph.stategraph`,
-//! compiled for the game's graph runner as `rules/camera/graph`) and the shots that graph chooses, with
+//! compiled for the game's graph runner as `rules/camera/graph`), the shots that graph chooses, with
 //! every blend shot's children (`camera_shots` collections of the tuning database, as
-//! `rules/camera/shots`; layout in `game_core::camera::shot`).
+//! `rules/camera/shots`; layout in `game_core::camera::shot`), and the camera shake's sample loop
+//! (`data/camera/1.shk`, as `rules/camera/shake`; layout in `game_core::camera::shake`).
 //!
 //! How shots are stored follows SK8-ENGINE/skate-3-rust-engine (GPL-3.0)
 //! crates/skate-game/src/camera/shot_data.rs: a blend's children are `RefSpec`s (the class hash, then
-//! the child collection's name hash).
+//! the child collection's name hash). The `.shk` text follows its crates/skate-game/src/camera/
+//! shake_data.rs: a sample count, then eight numbers a sample (a rotation's x y z and a fourth, a
+//! translation's x y z and a fourth; the fourths unused).
 
 use std::collections::HashMap;
 
+use game_core::camera::shake::Samples;
 use game_core::camera::shot::{
-    NONE, OPT_AVOID, OPT_DROP, OPT_FOLLOW, OPT_MIRROR, OPT_PREVIOUS, OPT_SNAP, REFS, Shot, ShotDef,
-    ShotSet, name_hash,
+    NONE, OPT_AVOID, OPT_DROP, OPT_FOLLOW, OPT_LOOK, OPT_MIRROR, OPT_PREVIOUS, OPT_SNAP, REFS,
+    Shot, ShotDef, ShotSet, name_hash,
 };
 use game_core::camera::tracker::RAD;
 
@@ -19,6 +23,38 @@ use crate::Res;
 
 pub const GRAPH: &str = "data/big/miscload.big::data/script/camera/Default_cameragraph.stategraph";
 pub const CLASS: &str = "camera_shots";
+/// The gameplay camera's shake samples (Skate 3 loads `1.shk` for the shake it shows, `2.shk` for a
+/// variant its preferences never pick).
+pub const SHAKE: &str = "data/big/miscload.big::data/camera/1.shk";
+
+/// Reads a `.shk` sample loop.
+pub fn shake(text: &str) -> Res<Samples> {
+    let mut words = text.split_whitespace();
+    let n: usize = words
+        .next()
+        .ok_or("camera shake: empty")?
+        .parse()
+        .map_err(|e| format!("camera shake: sample count: {e}"))?;
+    if n == 0 || n > 4096 {
+        return Err(format!("camera shake: {n} samples").into());
+    }
+    let mut rows = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut v = [0.0f32; 8];
+        for x in &mut v {
+            *x = words
+                .next()
+                .ok_or_else(|| format!("camera shake: sample {i} cut short"))?
+                .parse()
+                .map_err(|e| format!("camera shake: sample {i}: {e}"))?;
+        }
+        rows.push([v[0], v[1], v[2], v[4], v[5], v[6]]);
+    }
+    if words.next().is_some() {
+        return Err("camera shake: more numbers than samples".into());
+    }
+    Samples::from_rows(&rows).ok_or_else(|| "camera shake: a sample isn't a number".into())
+}
 
 /// The reference weights' fields, in the order the shots store them.
 const WEIGHTS: [&str; REFS] = [
@@ -130,6 +166,7 @@ pub fn shots(roots: &[String], field: &Field) -> Res<ShotSet> {
             (OPT_DROP, "OptionUseDropPredictor"),
             (OPT_AVOID, "OptionAvoidanceOverride"),
             (OPT_SNAP, "OptionSnapToReferencePoint"),
+            (OPT_LOOK, "OptionUseFreeCamStick"),
         ] {
             if flag(field, key, n) {
                 options |= o;
@@ -257,7 +294,22 @@ mod tests {
             put(n, "OptionMirrorForStance", vec![1]);
             put(n, "OptionCompassNorth", w(7));
         }
+        put("far", "OptionUseFreeCamStick", vec![1]);
         m
+    }
+
+    #[test]
+    fn reads_a_shake_loop_centred() {
+        // Two made-up samples: rotation x y z w, translation x y z w.
+        let s = shake("2\n0.1 0.0 0.0 1.0  1.0 2.0 3.0 9.0\n0.3 0.0 0.0 1.0  3.0 2.0 1.0 9.0\n")
+            .unwrap();
+        assert_eq!(s.rotation.len(), 2);
+        assert!((s.rotation[0][0] + 0.1).abs() < 1e-6 && (s.rotation[1][0] - 0.1).abs() < 1e-6);
+        assert_eq!(s.translation[0], [-1.0, 0.0, 1.0]);
+        assert!(Samples::parse(&s.encode()).is_some());
+        assert!(shake("2\n1 2 3 4 5 6 7 8\n").is_err(), "cut short");
+        assert!(shake("1\n1 2 3 4 5 6 7 8 9\n").is_err(), "too many");
+        assert!(shake("").is_err());
     }
 
     #[test]
@@ -278,6 +330,7 @@ mod tests {
         assert!((near.shot.heading + 150.0 * RAD).abs() < 1e-6);
         assert!(near.shot.has(OPT_MIRROR));
         assert_eq!(near.shot.compass, 7);
+        assert!(far.shot.has(OPT_LOOK) && !near.shot.has(OPT_LOOK));
         // Through the entry and back.
         let back = ShotSet::parse(&set.encode()).unwrap();
         assert_eq!(back.defs.len(), 3);
@@ -349,8 +402,14 @@ mod tests {
         assert_eq!(shots_named(&compiled).unwrap(), vec!["up_high", "ride"]);
         let mut g = game_core::camera::select::CamGraph::load(&compiled).unwrap();
         let mut c = game_core::camera::select::Conditions::default();
-        assert_eq!(g.update(&c, 1.0 / 60.0)[0].name, "ride");
+        assert_eq!(
+            g.update(&c, 1.0 / 60.0, &game_core::tuning::CamTuning::BUILT_IN)[0].name,
+            "ride"
+        );
         c.air_time = 1.0;
-        assert_eq!(g.update(&c, 1.0 / 60.0)[0].name, "Up_High");
+        assert_eq!(
+            g.update(&c, 1.0 / 60.0, &game_core::tuning::CamTuning::BUILT_IN)[0].name,
+            "Up_High"
+        );
     }
 }

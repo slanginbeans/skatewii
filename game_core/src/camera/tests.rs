@@ -378,6 +378,7 @@ fn collision_pulls_in_only_when_all_three_lines_are_blocked() {
             &shot,
             &subj,
             &DropPredictor::default(),
+            0.0,
             true,
             false,
             true,

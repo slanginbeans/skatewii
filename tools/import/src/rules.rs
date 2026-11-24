@@ -178,6 +178,23 @@ pub fn run<R: Read + Seek>(disc: &mut Disc<R>, args: &[String]) -> Res<()> {
         height: 0,
         gx_format: 0,
     });
+    // The camera shake's sample loop (without it the game uses its own).
+    match read_asset(disc, crate::camera::SHAKE)
+        .and_then(|b| crate::camera::shake(&String::from_utf8_lossy(&b)))
+    {
+        Ok(s) => {
+            println!("camera: shake loop of {} samples", s.rotation.len());
+            items.push(pack::Item {
+                name: game_core::camera::shake::ENTRY.into(),
+                kind: Kind::Data,
+                data: s.encode(),
+                width: 0,
+                height: 0,
+                gx_format: 0,
+            });
+        }
+        Err(e) => eprintln!("camera: no shake samples ({e}; the built-in loop stays)"),
+    }
     let mut shape_count = 0;
     for name in SHAPES {
         let text = read_asset(disc, &format!("{JOYSTICK}{name}.pat"))?;

@@ -165,7 +165,17 @@ impl State {
     }
 
     /// The flight's numbers and the look-at height's ramp from take-off to landing (SK8 manager_air.rs).
-    pub fn update_air(&mut self, s: &Subject, rig: &mut Rig, ground: bool, camera: Vec3) {
+    ///
+    /// Returns the ground's normal and the camera's velocity a tick ago when the camera's ground state
+    /// just came on moving into the ground: a landing, for the shake (SK8 manager_air.rs, the pair it
+    /// hands `ShakeEffect82E055D8`).
+    pub fn update_air(
+        &mut self,
+        s: &Subject,
+        rig: &mut Rig,
+        ground: bool,
+        camera: Vec3,
+    ) -> Option<(Vec3, Vec3)> {
         let previous_delta = self.landing_delta;
         let traj = s.trajectory;
         if let Some(tr) = traj {
@@ -222,11 +232,16 @@ impl State {
             rig.height_duration = tr.duration - tr.time;
             rig.height_time = 0.0;
         }
+        let mut landing = None;
         if ground {
+            if !self.was_ground && self.prev_vel.dot(s.ground_up) < 0.0 {
+                landing = Some((s.ground_up, self.prev_vel));
+            }
             self.landing_delta = 0.0;
         }
         self.was_ground = ground;
         self.prev_vel = rig.velocity;
+        landing
     }
 
     /// Slopes along the travel and the frontside angle (SK8 manager_incline.rs).
@@ -995,7 +1010,8 @@ impl Rig {
 }
 
 /// The shot's arm and options handed to the rig (SK8 manager_rig.rs `bind_shot`): heading and elevation
-/// targets, drop and collision raises, smoothing. Returns the heading mirror for the next tick's shot.
+/// targets, drop, free look and collision raises, smoothing. Returns the heading mirror for the next
+/// tick's shot.
 #[allow(clippy::too_many_arguments)]
 pub fn bind_shot(
     state: &mut State,
@@ -1003,6 +1019,7 @@ pub fn bind_shot(
     shot: &Shot,
     s: &Subject,
     drop: &DropPredictor,
+    look_elevation: f32,
     drop_on: bool,
     reset: bool,
     ground: bool,
@@ -1058,7 +1075,7 @@ pub fn bind_shot(
         )
     };
     rig.set_elevation(elevation, !reset);
-    rig.elevation_offset = drop_elevation;
+    rig.elevation_offset = drop_elevation + look_elevation;
     rig.additional_elevation = collision_elevation;
     rig.heading_on = shot.compass != 5;
     let heading_mirror = if shot.compass == 2 {

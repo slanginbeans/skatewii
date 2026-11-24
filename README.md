@@ -14,7 +14,9 @@ board meets the rail (50-50, 5-0, nosegrind, crooked, willy, feeble, smith, boar
 tailslide). Bails come from what the board hits: walls, hard or off-axis landings. Tricks score as in
 Skate 3 (its points, repetition penalty, grind, manual and grab curves, air height and spin), and linked
 tricks build a line with Skate 3's multiplier and line timer (shown under the score); a bail ends the line.
-Session markers (Z + d-pad) take you back to a spot, and a replay plays back the last 30 s.
+Session markers (Z + d-pad) take you back to a spot, and a replay plays back the last 30 s. The camera is
+Skate 3's: its Low or High camera (pause menu), free look on foot (Z + C-stick), shake on landings and
+slow motion through long airs.
 With your own Skate 3 disc the build also takes Skate 3's own riding numbers, trick points and
 flick shapes from it. Tested on the PC and on an emulated Wii CPU. **Not yet run on a Wii or in Dolphin.**
 Plan: [ROADMAP.md](ROADMAP.md).
@@ -54,6 +56,7 @@ X, Y). The default stance is goofy, as in Skate 3.
 | Z + d-pad up | Put a session marker down where the rider is: riding on the ground with the board upright, or standing on foot, on ground a checkpoint could go on (Skate 3's rules; one marker, a new one replaces it) |
 | Z + d-pad down, held | Back to the marker: after Skate 3's hold (0.2 s up to 100 m away, up to 1 s from 1 km; the screen washes out as it fills) the rider is put there at rest, facing the way he was, on the board or on foot as he was, as a respawn puts him back: the line ends. Not mid-bail or in the air (the hold waits) |
 | Z + d-pad left | Replay of the last 30 s (see below) |
+| Z + C-stick | Free look where Skate 3 has it: on foot (see below). On the board it does nothing (no flick, no dark catch) |
 | D-pad | Character gestures (with Skate 3's motion graphs) |
 
 Off the board (Y), with the board in hand:
@@ -64,6 +67,7 @@ Off the board (Y), with the board in hand:
 | A (hold) | Sprint: a burst that fades while held |
 | B | Jump |
 | Y | Back on the board, rolling the way the rider faces at his speed, in the stance he got off in. In the air (after B): he puts the board under his feet and lands on it |
+| Z + C-stick up / down | Free look: the camera rises to look down on him (up) or drops to look up (down), up to Skate 3's 30 degrees; let go and it eases back |
 | L (fully in) | Drop the board beside him (Skate 3's LT off the board) |
 | R (fully in) | Throw the board down ahead of him, rolling (Skate 3's RT) |
 
@@ -82,6 +86,25 @@ air), is a chord: it goes to the marker or the replay, not to the gestures, and 
 counts as let go for the riding until you really let it go, so it can't dark-catch a flip off the next
 pop. In the air the chord isn't taken: Z is the dark catch there and the d-pad its gestures. Z alone, and
 the d-pad without Z, work as before.
+
+**Z with the C-stick: free look.** The C-stick pushed off centre while Z is held, not in the air, is the
+look stick: it never reaches the riding (no flick, manual or board adjust), and its Z counts as let go
+until you let go of it (no dark catch). The camera only moves where Skate 3 lets its look stick move it:
+in the shots with `OptionUseFreeCamStick`, which are the on-foot shot (`offboard_ground`) and the drop-in.
+On the board the chord just does nothing. As in Skate 3 it tilts the camera up and down (Skate 3's
+`FreeCamElevationOffset`, 30 degrees, eased in at 2 a second); its heading offset is 0 on the disc, so
+left / right doesn't turn it. Let go of Z (or centre the stick) and the camera eases back to the shot; a
+stick still off centre stays the look's until centred. A C-stick already pushed when Z goes down stays the
+riding's (a wind-up isn't cut). In the air Z is the dark catch and the C-stick flicks, as before.
+
+**The camera.** Besides the shots, Skate 3's camera shakes and slows time:
+- Shake: a hand-held sway that grows with speed, and a jolt on every landing that dies away over a few
+  seconds (Skate 3's `camera_shake` numbers; its close low camera sways, the high camera's longer arm
+  hardly does). A bail fades the shake out.
+- Slow motion: an air on the board with over 2 s of predicted flight (not off a grind) slows the game to
+  as little as 35 ticks a second (0.58x) a fifth of the way through the flight, back to full speed by half
+  way, as Skate 3's low camera does (its high camera never slows). Only the clock slows: the game runs
+  the same 1/60 s steps, fewer of them a frame, drawn in between; the replay plays it back slowed.
 
 **Replay** (Z + d-pad left): the last 30 s as they were drawn, opened paused on the latest moment; the
 riding waits meanwhile and goes on exactly where it stopped when you leave.
@@ -103,10 +126,13 @@ With parks converted from your own disc, the game starts in a **start menu** lis
 skate parks the build converted, then the built-in demo park), with the last one you chose highlighted
 (`settings.txt` in the app folder remembers it; the first time, the build's default). Up/down on the d-pad or
 the control stick moves, A (or START) rides. **START** while riding opens the **pause menu**: Resume, Change
-location (the same list; B goes back), Draw distance, Respawn (back to the park's start), Quit to loader. B or
-START resumes. **Draw distance** (left/right, 40 to 120 m in steps of 10, 90 by default) sets how far a city
-district is drawn and read from the card, with the fog following it: shorter runs faster on a real Wii.
-`settings.txt` remembers it too.
+location (the same list; B goes back), Draw distance, Camera, Respawn (back to the park's start), Quit to
+loader. B or START resumes. **Draw distance** (left/right, 40 to 120 m in steps of 10, 90 by default) sets how
+far a city district is drawn and read from the card, with the fog following it: shorter runs faster on a
+real Wii. **Camera** (left/right or A) is Skate 3's Camera Angle: **Low** (the default, as Skate 3's camera
+preferences start; close behind the board and nearly level with it) or **High** (Skate 3's high camera,
+about 3 to 4.4 m back and 17 to 30 degrees up). `settings.txt` remembers both (a file from an older build
+still loads, with the default camera).
 While a menu is open the riding waits and the pad only drives the menu (the d-pad's gestures don't fire, and
 the A that chose an item is not a push until you let go of it). Changing location shows a loading screen
 while the park is read from the SD card (Dolphin reads the biggest, 4.2 MB, in well under a second; a real
@@ -131,7 +157,8 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
   scoring/         Skate 3's trick scoring: its trick catalogue, rewards, combo multiplier and lines
   marker.rs        session markers and the Z + d-pad chord
   replay.rs        the 30 s replay: the rolling recording of what was drawn, and its player
-  camera/          Skate 3's camera: shots and blends, the camera graph's choice, rig, collision, framing
+  camera/          Skate 3's camera: shots and blends, the camera graph's choice, rig, collision, framing,
+                   free look, shake, slow motion
   park.rs          height-field park made of blocks and ramps (placeholder geometry in code)
   game.rs          update + render loop; draws only through gfx::Gfx
   menu.rs          locations (the index the importer writes), start and pause menus

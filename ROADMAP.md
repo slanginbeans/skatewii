@@ -160,7 +160,10 @@ content second.
   three-line collision with the elevation raise, breadcrumb avoidance, the drop predictor, framing yaw
   and dutch roll, the lens's field of view for the TV's aspect; flatground's own shots and choice without
   the disc; the reset fade drawn
-- [ ] Camera, next: free look, camera shake, slow motion on long airs, the high camera
+- [x] Camera polish (`camera::look`, `shake`, `slow_motion`, `menu::CameraAngle`): free look on foot on
+  Z + C-stick (Skate 3's look stick, 30 degrees of tilt), Skate 3's Low / High camera in the pause menu
+  (saved), its shake (a sway with speed, a jolt on landings) and its slow motion on long airs (a slower
+  tick clock; the simulation is the same tick by tick)
 - [x] Off the board (docs/graph-runner.md "Off the board"): Y gets off and on, timed by Skate 3's dismount
   and mount clips; walking, running and the sprint burst on Skate 3's biped controller and curves; the
   jump with MatchAirTime; the graphs' `LocoState`, slope and air states; the off-board camera conditions
