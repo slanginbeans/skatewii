@@ -1,10 +1,112 @@
 //! Camera tuning: the numbers Skate 3's gameplay camera reads from its tuning database
 //! (`camera_tracker`, `camera/dynamics`, `camera/rotation`, `camera/subject_tracker`, `camera_compass`,
-//! `camera_positioner`, `camera_droppredictor`, `camera_lag_profile`). The built-in values are
-//! flatground's own; the player's disc supplies Skate 3's through the rules pack (`fg_import rules`).
-//! The shots themselves are a separate entry (`camera::shot`).
+//! `camera_positioner`, `camera_droppredictor`, `camera_lag_profile`, `camera/freecam`, `camera_shake`,
+//! `slowmotion_controller`). The player's disc supplies Skate 3's through the rules pack
+//! (`fg_import rules`); the free look, shake and slow motion built-ins are Skate 3's own numbers (read
+//! off the disc). The shots themselves are a separate entry (`camera::shot`).
 
 use super::Curve;
+
+/// Skate 3's camera shake (`camera_shake/default`, SK8 camera/shake.rs `ShakeSettings`): a sway that
+/// grows with speed, plus a one-shot impulse on landings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShakeTuning {
+    /// Bezier control points (x, y in the first two lanes) mapping speed over the top speed to the
+    /// amplitude's and the frequency's share between their minimum and maximum.
+    pub amplitude_curve: [[f32; 4]; 4],
+    pub frequency_curve: [[f32; 4]; 4],
+    /// The landing impulse: its most, the landing speeds it grows between, its frequency, its decay a
+    /// tick.
+    pub impulse_magnitude: f32,
+    pub impulse_min_speed: f32,
+    pub impulse_max_speed: f32,
+    pub impulse_frequency: f32,
+    pub impulse_decay: f32,
+    pub amplitude_min: f32,
+    pub amplitude_max: f32,
+    pub amplitude_top_speed: f32,
+    pub frequency_min: f32,
+    pub frequency_max: f32,
+    pub frequency_top_speed: f32,
+    /// Samples a second at frequency 1.
+    pub samples_per_second: f32,
+    pub translation: f32,
+    pub rotation: f32,
+    /// The roll's share of the rotation.
+    pub dutch: f32,
+}
+
+impl ShakeTuning {
+    /// Skate 3's `camera_shake/default`.
+    pub const BUILT_IN: ShakeTuning = ShakeTuning {
+        amplitude_curve: [
+            [0.991_666_7, 1.0, 0.0, 0.0],
+            [0.658_333_4, 1.034_483, 0.0, 0.0],
+            [1.141_667, -0.103_448_3, 0.0, 0.0],
+            [-0.008_333_334, 0.0, 0.0, 0.0],
+        ],
+        frequency_curve: [
+            [1.0, 1.0, 0.0, 0.0],
+            [0.7, 0.913_793_1, 0.0, 0.0],
+            [0.883_333_3, -0.068_965_55, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ],
+        impulse_magnitude: 0.5,
+        impulse_min_speed: 0.0,
+        impulse_max_speed: 0.0,
+        impulse_frequency: 0.5,
+        impulse_decay: 0.02,
+        amplitude_min: 0.3,
+        amplitude_max: 6.0,
+        amplitude_top_speed: 26.0,
+        frequency_min: 0.02,
+        frequency_max: 0.5,
+        frequency_top_speed: 20.0,
+        samples_per_second: 90.0,
+        translation: 0.05,
+        rotation: 4.0,
+        dutch: 0.1,
+    };
+
+    fn set(&mut self, field: &str, f: Option<f32>, v: &[f32]) -> bool {
+        let matrix = |m: &mut [[f32; 4]; 4]| {
+            if v.len() != 16 || v.iter().any(|x| !x.is_finite()) {
+                return false;
+            }
+            for (i, x) in v.iter().enumerate() {
+                m[i / 4][i % 4] = *x;
+            }
+            true
+        };
+        let target = match field {
+            "AmplitudeCurve" => return matrix(&mut self.amplitude_curve),
+            "FrequencyCurve" => return matrix(&mut self.frequency_curve),
+            "OneShotMagnitude" => &mut self.impulse_magnitude,
+            "OneShotMinVelocity" => &mut self.impulse_min_speed,
+            "OneShotMaxVelocity" => &mut self.impulse_max_speed,
+            "OneShotFrequency" => &mut self.impulse_frequency,
+            "OneShotDecay" => &mut self.impulse_decay,
+            "AmplitudeMin" => &mut self.amplitude_min,
+            "AmplitudeMax" => &mut self.amplitude_max,
+            "AmplitudeTopSkaterSpeed" => &mut self.amplitude_top_speed,
+            "FrequencyMin" => &mut self.frequency_min,
+            "FrequencyMax" => &mut self.frequency_max,
+            "FrequencyTopSkaterSpeed" => &mut self.frequency_top_speed,
+            "DataFPS" => &mut self.samples_per_second,
+            "TranslationMultiplier" => &mut self.translation,
+            "RotationMultiplier" => &mut self.rotation,
+            "DutchMultiplier" => &mut self.dutch,
+            _ => return false,
+        };
+        match f {
+            Some(f) => {
+                *target = f;
+                true
+            }
+            None => false,
+        }
+    }
+}
 
 /// An angle tracker (degrees): speed clamp, acceleration clamps far from and near the target, and the
 /// error band between them.
@@ -75,6 +177,17 @@ pub struct CamTuning {
     pub push_max: f32,
     pub pump_curve: Curve,
     pub pump_max: f32,
+    /// Free look (`camera/freecam`, SK8 look_input.rs): the stick's full deflection turns the arm this
+    /// far (deg), and the offset closes on that this much a second (times 1/60 a tick).
+    pub look_heading_offset: f32,
+    pub look_heading_speed: f32,
+    pub look_elevation_offset: f32,
+    pub look_elevation_speed: f32,
+    pub shake: ShakeTuning,
+    /// Slow motion (`slowmotion_controller/default`, SK8 slow_motion.rs): the share of the way from 60
+    /// to `slow_fps` simulation ticks a second against the air's progress.
+    pub slow_curve: Curve,
+    pub slow_fps: f32,
 }
 
 impl CamTuning {
@@ -153,10 +266,38 @@ impl CamTuning {
         push_max: 0.75,
         pump_curve: Curve::new(&[(0.0, 1.0), (0.4, 0.8), (0.75, 0.45), (1.0, 0.02)]),
         pump_max: 0.85,
+        // Skate 3's `camera/freecam`: no heading, up to 30 degrees of elevation.
+        look_heading_offset: 0.0,
+        look_heading_speed: 1.0,
+        look_elevation_offset: 30.0,
+        look_elevation_speed: 2.0,
+        shake: ShakeTuning::BUILT_IN,
+        // Skate 3's `slowmotion_controller/default`: down to 35 ticks a second a fifth of the way
+        // through the air, back to 60 by half way.
+        slow_curve: Curve::new(&[
+            (0.001_007_049, 0.0),
+            (0.033_232_63, 0.228_682_2),
+            (0.061_430_01, 0.457_364_3),
+            (0.097_683_79, 0.709_302_3),
+            (0.143_001, 0.945_736_4),
+            (0.199_395_8, 1.0),
+            (0.253_776_4, 0.957_364_3),
+            (0.311_178_2, 0.736_434_1),
+            (0.369_587_1, 0.461_240_3),
+            (0.445_115_8, 0.205_426_3),
+            (0.547_834_9, 0.027_131_8),
+            (0.710_976_8, 0.0),
+            (0.845_921_5, 0.0),
+            (0.907_351_4, 0.0),
+            (0.950_654_6, 0.0),
+            (1.0, 0.0),
+        ]),
+        slow_fps: 35.0,
     };
 
-    /// Takes over a value from the rules pack (`class/key/field`). Returns whether it was one of these.
-    pub(super) fn set(&mut self, name: &str, f: Option<f32>, c: Option<Curve>) -> bool {
+    /// Takes over a value from the rules pack (`class/key/field`; `v`: all its numbers). Returns whether
+    /// it was one of these.
+    pub(super) fn set(&mut self, name: &str, f: Option<f32>, c: Option<Curve>, v: &[f32]) -> bool {
         macro_rules! scalar {
             ($field:expr) => {
                 match f {
@@ -178,6 +319,9 @@ impl CamTuning {
                     None => false,
                 }
             };
+        }
+        if let Some(field) = name.strip_prefix("camera_shake/default/") {
+            return self.shake.set(field, f, v);
         }
         if let Some(rest) = name.strip_prefix("camera_tracker/") {
             let (key, field) = rest.split_once('/').unwrap_or((rest, ""));
@@ -244,6 +388,18 @@ impl CamTuning {
             "camera_lag_profile/push/MaxSmoothing" => scalar!(self.push_max),
             "camera_lag_profile/pump/Curve" => curve!(self.pump_curve),
             "camera_lag_profile/pump/MaxSmoothing" => scalar!(self.pump_max),
+            "camera/freecam/FreeCamHeadingOffset" => scalar!(self.look_heading_offset),
+            "camera/freecam/FreeCamHeadingSpeed" => scalar!(self.look_heading_speed),
+            "camera/freecam/FreeCamElevationOffset" => scalar!(self.look_elevation_offset),
+            "camera/freecam/FreeCamElevationSpeed" => scalar!(self.look_elevation_speed),
+            "slowmotion_controller/default/timescale" => curve!(self.slow_curve),
+            "slowmotion_controller/default/fps_at_scale_one" => match f {
+                Some(f) if (1.0..=60.0).contains(&f) => {
+                    self.slow_fps = f;
+                    true
+                }
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -307,4 +463,27 @@ pub const PATHS: &[&str] = &[
     "camera_lag_profile/push/MaxSmoothing",
     "camera_lag_profile/pump/Curve",
     "camera_lag_profile/pump/MaxSmoothing",
+    "camera/freecam/FreeCamHeadingOffset",
+    "camera/freecam/FreeCamHeadingSpeed",
+    "camera/freecam/FreeCamElevationOffset",
+    "camera/freecam/FreeCamElevationSpeed",
+    "camera_shake/default/AmplitudeCurve",
+    "camera_shake/default/FrequencyCurve",
+    "camera_shake/default/OneShotMagnitude",
+    "camera_shake/default/OneShotMinVelocity",
+    "camera_shake/default/OneShotMaxVelocity",
+    "camera_shake/default/OneShotFrequency",
+    "camera_shake/default/OneShotDecay",
+    "camera_shake/default/AmplitudeMin",
+    "camera_shake/default/AmplitudeMax",
+    "camera_shake/default/AmplitudeTopSkaterSpeed",
+    "camera_shake/default/FrequencyMin",
+    "camera_shake/default/FrequencyMax",
+    "camera_shake/default/FrequencyTopSkaterSpeed",
+    "camera_shake/default/DataFPS",
+    "camera_shake/default/TranslationMultiplier",
+    "camera_shake/default/RotationMultiplier",
+    "camera_shake/default/DutchMultiplier",
+    "slowmotion_controller/default/timescale",
+    "slowmotion_controller/default/fps_at_scale_one",
 ];

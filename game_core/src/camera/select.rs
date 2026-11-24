@@ -6,8 +6,10 @@
 //! crates/skate-game/src/camera/graph_conditions.rs): what the skater does (wiping out, off the board,
 //! grinding, in a manual, preparing to jump), the predicted flight (air time, top height, landing
 //! height, the top against the camera's distance at take-off, launch and landing slopes, reentry), how
-//! long the steering has been off centre, the rail's slope, which shot is on. Its behaviour
-//! `CameraChooseShot` picks a shot by name with optional transition times in and out.
+//! long the steering has been off centre, the rail's slope, which shot is on, which camera the player
+//! chose (`IsCameraTypeActive`: 0 Low, 1 High; the graph has a sub-graph for each). Its behaviour
+//! `CameraChooseShot` picks a shot by name with optional transition times in and out, and
+//! `SlowMotionController` slows the simulation through a long air ([`super::slow_motion`]).
 
 use alloc::collections::BTreeSet;
 use alloc::string::String;
@@ -17,6 +19,8 @@ use crate::graph::ops::{Cmp, Num};
 use crate::graph::{Controller, Frame, Graph, Host, OP_BEHAVIOUR, OP_CONDITION, OpId, Pack};
 
 use super::shot::{ShotSet, name_hash};
+use super::slow_motion::{self, SlowMotion};
+use crate::tuning::CamTuning;
 
 pub const ENTRY: &str = "rules/camera/graph";
 /// The graph's name in the entry.
@@ -61,7 +65,13 @@ pub struct Conditions {
     pub turning_time: f32,
     /// The current shot's key.
     pub shot: Option<u64>,
+    /// The camera the player chose: [`LOW`] or [`HIGH`].
+    pub camera_type: u32,
 }
+
+/// Skate 3's camera types (`IsCameraTypeActive`'s `type`).
+pub const LOW: u32 = 0;
+pub const HIGH: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Flag {
@@ -108,7 +118,7 @@ enum Value {
 enum Op {
     Flag(Flag),
     Num(Value, Num),
-    /// `IsCameraTypeActive`: 0 is the low camera, flatground's.
+    /// `IsCameraTypeActive`: 0 the low camera, 1 the high.
     Type(u32),
     Previous(Vec<u64>),
     /// `IsWipeoutBodyTweak`: none of the named tweaks happen in flatground's wipeouts.
@@ -118,6 +128,8 @@ enum Op {
         transition_in: f32,
         transition_out: f32,
     },
+    /// `SlowMotionController`.
+    SlowMotion,
     Ignore,
 }
 
@@ -138,6 +150,9 @@ pub struct CamGraph {
     controller: Controller,
     /// Names the graph uses that flatground doesn't implement (logged once).
     pub unsupported: BTreeSet<String>,
+    /// The slow-motion behaviour while it runs, and the simulation rate it asks for (ticks a second).
+    slow: Option<SlowMotion>,
+    pub rate: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -278,9 +293,9 @@ impl CamGraph {
                             },
                             None => Op::Ignore,
                         },
-                        // A debug print, and Skate 3's slow motion on long airs (flatground keeps
-                        // real time).
-                        "PrintText2D" | "SlowMotionController" => Op::Ignore,
+                        "SlowMotionController" => Op::SlowMotion,
+                        // A debug print.
+                        "PrintText2D" => Op::Ignore,
                         _ => {
                             unsupported.insert(String::from(name));
                             Op::Ignore
@@ -302,6 +317,8 @@ impl CamGraph {
             names,
             controller,
             unsupported,
+            slow: None,
+            rate: slow_motion::NORMAL,
         })
     }
 
@@ -313,15 +330,24 @@ impl CamGraph {
         })
     }
 
-    /// One tick: the shots chosen (in the order their states were entered).
-    pub fn update(&mut self, c: &Conditions, dt: f32) -> Vec<Choice> {
+    /// One tick: the shots chosen (in the order their states were entered); [`CamGraph::rate`] is the
+    /// simulation rate the slow-motion behaviour asks for after it.
+    pub fn update(&mut self, c: &Conditions, dt: f32, t: &CamTuning) -> Vec<Choice> {
         let mut host = CamHost {
             ops: &self.ops,
             c,
             chosen: Vec::new(),
+            tuning: t,
+            slow: &mut self.slow,
+            rate: &mut self.rate,
         };
         self.controller.update(&self.graph, dt, &mut host);
         host.chosen
+    }
+
+    /// The slow-motion behaviour is running.
+    pub fn slowing(&self) -> bool {
+        self.slow.is_some()
     }
 
     /// The current state's path (for the log).
@@ -338,6 +364,8 @@ impl CamGraph {
 
     pub fn restart(&mut self) {
         self.controller = Controller::new(&self.graph);
+        self.slow = None;
+        self.rate = slow_motion::NORMAL;
     }
 }
 
@@ -345,6 +373,9 @@ struct CamHost<'a> {
     ops: &'a [Op],
     c: &'a Conditions,
     chosen: Vec<Choice>,
+    tuning: &'a CamTuning,
+    slow: &'a mut Option<SlowMotion>,
+    rate: &'a mut f32,
 }
 
 impl Host for CamHost<'_> {
@@ -386,7 +417,7 @@ impl Host for CamHost<'_> {
                 Value::TurningTime => c.turning_time,
                 Value::SinceInput => 0.0,
             }),
-            Op::Type(t) => *t == 0,
+            Op::Type(t) => *t == c.camera_type,
             Op::Previous(keys) => c.shot.is_some_and(|k| keys.contains(&k)),
             Op::Tweak(t) => *t == 0,
             _ => false,
@@ -394,28 +425,60 @@ impl Host for CamHost<'_> {
     }
 
     fn begin(&mut self, op: OpId, _frame: &Frame) {
-        if let Op::Choose {
-            name,
-            transition_in,
-            transition_out,
-        } = &self.ops[op as usize]
-        {
-            self.chosen.push(Choice {
+        match &self.ops[op as usize] {
+            Op::Choose {
+                name,
+                transition_in,
+                transition_out,
+            } => self.chosen.push(Choice {
                 name: name.clone(),
                 transition_in: *transition_in,
                 transition_out: *transition_out,
-            });
+            }),
+            Op::SlowMotion => {
+                let (s, rate) = SlowMotion::begin(self.tuning);
+                *self.slow = Some(s);
+                *self.rate = rate;
+            }
+            _ => {}
         }
     }
 
-    fn update(&mut self, _op: OpId, _frame: &Frame) {}
-    fn end(&mut self, _op: OpId, _frame: &Frame) {}
+    fn update(&mut self, op: OpId, frame: &Frame) {
+        if self.ops[op as usize] == Op::SlowMotion
+            && let Some(s) = self.slow
+        {
+            *self.rate = s.update(frame.dt, self.c.air_time, self.tuning);
+        }
+    }
+
+    fn end(&mut self, op: OpId, _frame: &Frame) {
+        if self.ops[op as usize] == Op::SlowMotion && self.slow.take().is_some() {
+            *self.rate = slow_motion::NORMAL;
+        }
+    }
     fn hook(&mut self, _op: OpId, _frame: &Frame) {}
+}
+
+/// flatground's stand-in for the graph's slow-motion state (without Skate 3's graph): the low camera's
+/// `OnBoard/Air/MegaParkAirBugFix`, on the board in the air, not off a grind or re-entering a
+/// transition, with over 2 s of predicted air time (Skate 3's condition and threshold).
+pub fn built_in_slow(c: &Conditions) -> bool {
+    c.camera_type == LOW
+        && !c.wiping_out
+        && !c.off_board
+        && c.onboard_air
+        && !c.on_ground
+        && !c.grinding
+        && !c.reentry
+        && !c.was_grinding
+        && c.air_time > 2.0
 }
 
 /// flatground's own shot choice (without Skate 3's graph): wipeouts and run-outs from high up, grinds
 /// beside the rail, small airs keep the shot, long airs pull back, manuals low, hard turns swing, else
-/// the riding shot. Thresholds are ours.
+/// the riding shot; the high camera rides, grinds, manuals and flies on Skate 3's high shots' names.
+/// Thresholds are ours.
 pub fn built_in(c: &Conditions, set: &ShotSet) -> Choice {
     let pick = |name: &str, tin: f32, tout: f32| Choice {
         name: String::from(if set.find(name).is_some() {
@@ -427,12 +490,15 @@ pub fn built_in(c: &Conditions, set: &ShotSet) -> Choice {
         transition_out: tout,
     };
     let flying = !c.on_ground && !c.grinding && c.air_time > 0.12;
+    let high = c.camera_type == HIGH;
     if c.wiping_out {
         pick("wipeout", 0.15, 0.8)
     } else if c.off_board {
         pick("offboard_ground", 0.8, 0.5)
     } else if c.was_grinding && flying {
         pick("grind_exit", 0.6, 0.3)
+    } else if c.grinding && high {
+        pick("high_grind", 0.5, 0.3)
     } else if c.grinding {
         if c.ledge_left {
             pick("bl_grind_ledge_left", 1.0, 0.3)
@@ -441,6 +507,12 @@ pub fn built_in(c: &Conditions, set: &ShotSet) -> Choice {
         } else {
             pick("bl_grind", 0.5, 0.3)
         }
+    } else if flying && high {
+        if c.air_time > 1.3 || c.max_height > 1.3 {
+            pick("bl_high_air", -1.0, 0.5)
+        } else {
+            pick("low_ollie", 0.8, 0.4)
+        }
     } else if flying {
         if c.air_time > 1.3 || c.max_height > 1.3 {
             pick("bl_air", -1.0, 0.5)
@@ -448,7 +520,9 @@ pub fn built_in(c: &Conditions, set: &ShotSet) -> Choice {
             pick("low_ollie", 0.8, 0.4)
         }
     } else if c.manual {
-        pick("bl_manual", 1.5, -1.0)
+        pick(if high { "high_manual" } else { "bl_manual" }, 1.5, -1.0)
+    } else if high {
+        pick("bl_high_chase", -1.0, -1.0)
     } else if !c.preparing && c.centred_time < 0.25 && c.speed > 1.0 {
         pick("bl_turning", -1.0, -1.0)
     } else {

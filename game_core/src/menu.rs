@@ -126,12 +126,58 @@ pub fn write_index(locations: &[Location], default: Option<&str>) -> String {
     out
 }
 
+/// Skate 3's Camera Angle setting (Game Settings, "High" / "Low"; SK8 docs/hails-additions/
+/// 21-low-camera.md): which half of the camera graph runs. Skate 3's camera preferences start at 0, the
+/// low camera (its first boot asks the player), and flatground's camera has always been the low one:
+/// Low is the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CameraAngle {
+    #[default]
+    Low,
+    High,
+}
+
+impl CameraAngle {
+    /// The camera graph's `IsCameraTypeActive` type: 0 Low, 1 High.
+    pub fn graph_type(self) -> u32 {
+        match self {
+            CameraAngle::Low => crate::camera::select::LOW,
+            CameraAngle::High => crate::camera::select::HIGH,
+        }
+    }
+
+    pub fn of_graph_type(t: u32) -> CameraAngle {
+        if t == crate::camera::select::HIGH {
+            CameraAngle::High
+        } else {
+            CameraAngle::Low
+        }
+    }
+
+    /// As the settings file and the menu write it.
+    pub fn name(self) -> &'static str {
+        match self {
+            CameraAngle::Low => "low",
+            CameraAngle::High => "high",
+        }
+    }
+
+    pub fn other(self) -> CameraAngle {
+        match self {
+            CameraAngle::Low => CameraAngle::High,
+            CameraAngle::High => CameraAngle::Low,
+        }
+    }
+}
+
 /// What the settings file in the app folder (`settings.txt`) remembers: `location <id>`, the last location
-/// chosen, and `draw_distance <m>`, a district's draw distance.
+/// chosen, `draw_distance <m>`, a district's draw distance, and `camera low|high`, the camera angle. A
+/// line it doesn't know is skipped and one it lacks keeps the default, so older files still load.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub location: Option<String>,
     pub draw_distance: Option<u16>,
+    pub camera: Option<CameraAngle>,
 }
 
 pub fn parse_settings(text: &str) -> Settings {
@@ -141,14 +187,19 @@ pub fn parse_settings(text: &str) -> Settings {
         match (w.next(), w.next()) {
             (Some("location"), Some(id)) => s.location = Some(id.to_string()),
             (Some("draw_distance"), Some(d)) => s.draw_distance = d.parse().ok(),
+            (Some("camera"), Some("low")) => s.camera = Some(CameraAngle::Low),
+            (Some("camera"), Some("high")) => s.camera = Some(CameraAngle::High),
             _ => {}
         }
     }
     s
 }
 
-pub fn write_settings(location: &str, draw_distance: u16) -> String {
-    format!("# flatground settings\nlocation {location}\ndraw_distance {draw_distance}\n")
+pub fn write_settings(location: &str, draw_distance: u16, camera: CameraAngle) -> String {
+    format!(
+        "# flatground settings\nlocation {location}\ndraw_distance {draw_distance}\ncamera {}\n",
+        camera.name()
+    )
 }
 
 /// The location to start in: the last one chosen (settings), else the index's default, else the first.
@@ -178,6 +229,8 @@ pub enum Choice {
     Quit,
     /// The draw distance was changed to this (m); the menu stays open.
     DrawDistance(u16),
+    /// The camera angle was changed to this; the menu stays open.
+    Camera(CameraAngle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,15 +243,18 @@ pub enum Screen {
     Locations,
 }
 
-pub const PAUSE_ITEMS: [&str; 5] = [
+pub const PAUSE_ITEMS: [&str; 6] = [
     "RESUME",
     "CHANGE LOCATION",
     "DRAW DISTANCE",
+    "CAMERA",
     "RESPAWN",
     "QUIT TO LOADER",
 ];
 /// The pause menu's draw distance row: left and right change it by [`DISTANCE_STEP`].
 const DISTANCE_ROW: usize = 2;
+/// The camera angle row: left, right or A switch between Low and High.
+const CAMERA_ROW: usize = 3;
 pub const DISTANCE_STEP: u16 = 10;
 
 /// Holding a direction moves again after this long (s), then every [`REPEAT`].
@@ -222,6 +278,8 @@ pub struct Menu {
     /// The draw distance shown (m), and whether left or right was held last frame.
     pub draw_distance: u16,
     side: i8,
+    /// The camera angle shown.
+    pub camera: CameraAngle,
 }
 
 impl Menu {
@@ -236,6 +294,7 @@ impl Menu {
             repeat_in: 0.0,
             draw_distance: crate::world::DRAW_DISTANCE as u16,
             side: 0,
+            camera: CameraAngle::default(),
         }
     }
 
@@ -321,6 +380,10 @@ impl Menu {
                 return Some(Choice::DrawDistance(d));
             }
         }
+        if self.screen == Screen::Pause && self.cursor == CAMERA_ROW && (turned || accept) {
+            self.camera = self.camera.other();
+            return Some(Choice::Camera(self.camera));
+        }
         match self.screen {
             Screen::Start => (accept || start).then_some(Choice::Ride(self.cursor)),
             Screen::Locations if accept => Some(Choice::Ride(self.cursor)),
@@ -339,8 +402,8 @@ impl Menu {
                     self.cursor = current.min(locations.saturating_sub(1));
                     None
                 }
-                DISTANCE_ROW => None,
-                3 => Some(Choice::Respawn),
+                DISTANCE_ROW | CAMERA_ROW => None,
+                4 => Some(Choice::Respawn),
                 _ => Some(Choice::Quit),
             },
             Screen::Pause => None,
@@ -358,6 +421,8 @@ impl Menu {
                     .map(|(i, s)| {
                         if i == DISTANCE_ROW {
                             format!("< {s} {} M >", self.draw_distance)
+                        } else if i == CAMERA_ROW {
+                            format!("< {s} {} >", self.camera.name().to_ascii_uppercase())
                         } else {
                             s.to_string()
                         }
@@ -421,7 +486,9 @@ impl Menu {
         }
         let help = match self.screen {
             Screen::Start => "UP/DOWN CHOOSE  A RIDE",
-            Screen::Pause if self.cursor == DISTANCE_ROW => "LEFT/RIGHT CHANGE  B/START RESUME",
+            Screen::Pause if self.cursor == DISTANCE_ROW || self.cursor == CAMERA_ROW => {
+                "LEFT/RIGHT CHANGE  B/START RESUME"
+            }
             Screen::Pause => "A SELECT  B/START RESUME",
             Screen::Locations => "A RIDE  B BACK",
         };
@@ -586,7 +653,7 @@ mod tests {
         assert_eq!(tap(&mut m, btn::A, 4, 2), Some(Choice::Ride(1)));
         // Respawn and quit.
         let mut m = Menu::pause(0, 90);
-        for _ in 0..3 {
+        for _ in 0..4 {
             tap(&mut m, btn::DPAD_DOWN, 4, 0);
         }
         assert_eq!(tap(&mut m, btn::A, 4, 0), Some(Choice::Respawn));
@@ -636,6 +703,43 @@ mod tests {
         let mut other = MeshBuilder::new();
         Menu::pause(0, 120).draw(&mut other, &[], 0);
         assert_ne!(mesh.verts, other.verts);
+    }
+
+    #[test]
+    fn the_camera_row_switches_between_low_and_high() {
+        let mut m = Menu::pause(0, 90);
+        assert_eq!(m.camera, CameraAngle::Low, "Skate 3's default");
+        for _ in 0..3 {
+            tap(&mut m, btn::DPAD_DOWN, 4, 0);
+        }
+        assert_eq!(m.cursor, CAMERA_ROW);
+        assert_eq!(
+            tap(&mut m, btn::DPAD_RIGHT, 4, 0),
+            Some(Choice::Camera(CameraAngle::High))
+        );
+        assert_eq!(
+            tap(&mut m, btn::DPAD_LEFT, 4, 0),
+            Some(Choice::Camera(CameraAngle::Low))
+        );
+        assert_eq!(
+            tap(&mut m, btn::A, 4, 0),
+            Some(Choice::Camera(CameraAngle::High))
+        );
+        // The row shows the angle.
+        let mut high = MeshBuilder::new();
+        m.draw(&mut high, &[], 0);
+        m.camera = CameraAngle::Low;
+        let mut low = MeshBuilder::new();
+        m.draw(&mut low, &[], 0);
+        assert_ne!(high.verts, low.verts);
+        assert_eq!(
+            CameraAngle::of_graph_type(CameraAngle::High.graph_type()),
+            CameraAngle::High
+        );
+        assert_eq!(
+            CameraAngle::of_graph_type(CameraAngle::Low.graph_type()),
+            CameraAngle::Low
+        );
     }
 
     #[test]
@@ -703,17 +807,28 @@ mod tests {
 
     #[test]
     fn settings_and_the_start_location() {
-        let text = write_settings("MegaPark", 70);
+        let text = write_settings("MegaPark", 70, CameraAngle::High);
         let s = parse_settings(&text);
         assert_eq!(s.location.as_deref(), Some("MegaPark"));
         assert_eq!(s.draw_distance, Some(70));
-        assert_eq!(parse_settings("garbage\nlocation\n"), Settings::default());
+        assert_eq!(s.camera, Some(CameraAngle::High));
+        assert_eq!(
+            parse_settings(&write_settings("A", 90, CameraAngle::Low)).camera,
+            Some(CameraAngle::Low)
+        );
+        assert_eq!(
+            parse_settings("garbage\nlocation\ncamera sideways\n"),
+            Settings::default()
+        );
         // A file from before the draw distance setting.
         let old = parse_settings("# flatground settings\nlocation DownTown\n");
         assert_eq!(
-            (old.location.as_deref(), old.draw_distance),
-            (Some("DownTown"), None)
+            (old.location.as_deref(), old.draw_distance, old.camera),
+            (Some("DownTown"), None, None)
         );
+        // And one from before the camera setting: the default camera.
+        let old = parse_settings("# flatground settings\nlocation DownTown\ndraw_distance 70\n");
+        assert_eq!((old.draw_distance, old.camera), (Some(70), None));
         let list = vec![
             Location {
                 id: "A".into(),

@@ -1,12 +1,15 @@
 //! flatground's own camera shots, used when the player's disc hasn't supplied Skate 3's
 //! (`rules/camera/shots`). The tree has the shots flatground's own shot choice (`select::built_in`)
-//! asks for, named like the camera graph's so either choice finds them. The numbers are ours.
+//! asks for, named like the camera graph's so either choice finds them. The low camera's numbers are
+//! ours; the high camera's shots (`bl_high_chase`, `high_grind`, `high_manual`, `bl_high_air`) and the
+//! on-foot shot take Skate 3's distances, angles, smoothing and options (read off the disc; the blend
+//! points of the high chase are ours).
 
 use alloc::vec::Vec;
 
 use super::shot::{
-    NONE, OPT_DROP, OPT_FOLLOW, OPT_MIRROR, OPT_PREVIOUS, REF_BOARD, REF_COM, REF_DAMPED_COM, REFS,
-    Shot, ShotDef, ShotSet, name_hash,
+    NONE, OPT_DROP, OPT_FOLLOW, OPT_LOOK, OPT_MIRROR, OPT_PREVIOUS, REF_BOARD, REF_COM,
+    REF_DAMPED_COM, REF_GRIND, REFS, Shot, ShotDef, ShotSet, name_hash,
 };
 use super::tracker::RAD;
 
@@ -370,17 +373,88 @@ impl ShotSet {
         s.weights = [0.0; REFS];
         s.weights[REF_COM] = 0.9;
         s.weights[REF_DAMPED_COM] = 0.4;
+        // On foot: Skate 3's `offboard_ground` (3 m back, 25 degrees up), the one ground shot whose
+        // camera the look stick moves.
         let off = b.shot(
             "offboard_ground",
-            leaf(3.0, 22.0, 180.0, 0.0, 0.0, -4.0, 0.0),
+            leaf(3.0, 25.0, 180.0, 0.0, 0.0, -4.0, 0.0),
             [0.85, 0.8, 0.85, 0.85],
-            OPT_FOLLOW,
-            0.8,
+            OPT_FOLLOW | OPT_LOOK,
+            0.5,
         );
         let s = b.get(off);
         s.anchor = 5;
         s.weights = [0.0; REFS];
         s.weights[REF_DAMPED_COM] = 1.0;
+
+        // The high camera (Skate 3's `cameragraph_high` shots): further back and well above the rider.
+        let high = OPT_FOLLOW | OPT_MIRROR;
+        let chase = b.shot(
+            "high_chase",
+            leaf(3.0, 30.0, 180.0, 0.0, 0.0, 3.0, 1.0),
+            [0.9; 4],
+            high | OPT_DROP,
+            0.0,
+        );
+        let chase_far = b.shot(
+            "high_chase2",
+            leaf(4.4, 26.6, 180.0, 0.0, 0.0, 5.0, 1.0),
+            [0.7, 0.85, 0.85, 0.85],
+            high | OPT_DROP,
+            0.0,
+        );
+        b.blend(
+            "bl_high_chase",
+            SPEED,
+            &[9.0, 18.0],
+            &[chase, chase_far],
+            0.95,
+            2.0,
+        );
+        let hg = b.shot(
+            "high_grind",
+            leaf(2.9, 17.0, -160.0, 0.0, 0.0, 5.0, 1.0),
+            [0.85; 4],
+            high,
+            0.0,
+        );
+        let s = b.get(hg);
+        s.weights = [0.0; REFS];
+        s.weights[REF_GRIND] = 1.0;
+        b.shot(
+            "high_manual",
+            leaf(2.25, 19.0, -140.0, 0.0, 0.0, 0.0, 1.0),
+            [0.85; 4],
+            high,
+            0.5,
+        );
+        let near = b.shot(
+            "high_air",
+            leaf(3.0, 10.0, -170.0, 0.0, 0.0, -10.0, 0.0),
+            [0.95, 0.9, 0.9, 0.95],
+            OPT_FOLLOW,
+            0.0,
+        );
+        let s = b.get(near);
+        s.anchor = 1;
+        s.weights = [0.0; REFS];
+        s.weights[REF_COM] = 1.0;
+        let far_air = b.shot(
+            "high_air_far",
+            leaf(5.0, 0.0, -160.0, 0.0, 0.0, -25.0, 1.0),
+            [0.95, 0.9, 0.9, 0.9],
+            OPT_FOLLOW,
+            0.0,
+        );
+        b.get(far_air).anchor = 1;
+        b.blend(
+            "bl_high_air",
+            AIR_TIME,
+            &[1.0, 3.5],
+            &[near, far_air],
+            0.7,
+            0.0,
+        );
 
         ShotSet {
             defs: b.defs,

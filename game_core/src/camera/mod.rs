@@ -12,16 +12,26 @@
 //!    heading and elevation trackers, the anchor's push lag, the look-at height through the air,
 //!    avoidance, collision;
 //! 5. frames the skater ([`frame`]): framing yaw, pitch and roll eased between shots, then pan and tilt
-//!    trackers.
+//!    trackers;
+//! 6. shakes the view ([`shake`]): a sway with speed and an impulse on landings.
 //!
-//! Skate 3's shots and graph come from the player's disc (`rules/camera/shots`, `rules/camera/graph`);
-//! without them the camera uses flatground's own shots ([`ShotSet::built_in`]) and choice.
+//! The arm also takes the free look's offset ([`look`]: the look stick, in shots that allow it), the
+//! player's High or Low camera chooses which half of the graph runs ([`select::HIGH`], [`select::LOW`]),
+//! and the graph's slow motion on long airs asks for a slower simulation clock ([`slow_motion`],
+//! [`CameraMan::rate`]).
+//!
+//! Skate 3's shots, graph and shake samples come from the player's disc (`rules/camera/shots`,
+//! `rules/camera/graph`, `rules/camera/shake`); without them the camera uses flatground's own shots
+//! ([`ShotSet::built_in`]), choice and shake loop.
 
 pub mod builtin;
 pub mod frame;
+pub mod look;
 pub mod rig;
 pub mod select;
+pub mod shake;
 pub mod shot;
+pub mod slow_motion;
 pub mod subject;
 pub mod tracker;
 
@@ -36,17 +46,21 @@ use crate::skater::Skater;
 use crate::tuning::CamTuning;
 
 use frame::{Composer, Orientation};
+use look::LookInput;
 use rig::{Compass, DropPredictor, Rig, STEP, State, bind_shot};
 use select::{CamGraph, Choice, Conditions};
-use shot::{BlendInputs, OPT_DROP, Shot, ShotManager, ShotSet};
+use shake::{Samples, Shake};
+use shot::{BlendInputs, OPT_DROP, OPT_LOOK, Shot, ShotManager, ShotSet};
+use slow_motion::SlowMotion;
 use subject::{Anchors, Subject, SubjectHistory};
 use tracker::RAD;
 
-/// Shots and the graph that chooses them.
+/// Shots, the graph that chooses them and the shake's samples.
 #[derive(Clone, Debug)]
 pub struct CamData {
     pub shots: ShotSet,
     pub graph: Option<CamGraph>,
+    pub shake: Samples,
 }
 
 impl Default for CamData {
@@ -54,6 +68,7 @@ impl Default for CamData {
         CamData {
             shots: ShotSet::built_in(),
             graph: None,
+            shake: Samples::built_in(),
         }
     }
 }
@@ -101,6 +116,19 @@ pub struct CameraMan {
     eye: Vec3,
     at: Vec3,
     up: Vec3,
+    /// The player's camera: [`select::LOW`] (Skate 3's constructor default) or [`select::HIGH`].
+    pub camera_type: u32,
+    /// The look stick this tick (each axis -1..1; the game hands it over, [0, 0] when not looking), and
+    /// the arm's offset it makes in shots that allow it.
+    pub look_stick: [f32; 2],
+    pub look: LookInput,
+    pub shake: Shake,
+    /// The drawn view: the rig's shaken.
+    shaken: (Vec3, Vec3, Vec3),
+    /// The built-in choice's slow motion while it runs (the graph keeps its own), and the simulation
+    /// rate the camera asks for (ticks a second).
+    slow: Option<SlowMotion>,
+    rate: f32,
 }
 
 impl CameraMan {
@@ -132,6 +160,13 @@ impl CameraMan {
             eye: s.pos,
             at: v3(0.0, 0.0, 1.0),
             up: Vec3::UP,
+            camera_type: select::LOW,
+            look_stick: [0.0; 2],
+            look: LookInput::default(),
+            shake: Shake::default(),
+            shaken: (s.pos, v3(0.0, 0.0, 1.0), Vec3::UP),
+            slow: None,
+            rate: slow_motion::NORMAL,
         };
         c.update(s, park, STEP);
         c
@@ -140,6 +175,28 @@ impl CameraMan {
     /// Cuts straight to the shot on the next tick (the skater was put somewhere else).
     pub fn request_reset(&mut self) {
         self.reset = true;
+    }
+
+    /// The simulation's ticks a second the camera asks for: 60, or fewer through the slow motion of a
+    /// long air.
+    pub fn rate(&self) -> f32 {
+        self.rate
+    }
+
+    /// The slow motion of a long air is running (Skate 3's `SlowMotionController`).
+    pub fn slowing(&self) -> bool {
+        self.slow.is_some() || self.data.graph.as_ref().is_some_and(|g| g.slowing())
+    }
+
+    /// The free look is turning the camera now (the current shot reads the look stick and it is off
+    /// centre).
+    pub fn looking(&self) -> bool {
+        self.look_allowed() && self.look_stick != [0.0, 0.0]
+    }
+
+    /// The current shot reads the look stick (Skate 3's `OptionUseFreeCamStick`).
+    pub fn look_allowed(&self) -> bool {
+        self.shots.current_shot().has(OPT_LOOK)
     }
 
     /// New shots, graph or tuning (keeps the aspect); the camera cuts to its shot on the next tick.
@@ -205,7 +262,9 @@ impl CameraMan {
         // What the shot choice reads.
         self.state.update_timing(&subj, &t);
         let ground = self.rig.mode == 2 || subj.trajectory.is_none();
-        self.state.update_air(&subj, &mut self.rig, ground, camera);
+        if let Some((normal, vel)) = self.state.update_air(&subj, &mut self.rig, ground, camera) {
+            self.shake.landing(normal, vel, &t.shake);
+        }
         self.state.update_incline(&subj);
         let current = self.shots.current_shot();
         self.compass.update(
@@ -219,8 +278,15 @@ impl CameraMan {
         let inputs = self.blend_inputs(&subj);
         self.conditions = self.conditions(&subj);
         let choices = match &mut self.data.graph {
-            Some(g) => g.update(&self.conditions, dt),
-            None => alloc::vec![select::built_in(&self.conditions, &self.data.shots)],
+            Some(g) => {
+                let c = g.update(&self.conditions, dt, &t);
+                self.rate = g.rate;
+                c
+            }
+            None => {
+                self.built_in_slow(dt);
+                alloc::vec![select::built_in(&self.conditions, &self.data.shots)]
+            }
         };
         if reset {
             self.shots.instant = true;
@@ -253,10 +319,20 @@ impl CameraMan {
         let deck = subj.pos + subj.offset_dir * DECK;
         self.drop
             .update(park, deck, vel, drop_on, subj.off_board, &t);
+        // Free look: the stick as the shot lets the camera read it (SK8 manager.rs `look_enabled`).
+        let look_on = if reset {
+            self.shots.first_leaf()
+        } else {
+            self.shots.current_shot()
+        }
+        .has(OPT_LOOK);
+        self.look
+            .update(if look_on { self.look_stick } else { [0.0; 2] }, &t);
         if reset {
             self.shots.make_instant();
             self.rig.velocity = Vec3::ZERO;
             self.rig.acceleration = Vec3::ZERO;
+            self.shake = Shake::default();
         }
         let inputs = self.blend_inputs(&subj);
         self.shots.update(&self.data.shots, dt, &inputs);
@@ -288,6 +364,7 @@ impl CameraMan {
             &interpolated,
             &subj,
             &self.drop,
+            self.look.elevation,
             true,
             reset,
             ground,
@@ -345,6 +422,14 @@ impl CameraMan {
         let (at, up) = self.orient.view();
         self.at = at;
         self.up = up;
+        // The shake: by the camera's speed over the ground and its arm's length (SK8 manager_output.rs).
+        let v = self.rig.velocity;
+        let speed = sqrtf(v.x * v.x + v.z * v.z);
+        let arm = (self.rig.anchor - self.eye).length();
+        let offset =
+            self.shake
+                .update(dt, speed, arm, !subj.wiping_out, &self.data.shake, &t.shake);
+        self.shaken = shaken(self.eye, at, up, offset);
         self.subject = Some(subj);
         // The log, at most one shot line every quarter second.
         self.since_log += dt;
@@ -355,6 +440,24 @@ impl CameraMan {
             if self.log.len() < 64 {
                 self.log.push(line);
             }
+        }
+    }
+
+    /// Without Skate 3's graph: its slow-motion state's condition, run as the graph would.
+    fn built_in_slow(&mut self, dt: f32) {
+        let on = select::built_in_slow(&self.conditions);
+        match (&mut self.slow, on) {
+            (None, true) => {
+                let (s, rate) = SlowMotion::begin(&self.tuning);
+                self.slow = Some(s);
+                self.rate = rate;
+            }
+            (Some(s), true) => self.rate = s.update(dt, self.conditions.air_time, &self.tuning),
+            (Some(_), false) => {
+                self.slow = None;
+                self.rate = slow_motion::NORMAL;
+            }
+            (None, false) => self.rate = slow_motion::NORMAL,
         }
     }
 
@@ -432,18 +535,30 @@ impl CameraMan {
             centred_time: st.centred_time,
             turning_time: st.steering_time,
             shot: self.shots.current.map(|i| self.data.shots.defs[i].key),
+            camera_type: self.camera_type,
         }
     }
 
-    /// The camera to draw with.
+    /// The camera to draw with (shaken).
     pub fn camera(&self) -> Camera {
+        let (eye, at, up) = self.shaken;
+        Camera {
+            eye,
+            target: eye + at,
+            up,
+            fov_y_deg: lens_fov(self.shots.interpolated.lens, self.aspect),
+            near: 0.1,
+            far: 120.0,
+        }
+    }
+
+    /// The camera without its shake (what the walker's stick is read against).
+    pub fn steady(&self) -> Camera {
         Camera {
             eye: self.eye,
             target: self.eye + self.at,
             up: self.up,
-            fov_y_deg: lens_fov(self.shots.interpolated.lens, self.aspect),
-            near: 0.1,
-            far: 120.0,
+            ..self.camera()
         }
     }
 
@@ -456,6 +571,31 @@ impl CameraMan {
     pub fn shown(&self) -> Shot {
         self.shots.interpolated
     }
+}
+
+/// The view `eye`, looking along `at` with `up`, turned and moved by a shake `offset` about and along its
+/// own right, up and forward axes (SK8 `basis_from_angles`: pitch, yaw, roll).
+fn shaken(eye: Vec3, at: Vec3, up: Vec3, o: shake::Offset) -> (Vec3, Vec3, Vec3) {
+    if o.is_zero() {
+        return (eye, at, up);
+    }
+    let f = at.normalize_or(v3(0.0, 0.0, 1.0));
+    let right = up.cross(f).normalize_or(v3(1.0, 0.0, 0.0));
+    let u = f.cross(right);
+    let [p, y, r] = o.rotation;
+    let (sp, cp) = (crate::math::sinf(p), crate::math::cosf(p));
+    let (sy, cy) = (crate::math::sinf(y), crate::math::cosf(y));
+    let (sr, cr) = (crate::math::sinf(r), crate::math::cosf(r));
+    // The rotation's up and forward columns, in the view's axes.
+    let col_up = [sy * sp * cr - cp * sr, sy * sp * sr + cp * cr, cy * sp];
+    let col_at = [sy * cp * cr + sp * sr, sy * cp * sr - sp * cr, cy * cp];
+    let world = |c: [f32; 3]| right * c[0] + u * c[1] + f * c[2];
+    let [tx, ty, tz] = o.translation;
+    (
+        eye + world([tx, ty, tz]),
+        world(col_at) * at.length(),
+        world(col_up),
+    )
 }
 
 #[cfg(test)]

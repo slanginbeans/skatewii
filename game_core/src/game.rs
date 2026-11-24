@@ -16,7 +16,7 @@ use crate::hud;
 use crate::input::{Pad, PadRaw, btn, flag};
 use crate::marker::{Chord, ChordOut, Markers};
 use crate::math::{Mat3, PI, TAU, Xform, sinf, v3};
-use crate::menu::{Choice, Location, Menu, Request};
+use crate::menu::{CameraAngle, Choice, Location, Menu, Request};
 use crate::model::Models;
 use crate::pack::Pack;
 use crate::park::{Park, Terrain};
@@ -240,7 +240,14 @@ pub struct Game {
     /// The player changed a setting since the platform last saved them.
     settings_changed: bool,
     /// Simulated time minus shown time (s): ticks run until the simulation is at or just past the frame.
+    /// A tick takes `period` of shown time: [`TICK`], or longer through the camera's slow motion.
     ahead: f32,
+    period: f32,
+    /// Skate 3's slow motion on long airs (the camera graph's; on). Off, the simulation keeps real time
+    /// (tests compare the two: the ticks are the same, only how many a frame differs).
+    pub slow_motion: bool,
+    /// Shown time since the last recorded replay frame (s): a frame that ran no tick isn't recorded.
+    unrecorded: f32,
     /// Ticks run since the start.
     pub ticks: u64,
     /// The view one tick before the current one, and where between the two the frame is drawn (0..1).
@@ -347,6 +354,9 @@ impl Game {
             board_watch: None,
             settings_changed: false,
             ahead: 0.0,
+            period: TICK,
+            slow_motion: true,
+            unrecorded: 0.0,
             ticks: 0,
             prev_view: None,
             alpha: 1.0,
@@ -502,6 +512,7 @@ impl Game {
             Choice::Ride(i) if i == self.location => {}
             Choice::Ride(i) => self.request = Some(Request::Load(i.min(self.locations.len() - 1))),
             Choice::DrawDistance(d) => self.set_draw_distance(d as f32),
+            Choice::Camera(a) => self.set_camera_angle(a),
         }
     }
 
@@ -574,6 +585,15 @@ impl Game {
         self.draw_distance
     }
 
+    /// The camera the player chose (the pause menu's setting): Skate 3's Low or High camera.
+    pub fn set_camera_angle(&mut self, angle: CameraAngle) {
+        self.cam.camera_type = angle.graph_type();
+    }
+
+    pub fn camera_angle(&self) -> CameraAngle {
+        CameraAngle::of_graph_type(self.cam.camera_type)
+    }
+
     /// True once after the player changed a setting (the platform saves them).
     pub fn take_settings_changed(&mut self) -> bool {
         core::mem::take(&mut self.settings_changed)
@@ -619,12 +639,18 @@ impl Game {
             g.set_tuning(&self.tuning);
         }
         self.skater.tuning = self.tuning;
-        // The disc's camera shots and graph (`fg_import rules`), else the built-in ones.
+        // The disc's camera shots, graph and shake samples (`fg_import rules`), else the built-in ones.
         let mut data = CamData::default();
         if let Some(e) = pack.find(crate::camera::shot::ENTRY) {
             match crate::camera::shot::ShotSet::parse(e.data) {
                 Ok(set) => data.shots = set,
                 Err(e) => self.log.push(format!("camera: shots unreadable ({e:?})")),
+            }
+        }
+        if let Some(e) = pack.find(crate::camera::shake::ENTRY) {
+            match crate::camera::shake::Samples::parse(e.data) {
+                Some(s) => data.shake = s,
+                None => self.log.push("camera: shake samples unreadable".into()),
             }
         }
         if data.shots.imported
@@ -775,6 +801,10 @@ impl Game {
                     self.set_draw_distance(d as f32);
                     self.settings_changed = true;
                 }
+                Some(Choice::Camera(a)) => {
+                    self.set_camera_angle(a);
+                    self.settings_changed = true;
+                }
                 Some(c) => self.choose(c, raw.buttons),
                 None => {}
             }
@@ -789,7 +819,9 @@ impl Game {
             return;
         }
         if pressed & btn::START != 0 {
-            self.menu = Some(Menu::pause(raw.buttons, self.draw_distance as u16));
+            let mut menu = Menu::pause(raw.buttons, self.draw_distance as u16);
+            menu.camera = self.camera_angle();
+            self.menu = Some(menu);
             return;
         }
         self.blocked &= raw.buttons;
@@ -798,10 +830,11 @@ impl Game {
             ..*raw
         };
         let raw = &unblocked;
-        // Z + d-pad: markers and the replay (not in the air, where Z is the dark catch).
+        // Z + d-pad: markers and the replay; Z + C-stick: the free look (not in the air, where Z is the
+        // dark catch and the C-stick flicks).
         let air = self.skater.is_airborne() || self.skater.biped.air.is_some();
-        let (buttons, mut chord) = self.chord.read(raw.buttons, !air);
-        let seen = PadRaw { buttons, ..*raw };
+        let (seen, mut chord) = self.chord.read_pad(raw, !air);
+        let buttons = seen.buttons;
         let raw = &seen;
         if chord.replay && !self.recording.is_empty() {
             self.open_replay(buttons);
@@ -811,16 +844,23 @@ impl Game {
             return;
         }
         self.ahead -= dt;
+        self.unrecorded += dt;
         let mut ran = 0;
         // A little slack so float error never runs (or skips) a tick at 60 Hz.
         while self.ahead < -1e-4 {
             self.prev_view = Some(self.view());
             let turned = self.skater.frame_turned;
+            // The camera's rate from the tick before (Skate 3's clock takes the slow motion's request at
+            // the start of the next tick).
+            self.period = match self.cam.rate() {
+                r if !self.slow_motion || r >= crate::camera::slow_motion::NORMAL => TICK,
+                r => 1.0 / r,
+            };
             self.tick(raw, chord);
             // A marker goes down once a press, whatever the frame's ticks.
             chord.place = false;
             ran += 1;
-            self.ahead += TICK;
+            self.ahead += self.period;
             if self.skater.frame_turned != turned
                 && let Some(p) = &mut self.prev_view
             {
@@ -829,10 +869,18 @@ impl Game {
                 p.base = p.base.then(&Xform::new(Mat3::rot_y(PI), v3(0.0, 0.0, 0.0)));
             }
         }
-        self.alpha = (1.0 - self.ahead / TICK).clamp(0.0, 1.0);
+        self.alpha = (1.0 - self.ahead / self.period).clamp(0.0, 1.0);
+        // The rider's pose follows the simulation: in slow motion a frame that ran no tick isn't posed
+        // again, and one that did is posed for the ticks' time (so the pose is the same tick by tick as
+        // without slow motion).
+        let pose_dt = if self.period > TICK {
+            ran as f32 * TICK
+        } else {
+            dt
+        };
         let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
         let t1 = now(self.timer);
-        if self.rider.is_some() {
+        if self.rider.is_some() && (ran > 0 || self.period <= TICK) {
             let rot = self.imported_xform().rot;
             let place = self.board_place();
             let s = &self.skater;
@@ -855,13 +903,15 @@ impl Game {
             }
             if !posed && let Some(r) = &mut self.rider {
                 r.set_board_place(place);
-                r.update(&self.skater, self.clock, land_in, dt, rot);
+                r.update(&self.skater, self.clock, land_in, pose_dt, rot);
             }
         }
         let t2 = now(self.timer);
         self.times.skin_us = t2.wrapping_sub(t1);
         if ran > 0 {
-            self.record_frame(dt);
+            // Recorded with the shown time since the last recorded frame: slow motion replays slowed.
+            let shown = core::mem::take(&mut self.unrecorded);
+            self.record_frame(shown);
             self.times.replay_us = now(self.timer).wrapping_sub(t2);
         }
         let (render_us, park_draws, park_verts) = self.render_times.get();
@@ -956,9 +1006,10 @@ impl Game {
         let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
         let t0 = now(self.timer);
         let ground: &dyn Terrain = terrain(&self.world, &self.park);
-        // On foot the stick is read against the camera (where it looks, seen from above).
+        // On foot the stick is read against the camera (where it looks, seen from above; not its shake).
+        self.cam.look_stick = chord.look;
         {
-            let c = self.cam.camera();
+            let c = self.cam.steady();
             let look = (c.target - c.eye).horizontal();
             if look.length() > 1e-3 {
                 self.skater.cam_yaw = crate::math::atan2f(look.x, look.z);
