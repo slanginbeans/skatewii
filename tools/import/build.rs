@@ -21,6 +21,9 @@ const FORMATS: &[&str] = &[
     "graph/opcode.rs",
     "scoring/catalog.rs",
     "scoring/rules.rs",
+    "sound/mod.rs",
+    "sound/bank.rs",
+    "sound/adpcm.rs",
 ];
 
 fn walk(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
