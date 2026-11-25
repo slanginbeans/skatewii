@@ -917,6 +917,8 @@ pub struct Skater {
     /// it moved last tick (m/s).
     pub air_lift: Vec3,
     air_lift_rate: Vec3,
+    /// While the air steps the board: the hook's target, the skeleton's physical board.
+    air_board: Option<crate::math::Xform>,
     /// Off the board (`Mode::Walk`): the walker.
     pub biped: Biped,
     /// Climbing ledges on foot (SK8's own extension: `climb`).
@@ -1317,6 +1319,7 @@ impl Skater {
             air_frame: crate::math::Mat3::IDENTITY,
             air_com_from_board: None,
             air_lift: Vec3::ZERO,
+            air_board: None,
             air_lift_rate: Vec3::ZERO,
             wallride: None,
             checkpoints: Checkpoints::default(),

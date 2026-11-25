@@ -10,6 +10,7 @@
 use super::*;
 use crate::math::Mat3;
 use crate::math::Xform;
+use crate::physics::Quat;
 use crate::physics::board::{self as pb, Board, BoardInput};
 use crate::physics::rider_body::{RiderBody, RiderInput};
 use crate::tuning::Curve;
@@ -97,6 +98,96 @@ pub struct Rig {
     pub airborne: bool,
     /// The skater's frame is turned end for end against the deck (a switch or a revert's turn).
     pub flip: bool,
+    /// The deck's turn off the animated board, blended away in the air (SK8 `BoardAnimation`).
+    pub blend: BoardBlend,
+}
+
+/// SK8 board_animation.rs `BoardAnimation` (TU3 0x82C04368, 0x82C01878): on the ground every tick
+/// the physical deck's turn off the animated board is captured; in the air the hook's target is the
+/// animated board turned by it, the turn taken down each tick by `PhysToAnimSlow` (the first air
+/// tick, SK8's PhysicsAir) or `PhysToAnimFast` (KnownAir) of its angle, until that share reaches 0.95.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoardBlend {
+    pub error: Quat,
+    pub blending: bool,
+}
+
+impl Default for BoardBlend {
+    fn default() -> Self {
+        BoardBlend {
+            error: Quat::IDENTITY,
+            blending: false,
+        }
+    }
+}
+
+impl BoardBlend {
+    /// The deck `deck`'s turn off the animated board `target` (both rotations).
+    pub fn capture(&mut self, target: &Mat3, deck: &Mat3) {
+        let c = |j: usize| {
+            v3(
+                target.cols[0].dot(deck.cols[j]),
+                target.cols[1].dot(deck.cols[j]),
+                target.cols[2].dot(deck.cols[j]),
+            )
+        };
+        self.error = Quat::from_mat3(&Mat3::from_cols(c(0), c(1), c(2))).normalize();
+        self.blending = true;
+    }
+
+    /// This tick's board: `target` turned by what is left of the error after `graph`'s share of it.
+    pub fn apply(&mut self, target: &Mat3, graph: &Curve) -> Mat3 {
+        if !self.blending {
+            return *target;
+        }
+        let q = self.error;
+        let angle = libm::acosf(q.w.clamp(-1.0, 1.0)) * 2.0;
+        let turns = angle * core::f32::consts::FRAC_1_PI * 0.5;
+        let fraction = turns - libm::floorf(turns);
+        let folded = fraction - if fraction > 0.5 { 1.0 } else { 0.0 };
+        let distance = (folded * core::f32::consts::TAU).abs();
+        let share = graph.eval(distance);
+        if share >= 0.95 || share.is_nan() {
+            self.blending = false;
+            return *target;
+        }
+        // Towards the identity: a short-way nlerp near it, else a slerp.
+        let q = if q.w < 0.0 {
+            Quat {
+                x: -q.x,
+                y: -q.y,
+                z: -q.z,
+                w: -q.w,
+            }
+        } else {
+            q
+        };
+        let q = if q.w > 0.996_19 {
+            let k = 1.0 - share;
+            Quat {
+                x: q.x * k,
+                y: q.y * k,
+                z: q.z * k,
+                w: q.w + (1.0 - q.w) * share,
+            }
+            .normalize()
+        } else {
+            let theta = libm::acosf(q.w);
+            let s = libm::sinf(theta);
+            let (a, b) = (
+                libm::sinf((1.0 - share) * theta) / s,
+                libm::sinf(share * theta) / s,
+            );
+            Quat {
+                x: q.x * a,
+                y: q.y * a,
+                z: q.z * a,
+                w: q.w * a + b,
+            }
+        };
+        self.error = q;
+        target.mul(&q.to_mat3())
+    }
 }
 
 impl Skater {
@@ -187,6 +278,7 @@ impl Skater {
                     last_sync: Vec3::ZERO,
                     airborne: false,
                     flip: false,
+                    blend: BoardBlend::default(),
                 });
             }
         }
@@ -267,19 +359,47 @@ impl Skater {
         self.land(normal, 0, time, events);
     }
 
-    pub(super) fn fly_rig(&mut self, park: &dyn Terrain) {
-        // The deck as the clip carries it under the rider (pitched with it), else the flight's.
-        let frame = match self.graph.and_then(|g| g.pose_board) {
+    /// The animated board's axes: the board as the clip carries it under the rider, in the rider's
+    /// frame on Skate 3's reckoning up (SK8 `animation_to_world`), else the flight's.
+    fn animated_board(&self) -> Mat3 {
+        match self.graph.and_then(|g| g.pose_board) {
             Some((_, up, nose)) => {
-                let r = self.air_axes();
+                let n = self.reckoning.up.normalize_or(Vec3::UP);
+                let f = tangent(self.fwd, n);
+                let r = Mat3::from_cols(n.cross(f), n, f);
                 let (up, nose) = (r.apply(up), r.apply(nose));
                 let nose = tangent(nose, up);
-                crate::math::Mat3::from_cols(up.cross(nose), up, nose)
+                Mat3::from_cols(up.cross(nose), up, nose)
             }
             None => self.board_frame(),
+        }
+    }
+
+    /// SK8 `capture_physics_error`: the grounded deck's turn off the animated board, each tick before
+    /// the solve.
+    fn capture_board_error(&mut self) {
+        let target = self.animated_board();
+        if let Some(r) = &mut self.rig {
+            let deck = r.board.deck().axes;
+            r.blend.capture(&target, &deck);
+        }
+    }
+
+    pub(super) fn fly_rig(&mut self, park: &dyn Terrain) {
+        // SK8 KnownAir: the hook's target is the skeleton's physical board, the animated board with
+        // the deck's turn off it at the take-off blended away (`apply_board`).
+        let animated = self.animated_board();
+        let first = matches!(self.mode, Mode::Air { time } if time <= 0.0);
+        let t = self.tuning;
+        let graph = if first {
+            t.phys_to_anim_slow
+        } else {
+            t.phys_to_anim_fast
         };
-        let target = (self.deck(), frame);
+        let deck = self.deck();
         let Some(r) = &mut self.rig else { return };
+        let frame = r.blend.apply(&animated, &graph);
+        let target = (deck, frame);
         r.airborne = true;
         // SK8 KnownAir: the trajectory follow sets the board's velocity (every part's, to reach the
         // flight's deck this tick); the hook drive only turns the deck.
@@ -293,7 +413,9 @@ impl Skater {
             wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
             ..BoardInput::default()
         };
+        self.air_board = Some(Xform::new(frame, deck));
         self.step_board(park, &input, true);
+        self.air_board = None;
     }
 
     /// The rider's body's input this tick: the animated pose at the deck where it will be at the end
@@ -315,6 +437,7 @@ impl Skater {
         );
         Some(RiderInput {
             pose: local.map(|x| deck.then(&x)),
+            physical_board: self.air_board,
             airborne,
             ground,
             board_contacts: false,
@@ -396,6 +519,7 @@ impl Skater {
         let ticks = dt * 60.0;
         let n = self.contact_n;
         self.sync_rig(park);
+        self.capture_board_error();
 
         // The speed model's target (SK8 speed_model.rs), as `ride`.
         let bound = t.friction_max_change.max(0.0);

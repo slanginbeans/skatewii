@@ -108,6 +108,7 @@ fn parked() -> Board {
 fn input(pose: [Xform; ANIMATED_PARTS], airborne: bool) -> RiderInput {
     RiderInput {
         pose,
+        physical_board: None,
         airborne,
         ground: (Vec3::ZERO, Vec3::UP),
         board_contacts: false,

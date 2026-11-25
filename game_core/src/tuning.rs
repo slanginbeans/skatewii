@@ -426,6 +426,10 @@ pub struct Tuning {
     /// Most a candidate is nudged (m/s), and how long (s) the start error takes to blend away.
     pub traj_max_adjust: f32,
     pub traj_error_blend: f32,
+    /// The share of the deck's turn off the animated board taken away per air tick, against its angle
+    /// (rad): PhysicsAir's and KnownAir's (SK8 board_animation.rs).
+    pub phys_to_anim_slow: Curve,
+    pub phys_to_anim_fast: Curve,
     /// The centre of mass's height over the landing (a share of its height over the board at the
     /// launch), against the landing normal's y (SK8 selector.rs `com_trajectory`).
     pub traj_landing_com_vs_slope: Curve,
@@ -981,6 +985,8 @@ pub const PATHS: &[&str] = &[
     "physics_trajectory/default/MaxTrajectoryAdjust",
     "physics_trajectory/default/LandingComScalarVsSlope",
     "physics_airstates/default/TrajErrorBlendAwayTime",
+    "physics_airstates/default/PhysToAnimSlow",
+    "physics_airstates/default/PhysToAnimFast",
     "physics_trajectory/default/WallRideTestDist",
     "physics_trajectory/default/WallRideMinHeightFromGround",
     "physics_trajectory/default/ScoreWallrideHeight",
@@ -1446,6 +1452,27 @@ impl Tuning {
         traj_second_pass_delta: 0.12,
         traj_max_adjust: 1.2,
         traj_error_blend: 0.25,
+        // `physics_airstates/default/PhysToAnimSlow` and `PhysToAnimFast`.
+        phys_to_anim_slow: Curve::new(&[
+            (0.0, 1.0),
+            (0.006_351_8, 0.825),
+            (0.045_928_3, 0.296_428_6),
+            (0.088_436_5, 0.157_142_9),
+            (0.128_013, 0.110_714_3),
+            (0.172_475_6, 0.089_285_7),
+            (0.218_892_5, 0.071_428_6),
+            (0.3, 0.04),
+        ]),
+        phys_to_anim_fast: Curve::new(&[
+            (0.0, 1.0),
+            (0.018_566_8, 1.0),
+            (0.045_928_4, 0.921_428_6),
+            (0.086_482_1, 0.760_714_3),
+            (0.120_195_5, 0.617_857_2),
+            (0.163_192_2, 0.478_571_4),
+            (0.205_211_7, 0.4),
+            (0.299_022_8, 0.267_857_1),
+        ]),
         // `physics_trajectory/default/LandingComScalarVsSlope`.
         traj_landing_com_vs_slope: Curve::new(&[
             (-1.0, 0.942_857_1),
@@ -1803,6 +1830,8 @@ impl Tuning {
                 curve!(self.traj_landing_com_vs_slope)
             }
             "physics_airstates/default/TrajErrorBlendAwayTime" => scalar!(self.traj_error_blend),
+            "physics_airstates/default/PhysToAnimSlow" => curve!(self.phys_to_anim_slow),
+            "physics_airstates/default/PhysToAnimFast" => curve!(self.phys_to_anim_fast),
             "physics_trajectory/default/WallRideTestDist" => scalar!(self.traj_wall_test_dist),
             "physics_trajectory/default/WallRideMinHeightFromGround" => {
                 scalar!(self.traj_wall_min_height)

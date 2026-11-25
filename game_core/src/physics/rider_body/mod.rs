@@ -627,6 +627,9 @@ impl Feedback {
 pub struct RiderInput {
     /// The animated pose: each physical body's frame (world).
     pub pose: [Xform; ANIMATED_PARTS],
+    /// In the air, the skeleton's physical board (SK8 sets `SkeletonBoardFrames::physical_board` to
+    /// the hook's target there); on the ground the deck is.
+    pub physical_board: Option<Xform>,
     /// Off the ground: the skeleton is solved.
     pub airborne: bool,
     /// The ground the riding stands on (point, normal), for the feedback's ground filter.
@@ -1105,7 +1108,9 @@ impl RiderBody {
         }
         self.idle = 0;
         self.set_target(pose);
-        self.physical_board = Xform::new(board[pb::DECK].axes, board[pb::DECK].position);
+        self.physical_board = input
+            .physical_board
+            .unwrap_or(Xform::new(board[pb::DECK].axes, board[pb::DECK].position));
 
         let mut found = core::mem::take(&mut self.found);
         let mut pairs = core::mem::take(&mut self.pairs);
