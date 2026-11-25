@@ -765,6 +765,30 @@ impl Rider {
         Some(rel[1] + (along_board - rel[1]) * k)
     }
 
+    /// The animated centre of mass from the posed board's centre, in the character's space (x
+    /// `up x nose`, y up, z ahead), from the last pose: where the clip carries the board under the
+    /// rider (SK8's skeleton board frames under KnownAir's centre of mass). `None` without the stock
+    /// skeleton.
+    pub fn com_from_board(&self) -> Option<Vec3> {
+        if self.com_parts.len() < COM_PARTS.len() {
+            return None;
+        }
+        let w = self.character.world();
+        let board = w.get(self.board_bone?)?;
+        let mut com = [0.0f32; 3];
+        for &(bone, weight, along) in &self.com_parts {
+            let m = w.get(bone)?;
+            for (i, c) in com.iter_mut().enumerate() {
+                *c += (m[3][i] + m[0][i] * along) * weight;
+            }
+        }
+        Some(v3(
+            com[0] - board[3][0],
+            com[1] - board[3][1],
+            com[2] - board[3][2],
+        ))
+    }
+
     /// `turned`: the board's frame is turned end for end now (`Skater::frame_turned`); a tree started
     /// the other way is turned half round before blending, so it stays where it was in the world.
     pub fn update_graph(

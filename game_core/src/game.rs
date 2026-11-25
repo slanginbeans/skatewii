@@ -1296,6 +1296,7 @@ impl Game {
             if let Some(r) = &self.rider {
                 control.pose_com = r.com_above_board();
                 control.pose_deck = posed_deck(Some(r), self.skater.mirrored());
+                control.pose_board = posed_board(r, self.skater.mirrored());
                 control.pose_lift = (r.board_rest_height() - crate::skater::DECK_HEIGHT).max(0.0);
             }
             self.skater.graph = Some(control);
@@ -2319,6 +2320,18 @@ const MEAT_SHOW: f32 = 5.0;
 /// The posed board's nose in the rider's space from the imported rider's last pose, as Skate 3 reads it
 /// for the deck's yaw and pitch: turned round for a mirrored rider, whose clips turn the posed board end
 /// for end (SK8 `publish_deck_angles`' `board_flipped`).
+/// The posed board under the rider ([`crate::skater::GraphControl::pose_board`]), mirrored with the
+/// rider.
+fn posed_board(
+    rider: &Rider,
+    mirrored: bool,
+) -> Option<(crate::math::Vec3, crate::math::Vec3, crate::math::Vec3)> {
+    let com = rider.com_from_board()?;
+    let (up, nose) = rider.board_axes()?;
+    let m = |v: crate::math::Vec3| if mirrored { v3(-v.x, v.y, v.z) } else { v };
+    Some((m(com), m(up), m(nose)))
+}
+
 fn posed_deck(rider: Option<&Rider>, mirrored: bool) -> Option<crate::math::Vec3> {
     let (_, nose) = rider?.board_axes()?;
     Some(if mirrored { -nose } else { nose })

@@ -908,6 +908,10 @@ pub struct Skater {
     /// The rider's up at take-off: the centre of mass flies `air_com` along it from the flight's
     /// point.
     air_up: Vec3,
+    /// The rider's frame at take-off and, from the clip, the centre of mass from the posed board in
+    /// it: the centre of mass flies off the flight's point by that.
+    air_frame: crate::math::Mat3,
+    air_com_from_board: Option<Vec3>,
     /// Where the board hangs off the flight's path (m): under the flying centre of mass along the
     /// rider's up as the clip poses it (SK8's board under the KnownAir centre of mass), and how fast
     /// it moved last tick (m/s).
@@ -1090,6 +1094,9 @@ pub struct GraphControl {
     /// The posed board's nose in the rider's frame (x `up x nose`, y up, z ahead) from the imported
     /// rider's last pose: where the clips have put the deck. `None` without the imported rider.
     pub pose_deck: Option<Vec3>,
+    /// The posed board under the rider (same frame): the animated centre of mass from its centre,
+    /// its up and its nose. `None` without the imported rider.
+    pub pose_board: Option<(Vec3, Vec3, Vec3)>,
     /// Grinding, the grind grab the motion graph's grind-grab states score (`FS_5_O_FSGRAB`: `FSGRAB`)
     /// and the 5-0's free end they hold up (`PhysGrindGrabMinHeight`, 0 when none).
     pub grind_grab: Option<&'static str>,
@@ -1307,6 +1314,8 @@ impl Skater {
             body_us: 0,
             air_com: None,
             air_up: Vec3::UP,
+            air_frame: crate::math::Mat3::IDENTITY,
+            air_com_from_board: None,
             air_lift: Vec3::ZERO,
             air_lift_rate: Vec3::ZERO,
             wallride: None,
@@ -1455,6 +1464,13 @@ impl Skater {
         let n = self.normal.normalize_or(Vec3::UP);
         let up = (n - f * n.dot(f)).normalize_or(n);
         let f = tangent(f, up);
+        crate::math::Mat3::from_cols(up.cross(f), up, f)
+    }
+
+    /// The rider's frame: right (`up x nose`), up, nose.
+    pub fn air_axes(&self) -> crate::math::Mat3 {
+        let up = self.normal.normalize_or(Vec3::UP);
+        let f = tangent(self.fwd, up);
         crate::math::Mat3::from_cols(up.cross(f), up, f)
     }
 
@@ -3178,6 +3194,8 @@ impl Skater {
         self.plant_clock = 0.0;
         self.air_com = self.body_com;
         self.air_up = self.normal;
+        self.air_frame = self.air_axes();
+        self.air_com_from_board = self.graph.and_then(|g| g.pose_board).map(|b| b.0);
         self.air_lift = Vec3::ZERO;
         self.air_lift_rate = Vec3::ZERO;
     }
@@ -3542,6 +3560,16 @@ impl Skater {
             // not when the board his clips' legs leave behind touches the ground.
             self.air_lift = Vec3::ZERO;
             self.air_lift_rate = Vec3::ZERO;
+        } else if let (Some(c0), Some((c, _, _))) = (
+            self.air_com_from_board,
+            self.graph.and_then(|g| g.pose_board),
+        ) {
+            // The centre of mass flies off the flight's point where the clip held it at take-off; the
+            // board hangs under it as the clip carries it now (forward and back as well as down), in
+            // the rider's frame (SK8: the skeleton's board frames under KnownAir's centre of mass).
+            let lift = self.air_frame.apply(c0) - self.air_axes().apply(c);
+            self.air_lift_rate = (lift - self.air_lift) * (1.0 / dt.max(1e-4));
+            self.air_lift = lift;
         } else if let (Some(c0), Some(d)) = (self.air_com, self.body_com) {
             // The centre of mass flew off `c0` along the take-off's up; the board hangs `d` under it
             // along the rider's up now.

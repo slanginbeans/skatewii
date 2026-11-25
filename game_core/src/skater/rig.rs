@@ -220,7 +220,17 @@ impl Skater {
     /// One air tick of the rigid board: no ground behaviours, the deck hooked to where the flight
     /// draws it (SK8's hook drive while the animation holds the board).
     pub(super) fn fly_rig(&mut self, park: &dyn Terrain) {
-        let target = (self.deck(), self.board_frame());
+        // The deck as the clip carries it under the rider (pitched with it), else the flight's.
+        let frame = match self.graph.and_then(|g| g.pose_board) {
+            Some((_, up, nose)) => {
+                let r = self.air_axes();
+                let (up, nose) = (r.apply(up), r.apply(nose));
+                let nose = tangent(nose, up);
+                crate::math::Mat3::from_cols(up.cross(nose), up, nose)
+            }
+            None => self.board_frame(),
+        };
+        let target = (self.deck(), frame);
         let Some(r) = &mut self.rig else { return };
         r.airborne = true;
         let input = BoardInput {
