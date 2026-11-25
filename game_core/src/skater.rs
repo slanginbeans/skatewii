@@ -896,6 +896,12 @@ pub struct Skater {
     /// solve took this tick.
     pub clock: Clock,
     pub board_us: u32,
+    /// The rider's physical body (SK8's skeleton in the board's solve): on with an imported rider's
+    /// animated pose, `rider_pose` (each physical body's frame on the deck, set each tick by the
+    /// game), off without one. `body_us`: its step's cost this tick (inside the board's).
+    pub rider_body: Option<alloc::boxed::Box<crate::physics::rider_body::RiderBody>>,
+    pub rider_pose: Option<[crate::math::Xform; crate::physics::skeleton::ANIMATED_PARTS]>,
+    pub body_us: u32,
     air_com: Option<f32>,
     /// How far the legs have lifted the board over the flight's path (m, world up), and how fast it
     /// moved last tick (m/s).
@@ -1289,6 +1295,9 @@ impl Skater {
             body_com: None,
             clock: Clock(None),
             board_us: 0,
+            rider_body: None,
+            rider_pose: None,
+            body_us: 0,
             air_com: None,
             air_lift: 0.0,
             air_lift_rate: 0.0,
@@ -1613,6 +1622,10 @@ impl Skater {
         dt: f32,
         events: &mut Vec<Event>,
     ) {
+        self.body_us = 0;
+        if let Some(b) = &mut self.rider_body {
+            b.tick();
+        }
         let touched = pad.held != 0
             || pad.stick != [0.0, 0.0]
             || flick.stick != [0.0, 0.0]

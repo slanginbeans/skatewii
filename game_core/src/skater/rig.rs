@@ -9,7 +9,9 @@
 
 use super::*;
 use crate::math::Mat3;
+use crate::math::Xform;
 use crate::physics::board::{self as pb, Board, BoardInput};
+use crate::physics::rider_body::{RiderBody, RiderInput};
 use crate::tuning::Curve;
 
 /// `physics_feet`: the feet's force points along the deck (m), the force against the rider's up per
@@ -226,9 +228,56 @@ impl Skater {
             wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
             ..BoardInput::default()
         };
+        self.step_board(park, &input, true);
+    }
+
+    /// The rider's body's input this tick: the animated pose on the deck where it will be at the end
+    /// of the tick (SK8 drives to the predicted board), and the ground under the wheels.
+    fn rider_input(&self, airborne: bool) -> Option<RiderInput> {
+        let local = self.rider_pose.as_ref()?;
+        let d = self.rig.as_ref()?.board.deck();
+        let deck = Xform::new(d.axes, d.position + d.velocity * crate::physics::STEP);
+        let wheels = &self.rig.as_ref()?.board.wheels;
+        let ground = wheels.iter().flatten().next().map_or(
+            (
+                d.position - d.axes.cols[1] * pb::DECK_HEIGHT,
+                d.axes.cols[1],
+            ),
+            |w| (w.point, w.normal),
+        );
+        Some(RiderInput {
+            pose: local.map(|x| deck.then(&x)),
+            airborne,
+            ground,
+            board_contacts: false,
+            clock: self.clock.0,
+        })
+    }
+
+    /// Steps the rigid board, with the rider's body in its solve when there is one (timed apart).
+    fn step_board(&mut self, park: &dyn Terrain, input: &BoardInput, airborne: bool) {
+        let ri = self.rider_input(airborne);
+        if ri.is_none() {
+            self.rider_body = None;
+        }
         let t0 = self.clock.now();
-        r.board.step(park, &input);
-        self.board_us = self.clock.now().wrapping_sub(t0);
+        let Some(rig) = self.rig.as_mut() else { return };
+        let body = match &ri {
+            Some(ri) => Some((
+                &mut **self
+                    .rider_body
+                    .get_or_insert_with(|| alloc::boxed::Box::new(RiderBody::new(&ri.pose))),
+                ri,
+            )),
+            None => None,
+        };
+        rig.board.step_with(park, input, body);
+        self.body_us = self.rider_body.as_ref().map_or(0, |b| b.cost_us);
+        self.board_us = self
+            .clock
+            .now()
+            .wrapping_sub(t0)
+            .saturating_sub(self.body_us);
     }
 
     /// Remembers the ground state as read off the board.
@@ -537,12 +586,13 @@ impl Skater {
             }
         }
 
+        if self.rig.is_none() {
+            return;
+        }
+        self.step_board(park, &input, false);
         let Some(rig) = self.rig.as_mut() else {
             return;
         };
-        let t0 = self.clock.now();
-        rig.board.step(park, &input);
-        self.board_us = self.clock.now().wrapping_sub(t0);
         rig.ground_time += dt;
         self.read_rig(park, d, dt, events);
     }

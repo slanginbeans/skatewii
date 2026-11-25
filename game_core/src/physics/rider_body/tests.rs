@@ -110,6 +110,8 @@ fn input(pose: [Xform; ANIMATED_PARTS], airborne: bool) -> RiderInput {
         pose,
         airborne,
         ground: (Vec3::ZERO, Vec3::UP),
+        board_contacts: false,
+        clock: None,
     }
 }
 

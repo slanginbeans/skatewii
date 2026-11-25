@@ -620,7 +620,7 @@ impl Feedback {
 }
 
 /// What the rider's body is driven to this tick.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct RiderInput {
     /// The animated pose: each physical body's frame (world).
     pub pose: [Xform; ANIMATED_PARTS],
@@ -628,6 +628,11 @@ pub struct RiderInput {
     pub airborne: bool,
     /// The ground the riding stands on (point, normal), for the feedback's ground filter.
     pub ground: (Vec3, Vec3),
+    /// The board's volumes touch the bones: only off the board (its collision group 7; riding, its
+    /// group 4 against the skater's 5 is culled by TU3's group table, SK8 assembly_contacts.rs).
+    pub board_contacts: bool,
+    /// A microsecond clock (for [`RiderBody::cost_us`]).
+    pub clock: Option<fn() -> u32>,
 }
 
 /// A volume's spheres: a sphere's, or a capsule's ends and middle (its axis is the body's z).
@@ -683,7 +688,7 @@ const MATERIAL: [f32; 3] = [0.0, 0.0, 0.0];
 const MARGIN: f32 = 0.02;
 
 /// The rider's physical body.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RiderBody {
     /// The 26 bodies (merged and kinematic ones are placed from their hosts and targets).
     pub parts: [Body; PARTS],
@@ -697,8 +702,11 @@ pub struct RiderBody {
     pub physical_board: Xform,
     /// Whether the last step solved the skeleton (else it followed the animated pose).
     pub solved: bool,
+    /// The step's cost (us, with the shared solve when it solved).
+    pub cost_us: u32,
     /// Stepped last tick: a gap restarts it at the animated pose.
     live: bool,
+    idle: u32,
     shapes: [Shape; PARTS],
     contacts: Vec<ContactRow>,
     reports: Vec<(usize, Other, usize)>,
@@ -707,6 +715,8 @@ pub struct RiderBody {
     bodies: Vec<Body>,
     reactions: Vec<Reaction>,
     tris: Vec<([Vec3; 3], Vec3)>,
+    tri_boxes: Vec<(Vec3, Vec3)>,
+    near: Vec<([Vec3; 3], Vec3)>,
 }
 
 /// A candidate contact: the bone part, its volume sphere's world centre and radius, what it meets.
@@ -750,7 +760,9 @@ impl RiderBody {
             target: *pose,
             physical_board: Xform::IDENTITY,
             solved: false,
+            cost_us: 0,
             live: false,
+            idle: 0,
             shapes: stock.map(|p| p.shape),
             contacts: Vec::new(),
             reports: Vec::new(),
@@ -759,6 +771,8 @@ impl RiderBody {
             bodies: Vec::new(),
             reactions: Vec::new(),
             tris: Vec::new(),
+            tri_boxes: Vec::new(),
+            near: Vec::new(),
         }
     }
 
@@ -796,9 +810,9 @@ impl RiderBody {
         self.live = true;
     }
 
-    /// Marks the body not stepped this tick (the board was moved kinematically).
-    pub fn pause(&mut self) {
-        self.live = false;
+    /// A tick passes: a body not stepped in it restarts at the animated pose next time.
+    pub fn tick(&mut self) {
+        self.idle += 1;
     }
 
     /// Moves a following body to `to` with the velocity that gets it there in a tick.
@@ -828,6 +842,7 @@ impl RiderBody {
         &mut self,
         park: &dyn Terrain,
         board: &[Body],
+        board_contacts: bool,
         out: &mut Vec<Candidate>,
         pairs: &mut Vec<(usize, usize, ContactInput)>,
     ) {
@@ -835,6 +850,22 @@ impl RiderBody {
         let reach = 1.4 + self.parts[23].velocity.length() * STEP;
         self.tris.clear();
         let has_tris = park.triangles_near(hips, reach, &mut self.tris);
+        // Each triangle's box, for a bone's first cut (its neighbours, which the edge fix-up reads,
+        // come along with the bone box's slack).
+        self.tri_boxes.clear();
+        for (t, _) in &self.tris {
+            let lo = v3(
+                t[0].x.min(t[1].x).min(t[2].x),
+                t[0].y.min(t[1].y).min(t[2].y),
+                t[0].z.min(t[1].z).min(t[2].z),
+            );
+            let hi = v3(
+                t[0].x.max(t[1].x).max(t[2].x),
+                t[0].y.max(t[1].y).max(t[2].y),
+                t[0].z.max(t[1].z).max(t[2].z),
+            );
+            self.tri_boxes.push((lo, hi));
+        }
         let floor = combine(MATERIAL, pb::FLOOR);
         for (part, bone) in BONES.iter().enumerate().skip(1) {
             if !bone.has_collision {
@@ -843,12 +874,35 @@ impl RiderBody {
             let f = self.frame(part);
             let (offsets, n, radius) = spheres(self.shapes[part]);
             let v = self.parts[host(part)].velocity;
+            if has_tris {
+                let (e0, e1) = (
+                    f.point(v3(0.0, 0.0, offsets[0])),
+                    f.point(v3(0.0, 0.0, offsets[n - 1])),
+                );
+                let slack = radius + MARGIN + v.length() * STEP + 0.3;
+                let lo =
+                    v3(e0.x.min(e1.x), e0.y.min(e1.y), e0.z.min(e1.z)) - v3(slack, slack, slack);
+                let hi =
+                    v3(e0.x.max(e1.x), e0.y.max(e1.y), e0.z.max(e1.z)) + v3(slack, slack, slack);
+                self.near.clear();
+                for (t, (bl, bh)) in self.tris.iter().zip(&self.tri_boxes) {
+                    if bl.x <= hi.x
+                        && bh.x >= lo.x
+                        && bl.y <= hi.y
+                        && bh.y >= lo.y
+                        && bl.z <= hi.z
+                        && bh.z >= lo.z
+                    {
+                        self.near.push(*t);
+                    }
+                }
+            }
             for &z in &offsets[..n] {
                 let c = f.point(v3(0.0, 0.0, z));
                 if has_tris {
                     let r = radius + MARGIN + v.length() * STEP;
                     for ci in pb::sphere_triangles(
-                        &self.tris,
+                        &self.near,
                         c,
                         c - v * STEP,
                         radius,
@@ -882,7 +936,7 @@ impl RiderBody {
                     }
                 }
                 // The board's volumes as spheres (its deck and trucks).
-                for (bp, at, br) in pb::board_spheres(board) {
+                for (bp, at, br) in pb::board_spheres(board).filter(|_| board_contacts) {
                     let d = c - at;
                     let l = d.length();
                     if l < radius + br + MARGIN && l > 1e-6 {
@@ -965,17 +1019,36 @@ impl RiderBody {
         reactions: &mut [Reaction],
         input: &RiderInput,
     ) -> bool {
+        let t0 = input.clock.map_or(0, |f| f());
+        let solved = self.step_inner(park, board, contacts, joints, drives, reactions, input);
+        self.cost_us = input.clock.map_or(0, |f| f()).wrapping_sub(t0);
+        solved
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_inner(
+        &mut self,
+        park: &dyn Terrain,
+        board: &[Body],
+        contacts: &mut [ContactRow],
+        joints: &mut [JointRow],
+        drives: &mut [DriveRow],
+        reactions: &mut [Reaction],
+        input: &RiderInput,
+    ) -> bool {
         let pose = &input.pose;
-        // A jump of the hips target (a respawn, a kinematic move) restarts the body there.
-        if !self.live || (pose[23].pos - self.target[23].pos).length() > 1.0 {
+        // A tick without a step, or a jump of the hips target (a respawn, a kinematic move), restarts
+        // the body at the animated pose (SK8 `update_positions`' continuity check).
+        if !self.live || self.idle > 1 || (pose[23].pos - self.target[23].pos).length() > 1.0 {
             self.reset(pose);
         }
+        self.idle = 0;
         self.target = *pose;
         self.physical_board = Xform::new(board[pb::DECK].axes, board[pb::DECK].position);
 
         let mut found: Vec<Candidate> = Vec::new();
         let mut pairs = Vec::new();
-        self.candidates(park, board, &mut found, &mut pairs);
+        self.candidates(park, board, input.board_contacts, &mut found, &mut pairs);
         let solve =
             input.airborne || Self::needs_solve(&found, input.ground, &self.feedback.settings);
         self.solved = solve;
