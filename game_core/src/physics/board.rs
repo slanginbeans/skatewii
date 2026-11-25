@@ -78,7 +78,7 @@ pub fn total_mass() -> f32 {
 /// Wheel friction on the surface (`physics_surfaces/smooth`: static, dynamic) and restitution
 /// (`WheelRestitution`); the world's own material adds nothing (static 0, dynamic 0, restitution 1).
 pub const WHEEL_FRICTION: [f32; 3] = [0.8, 0.7, 0.0];
-const FLOOR: [f32; 3] = [0.0, 0.0, 1.0];
+pub(crate) const FLOOR: [f32; 3] = [0.0, 0.0, 1.0];
 
 /// The trucks' joint and drive frames on the deck with the steering's angles (SK8 drive_frames.rs
 /// `calculate_truck_transforms`, truck_frames.rs `steering_truck_transforms`): each truck's X is its
@@ -169,7 +169,7 @@ pub const TRUCK_DRIVE: DriveDynamics = DriveDynamics {
 /// `physicstrucks` `TruckStaticFriction`, `TruckDynamicFriction`, `TruckRestitution` and
 /// `physicsdeck` `DeckStaticFriction`, `DeckDynamicFriction`, `DeckRestitution`.
 const TRUCK_MATERIAL: [f32; 3] = [0.9, 0.0, 0.0];
-const DECK_MATERIAL: [f32; 3] = [0.1, 0.1, 0.0];
+pub(crate) const DECK_MATERIAL: [f32; 3] = [0.1, 0.1, 0.0];
 /// The truck capsule's radius (`RadiusScalar` 0.5375 x the wheel radius), spheres along its axle
 /// between the wheels.
 const TRUCK_RADIUS: f32 = 0.5375 * WHEEL_RADIUS;
@@ -193,6 +193,22 @@ const DECK_SPHERES: [(Vec3, f32); 11] = [
     (v3(0.0, 0.0322, -0.4447), 0.0075),
 ];
 const BODY_SPHERES: usize = 6 + DECK_SPHERES.len();
+
+/// The board's volumes as spheres (the part, the centre, the radius): the trucks' capsules and the
+/// deck's (as `Board::body_contacts` meets the world with them).
+pub(crate) fn board_spheres(parts: &[Body]) -> impl Iterator<Item = (usize, Vec3, f32)> + '_ {
+    (0..BODY_SPHERES).map(move |i| {
+        let (part, local, radius) = if i < 6 {
+            let t = if i < 3 { FRONT_TRUCK } else { BACK_TRUCK };
+            let z = [-TRUCK_SPHERE_SPACING, 0.0, TRUCK_SPHERE_SPACING][i % 3];
+            (t, v3(0.0, 0.0, z), TRUCK_RADIUS)
+        } else {
+            (DECK, DECK_SPHERES[i - 6].0, DECK_SPHERES[i - 6].1)
+        };
+        let b = &parts[part];
+        (part, b.position + b.axes.apply(local), radius)
+    })
+}
 
 /// The terrain as the board's narrow phase sees it this tick: its triangles near the board when it has
 /// them (SK8's sphere-triangle queries), else rays.
@@ -495,7 +511,7 @@ fn fix_up(tris: &[([Vec3; 3], Vec3)], t: &[Vec3; 3], n: Vec3, toward: Vec3) -> F
 /// from a convex corner's edge outside its bend) and the sphere's swept box meets the triangle; the
 /// two nearest distinct contacts are kept.
 #[allow(clippy::too_many_arguments)]
-fn sphere_triangles(
+pub(crate) fn sphere_triangles(
     tris: &[([Vec3; 3], Vec3)],
     c: Vec3,
     was: Vec3,
@@ -834,6 +850,20 @@ impl Board {
     /// One tick (SK8 `BoardStep::advance`): the queued forces and deck turns, the rows from this
     /// state, the shared solve and every part's integration.
     pub fn step(&mut self, park: &dyn Terrain, input: &BoardInput) {
+        self.step_with(park, input, None);
+    }
+
+    /// [`Board::step`] with the rider's physical body in the same solve (SK8 `advance_attached`);
+    /// with no rider body, or none to solve this tick, the board is solved alone.
+    pub fn step_with(
+        &mut self,
+        park: &dyn Terrain,
+        input: &BoardInput,
+        rider: Option<(
+            &mut super::rider_body::RiderBody,
+            &super::rider_body::RiderInput,
+        )>,
+    ) {
         let deck = &mut self.parts[DECK];
         for &(f, p) in &input.forces {
             deck.add_force_at(f, p + v3(0.0, FORCE_Y_OFFSET, 0.0));
@@ -931,13 +961,27 @@ impl Board {
             rows[2] = DriveRow::build(&all, PARTS, DECK, &here, &here, &HOOK_DRIVE);
             n_drives = 3;
         }
-        super::solve(
-            &mut contacts[..count],
-            &mut joints,
-            &mut rows[..n_drives],
-            &mut reactions,
-            ITERATIONS,
-        );
+        let together = match rider {
+            Some((body, ri)) => body.step(
+                park,
+                &all,
+                &mut contacts[..count],
+                &mut joints,
+                &mut rows[..n_drives],
+                &mut reactions,
+                ri,
+            ),
+            None => false,
+        };
+        if !together {
+            super::solve(
+                &mut contacts[..count],
+                &mut joints,
+                &mut rows[..n_drives],
+                &mut reactions,
+                ITERATIONS,
+            );
+        }
         for (p, r) in self.parts.iter_mut().zip(&reactions) {
             p.mass.linear_drag = input.linear_drag;
             p.integrate(r, GRAVITY);

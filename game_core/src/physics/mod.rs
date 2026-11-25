@@ -18,6 +18,7 @@ pub mod body;
 pub mod contact;
 pub mod drive;
 pub mod joint;
+pub mod rider_body;
 pub mod skeleton;
 pub mod solver;
 
