@@ -231,12 +231,15 @@ impl Skater {
         self.step_board(park, &input, true);
     }
 
-    /// The rider's body's input this tick: the animated pose on the deck where it will be at the end
+    /// The rider's body's input this tick: the animated pose at the deck where it will be at the end
     /// of the tick (SK8 drives to the predicted board), and the ground under the wheels.
     fn rider_input(&self, airborne: bool) -> Option<RiderInput> {
         let local = self.rider_pose.as_ref()?;
         let d = self.rig.as_ref()?.board.deck();
-        let deck = Xform::new(d.axes, d.position + d.velocity * crate::physics::STEP);
+        let deck = Xform::new(
+            self.rider_axes,
+            d.position + d.velocity * crate::physics::STEP,
+        );
         let wheels = &self.rig.as_ref()?.board.wheels;
         let ground = wheels.iter().flatten().next().map_or(
             (
@@ -753,5 +756,49 @@ impl Skater {
             return;
         }
         self.update_wallride(park, dt, events);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::park::Park;
+    use crate::physics::skeleton::ANIMATED_PARTS;
+
+    /// SK8 `SkeletonRootFrames::update`: the body's animated pose stands on the rider's axes (the
+    /// reckoning's up) at the predicted deck, whatever the physical deck's pitch.
+    #[test]
+    fn the_rider_pose_stands_on_the_reckoning_not_the_deck() {
+        let park = Park {
+            shapes: Vec::new(),
+            half_size: 50.0,
+            wall_height: 2.0,
+            spawn: Vec3::ZERO,
+            spawn_yaw: 0.0,
+            rails: Vec::new(),
+        };
+        let mut s = Skater::spawn(&park);
+        s.sync_rig(&park);
+        // The deck pitched nose down half a radian (over a lip), the reckoning upright.
+        let pitched = Mat3::from_cols(
+            v3(1.0, 0.0, 0.0),
+            v3(0.0, libm::cosf(0.5), libm::sinf(0.5)),
+            v3(0.0, -libm::sinf(0.5), libm::cosf(0.5)),
+        );
+        let r = s.rig.as_mut().unwrap();
+        let at = r.board.deck().position;
+        r.board.place(at, &pitched, Vec3::ZERO, Vec3::ZERO);
+        s.rider_axes = Mat3::IDENTITY;
+        let local = Xform::new(Mat3::IDENTITY, v3(0.0, 0.9, 0.0));
+        s.rider_pose = Some([local; ANIMATED_PARTS]);
+        let input = s.rider_input(false).unwrap();
+        let hips = input.pose[23];
+        let deck = s.rig.as_ref().unwrap().board.deck().position;
+        assert!(
+            (hips.pos - (deck + v3(0.0, 0.9, 0.0))).length() < 1e-4,
+            "{:?}",
+            hips.pos
+        );
+        assert!((hips.rot.cols[1] - Vec3::UP).length() < 1e-6);
     }
 }

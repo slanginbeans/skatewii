@@ -901,6 +901,8 @@ pub struct Skater {
     /// game), off without one. `body_us`: its step's cost this tick (inside the board's).
     pub rider_body: Option<alloc::boxed::Box<crate::physics::rider_body::RiderBody>>,
     pub rider_pose: Option<[crate::math::Xform; crate::physics::skeleton::ANIMATED_PARTS]>,
+    /// The axes the rider's pose stands on (the reckoning's up, the rider's heading).
+    pub rider_axes: crate::math::Mat3,
     pub body_us: u32,
     air_com: Option<f32>,
     /// How far the legs have lifted the board over the flight's path (m, world up), and how fast it
@@ -1297,6 +1299,7 @@ impl Skater {
             board_us: 0,
             rider_body: None,
             rider_pose: None,
+            rider_axes: crate::math::Mat3::IDENTITY,
             body_us: 0,
             air_com: None,
             air_lift: 0.0,
