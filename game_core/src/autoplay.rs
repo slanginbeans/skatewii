@@ -384,6 +384,30 @@ fn clear_heading(game: &Game, yaw: f32, dist: f32) -> Option<f32> {
     None
 }
 
+/// Whether the ground stays flat and free of walls for `dist` metres along `yaw` from the skater, on
+/// its line and `half` metres either side of it.
+fn lane_clear(game: &Game, yaw: f32, dist: f32, half: f32) -> bool {
+    let s = &game.skater;
+    let ground = game.terrain();
+    let y0 = s.pos.y;
+    let (dx, dz) = (sinf(yaw), cosf(yaw));
+    [-half, 0.0, half].iter().all(|&side| {
+        let start = s.pos + crate::math::v3(dz * side, 0.0, -dx * side);
+        let mut prev = start;
+        let mut d = 0.5;
+        while d <= dist {
+            let p = crate::math::v3(start.x + dx * d, y0, start.z + dz * d);
+            let g = ground.ground(p.x, p.z, y0 + 1.5);
+            if (g.height - y0).abs() > 0.08 || ground.blocked(prev, p) {
+                return false;
+            }
+            prev = p;
+            d += 0.5;
+        }
+        true
+    })
+}
+
 /// How far beside a ledge the tour rides to ollie onto it, and how far in from a deck's edge it rolls
 /// off onto coping (m).
 const LEDGE_SIDE: f32 = 0.35;
@@ -796,6 +820,7 @@ impl TrickTour {
                 };
                 if turned && self.t > 40 {
                     next(self, Tour::Manual, sw);
+                    self.steer_to = None;
                 }
             }
             Tour::Manual => {
@@ -812,6 +837,28 @@ impl TrickTour {
                     // Undo the stick conditioning: 0.25 dead zone, full at 0.95 of the C-stick's range.
                     pad.cstick_y = -((gesture_y * 0.7 + 0.25) * crate::input::C_RANGE) as i8;
                 }
+                // The manual barely steers: it starts only with clear, flat ground for the whole of
+                // it ahead, a board's width either side (the rigid board is pushed back off a wall it
+                // runs into, which would leave it rolling fakie); until then, steer for some.
+                if rolling && self.t >= 40 && s.manual.is_none() && self.held == 0 {
+                    let ahead = (s.speed.abs() * 3.5).clamp(4.0, 16.0);
+                    if !lane_clear(game, s.travel_yaw(), ahead, 0.4) {
+                        pad.cstick_y = 0;
+                        if self.steer_to.is_none() {
+                            self.steer_to = (1..12).find_map(|k| {
+                                let a = s.travel_yaw()
+                                    + if k % 2 == 0 { 1.0 } else { -1.0 }
+                                        * ((k + 1) / 2) as f32
+                                        * 0.2;
+                                lane_clear(game, a, ahead, 0.4).then_some(a)
+                            });
+                        }
+                        if let Some(h) = self.steer_to {
+                            let err = wrap_angle(h - s.travel_yaw());
+                            pad.stick_x = if err > 0.0 { -100 } else { 100 };
+                        }
+                    }
+                }
                 // Held for 3 s from when it engaged (a push still running holds it off at first).
                 if s.manual.is_some() {
                     self.held += 1;
@@ -819,6 +866,7 @@ impl TrickTour {
                 }
                 if self.held > MANUAL_TICKS || (self.held == 0 && self.t > 600) {
                     next(self, Tour::KickTurn, sw);
+                    self.steer_to = None;
                 }
             }
             Tour::KickTurn => {
