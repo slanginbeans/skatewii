@@ -1115,10 +1115,28 @@ impl Skater {
             if entry == Entry::DropIn && (f.deck - h.point).dot(f.up).abs() >= TIP_DEPTH {
                 return None;
             }
-            // Riding: only a tip the board is moving towards, and moving (standing still beside an
-            // edge isn't a drop-in; ours, where SK8 reads a retained lean flag).
-            if ground && (v.length() < DROP_IN_MIN || (h.point - f.deck).dot(v) <= 0.0) {
+            // Riding: moving (standing still beside an edge isn't a drop-in).
+            if ground && v.length() < DROP_IN_MIN {
                 return None;
+            }
+            // Under 3 m/s across the rail (SK8 families.rs `tipslide`): in a manual, only a rail on
+            // the ground side of the deck (`balance_2720`, against the wheels' normal); riding over
+            // a second, only towards the rail with the weight forwards and away from it without
+            // (`flags_2472` bit 12: the animation's weight on the nose, turned round riding fakie).
+            let across = v - d * v.dot(d);
+            if across.dot(across) < 9.0 {
+                if self.manual.is_some() {
+                    if (h.point - f.deck).dot(self.contact_n) >= 0.0 {
+                        return None;
+                    }
+                } else if self.riding_ticks > 30 {
+                    let toward = (h.point - f.deck).dot(v) > 0.0;
+                    let on_nose = self.graph.is_some_and(|g| g.weight_on_nose);
+                    let forwards = if self.fakie { !on_nose } else { on_nose };
+                    if forwards != toward {
+                        return None;
+                    }
+                }
             }
             Some(contact(&h, Family::Tipslide, front, entry))
         };

@@ -467,7 +467,7 @@ pub struct Shared {
     pub player: Player,
     /// Packet values this tick (CreateAttribute, AttachIntent, SetTrickHeight ...), latest per name.
     pub packet: Vec<(Str, f32)>,
-    flags: [u8; 7],
+    flags: [u8; 8],
     pub dark: bool,
     pub manual_out_timer: f32,
     pub tricks_disabled: f32,
@@ -574,6 +574,7 @@ fn flag_index(f: Flag) -> usize {
         Flag::Anticipating => 4,
         Flag::SlideCandidate => 5,
         Flag::NoPumping => 6,
+        Flag::WeightOnNose => 7,
     }
 }
 
@@ -944,7 +945,7 @@ impl<'a> Runner<'a> {
                 world: World::default(),
                 player: Player::default(),
                 packet: Vec::new(),
-                flags: [0; 7],
+                flags: [0; 8],
                 dark: false,
                 manual_out_timer: 0.0,
                 tricks_disabled: 0.0,
@@ -1144,7 +1145,7 @@ impl<'a> Runner<'a> {
         }
         self.s.mg.clear();
         self.s.filtered.clear();
-        self.s.flags = [0; 7];
+        self.s.flags = [0; 8];
         self.s.push = PushState::default();
         self.s.time_since_teleport = 0.0;
         self.s.applying_tilt = false;
