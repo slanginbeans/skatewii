@@ -974,15 +974,12 @@ all but their spin. The truck drives are hard angular drives (`Angular_Hard_Disp
 **The rider.** In SK8 the rider is a physical skeleton (26 bodies, 28 joints, 53 drives to its animation
 targets) in the same solve. Measured in SK8 (headless harness, SK8's course): while riding, the only
 contacts on the board are its four wheels on the ground, and they carry 113.3 N standing, the board's own
-weight (11.56 kg x 9.8); the skeleton's drives hold the rider to its animation, not the deck. So the board
-is ported fully and the rider is not: flatground's rider stays animated over the deck, as before.
+weight (11.56 kg x 9.8); the skeleton's drives hold the rider to its animation, not the deck. The
+skeleton is now in the solve too ("The rider's body" below), reduced so that it fits the Wii's tick.
 
 **What is simplified for the Wii, and why.**
 
-- The skeleton is not simulated (above). With it a tick solves about 120 rows (board 13, skeleton
-  81, contacts) 50 times; the board alone is 13 rows plus its contacts. The board's solve measures on
-  the host as noted under "Measured against SK8"; at the Wii's 15 to 25 times slower core the board
-  costs well under a millisecond, the skeleton would cost several.
+- The skeleton is solved with two reductions ("The rider's body" below).
 - Arithmetic: SK8 keeps the Xenon's fused multiply-adds, reciprocal estimates and operation order to
   match the console bit for bit; flatground computes the same formulas in plain f32 (the PowerPC 750CL
   has no matching estimates), which differs in the last bits only.
@@ -1065,6 +1062,78 @@ deck scrapes), lips and coping stalls, grinds and slides, landings, kick turns, 
 on the rigid board, and then removing the kinematic ground model those still use. Known gaps: a built-in
 (no imported data) full carve at 3.3 m/s turns 1.28 rad/s against SK8's 1.71 (the imported graphs'
 steering gives 1.81); the 2.5 m drop-in's bottom speed.
+
+## The rider's body (`game_core/src/physics/rider_body`)
+
+A port of SK8's skeleton_body (joints.rs, drives.rs, drive_dynamics.rs, drive_frames.rs, targets.rs,
+collision_update.rs, errors.rs) and skate-game physics/solve.rs: the rider's 26 bodies
+(`physics/skeleton.rs`) in the board's solve, `Board::step_with`.
+
+- **Joints**: `build_joints` is `SkeletonJoints::new` (TU3 InitJoints 0x82BE5B30, SetUpNormalJointLimits
+  0x82BE58A8): 22 joints from the bones' physical parents, `PHYS_TPOSE`'s joint and volume frames
+  (words 0-7, 12-18) and limits (20, 21), `physics_skeleton_joints` and the global displacement limits
+  (0.01 m and 10 rad a second's worth a tick). The stock records (`STOCK_JOINTS`) are SK8's, dumped from
+  `load_joints` on the stock rider; a test builds them again from the rig's initial bone frames and
+  matches them.
+- **Drives**: every bone to its parent (LOCAL) and to the hips (LOCAL_ROOT), in mode 0 (the animation's
+  hard drives: linear 60 m/s and 3600, angular 240 rad/s and 14400) or, while a contact's effect lasts
+  (`effect_time` 0.16 s), mode 3 (soft: `CollisionSoftDisplacement` 25000 and strength 100 times the
+  part's collision strength); the hips to an immovable target at the animated hips (600, 36000). The
+  targets are the imported rider's clip pose (`Rider::physical_bones`, each bone times its volume frame),
+  held on the physical deck where it will be at the tick's end (SK8 drives to the predicted board). A
+  mirrored (regular) rider takes each body's partner bone, reflected, turned by the fixed turn that makes
+  it the body's own frame in the rig's symmetric initial pose. No imported rider: no body.
+- **Contacts**: the bones' spheres and capsules (capsules as three spheres) against the terrain's
+  triangles (frictionless, `physics_skeleton_collision`'s normal material) and the forearms against the
+  trunk and thighs (the six pairs SkeletonCollision doesn't cull). Body against board only off the board:
+  riding, the board's collision group 4 against the skater's 5 is culled by TU3's group table (SK8
+  assembly_contacts.rs).
+- **Feedback** (`Feedback`): SK8's contact flags (any, foot on board, non-board, compliant, recovering),
+  the bones' and regions' hardest contacts, the drive weight, and the pose error (each bone's physical
+  position less its animated one; the largest over the hips, legs, feet and head). Phase 4 reads them.
+- **The physical board** (`RiderBody::physical_board`, SK8 `SkeletonBoardFrames::physical_board`): the
+  deck's frame each tick, the air's hook target to come. Nothing in the riding reads the body yet.
+
+**Reduction 1: merged and kinematic bodies.** The hands into the forearms (0.43 kg each), the toes into
+the feet (0.39 kg), the neck (1.0 kg) into the head (6.7 kg): their mass rides on the host (its inertia
+scaled with it), their joints and drives go, their volumes still touch at their animated place on the
+host. The skateboard root (1 g, held to the deck by its own target, no collision) and the two extra
+capsules (held to the centre of mass, no collision) have no joint, drive or contact to another body, so
+they follow their targets. 18 bodies, 17 joints and 34 drives (with the hips' target) instead of 26, 22
+and 48.
+
+**Reduction 2: solve only when the result is read.** Riding on the ground with nothing but the ground near
+the bones, the body is the animated pose (followed, its velocities from the motion); it is solved in the
+air, and on the ground when a bone can touch something other than the ground under the riding (beyond
+`ground_plane_max_distance` 0.3 m or steeper than `ground_plane_max_angle` 0.8, the feedback's own ground
+filter). The contacts are still found every tick, so the flags stay SK8's.
+
+SK8's traces: the probe with each reduction switched in (merge: the merged bones' joints locked and their
+drives removed; kinematic: the bodies snapped to their targets), against its own baseline. Largest
+difference over the run of the board's deck and of the skeleton's centre of mass; "flag ticks" are ticks
+whose `any` or `nonboard` flag differs.
+
+| Scenario | merge hands, toes, neck | root and capsules kinematic | ground kinematic |
+|---|---|---|---|
+| carve_full_6 | board 2e-4 m, 0.011 m/s; COM 1.0 mm; 4 flag ticks | identical | board 1e-4 m, 0.002 m/s; COM 5.9 mm |
+| carve_half_6 | board 1e-4 m, 1e-4 m/s; COM 3.5 mm | identical | board 2.6 mm, 0.02 m/s, 1.7 mrad; COM 5.9 mm |
+| carve_full_8, the two push runs | board identical; COM 0.3 to 1.0 mm | identical | board identical; COM 5.9 mm |
+| wall_plain_3, wall_plain_6, wall_manual_6 | board identical; COM 1.0 mm | identical | board identical; COM 6.0 mm |
+| pipe_dropin | diverges in the drop-in's flight (tick 103); bottom speeds 9.08 9.08 9.15 9.15 9.16 against the baseline's 9.08 9.06 8.80 9.19 8.89 | identical | diverges at tick 119; 9.23 9.02 9.06 8.99 8.94 |
+
+While riding, SK8's skeleton never touches the board (no `Deck<->Attached` contact in any riding
+scenario; three in a nose-manual fall) and on flat ground its contacts are the ground's, so the board
+rides the same with the body followed; what moves is SK8's own read of the physical centre of mass (a few
+millimetres), which flatground's riding doesn't read. In flatground the board is bit for bit the same with
+and without the body (the harness's drop-in: 718 of 718 rows equal; bottom speed 7.04 first pass, 6.94
+later, against main's 6.89 and 6.93).
+
+**Cost** (host, release): the board alone 27 to 32 us; the body solved with it +118 us
+(`rider_body_step_cost`, open ground), followed +6 us; riding real districts (300 ticks from the start at
+6 m/s) the body averages 16 us in Industrial and 10 us in University, its solved ticks there peaking at
+208 us. On the Wii (8 to 10 times the host) that is 0.1 to 0.2 ms a tick on the ground and about 1 to
+1.2 ms solved in the open; a solved tick among many triangles can pass 1.5 ms. Wii log: `rider body`
+next to `board solve` (which no longer includes it).
 
 ## The camera (`game_core/src/camera`)
 

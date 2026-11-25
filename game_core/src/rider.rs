@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use crate::character::{Character, Local, Rows, mul, rigid_inverse};
 use crate::gesture::{Flick, Trick};
 use crate::gfx::SUN;
-use crate::math::{Mat3, PI, Vec3, sqrtf, v3};
+use crate::math::{Mat3, PI, Vec3, Xform, sqrtf, v3};
 use crate::skater::ragdoll::{PARTS, POINTS};
 use crate::skater::{GrabKind, GrindKind, LandKind, Landing, Mode, Skater};
 
@@ -543,6 +543,8 @@ pub struct Rider {
     /// the pose drawn and the clips' pose under it.
     doll_points: [Option<usize>; POINTS],
     doll_parts: [Option<usize>; PARTS],
+    /// The rig's bones for the physical skeleton's bodies (`physics::skeleton::BONE_NAMES`).
+    physical: Option<[usize; crate::physics::skeleton::ANIMATED_PARTS]>,
     doll: Option<[Rows; PARTS]>,
     doll_dt: f32,
     doll_on: bool,
@@ -597,6 +599,11 @@ impl Rider {
         let board_bone = character.bone("SKATEBOARD_ROOT");
         let doll_points = DOLL_POINTS.map(|names| names.iter().find_map(|b| character.bone(b)));
         let doll_parts = DOLL_PARTS.map(|b| character.bone(b));
+        let found = crate::physics::skeleton::BONE_NAMES.map(|b| character.bone(b));
+        let physical = found
+            .iter()
+            .all(Option::is_some)
+            .then(|| found.map(|b| b.unwrap_or(0)));
         let legs = crate::foot_ik::Legs::find(&character);
         let mut r = Rider {
             legs,
@@ -604,6 +611,7 @@ impl Rider {
             feet_frame: None,
             doll_points,
             doll_parts,
+            physical,
             doll: None,
             doll_dt: 0.0,
             doll_on: false,
@@ -976,6 +984,21 @@ impl Rider {
             };
         }
         Some(out)
+    }
+
+    /// The clips' pose (before the ragdoll) of the physical skeleton's bones (character space, axes
+    /// then origin), and whether it is drawn mirrored; none when the rig lacks one of them.
+    pub fn physical_bones(
+        &self,
+    ) -> Option<([Xform; crate::physics::skeleton::ANIMATED_PARTS], bool)> {
+        let bones = self.physical?;
+        let mut out = [Xform::IDENTITY; crate::physics::skeleton::ANIMATED_PARTS];
+        for (o, b) in out.iter_mut().zip(bones) {
+            let r = self.anim_world.get(b)?;
+            let v = |a: [f32; 3]| v3(a[0], a[1], a[2]);
+            *o = Xform::new(Mat3::from_cols(v(r[0]), v(r[1]), v(r[2])), v(r[3]));
+        }
+        Some((out, self.anim_mirrored))
     }
 
     /// The ragdoll's pose over the clips' (see [`Rider::set_ragdoll`]).

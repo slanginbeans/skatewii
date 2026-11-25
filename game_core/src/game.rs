@@ -159,6 +159,11 @@ pub struct SectionTimes {
     pub board_us: u32,
     pub board_peak_us: u32,
     pub board_max_us: u32,
+    /// The rider's physical body's step (SK8's skeleton, solved with the board or following the
+    /// pose), as the board's: this tick, peak since the last log line, most since the start.
+    pub body_us: u32,
+    pub body_peak_us: u32,
+    pub body_max_us: u32,
 }
 
 struct Popup {
@@ -1092,6 +1097,22 @@ impl Game {
             } else {
                 self.skater.pose_seed = points;
             }
+            // The rider's physical body is driven to the clips' pose, held on the physical deck (it
+            // rides with the board until the next tick's solve).
+            let deck = self.skater.rig.as_ref().map(|r| {
+                let d = r.board.deck();
+                Xform::new(d.axes, d.position)
+            });
+            let bones = self.rider.as_ref().and_then(|r| r.physical_bones());
+            self.skater.rider_pose = match (bones, deck) {
+                (Some((bones, mirrored)), Some(deck)) => {
+                    let at = self.imported_xform_on(self.skater_base());
+                    let world = crate::physics::rider_body::pose_from_bones(&bones, &at, mirrored);
+                    let on_deck = crate::physics::rider_body::inverse(&deck);
+                    Some(world.map(|x| on_deck.then(&x)))
+                }
+                _ => None,
+            };
         }
         let t2 = now(self.timer);
         self.times.skin_us = t2.wrapping_sub(t1);
@@ -1297,6 +1318,9 @@ impl Game {
         self.times.board_us = self.skater.board_us;
         self.times.board_peak_us = self.times.board_peak_us.max(self.skater.board_us);
         self.times.board_max_us = self.times.board_max_us.max(self.skater.board_us);
+        self.times.body_us = self.skater.body_us;
+        self.times.body_peak_us = self.times.body_peak_us.max(self.skater.body_us);
+        self.times.body_max_us = self.times.body_max_us.max(self.skater.body_us);
         let bailed = self.skater.ragdoll_active();
         if bailed {
             let us = now(self.timer).wrapping_sub(t_step);
