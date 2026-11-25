@@ -736,6 +736,9 @@ pub struct BoardInput {
     /// The animated board the deck is hooked to (deck centre, axes): SK8's hook drive, on while the
     /// rider's animation holds the board (the air).
     pub hook: Option<(Vec3, Mat3)>,
+    /// The hook turns the deck only (SK8 KnownAir: its linear drive off, the trajectory follow
+    /// setting the board's velocity).
+    pub hook_angular_only: bool,
 }
 
 /// The board's seven bodies.
@@ -962,7 +965,15 @@ impl Board {
             let mut hook = Body::new(deck_mass(), at, Quat::from_mat3(&axes), Vec3::ZERO);
             hook.active = false;
             all[PARTS] = hook;
-            rows[2] = DriveRow::build(&all, PARTS, DECK, &here, &here, &HOOK_DRIVE);
+            let drive = if input.hook_angular_only {
+                DriveDynamics {
+                    linear: DriveParams::OFF,
+                    ..HOOK_DRIVE
+                }
+            } else {
+                HOOK_DRIVE
+            };
+            rows[2] = DriveRow::build(&all, PARTS, DECK, &here, &here, &drive);
             n_drives = 3;
         }
         let together = match rider {
