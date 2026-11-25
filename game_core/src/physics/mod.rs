@@ -18,6 +18,7 @@ pub mod body;
 pub mod contact;
 pub mod drive;
 pub mod joint;
+pub mod skeleton;
 pub mod solver;
 
 pub use body::{Body, Reaction};

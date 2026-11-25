@@ -226,7 +226,9 @@ impl Skater {
             wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
             ..BoardInput::default()
         };
+        let t0 = self.clock.now();
         r.board.step(park, &input);
+        self.board_us = self.clock.now().wrapping_sub(t0);
     }
 
     /// Remembers the ground state as read off the board.
@@ -538,7 +540,9 @@ impl Skater {
         let Some(rig) = self.rig.as_mut() else {
             return;
         };
+        let t0 = self.clock.now();
         rig.board.step(park, &input);
+        self.board_us = self.clock.now().wrapping_sub(t0);
         rig.ground_time += dt;
         self.read_rig(park, d, dt, events);
     }

@@ -154,6 +154,11 @@ pub struct SectionTimes {
     /// `ragdoll_peak_us`.
     pub ragdoll_us: u32,
     pub ragdoll_peak_us: u32,
+    /// The rigid board's solve on the last tick, the most one took since the platform last cleared
+    /// `board_peak_us`, and the most since the game started.
+    pub board_us: u32,
+    pub board_peak_us: u32,
+    pub board_max_us: u32,
 }
 
 struct Popup {
@@ -1286,7 +1291,12 @@ impl Game {
         }
         let air = self.skater.is_airborne();
         let t_step = now(self.timer);
+        self.skater.clock = crate::skater::Clock(self.timer);
+        self.skater.board_us = 0;
         self.skater.step(ground, &pad, &flick, dt, &mut events);
+        self.times.board_us = self.skater.board_us;
+        self.times.board_peak_us = self.times.board_peak_us.max(self.skater.board_us);
+        self.times.board_max_us = self.times.board_max_us.max(self.skater.board_us);
         let bailed = self.skater.ragdoll_active();
         if bailed {
             let us = now(self.timer).wrapping_sub(t_step);
