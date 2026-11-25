@@ -6237,6 +6237,44 @@ mod tests {
     }
 
     #[test]
+    fn a_head_on_wall_stops_the_board_as_sk8s() {
+        // SK8 riding head-on into its platform's 1.5 m wall at 3.1, 4.7 and 6.7 m/s: the board stops
+        // within two ticks of reaching it, upright and riding, and moves off it no faster than
+        // 0.6 m/s after (0.3 m/s riding, 0.59 in a manual at 6 m/s).
+        let park = quarter_pipe();
+        for speed in [3.0, 4.5, 6.5] {
+            let mut s = spawn(&park);
+            s.pos = v3(-4.0, 0.0, -12.0);
+            s.set_heading(0.0);
+            s.speed = speed;
+            let mut ev = Vec::new();
+            let mut hit = None;
+            for k in 0..240 {
+                ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+                if hit.is_none() && s.speed < speed * 0.5 {
+                    hit = Some(k);
+                }
+                if let Some(h) = hit {
+                    if k >= h + 2 {
+                        assert!(s.speed < 0.05, "{speed} m/s: still {} into it", s.speed);
+                    }
+                    assert!(s.speed > -0.6, "{speed} m/s: pushed off at {}", s.speed);
+                }
+            }
+            assert!(
+                hit.is_some(),
+                "{speed} m/s never reached the wall: {:?}",
+                s.pos
+            );
+            assert!(
+                !ev.contains(&Event::Bailed) && !ev.contains(&Event::RanOut),
+                "{speed} m/s: {ev:?}"
+            );
+            assert_eq!(s.mode, Mode::Rolling);
+        }
+    }
+
+    #[test]
     fn walls_keep_speed_along_them_and_hard_hits_take_you_off() {
         let park = quarter_pipe();
         let wall_run = |speed: f32, yaw: f32| {
