@@ -20,6 +20,8 @@ const FOOT_OFFSET: f32 = 0.22;
 const FOOT_MIN_FORCE: f32 = 20.0;
 const FOOT_LANDING_FORCE: f32 = 100.0;
 const FOOT_LANDING_TIME: f32 = 0.1;
+/// The wheel lines' length (m, SK8 board_ground.rs `WHEEL_LINE_LENGTH`).
+const WHEEL_LINE: f32 = 0.2;
 /// Skate 3's manual corrective drag (N per m/s, SK8 manual/controller.rs `apply_correction`).
 const MANUAL_CORRECTIVE_DRAG: f32 = 400.0;
 
@@ -132,6 +134,9 @@ impl Skater {
             && r.airborne
         {
             r.airborne = false;
+            // Landing: the feet's landing force starts again (SK8 ground_force.rs, from the ground
+            // state's start).
+            r.ground_time = 0.0;
             if (r.board.deck().position - deck).length() < 0.5 {
                 self.adopt_rig();
                 self.mark_rig();
@@ -636,39 +641,18 @@ impl Skater {
         self.wall_clock += dt;
         if down.is_empty() {
             self.vn = v.dot(nn);
-            // How far the surface is below the deck along its up (a board tipped over a coping looks
-            // down the transition, not to the pipe's floor).
-            let up = deck.axes.cols[1];
-            let gap = park
-                .raycast(deck.position, -up, 1.0)
-                .map_or(f32::MAX, |h| h.t - pb::DECK_HEIGHT);
-            // A board tipping nose first over an edge stays on its physics for Skate 3's natural-air
-            // time (SK8's rigid board falls onto the transition below a coping on its own and lands
-            // there, a quarter second later, without the flight's kinematic path).
-            let nose = deck.axes.cols[2];
-            let lead = if deck.velocity.dot(nose) >= 0.0 {
-                nose
-            } else {
-                -nose
-            };
-            let tipping = lead.y < -0.2;
-            let leave = if tipping {
-                // Tipping over an edge, the natural-air time rule alone (SK8's rider goes into its
-                // air state a quarter second on, the board hooked to it).
-                gap == f32::MAX || {
-                    self.gap_time += dt;
-                    self.gap_time > t.natural_air_time
-                }
-            } else {
-                gap > t.natural_air_max_dist || {
-                    if gap > t.natural_air_min_dist {
-                        self.gap_time += dt;
-                    } else {
-                        self.gap_time = 0.0;
-                    }
-                    self.gap_time > t.natural_air_time
-                }
-            };
+            // Skate 3's off-ground test (SK8 selector/conditions.rs `condition_is_off_ground`, on
+            // board_ground.rs `wheel_lines`): a 0.2 m line down the rider's up from each wheel; off the
+            // ground when the nearest surface under them is past `NaturalAirMaxDist`, or past
+            // `NaturalAirMinDist` with no wheel touching for `NaturalAirTime`.
+            let up = self.reckoning.up.normalize_or(nn);
+            let nearest = (0..4)
+                .filter_map(|w| park.raycast(board.parts[w].position, -up, WHEEL_LINE))
+                .map(|h| h.t)
+                .fold(WHEEL_LINE, f32::min);
+            self.gap_time += dt;
+            let leave = nearest > t.natural_air_max_dist
+                || (nearest > t.natural_air_min_dist && self.gap_time > t.natural_air_time);
             if leave {
                 // The flight starts from the board as it is: a board tipped over an edge leaves it
                 // pitched, its deck below the edge.
