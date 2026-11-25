@@ -538,13 +538,6 @@ impl Skater {
         let Some(rig) = self.rig.as_mut() else {
             return;
         };
-        if rig.board.wheels_down() == 0 && rig.ground_time > 0.0 {
-            // No wheel on the ground: the ground behaviours don't act (SK8 queues them in its ground
-            // state only); the board flies on its own physics.
-            input.forces.clear();
-            input.limited = Vec3::ZERO;
-            input.angular = Vec3::ZERO;
-        }
         rig.board.step(park, &input);
         rig.ground_time += dt;
         self.read_rig(park, d, dt, events);
