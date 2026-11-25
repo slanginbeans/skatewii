@@ -905,10 +905,14 @@ pub struct Skater {
     pub rider_axes: crate::math::Mat3,
     pub body_us: u32,
     air_com: Option<f32>,
-    /// How far the legs have lifted the board over the flight's path (m, world up), and how fast it
-    /// moved last tick (m/s).
-    pub air_lift: f32,
-    air_lift_rate: f32,
+    /// The rider's up at take-off: the centre of mass flies `air_com` along it from the flight's
+    /// point.
+    air_up: Vec3,
+    /// Where the board hangs off the flight's path (m): under the flying centre of mass along the
+    /// rider's up as the clip poses it (SK8's board under the KnownAir centre of mass), and how fast
+    /// it moved last tick (m/s).
+    pub air_lift: Vec3,
+    air_lift_rate: Vec3,
     /// Off the board (`Mode::Walk`): the walker.
     pub biped: Biped,
     /// Climbing ledges on foot (SK8's own extension: `climb`).
@@ -1302,8 +1306,9 @@ impl Skater {
             rider_axes: crate::math::Mat3::IDENTITY,
             body_us: 0,
             air_com: None,
-            air_lift: 0.0,
-            air_lift_rate: 0.0,
+            air_up: Vec3::UP,
+            air_lift: Vec3::ZERO,
+            air_lift_rate: Vec3::ZERO,
             wallride: None,
             checkpoints: Checkpoints::default(),
             riding_ticks: 0,
@@ -1434,7 +1439,7 @@ impl Skater {
     /// The deck's centre: over the board's contact point, lifted in the air as far as the legs have
     /// tucked the board up.
     pub fn deck(&self) -> Vec3 {
-        self.pos + self.normal * DECK_HEIGHT + Vec3::UP * self.air_lift
+        self.pos + self.normal * DECK_HEIGHT + self.air_lift
     }
 
     /// The board's frame in the world: right, up (the surface normal or the board's own up in the air),
@@ -1682,7 +1687,7 @@ impl Skater {
         if !self.is_airborne() {
             self.body.ground(self.spin_input(pad));
             self.air_com = None;
-            self.air_lift = 0.0;
+            self.air_lift = Vec3::ZERO;
         }
         // The rider's body over the board: the animation's while riding; following it only so fast
         // from the pop's tail strike (SK8's GroundAnimation) until the jump's top (measured: SK8's
@@ -3172,8 +3177,9 @@ impl Skater {
         self.one_foot = None;
         self.plant_clock = 0.0;
         self.air_com = self.body_com;
-        self.air_lift = 0.0;
-        self.air_lift_rate = 0.0;
+        self.air_up = self.normal;
+        self.air_lift = Vec3::ZERO;
+        self.air_lift_rate = Vec3::ZERO;
     }
 
     /// The rider's centre of mass over the board's point (m, along the board's up).
@@ -3399,6 +3405,23 @@ impl Skater {
             }
         }
         if let Some(mut p) = self.selector.update(&t, park) {
+            // The centre of mass's flight (SK8 selector.rs `com_trajectory`, launch.rs
+            // `adjust_trajectory`): it starts `c0` off the flight along the take-off's up, and is
+            // nudged (at most `MaxTrajectoryAdjust`) to arrive its landing height over the landing
+            // along its normal, the board under it.
+            if let Some(c0) = self.air_com
+                && p.contact.time > 0.0
+            {
+                let height = c0 * t.traj_landing_com_vs_slope.eval(p.normal.y);
+                let correction = (p.normal * height - self.air_up * c0) * (1.0 / p.contact.time);
+                let len = correction.length();
+                let scale = if len > t.traj_max_adjust {
+                    t.traj_max_adjust / len
+                } else {
+                    1.0
+                };
+                p.flight.vel += correction * scale;
+            }
             p.adopted = now;
             p.offset = self.pos - p.flight.at(now - p.start);
             self.plan = Some(p);
@@ -3517,11 +3540,14 @@ impl Skater {
             // A hippie jump or getting on in the air: the rider is off the board above it while it rolls
             // on along the ground (Skate 3's LandingOnDeck). He lands when he comes back down onto it,
             // not when the board his clips' legs leave behind touches the ground.
-            self.air_lift = 0.0;
-            self.air_lift_rate = 0.0;
+            self.air_lift = Vec3::ZERO;
+            self.air_lift_rate = Vec3::ZERO;
         } else if let (Some(c0), Some(d)) = (self.air_com, self.body_com) {
-            self.air_lift_rate = (c0 - d - self.air_lift) / dt.max(1e-4);
-            self.air_lift = c0 - d;
+            // The centre of mass flew off `c0` along the take-off's up; the board hangs `d` under it
+            // along the rider's up now.
+            let lift = self.air_up * c0 - self.normal * d;
+            self.air_lift_rate = (lift - self.air_lift) * (1.0 / dt.max(1e-4));
+            self.air_lift = lift;
         }
         if let Some(g) = self.graph {
             self.follow_graph_trick(&g);
@@ -3574,8 +3600,8 @@ impl Skater {
         // of mass). It is tested along its own path this tick, from where the legs held it to where
         // they hold it now: reaching down for a landing moves it a few centimetres a tick on top of
         // the flight, and a test along the flight alone started under the ground and fell through it.
-        let start = from + Vec3::UP * lift_before;
-        let path = delta + Vec3::UP * (self.air_lift - lift_before);
+        let start = from + lift_before;
+        let path = delta + (self.air_lift - lift_before);
         let len = path.length();
         if len > 1e-6 {
             let dir = path * (1.0 / len);
@@ -4018,7 +4044,7 @@ impl Skater {
         // The board lands as the rider lined it up (board adjust): its nose is the landing's.
         self.bake_deck_adjust();
         self.air_com = None;
-        self.air_lift = 0.0;
+        self.air_lift = Vec3::ZERO;
         let n = normal.normalize_or(Vec3::UP);
         let vt = self.vel - n * self.vel.dot(n);
         // A body flip ends with the landing: its turn baked into the board, which has to come down on
@@ -4127,7 +4153,7 @@ impl Skater {
         // Skate 3's rigid board comes down on its wheels: their friction against the touchdown's
         // impact takes the sideways speed off a crooked landing (measured on SK8: about 0.4 of the
         // speed into the ground, a 70-degree landing at 6 m/s keeping 0.75 m/s).
-        let into = (-(self.vel + Vec3::UP * self.air_lift_rate).dot(n)).max(0.0);
+        let into = (-(self.vel + self.air_lift_rate).dot(n)).max(0.0);
         let scrub = (LAND_SIDE_FRICTION * into).min(self.slip.abs());
         self.slip -= scrub * self.slip.signum();
         let quality = landing::classify(&t, along, self.fwd, n, spin);
