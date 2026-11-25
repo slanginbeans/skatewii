@@ -426,6 +426,9 @@ pub struct Tuning {
     /// Most a candidate is nudged (m/s), and how long (s) the start error takes to blend away.
     pub traj_max_adjust: f32,
     pub traj_error_blend: f32,
+    /// The centre of mass's height over the landing (a share of its height over the board at the
+    /// launch), against the landing normal's y (SK8 selector.rs `com_trajectory`).
+    pub traj_landing_com_vs_slope: Curve,
     /// Wallride candidates: probe distance off the wall, least height over the floor, score per metre,
     /// the slope from launch to wall that still counts, and the upward nudge against height.
     pub traj_wall_test_dist: f32,
@@ -976,6 +979,7 @@ pub const PATHS: &[&str] = &[
     "physics_trajectory/default/MinTimeAfterApexForTransition",
     "physics_trajectory/default/MinNormalDeltaForSecondPass",
     "physics_trajectory/default/MaxTrajectoryAdjust",
+    "physics_trajectory/default/LandingComScalarVsSlope",
     "physics_airstates/default/TrajErrorBlendAwayTime",
     "physics_trajectory/default/WallRideTestDist",
     "physics_trajectory/default/WallRideMinHeightFromGround",
@@ -1442,6 +1446,17 @@ impl Tuning {
         traj_second_pass_delta: 0.12,
         traj_max_adjust: 1.2,
         traj_error_blend: 0.25,
+        // `physics_trajectory/default/LandingComScalarVsSlope`.
+        traj_landing_com_vs_slope: Curve::new(&[
+            (-1.0, 0.942_857_1),
+            (-0.429_967_4, 0.792_857_2),
+            (-0.257_329, 0.703_571_4),
+            (0.0, 0.453_571_4),
+            (0.058_631_9, 0.867_857_2),
+            (0.114_006_5, 0.95),
+            (0.247_557, 1.0),
+            (1.0, 1.0),
+        ]),
         traj_wall_test_dist: 0.06,
         traj_wall_min_height: 0.5,
         traj_wall_score: 400.0,
@@ -1784,6 +1799,9 @@ impl Tuning {
                 scalar!(self.traj_second_pass_delta)
             }
             "physics_trajectory/default/MaxTrajectoryAdjust" => scalar!(self.traj_max_adjust),
+            "physics_trajectory/default/LandingComScalarVsSlope" => {
+                curve!(self.traj_landing_com_vs_slope)
+            }
             "physics_airstates/default/TrajErrorBlendAwayTime" => scalar!(self.traj_error_blend),
             "physics_trajectory/default/WallRideTestDist" => scalar!(self.traj_wall_test_dist),
             "physics_trajectory/default/WallRideMinHeightFromGround" => {

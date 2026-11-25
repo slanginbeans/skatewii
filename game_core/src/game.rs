@@ -1570,15 +1570,24 @@ impl Game {
         // Riding, the board's lowest wheel on the ground (a manual's pitch lifts the deck).
         let height = match (&self.rider, self.skater.mode) {
             (Some(r), Mode::Rolling) => r.board_rest_height() + self.wheel_lift(&base),
-            (_, Mode::Air { .. }) => crate::skater::DECK_HEIGHT + self.skater.air_lift,
+            (_, Mode::Air { .. }) => crate::skater::DECK_HEIGHT,
             // On foot the off-board clips' origin is on the ground under the feet.
             _ => crate::skater::DECK_HEIGHT,
         };
         // On foot (and getting off or on) the off-board clips' origin is on the ground under the feet.
         let height = height * (1.0 - self.foot_origin);
+        // In the air, where the legs hang the board off the flight's path (in the board's frame).
+        let lift = match self.skater.mode {
+            Mode::Air { .. } => {
+                let l = self.skater.air_lift;
+                let c = base.rot.cols;
+                v3(c[0].dot(l), c[1].dot(l), c[2].dot(l)) * (1.0 - self.foot_origin)
+            }
+            _ => v3(0.0, 0.0, 0.0),
+        };
         let placed = base
             .then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
-            .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, height, 0.0)));
+            .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, height, 0.0) + lift));
         // Turned about the posed board's centre, which stays where it is.
         let Some(b) = self
             .rider
