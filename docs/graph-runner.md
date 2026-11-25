@@ -1080,7 +1080,11 @@ collision_update.rs, errors.rs) and skate-game physics/solve.rs: the rider's 26 
   (`effect_time` 0.16 s), mode 3 (soft: `CollisionSoftDisplacement` 25000 and strength 100 times the
   part's collision strength); the hips to an immovable target at the animated hips (600, 36000). The
   targets are the imported rider's clip pose (`Rider::physical_bones`, each bone times its volume frame),
-  held on the physical deck where it will be at the tick's end (SK8 drives to the predicted board). A
+  its board at the physical deck where it will be at the tick's end (SK8 drives to the predicted board),
+  standing on the reckoning's up and the rider's heading, not turned with the deck (SK8
+  `SkeletonRootFrames::update`'s `animation_to_world`: over the drop-in's lip the deck pitches 0.6 rad
+  while the reckoning stays upright, and the pose on the deck pushed the back leg 0.67 m into the lip;
+  upright, 0.37 m, the rest while the board falls past the lip unhooked, against SK8's 0.08 m). A
   mirrored (regular) rider takes each body's partner bone, reflected, turned by the fixed turn that makes
   it the body's own frame in the rig's symmetric initial pose. No imported rider: no body.
 - **Contacts**: the bones' spheres and capsules (capsules as three spheres) against the terrain's
@@ -1130,10 +1134,14 @@ later, against main's 6.89 and 6.93).
 
 **Cost** (host, release): the board alone 27 to 32 us; the body solved with it +118 us
 (`rider_body_step_cost`, open ground), followed +6 us; riding real districts (300 ticks from the start at
-6 m/s) the body averages 16 us in Industrial and 10 us in University, its solved ticks there peaking at
-208 us. On the Wii (8 to 10 times the host) that is 0.1 to 0.2 ms a tick on the ground and about 1 to
-1.2 ms solved in the open; a solved tick among many triangles can pass 1.5 ms. Wii log: `rider body`
-next to `board solve` (which no longer includes it).
+6 m/s) the body averages 16 us in Industrial and 10 us in University, its solved ticks there (7 to 9
+contact rows) 151 to 163 us, of which the 50 iterations are about 120 us, the contact search 13 to 17 and
+the rows 11 to 30. The rows are built from frames worked out once a tick (each bone's inverse, its drive
+frame's rotation, a merged bone's frame on its host), the solve's buffers are kept and reserved, and a
+bone's first cut of the nearby triangles takes 1 cm of slack, not 0.3 m (bit for bit the same contacts,
+the fix-up's neighbours included). On the Wii (8 to 10 times the host) that is 0.1 to 0.2 ms a tick on
+the ground and about 1.2 to 1.6 ms solved. Wii log: `rider body` next to `board solve` (which no longer
+includes it); `RiderBody::contact_rows` is the last solve's contact row count.
 
 ## The camera (`game_core/src/camera`)
 

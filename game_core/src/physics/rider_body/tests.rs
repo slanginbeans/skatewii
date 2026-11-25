@@ -133,6 +133,10 @@ fn the_merged_and_solved_bodies_cover_the_skeleton() {
         .map(|&p| 1.0 / b.parts[p].mass.inverse_mass)
         .sum();
     assert!((total - solved).abs() < 1e-3 * total, "{total} vs {solved}");
+    // Each part's solved slot is its host's place among the solved bodies.
+    for p in 1..ANIMATED_PARTS {
+        assert_eq!(SOLVED_PARTS[SOLVED_SLOT[p]], host(p), "part {p}");
+    }
 }
 
 #[test]
@@ -189,12 +193,15 @@ fn on_flat_ground_the_body_follows_the_pose_until_a_wall_is_near() {
     }
     assert!(body.feedback.max_error < 1e-5);
     assert!(!body.feedback.flags.nonboard);
+    assert_eq!(body.contact_rows(), 0);
     // A wall at arm's length: an arm can touch it, so the skeleton is solved, and the contact is
     // reported.
     let walled = Yard { wall: Some(0.5) };
     board.step_with(&walled, &idle, Some((&mut body, &input(pose, false))));
     assert!(body.solved);
     assert!(body.feedback.flags.any && body.feedback.flags.nonboard);
+    // The board's contacts and the arm's against the wall, in one solve.
+    assert!(body.contact_rows() > 0);
     assert!(body.feedback.drive_weight < 1.0);
 }
 

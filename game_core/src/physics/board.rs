@@ -526,10 +526,14 @@ pub(crate) fn sphere_triangles(
     let mut count = 0;
     let swept = swept_box(c, radius, (c - was) * 60.0);
     for (t, n) in tris {
+        // The box first: the same rejection, without the closest point.
+        if !box_meets(swept, t) {
+            continue;
+        }
         let (q, face) = closest_on_triangle(c, t);
         let d = c - q;
         let dist = d.length();
-        if dist > reach || !box_meets(swept, t) {
+        if dist > reach {
             continue;
         }
         // The side the centre is on, unless it went through the face this tick (a fast sphere).

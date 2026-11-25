@@ -1097,19 +1097,22 @@ impl Game {
             } else {
                 self.skater.pose_seed = points;
             }
-            // The rider's physical body is driven to the clips' pose, held on the physical deck (it
-            // rides with the board until the next tick's solve).
-            let deck = self.skater.rig.as_ref().map(|r| {
-                let d = r.board.deck();
-                Xform::new(d.axes, d.position)
-            });
+            // The rider's physical body is driven to the clips' pose with its board at the physical
+            // deck (it rides with the board until the next tick's solve), standing on the reckoning:
+            // SK8 `SkeletonRootFrames::update` places the animation by the reckoning's frame and the
+            // rider's heading at the predicted board, not turned with the deck.
+            let deck = self.skater.rig.as_ref().map(|r| r.board.deck().position);
             let bones = self.rider.as_ref().and_then(|r| r.physical_bones());
             self.skater.rider_pose = match (bones, deck) {
                 (Some((bones, mirrored)), Some(deck)) => {
-                    let at = self.imported_xform_on(self.skater_base());
+                    let base = self.skater_base();
+                    let at = self.imported_xform_on(base);
                     let world = crate::physics::rider_body::pose_from_bones(&bones, &at, mirrored);
-                    let on_deck = crate::physics::rider_body::inverse(&deck);
-                    Some(world.map(|x| on_deck.then(&x)))
+                    let up = self.skater.reckoning.up.normalize_or(v3(0.0, 1.0, 0.0));
+                    let nose = crate::skater::tangent(base.rot.cols[2], up);
+                    self.skater.rider_axes = Mat3::from_cols(up.cross(nose), up, nose);
+                    let on_board = crate::physics::rider_body::inverse(&Xform::new(base.rot, deck));
+                    Some(world.map(|x| on_board.then(&x)))
                 }
                 _ => None,
             };

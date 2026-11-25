@@ -281,6 +281,23 @@ const fn solved_parts() -> [usize; SOLVED] {
 }
 pub const SOLVED_PARTS: [usize; SOLVED] = solved_parts();
 
+/// Each part's host's place among `SOLVED_PARTS` (the skateboard root, which has none, at 0).
+const fn solved_slots() -> [usize; ANIMATED_PARTS] {
+    let mut out = [0; ANIMATED_PARTS];
+    let mut k = 0;
+    while k < SOLVED {
+        out[SOLVED_PARTS[k]] = k;
+        k += 1;
+    }
+    let mut part = 0;
+    while part < ANIMATED_PARTS {
+        out[part] = out[host(part)];
+        part += 1;
+    }
+    out
+}
+const SOLVED_SLOT: [usize; ANIMATED_PARTS] = solved_slots();
+
 /// The self-collision pairs SkeletonCollision doesn't cull (forearms against the trunk and thighs).
 const SELF_PAIRS: [(usize, usize); 6] = [(14, 4), (14, 8), (23, 4), (23, 8), (4, 18), (8, 22)];
 
@@ -382,20 +399,6 @@ const HIPS_DRIVE: DriveDynamics = DriveDynamics {
     linear: hard(HARD_VELOCITY, HARD_STRENGTH),
     angular: hard(HARD_VELOCITY, HARD_STRENGTH),
 };
-
-/// SK8 `bone_drive_frames`: a frame at the child's animated origin, in the world's axes, expressed on
-/// the child and on the parent.
-fn drive_frames(child: &Xform, parent: &Xform) -> (DriveFrame, DriveFrame) {
-    let common = Xform::new(Mat3::IDENTITY, child.pos);
-    let pack = |x: Xform| DriveFrame {
-        orientation: Quat::from_mat3(&x.rot).normalize(),
-        translation: x.pos,
-    };
-    (
-        pack(inverse(child).then(&common)),
-        pack(inverse(parent).then(&common)),
-    )
-}
 
 /// SkeletonCollision's settings (`physics_skeleton_collision`, `physics_skeleton_feedback`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -717,6 +720,14 @@ pub struct RiderBody {
     tris: Vec<([Vec3; 3], Vec3)>,
     tri_boxes: Vec<(Vec3, Vec3)>,
     near: Vec<([Vec3; 3], Vec3)>,
+    found: Vec<Candidate>,
+    pairs: Vec<(usize, usize, ContactInput)>,
+    bone_reports: Vec<BoneReport>,
+    /// Per tick, from the animated pose: each bone's inverse frame, the rotation of a world-axes frame
+    /// on it (the drives' frames), and a merged bone's frame on its host (identity for the others).
+    inverse_pose: [Xform; ANIMATED_PARTS],
+    drive_rotation: [Quat; ANIMATED_PARTS],
+    on_host: [Xform; ANIMATED_PARTS],
 }
 
 /// A candidate contact: the bone part, its volume sphere's world centre and radius, what it meets.
@@ -752,7 +763,7 @@ impl RiderBody {
             let q = parts[into].orientation;
             parts[into].set_orientation(q);
         }
-        RiderBody {
+        let mut body = RiderBody {
             parts,
             joints: STOCK_JOINTS,
             drive_settings: DriveSettings::STOCK,
@@ -773,7 +784,56 @@ impl RiderBody {
             tris: Vec::new(),
             tri_boxes: Vec::new(),
             near: Vec::new(),
+            found: Vec::with_capacity(64),
+            pairs: Vec::with_capacity(SELF_PAIRS.len()),
+            bone_reports: Vec::with_capacity(64),
+            inverse_pose: [Xform::IDENTITY; ANIMATED_PARTS],
+            drive_rotation: [Quat::IDENTITY; ANIMATED_PARTS],
+            on_host: [Xform::IDENTITY; ANIMATED_PARTS],
+        };
+        // The solve's rows, reserved so that a first solved tick doesn't grow them.
+        body.contacts.reserve(64);
+        body.reports.reserve(64);
+        body.joint_rows.reserve(32);
+        body.drive_rows.reserve(64);
+        body.bodies.reserve(PARTS + 8);
+        body.reactions.reserve(PARTS + 8);
+        body.set_target(pose);
+        body
+    }
+
+    /// Drives the body to `pose` this tick (and the per-tick frames read from it).
+    fn set_target(&mut self, pose: &[Xform; ANIMATED_PARTS]) {
+        self.target = *pose;
+        for (p, at) in pose.iter().enumerate() {
+            let inv = inverse(at);
+            self.drive_rotation[p] = Quat::from_mat3(&inv.rot.mul(&Mat3::IDENTITY)).normalize();
+            self.inverse_pose[p] = inv;
         }
+        for (child, into) in MERGED {
+            self.on_host[child] = self.inverse_pose[into].then(&pose[child]);
+        }
+    }
+
+    /// SK8 `bone_drive_frames` for `part` driven from `parent`'s body: a frame at the part's animated
+    /// origin, in the world's axes, expressed on each.
+    fn drive_frames(&self, part: usize, parent: usize) -> (DriveFrame, DriveFrame) {
+        let at = self.target[part].pos;
+        (
+            DriveFrame {
+                orientation: self.drive_rotation[part],
+                translation: self.inverse_pose[part].point(at),
+            },
+            DriveFrame {
+                orientation: self.drive_rotation[parent],
+                translation: self.inverse_pose[parent].point(at),
+            },
+        )
+    }
+
+    /// The contact rows of the last solved step (the board's and the skeleton's; 0 when it followed).
+    pub fn contact_rows(&self) -> usize {
+        if self.solved { self.contacts.len() } else { 0 }
     }
 
     /// Each animated bone's physical frame now (merged bones at their animated place on their host).
@@ -791,8 +851,7 @@ impl RiderBody {
         if h == p {
             return self.body_frame(p);
         }
-        let rel = inverse(&self.target[h]).then(&self.target[p]);
-        self.body_frame(h).then(&rel)
+        self.body_frame(h).then(&self.on_host[p])
     }
 
     /// Puts every body at the animated pose, at rest (SK8 `reset_to_animation`).
@@ -806,7 +865,7 @@ impl RiderBody {
             b.force = pb::GRAVITY;
             b.torque = Vec3::ZERO;
         }
-        self.target = *pose;
+        self.set_target(pose);
         self.live = true;
     }
 
@@ -850,8 +909,10 @@ impl RiderBody {
         let reach = 1.4 + self.parts[23].velocity.length() * STEP;
         self.tris.clear();
         let has_tris = park.triangles_near(hips, reach, &mut self.tris);
-        // Each triangle's box, for a bone's first cut (its neighbours, which the edge fix-up reads,
-        // come along with the bone box's slack).
+        // Each triangle's box, for a bone's first cut. The edge fix-up's neighbours come along: one
+        // across an edge or corner a sphere touches holds it, within the sphere's reach (the 1 cm of
+        // slack covers the fix-up's 1 mm weld; the drop-in and four University rides are bit for bit
+        // the same as with 0.3 m).
         self.tri_boxes.clear();
         for (t, _) in &self.tris {
             let lo = v3(
@@ -879,7 +940,7 @@ impl RiderBody {
                     f.point(v3(0.0, 0.0, offsets[0])),
                     f.point(v3(0.0, 0.0, offsets[n - 1])),
                 );
-                let slack = radius + MARGIN + v.length() * STEP + 0.3;
+                let slack = radius + MARGIN + v.length() * STEP + 0.01;
                 let lo =
                     v3(e0.x.min(e1.x), e0.y.min(e1.y), e0.z.min(e1.z)) - v3(slack, slack, slack);
                 let hi =
@@ -1043,11 +1104,13 @@ impl RiderBody {
             self.reset(pose);
         }
         self.idle = 0;
-        self.target = *pose;
+        self.set_target(pose);
         self.physical_board = Xform::new(board[pb::DECK].axes, board[pb::DECK].position);
 
-        let mut found: Vec<Candidate> = Vec::new();
-        let mut pairs = Vec::new();
+        let mut found = core::mem::take(&mut self.found);
+        let mut pairs = core::mem::take(&mut self.pairs);
+        found.clear();
+        pairs.clear();
         self.candidates(park, board, input.board_contacts, &mut found, &mut pairs);
         let solve =
             input.airborne || Self::needs_solve(&found, input.ground, &self.feedback.settings);
@@ -1066,6 +1129,8 @@ impl RiderBody {
                 self.reports.push((*part, *other, i));
             }
             self.finish(&found, board, input);
+            self.found = found;
+            self.pairs = pairs;
             return false;
         }
 
@@ -1083,7 +1148,7 @@ impl RiderBody {
 
         // Bodies: the board's, the solved bones, the hips' target.
         let base = board.len();
-        let index = |p: usize| base + SOLVED_PARTS.iter().position(|&q| q == host(p)).unwrap();
+        let index = |p: usize| base + SOLVED_SLOT[p];
         let target_index = base + SOLVED;
         self.bodies.clear();
         self.bodies.extend_from_slice(board);
@@ -1129,17 +1194,18 @@ impl RiderBody {
             if hc == hp {
                 continue;
             }
-            let on = |p: usize, h: usize| inverse(&pose[h]).then(&pose[p]);
-            let (rc, rp) = (on(j.child, hc), on(j.parent, hp));
             let mut f = j.frames;
             if hc != j.child {
+                let rc = &self.on_host[j.child];
                 f.orientation_a = Quat::from_mat3(&rc.rot).compose(f.orientation_a);
                 f.anchor_a = rc.point(f.anchor_a);
             }
             if hp != j.parent {
-                f.orientation_b = Quat::from_mat3(&rp.rot).compose(f.orientation_b);
+                let rp = &self.on_host[j.parent];
+                let q = Quat::from_mat3(&rp.rot);
+                f.orientation_b = q.compose(f.orientation_b);
                 f.anchor_b = rp.point(f.anchor_b);
-                f.linear_orientation_b = Quat::from_mat3(&rp.rot).compose(f.linear_orientation_b);
+                f.linear_orientation_b = q.compose(f.linear_orientation_b);
             }
             self.joint_rows.push(JointRow::build(
                 &self.bodies,
@@ -1185,7 +1251,7 @@ impl RiderBody {
                     base_strength[channel]
                 };
                 let d = bone_dynamics(&s, channel, collision, strength);
-                let (fa, fb) = drive_frames(&pose[part], &pose[host(parent)]);
+                let (fa, fb) = self.drive_frames(part, host(parent));
                 self.drive_rows.push(DriveRow::build(
                     &self.bodies,
                     index(part),
@@ -1215,27 +1281,25 @@ impl RiderBody {
             self.parts[p] = b;
         }
         for (child, into) in MERGED {
-            let to = self
-                .body_frame(into)
-                .then(&inverse(&pose[into]).then(&pose[child]));
+            let to = self.body_frame(into).then(&self.on_host[child]);
             Self::follow(&mut self.parts[child], &to);
         }
-        let found_copy = found;
-        self.finish(&found_copy, board, input);
+        self.finish(&found, board, input);
+        self.found = found;
+        self.pairs = pairs;
         true
     }
 
     /// The feedback and pose error after the step.
     fn finish(&mut self, found: &[Candidate], board: &[Body], input: &RiderInput) {
-        let reports: Vec<BoneReport> = found
-            .iter()
-            .map(|(part, ci, other)| BoneReport {
-                part: *part,
-                other: *other,
-                normal: ci.normal,
-                point: ci.point_b,
-            })
-            .collect();
+        let mut reports = core::mem::take(&mut self.bone_reports);
+        reports.clear();
+        reports.extend(found.iter().map(|(part, ci, other)| BoneReport {
+            part: *part,
+            other: *other,
+            normal: ci.normal,
+            point: ci.point_b,
+        }));
         let board_mass = pb::total_mass();
         let deck = &board[pb::DECK];
         let parts = &self.parts;
@@ -1251,6 +1315,7 @@ impl RiderBody {
         let physical: [Vec3; ANIMATED_PARTS] = core::array::from_fn(|p| self.frame(p).pos);
         let target = self.target;
         self.feedback.set_errors(&physical, &target);
+        self.bone_reports = reports;
         self.live = true;
     }
 }
