@@ -1735,6 +1735,7 @@ impl Skater {
             self.reckoning.lean = 0.0;
             if matches!(self.mode, Mode::Air { .. }) {
                 self.fly_rig(park);
+                self.land_on_rig_contact(events);
             } else {
                 self.rig = None;
             }

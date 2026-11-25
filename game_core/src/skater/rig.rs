@@ -222,6 +222,49 @@ impl Skater {
 
     /// One air tick of the rigid board: no ground behaviours, the deck hooked to where the flight
     /// draws it (SK8's hook drive while the animation holds the board).
+    /// SK8's KnownAir hand-back (selector/air.rs `select_known_air`): once 0.04 s into the air, the
+    /// board touching anything (a wheel, or its trucks or deck) ends the air: the rider is back on the
+    /// ground state, the board where it is.
+    pub(super) fn land_on_rig_contact(&mut self, events: &mut Vec<Event>) {
+        const GRACE: f32 = 0.04;
+        let Mode::Air { time } = self.mode else {
+            return;
+        };
+        if time < GRACE
+            || self.takeoff.hippy
+            || self.takeoff.mount
+            || self.air_plant.is_some()
+            || self.hand_plant.is_some()
+        {
+            return;
+        }
+        let Some(r) = &self.rig else { return };
+        let b = &r.board;
+        let wheels: Vec<Vec3> = b
+            .wheels
+            .iter()
+            .flatten()
+            .filter(|w| w.load > 0.0)
+            .map(|w| w.normal)
+            .collect();
+        if wheels.is_empty() && b.body_load <= 0.0 {
+            return;
+        }
+        let deck = *b.deck();
+        let normal = if wheels.is_empty() {
+            b.wall.map_or(deck.axes.cols[1], |w| w.0)
+        } else {
+            wheels
+                .iter()
+                .fold(Vec3::ZERO, |a, n| a + *n)
+                .normalize_or(deck.axes.cols[1])
+        };
+        // The flight's point under the board as it is (the hand-back takes the board's state).
+        self.pos = deck.position - deck.axes.cols[1] * pb::DECK_HEIGHT;
+        self.air_lift = Vec3::ZERO;
+        self.land(normal, 0, time, events);
+    }
+
     pub(super) fn fly_rig(&mut self, park: &dyn Terrain) {
         // The deck as the clip carries it under the rider (pitched with it), else the flight's.
         let frame = match self.graph.and_then(|g| g.pose_board) {
@@ -236,8 +279,15 @@ impl Skater {
         let target = (self.deck(), frame);
         let Some(r) = &mut self.rig else { return };
         r.airborne = true;
+        // SK8 KnownAir: the trajectory follow sets the board's velocity (every part's, to reach the
+        // flight's deck this tick); the hook drive only turns the deck.
+        let follow = (target.0 - r.board.deck().position) * (1.0 / crate::physics::STEP);
+        for p in &mut r.board.parts {
+            p.velocity = follow;
+        }
         let input = BoardInput {
             hook: Some(target),
+            hook_angular_only: true,
             wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
             ..BoardInput::default()
         };
