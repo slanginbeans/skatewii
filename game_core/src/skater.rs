@@ -892,6 +892,10 @@ pub struct Skater {
     /// animation's while riding; from the pop's tail strike and in the air the body follows its
     /// animation only so fast (SK8's rider is physical). And in the air, its height at take-off.
     pub body_com: Option<f32>,
+    /// A microsecond clock from the platform (none: no timing), and how long the rigid board's
+    /// solve took this tick.
+    pub clock: Clock,
+    pub board_us: u32,
     air_com: Option<f32>,
     /// How far the legs have lifted the board over the flight's path (m, world up), and how fast it
     /// moved last tick (m/s).
@@ -965,6 +969,24 @@ pub struct Skater {
 }
 
 /// The state graphs' decisions for the physics (see `graph::drive::Driver::control`).
+/// The platform's microsecond clock, for timing (none: no timing). Equal whatever it holds: it
+/// isn't part of the simulation's state.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Clock(pub Option<fn() -> u32>);
+
+impl PartialEq for Clock {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Clock {
+    /// Microseconds now (0 without a clock).
+    pub fn now(self) -> u32 {
+        self.0.map_or(0, |f| f())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GraphControl {
     /// A push clip's foot is on the ground (its `PUSHCONTACT` window): only then does a push drive.
@@ -1265,6 +1287,8 @@ impl Skater {
             flipped: None,
             graph_push: None,
             body_com: None,
+            clock: Clock(None),
+            board_us: 0,
             air_com: None,
             air_lift: 0.0,
             air_lift_rate: 0.0,

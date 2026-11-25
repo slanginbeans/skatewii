@@ -954,7 +954,7 @@ fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
             log(
                 false,
                 &format!(
-                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, air {:.2} / {:.2} peak, camera {:.2} / {:.2} peak, ragdoll {:.2} / {:.2} peak, skin {:.1}, replay {:.2}, audio {:.2} / {:.2} peak ({} voices, {} underruns), draw {:.1}, of which world {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
+                    "frame: cpu {:.1} ms avg, {:.1} peak (physics {:.1}, graph {:.2}, air {:.2} / {:.2} peak, camera {:.2} / {:.2} peak, ragdoll {:.2} / {:.2} peak, board solve {:.2} / {:.2} peak / {:.2} max, skin {:.1}, replay {:.2}, audio {:.2} / {:.2} peak ({} voices, {} underruns), draw {:.1}, of which world {:.1}) | gpu wait {:.1} | idle {:.1} | dropped {} | park {} meshes {} verts | arena {} KB | heap {} KB, MEM1 {} KB free, MEM2 {} KB free",
                     c.avg_us / 1000.0,
                     c.peak_us as f32 / 1000.0,
                     t.physics_us as f32 / 1000.0,
@@ -965,6 +965,9 @@ fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
                     t.cam_peak_us as f32 / 1000.0,
                     t.ragdoll_us as f32 / 1000.0,
                     t.ragdoll_peak_us as f32 / 1000.0,
+                    t.board_us as f32 / 1000.0,
+                    t.board_peak_us as f32 / 1000.0,
+                    t.board_max_us as f32 / 1000.0,
                     t.skin_us as f32 / 1000.0,
                     t.replay_us as f32 / 1000.0,
                     AUDIO_US.0 as f32 / 1000.0,
@@ -987,6 +990,7 @@ fn frame(game: &mut Game, pad: *const PadRaw, dt: f32) {
             game.times.air_peak_us = 0;
             game.times.cam_peak_us = 0;
             game.times.ragdoll_peak_us = 0;
+            game.times.board_peak_us = 0;
             AUDIO_US.1 = 0;
         }
     }
