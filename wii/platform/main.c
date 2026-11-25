@@ -12,10 +12,11 @@ int main(int argc, char **argv) {
     const float refresh = fg_frame_dt();
     for (;;) {
         // A frame covers the time the last one was on screen, so a frame that runs past a refresh doesn't
-        // slow the game down (it runs more fixed steps instead). Capped so a long stall (a load) doesn't
-        // jump the rider ahead.
+        // slow the game down (it runs more fixed steps instead). Capped at two refreshes: catching up more
+        // made a heavy frame run three or four ticks next time, miss again, and stutter for a second; past
+        // two the game slows briefly instead. A long stall (a load) doesn't jump the rider ahead either.
         uint32_t n = fg_frame_refreshes();
-        const float dt = refresh * (float)(n < 1 ? 1 : n > 4 ? 4 : n);
+        const float dt = refresh * (float)(n < 1 ? 1 : n > 2 ? 2 : n);
         FgPadRaw pad;
         fg_read_pad(&pad);
         if (pad.flags & FG_FLAG_EXIT) {
