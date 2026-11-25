@@ -2023,3 +2023,86 @@ fn a_clips_jump_height_override_counts_only_where_the_physics_mode_allows_it() {
     t.set_difficulty(Difficulty::Easy);
     assert_eq!(super::drive::jump_strength(low, 0.6, &t), 0.6);
 }
+
+/// MatchCadence and MatchAirTime (SK8 motion_offboard/cadence.rs, match_air_time.rs): each captures the
+/// walker's step cadence on entering and publishes it as `CadenceStartPercent` on every update (the
+/// run and sprint mounts expose `OB_TRAJ` from it; without it they never got on).
+mod cadence {
+    use super::*;
+    use crate::graph::host::Runner;
+    use crate::motion::MotionDb;
+    use crate::motion::write::{AttrIn, ClipIn, write};
+
+    fn lib() -> Vec<u8> {
+        let scalar = |name: &str| AttrIn {
+            name: name.into(),
+            kind: crate::motion::KIND_SCALAR,
+            begin: -1.0,
+            end: -1.0,
+            words: vec![0.0f32.to_bits()],
+        };
+        let clip = ClipIn {
+            name: "MOUNT".into(),
+            fps: 30.0,
+            frames: 30.0,
+            base_speed: 1.0,
+            andale_flags: 0,
+            has_pose: true,
+            attrs: vec![scalar("CADENCESTARTPERCENT"), scalar("ANIMTIME")],
+        };
+        write(&[clip], &[])
+    }
+
+    fn graphs(behaviour: &str) -> Vec<u8> {
+        let action = st("Action", &[], vec![]);
+        let motion = st(
+            "Motion",
+            &[],
+            vec![st(
+                "Mount",
+                &[],
+                vec![
+                    Element::of("behaviour", &[("name", behaviour)], vec![]),
+                    Element::of(
+                        "behaviour",
+                        &[("name", "PlayAnimation"), ("anim", "MOUNT")],
+                        vec![],
+                    ),
+                ],
+            )],
+        );
+        compile(&[
+            (crate::graph::host::ACTION, &action),
+            (crate::graph::host::MOTION, &motion),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn the_mounts_start_from_the_cadence_captured_on_entering() {
+        let lib = lib();
+        let db = MotionDb::parse(&lib).unwrap();
+        let n = db.name_id("CADENCESTARTPERCENT").unwrap();
+        for behaviour in ["MatchCadence", "MatchAirTime"] {
+            let bytes = graphs(behaviour);
+            let mut r = Runner::new(Pack::parse(&bytes).unwrap(), Some(&db)).unwrap();
+            let param = |r: &Runner| {
+                r.s.player
+                    .params
+                    .iter()
+                    .find(|p| p.name == n)
+                    .map(|p| p.value)
+            };
+            r.s.world.cadence = 0.4;
+            r.update(Some(&db), 1.0 / 60.0);
+            assert_eq!(r.motion_state(), "Mount", "{behaviour}");
+            assert_eq!(param(&r), Some(0.4), "{behaviour}: published");
+            // The walker steps on: still the cadence captured on entering.
+            r.s.world.cadence = 0.7;
+            for _ in 0..5 {
+                r.update(Some(&db), 1.0 / 60.0);
+            }
+            assert_eq!(param(&r), Some(0.4), "{behaviour}: captured");
+        }
+    }
+}
