@@ -3050,17 +3050,36 @@ impl Skater {
         // the board follows the selected trajectory (its start error blended away; the legs' tuck and
         // a body flip place the deck off it, `air_board_target`); without one it flies on its own,
         // given the jump's velocity for its first ticks (SK8 `calculate_velocity_from_jump`).
+        let from = (self.pos, self.vel);
         let motion = match &self.plan {
             Some(p) => {
                 let assist = self.air_assist.map_or(Vec3::ZERO, |a| a.offset);
                 self.pos = p.target(time, t.traj_error_blend) + assist;
+                self.vel = (self.pos - from.0) * (1.0 / dt.max(1e-4));
                 AirMotion::Follow
             }
             None => match self.jump_velocity(dt) {
-                Some(v) => AirMotion::Velocity(v),
-                None => AirMotion::Free,
+                Some(v) => {
+                    self.vel = v;
+                    AirMotion::Velocity(v)
+                }
+                None => {
+                    self.vel.y -= t.gravity * dt;
+                    AirMotion::Free
+                }
             },
         };
+        // A rail is looked for where the flight takes the board this tick, before the board meets the
+        // rail's own box (Skate 3's grind contact takes it onto the rail, not its collision).
+        if motion != AirMotion::Follow {
+            self.pos = from.0 + self.vel * dt;
+        }
+        if self.try_grind(park, category, events) {
+            return;
+        }
+        if motion != AirMotion::Follow {
+            (self.pos, self.vel) = from;
+        }
         let incoming = self.fly_board(park, motion);
         self.read_air_board();
         // A wall: before Skate 3's selector would take the board out of the air on it, the board meets
@@ -3094,9 +3113,6 @@ impl Skater {
                 }
                 None => return,
             }
-        }
-        if self.try_grind(park, category, events) {
-            return;
         }
         // Touchdown: the board's wheels on a surface it lands on. Skate 3's state selector takes the
         // board onto the ground from its wheel contacts once the air state has settled; until then it
@@ -3155,7 +3171,10 @@ impl Skater {
             .map(|w| w.normal);
         let n = r.board.wall.map(|w| w.0).or(wheel)?;
         let at = r.board.deck().position;
-        let behind = |n: Vec3| park.raycast(at, -n, 0.5).is_some_and(|h| h.normal.dot(n) > 0.5);
+        let behind = |n: Vec3| {
+            park.raycast(at, -n, 0.5)
+                .is_some_and(|h| h.normal.dot(n) > 0.5)
+        };
         let n = if behind(n) {
             n
         } else if behind(-n) {
@@ -3176,7 +3195,10 @@ impl Skater {
         }
         let predicted = *jump - Vec3::UP * (self.tuning.gravity * dt * *frames as f32);
         *frames += 1;
-        let current = self.rig.as_ref().map_or(self.vel, |r| r.board.deck().velocity);
+        let current = self
+            .rig
+            .as_ref()
+            .map_or(self.vel, |r| r.board.deck().velocity);
         let error = current - predicted;
         let mut out = predicted;
         if error.y <= -3.0 {
@@ -3734,7 +3756,17 @@ impl Skater {
             self.grabbed = Some(g);
         }
         let spin = self.body.speed;
-        let along = vt * t.landing_speed_vs_ny.eval(n.y);
+        // KnownAir's exit onto the ground (SK8 known/trajectory.rs `restore_velocity`): the speed along
+        // the surface scaled by `LandingSpeedScalarVsGroundNormalY`, as far as the travel goes downhill;
+        // PhysicsAir's exit keeps the board's.
+        let scale = if self.plan.is_some() {
+            let downhill = n.cross(n.cross(Vec3::UP)).normalize_or(Vec3::ZERO);
+            let w = downhill.dot(vt.normalize_or(Vec3::ZERO)).clamp(0.0, 1.0);
+            (t.landing_speed_vs_ny.eval(n.y) - 1.0) * w + 1.0
+        } else {
+            1.0
+        };
+        let along = vt * scale;
         self.contact_n = n;
         self.fwd = axis;
         self.set_ground_velocity(along);
@@ -3744,6 +3776,15 @@ impl Skater {
         let into = (-(self.vel + Vec3::UP * self.air_lift_rate).dot(n)).max(0.0);
         let scrub = (LAND_SIDE_FRICTION * into).min(self.slip.abs());
         self.slip -= scrub * self.slip.signum();
+        // The physical board leaves the air with that velocity (its speed into the ground kept), which
+        // the ground ride takes over from it.
+        let ground = self.ground_velocity();
+        if let Some(r) = self.rig.as_mut().filter(|r| r.airborne) {
+            let keep = n * r.board.deck().velocity.dot(n);
+            for p in &mut r.board.parts {
+                p.velocity = ground + keep;
+            }
+        }
         let quality = landing::classify(&t, along, self.fwd, n, spin);
         let kind = match quality.kind {
             1 => LandKind::Sketchy {
@@ -4447,24 +4488,36 @@ mod tests {
 
     #[test]
     fn transitions_add_speed_on_landing() {
+        // SK8 `restore_velocity`: out of KnownAir, the speed along the surface times
+        // `LandingSpeedScalarVsGroundNormalY`, weighted by how far the travel goes downhill.
         let t = Tuning::BUILT_IN;
-        let park = flat();
-        let mut s = spawn(&park);
-        s.take_off(Some(Flick::OLLIE));
-        s.select_state();
-        s.trick = None;
-        let a = 0.98; // about 56 degrees
-        let n = v3(0.0, cosf(a), -sinf(a));
-        s.fwd = tangent(v3(0.0, 0.0, 1.0), n);
-        s.normal = n;
-        s.vel = s.fwd * 5.0 - n * 2.0;
-        let mut ev = Vec::new();
-        s.states.time = 0.6;
-        s.land(n, 0, 0.6, &mut ev);
-        s.select_state();
+        let land = |down_hill: bool| {
+            let park = flat();
+            let mut s = spawn(&park);
+            s.vel = v3(0.0, 3.0, 4.0);
+            s.take_off(Some(Flick::OLLIE));
+            s.update_prediction(&park, 0.0);
+            assert!(s.plan.is_some(), "a known landing");
+            s.select_state();
+            s.trick = None;
+            let a = 0.98; // about 56 degrees: the surface rises towards +z
+            let n = v3(0.0, cosf(a), -sinf(a));
+            let dir = if down_hill { -1.0 } else { 1.0 };
+            s.fwd = tangent(v3(0.0, 0.0, dir), n);
+            s.normal = n;
+            s.vel = s.fwd * 5.0 - n * 2.0;
+            let mut ev = Vec::new();
+            s.states.time = 0.6;
+            s.land(n, 0, 0.6, &mut ev);
+            s.select_state();
+            (s.speed, n)
+        };
+        let (down, n) = land(true);
         let gain = t.landing_speed_vs_ny.eval(n.y);
         assert!(gain > 1.05);
-        assert!((s.speed - 5.0 * gain).abs() < 1e-3, "{}", s.speed);
+        assert!((down - 5.0 * gain).abs() < 1e-3, "{down}");
+        let (up, _) = land(false);
+        assert!((up - 5.0).abs() < 1e-3, "{up}");
     }
 
     #[test]
@@ -5806,10 +5859,10 @@ mod tests {
         );
         // Flying into the free-standing wall a metre over the flat: it rides it and jumps off.
         let mut s = spawn(&park);
-        s.pos = v3(-3.2, 1.3, -5.5);
+        s.pos = v3(-3.2, 1.3, -4.9);
         s.take_off(None);
         s.select_state();
-        s.vel = v3(-3.0, 1.0, -1.0);
+        s.vel = v3(-3.0, 1.0, -3.0);
         let mut ev = Vec::new();
         let mut rode = false;
         for _ in 0..90 {
