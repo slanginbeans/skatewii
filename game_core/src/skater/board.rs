@@ -101,8 +101,6 @@ const SLIDE_GRIP: f32 = 0.6;
 /// degrees in its second, at about 1 g sideways, after a slow first 0.2 s.
 const SLIDE_SIDE_ACCEL: f32 = 9.8;
 const SLIDE_SIDE_BUILD: f32 = 0.25;
-/// Full crouch lowers the rider's centre of mass this much (m, ours): the pumping extension.
-const CROUCH_DEPTH: f32 = 0.25;
 /// Wallrides: how far down the floor is looked for, and the least height above it (m).
 const FLOOR_PROBE: f32 = 4.0;
 pub const WALLRIDE_MIN_HEIGHT: f32 = 0.5;
@@ -183,13 +181,11 @@ impl Skater {
         SIDE_GRIP * load.max(0.0)
     }
 
-    /// The rider's centre of mass over the board (m): the posed rider's, else between the riding
-    /// animation's highest (at this speed) and lowest by the crouch (Skate 3's `anim_motion/crouching`).
+    /// The rider's centre of mass over the board (m): the posed rider's, else Skate 3's Crouching on
+    /// the stick's crouch (`anim_motion/crouching`), else the riding animation's highest at this speed.
     pub fn riding_com(&self) -> f32 {
-        self.body_com.unwrap_or_else(|| {
-            let a = &self.tuning.anim;
-            let high = a.crouch_max_height.eval(self.speed.abs());
-            high - self.crouch.clamp(0.0, 1.0) * (high - a.crouch_min_height)
+        self.body_com.or(self.crouch_com).unwrap_or_else(|| {
+            self.tuning.anim.crouch_max_height.eval(self.speed.abs())
         })
     }
 
@@ -559,6 +555,8 @@ impl Skater {
             }
         }
         self.update_pumping(d, dt);
+        let dv = self.pump.dv;
+        self.speed += if self.speed < 0.0 { -dv } else { dv };
         // Hanging under an overhang: fall off it.
         if self.contact_n.y < -0.2 {
             let v = self.ground_velocity() + self.contact_n * 0.5;
@@ -696,7 +694,7 @@ impl Skater {
         let t = self.tuning;
         let n = self.contact_n;
         let deck_angle = self.deck_angle();
-        let height = self.body_com.unwrap_or(-self.crouch * CROUCH_DEPTH);
+        let height = self.body_com.or(self.crouch_com).unwrap_or(0.0);
         let vel = self.ground_velocity();
         let p = &mut self.pump;
         if p.prev_n.is_none() {
@@ -763,10 +761,7 @@ impl Skater {
             if !d.intentional_pump {
                 dv *= t.pump_unintentional;
             }
-            if dv != 0.0 {
-                self.speed += if self.speed < 0.0 { -dv } else { dv };
-                self.pump.dv = dv;
-            }
+            self.pump.dv = dv;
         }
     }
 

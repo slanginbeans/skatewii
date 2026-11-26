@@ -226,7 +226,7 @@ impl<'a> World<'a> {
 
 /// The point of triangle `t` closest to `p`, and whether it is inside the face (not on an edge or a
 /// corner): Ericson, Real-Time Collision Detection 5.1.5.
-fn closest_on_triangle(p: Vec3, t: &[Vec3; 3]) -> (Vec3, bool) {
+pub(crate) fn closest_on_triangle(p: Vec3, t: &[Vec3; 3]) -> (Vec3, bool) {
     let [a, b, c] = *t;
     let (ab, ac, ap) = (b - a, c - a, p - a);
     let (d1, d2) = (ab.dot(ap), ac.dot(ap));

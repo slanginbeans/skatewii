@@ -702,8 +702,13 @@ pub struct Skater {
     target_speed: f32,
     /// The speed the last ride ended with (a different one at the next is a change from outside).
     model_speed: f32,
-    /// 0..1, how far the skater is crouched (drawn).
+    /// 0..1, how far the stick asks the skater to crouch (Skate 3's `Crouch` intent).
     pub crouch: f32,
+    /// Without the imported rider: Skate 3's Crouching (SK8 crouching.rs, the graph's
+    /// `disttocog`) run on the stick's crouch, and the centre of mass over the board it gives (m).
+    stick_crouch: Option<crate::graph::riding::Crouch>,
+    crouch_com: Option<f32>,
+    crouch_pump: bool,
     /// The crouch is for a nollie (stick held forward).
     pub crouch_nose: bool,
     pub landing: Option<Landing>,
@@ -969,6 +974,9 @@ pub struct GraphControl {
     /// The motion graph's `DoLandOnBoard` (its `IntoLandingOnBoard` and `LandingOnBoard` states): the
     /// physics comes down onto the board (SK8: biped air into LandingOnDeck).
     pub land_on_board: bool,
+    /// Crouching's `PlayerControlledPump` (the rider crouched or pumped within half a second): Skate
+    /// 3's intentional pumping (SK8 Processed2476 bit 1), which pays in full.
+    pub player_pump: bool,
     /// The posed board's nose in the rider's frame (x `up x nose`, y up, z ahead) from the imported
     /// rider's last pose: where the clips have put the deck. `None` without the imported rider.
     pub pose_deck: Option<Vec3>,
@@ -1146,6 +1154,9 @@ impl Skater {
             target_speed: 0.0,
             model_speed: 0.0,
             crouch: 0.0,
+            stick_crouch: None,
+            crouch_com: None,
+            crouch_pump: false,
             crouch_nose: false,
             landing: None,
             manual: None,
@@ -1339,6 +1350,41 @@ impl Skater {
         self.heading = yaw;
     }
 
+    /// Without the imported rider's pose, Skate 3's Crouching (the graph's `disttocog`, SK8
+    /// crouching.rs) on the stick's crouch and the pumping's feedback gives the centre of mass over
+    /// the board, which the pump reads (riding only).
+    fn update_stick_crouch(&mut self, dt: f32) {
+        use crate::graph::riding::{Crouch, CrouchIntents, CrouchPhysical};
+        if self.graph.pose_com.is_some() || !self.rolling() {
+            self.stick_crouch = None;
+            self.crouch_com = None;
+            self.crouch_pump = false;
+            return;
+        }
+        let a = &self.tuning.anim;
+        let speed = self.ground_velocity().length();
+        let p = CrouchPhysical {
+            vel_y: self.vel.y,
+            ground_speed: speed,
+            pump_potential: self.pump.pumping,
+            force: self.pump.absorption,
+            ground_force: self.pump.ground_absorption,
+            min_crouch: self.pump.min_crouch,
+            deck_angle: self.pump.deck_absorption,
+            height: self
+                .crouch_com
+                .unwrap_or_else(|| a.crouch_max_height.eval(speed)),
+        };
+        let c = self.stick_crouch.get_or_insert_with(|| Crouch::begin(p, a));
+        let i = CrouchIntents {
+            crouch: Some(self.crouch),
+            ..CrouchIntents::default()
+        };
+        let out = c.update(p, i, dt, a);
+        self.crouch_com = Some(out.height);
+        self.crouch_pump = out.player_pump;
+    }
+
     /// Sets the air spin to `spin` (rad), turning the board and rider about the board's up to match.
     pub fn set_spin(&mut self, spin: f32) {
         let d = spin - self.spin;
@@ -1528,7 +1574,8 @@ impl Skater {
         } else {
             0.0
         };
-        self.crouch += (crouch - self.crouch) * smooth(18.0, dt);
+        self.crouch = crouch;
+        self.update_stick_crouch(dt);
         self.grind_pitch_input = pad.flick[1];
         // The deck is posed apart from the body only in the air (touching down bakes it in).
         if !self.is_airborne() {
@@ -2289,7 +2336,7 @@ impl Skater {
             slide_time: self.slide.as_ref().map_or(0.0, |s| s.time),
             pivot: kick || self.revert.is_some(),
             keep_velocity: self.revert.is_some(),
-            intentional_pump: flick.crouch > 0.0 || self.crouch > 0.05,
+            intentional_pump: self.graph.player_pump || self.crouch_pump,
         };
         self.ride(park, &drive, dt, events);
         // Riding onto a rail: into coping, off a ledge's top, up a bank into a ledge; not while the
@@ -2908,6 +2955,8 @@ impl Skater {
                         lean: self.takeoff.lean,
                         grind: self.jumper.cooldown == 0,
                         lift: self.air_com.map_or(0.0, |c0| (c0 - t.air_com_min).max(0.0)),
+                        sphere: self.reckoning.up.normalize_or(Vec3::UP)
+                            * (self.com_height() - t.traj_displacement),
                     },
                 );
                 self.selector.countdown = air::QUERY_EVERY;
@@ -6590,7 +6639,12 @@ mod tests {
         let mut s = spawn(&park);
         s.speed = 4.0;
         steps(&mut s, &park, &Pad::default(), None, 30);
-        assert_eq!(s.pump.deck_absorption, 0.0, "level with the rider's up");
+        // (The physical deck, which the angle is measured on, settles within a hair of level.)
+        assert!(
+            s.pump.deck_absorption < 1e-3,
+            "level with the rider's up: {}",
+            s.pump.deck_absorption
+        );
         // The rider's up leaning back 0.3 rad from the deck's (as over a transition's start).
         let right = s.reckoning.ground_right();
         s.reckoning.up = rotate(Vec3::UP, right, 0.3);

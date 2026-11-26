@@ -396,6 +396,7 @@ impl Driver {
             },
             retrieve_board: r.s.retrieve_pulse,
             land_on_board: r.packet_named("DoLandOnBoard").is_some(),
+            player_pump: r.packet_named("PlayerControlledPump").is_some(),
             ob_mounting: r.packet_named("OB_Mounting").is_some(),
             land_backwards: r.s.land_backwards,
             dismounting: r.mg_state_root() == Some("Dismount"),

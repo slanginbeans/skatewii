@@ -724,6 +724,16 @@ impl Skater {
                 .push((side * (along_surface.dot(side) * scalar), Vec3::ZERO));
         }
 
+        // Skate 3's pumping (SK8 ground_runtime/pumping.rs `update`, before the board's update): its
+        // acceleration is a force along the travel, the board's mass times it a tick (SK8
+        // pumping.rs `calculate`, CalcPumpForce, queued as tag 8).
+        self.update_pumping(d, dt);
+        if self.pump.dv != 0.0 && v > 0.01 {
+            input
+                .forces
+                .push((vel * (mass * self.pump.dv / (v * dt)), Vec3::ZERO));
+        }
+
         // The manual's deck turn (SK8 manual/controller.rs, `apply_angular_displacement`): the nose
         // lifted about the deck's left-right axis.
         if let Some(m) = &self.manual {
@@ -891,20 +901,18 @@ impl Skater {
         } else {
             self.vn = 0.0;
         }
-        let before = self.speed;
-        self.update_pumping(d, dt);
-        let pumped = self.speed - before;
-        if pumped != 0.0
-            && let Some(r) = &mut self.rig
-        {
-            for p in &mut r.board.parts {
-                p.velocity += f * pumped;
-            }
-        }
         self.mark_rig();
-        // A foot on the ground resets the speed model: it starts again from the speed the board
-        // comes out of this tick with (SK8's `flags_1360` reset).
-        self.model_speed = if d.push_target.is_some() || d.brake > 0.0 || d.manual_correction {
+        // A foot on the ground or the pump's force resets the speed model: it starts again from the
+        // speed the board comes out of this tick with (SK8 ordinary.rs `update_speed_model_reset`:
+        // any push, brake or pump force sets `flags_1360`).
+        self.model_speed = if d.push_target.is_some()
+            || d.brake > 0.0
+            || d.manual_correction
+            || {
+                let force = pb::total_mass() * self.pump.dv / dt.max(1e-4);
+                force * force > SPEED_MODEL_RESET_FORCE_SQUARED
+            }
+        {
             -1.0
         } else {
             self.ground_velocity().length()
@@ -918,6 +926,10 @@ impl Skater {
         self.update_wallride(park, dt, events);
     }
 }
+
+/// SK8 ground_runtime/settings.rs `speed_model_reset_force_squared` (0x37800000): a push, brake or
+/// pump force whose square is over this restarts the speed model from the board's speed.
+const SPEED_MODEL_RESET_FORCE_SQUARED: f32 = 1.525_878_9e-5;
 
 /// SK8 board_ground.rs `WHEEL_LINE_LENGTH`: each wheel's line down the reckoning's up (m).
 pub const WHEEL_LINE_LENGTH: f32 = 0.2;

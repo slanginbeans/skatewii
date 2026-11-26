@@ -392,6 +392,13 @@ pub struct Tuning {
     /// latter scaled by `traj_cone_z_vs_speed` against speed / 20 m/s), the second pass's angles, and
     /// the cone's speed range (m/s).
     pub traj_cone_x: f32,
+    /// The swept sphere each candidate flight is followed with (m), and the chord error at the
+    /// flight's start and end, in radii (SK8 query.rs: the chords' lengths come from them).
+    pub traj_radius: f32,
+    /// How far under the rider's centre of mass the swept sphere's centre starts (m).
+    pub traj_displacement: f32,
+    pub traj_error_start: f32,
+    pub traj_error_end: f32,
     pub traj_cone_z: f32,
     pub traj_cone_z_vs_speed: Curve,
     pub traj_cone_x2: f32,
@@ -964,6 +971,10 @@ pub const PATHS: &[&str] = &[
     "physics_trajectory/default/ScoreLandingForce",
     "physics_trajectory/default/ScoreLandingDirection",
     "physics_trajectory/default/ScoreMiddleBonus",
+    "physics_trajectory/default/TrajectoryMaxErrorStart",
+    "physics_trajectory/default/TrajectoryMaxErrorEnd",
+    "physics_reckoning/default/TrajectoryRadius",
+    "physics_reckoning/default/TrajectoryDisplacement",
     "physics_trajectory/default/ScoreTransition",
     "physics_trajectory/default/ScoreSurface_Unrideable",
     "physics_trajectory/default/ScoreSurface_DontAlign",
@@ -1414,6 +1425,10 @@ impl Tuning {
         phys_air_align: 0.12,
         phys_air_dont_align: 1.5,
         traj_cone_x: 12.0,
+        traj_radius: 0.2,
+        traj_displacement: 0.85,
+        traj_error_start: 0.25,
+        traj_error_end: 1.2,
         traj_cone_z: 35.0,
         traj_cone_z_vs_speed: Curve::new(&[(0.0, 0.35), (0.5, 0.45), (1.0, 0.55)]),
         traj_cone_x2: 6.0,
@@ -1759,6 +1774,14 @@ impl Tuning {
                 scalar!(self.traj_score_direction)
             }
             "physics_trajectory/default/ScoreMiddleBonus" => scalar!(self.traj_score_middle),
+            "physics_trajectory/default/TrajectoryMaxErrorStart" => {
+                scalar!(self.traj_error_start)
+            }
+            "physics_trajectory/default/TrajectoryMaxErrorEnd" => scalar!(self.traj_error_end),
+            "physics_reckoning/default/TrajectoryRadius" => scalar!(self.traj_radius),
+            "physics_reckoning/default/TrajectoryDisplacement" => {
+                scalar!(self.traj_displacement)
+            }
             "physics_trajectory/default/ScoreTransition" => scalar!(self.traj_score_transition),
             "physics_trajectory/default/ScoreSurface_Unrideable" => {
                 scalar!(self.traj_score_unrideable)
