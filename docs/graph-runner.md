@@ -1020,7 +1020,7 @@ riding behaviours become forces at the deck, each as SK8 queues it:
 - the speed model, rolling resistance and the slope cap: the force that makes the board's travel speed
   what Skate 3's model asks, gravity being the solver's;
 - a push: the board's mass times the gap to its target (at most the tick's change), and the foot brake
-  its force (`FootBrakeForce` x the surface, through `brake_scale`): the wheels take their share, so the
+  its force (`FootBrakeForce` x the surface): the wheels take their share, so the
   0.96 "push transfer" flatground measured is now the board's own;
 - the feet (SK8 ground_force.rs): `MinForce` x speed / 8 against the rider's up at each foot
   (`FootForceOffset`), `MaxLandingForce` for `LandingForceTime` after touching down;
@@ -1279,7 +1279,7 @@ Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_
 
 - **Brake contact**: `BRAKE_CONTACT` is a value (0 in the brake's `INTO` clip, 1 in `CYC`); its presence
   was read as contact, so the foot dragged from the first tick. Now 0.23 s after the press, as SK8, at
-  SK8's 4.08 m/s^2 (`brake_scale` calibrated; it was 3.0).
+  SK8's 4.08 m/s^2 (the force on the board's mass).
 - **Speed model**: Skate 3 holds the speed to a target only the slope and rolling resistance move
   (`UpdateSpeedModel`); carving cost 1 to 2 m/s at 6 to 8 m/s here. Now the target pulls the speed back
   (`GeneralAmount` of the gap a tick, within `Friction_MaxSpeedChange`), off while a foot pushes or

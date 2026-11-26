@@ -2428,8 +2428,7 @@ impl Skater {
             }
             None => self.update_brake(pad, dt),
         };
-        let brake = t.brake_scale
-            * t.braking_scalar
+        let brake = t.braking_scalar
             * if tail_brake {
                 t.tail_brake
             } else if foot_brake {

@@ -488,9 +488,8 @@ impl Skater {
             }
             self.target_speed = target.max(0.0);
             // The feet's forces (SK8 push.rs, braking.rs): the push the gap to its target, at most
-            // the tick's change, times the board's mass; the brake its force (`brake_scale` turns
-            // it into the deceleration the older model used). The board's wheels take their share,
-            // as SK8's do.
+            // the tick's change, times the board's mass; the brake its force. The board's wheels
+            // take their share, as SK8's do.
             let mut feet = 0.0;
             if let Some(target) = d.push_target
                 && self.speed < target
@@ -505,7 +504,7 @@ impl Skater {
                     // parts' linear drag to 1 x 60, which stops them.
                     input.linear_drag = 60.0;
                 } else {
-                    feet -= self.speed.signum() * d.brake / t.brake_scale.max(1e-6);
+                    feet -= self.speed.signum() * d.brake;
                 }
             }
             input.forces.push((f * feet, Vec3::ZERO));

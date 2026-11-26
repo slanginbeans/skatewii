@@ -127,7 +127,7 @@ pub struct Drive {
     /// A push is under way (its clips' push contact events, the foot down or coming back): Skate 3's
     /// steering weakens to `PushScalarMin` meanwhile (SK8 steering.rs reads processed bit 27).
     pub pushing: bool,
-    /// A braking foot or tail is on the ground: slow down at this (m/s^2).
+    /// A braking foot or tail is on the ground: its force (N).
     pub brake: f32,
     /// On two wheels.
     pub manual: bool,
@@ -384,8 +384,9 @@ impl Skater {
             self.speed += step * PUSH_TRANSFER;
         }
         if d.brake > 0.0 {
-            self.speed = approach(self.speed, 0.0, d.brake * dt);
-            self.slip = approach(self.slip, 0.0, d.brake * dt);
+            let decel = d.brake / crate::physics::board::total_mass();
+            self.speed = approach(self.speed, 0.0, decel * dt);
+            self.slip = approach(self.slip, 0.0, decel * dt);
             if self.speed.abs() < 2.0 * t.brake_slow_speed {
                 self.speed = 0.0;
                 self.slip = 0.0;
