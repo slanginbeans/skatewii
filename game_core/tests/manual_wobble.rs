@@ -15,8 +15,8 @@ use game_core::flick::FlickOut;
 use game_core::input::{Pad, PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
 use game_core::park::Park;
+use game_core::skater::Skater;
 use game_core::skater::wobble::SpeedWobble;
-use game_core::skater::{Event, Skater};
 use game_core::tuning::Difficulty;
 
 const TICK: f32 = 1.0 / 60.0;
@@ -75,31 +75,6 @@ fn a_fast_straight_ride_wobbles_above_the_onset_and_settles_below_it() {
         assert!(!s.wobble.active && s.wobble.amplitude == 0.0);
     }
     assert!(s.speed > 5.0 && s.rolling());
-}
-
-#[test]
-fn without_the_graphs_a_manual_held_past_its_sweet_spot_tips_back_onto_four_wheels() {
-    let park = flat(100.0);
-    let mut s = Skater::spawn(&park);
-    s.put_at(&park, v3(0.0, 0.0, -80.0), 0.0, 5.0);
-    let mut ev = Vec::new();
-    // The C-stick held most of the way back (towards the player), never corrected.
-    let back = FlickOut {
-        stick: [0.0, 0.8],
-        ..FlickOut::default()
-    };
-    let mut manualled = 0;
-    for _ in 0..(5 * 60) {
-        s.speed = s.speed.max(4.0);
-        s.step(&park, &Pad::default(), &back, TICK, &mut ev);
-        manualled += s.manual.is_some() as u32;
-        if ev.contains(&Event::ManualLost) {
-            break;
-        }
-    }
-    assert!(manualled > 10, "it was a manual");
-    assert!(ev.contains(&Event::ManualLost), "{ev:?}");
-    assert!(s.manual.is_none() && s.rolling());
 }
 
 fn data_dir() -> Option<PathBuf> {

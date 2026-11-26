@@ -216,7 +216,7 @@ impl Driver {
             // Skate 3's processed turn: the graph's last `Turn` packet, negated (SK8
             // scalar_attributes.rs; ProcessedPhysIn+2676, what SK8's animation feedback hands the
             // turn conditioner), 0 without one.
-            turn: s.graph.and_then(|g| g.turn_packet).map_or(0.0, |t| -t),
+            turn: s.graph.turn_packet.map_or(0.0, |t| -t),
             // The reckoning's lean (Reckoning+1576 with the frame's sign, `skater::reckoning`).
             lean: s.published_lean(),
             ground_speed: s.ground_velocity().length(),

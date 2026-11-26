@@ -1,10 +1,10 @@
-//! Combos and lines (Skate 3's scoring: `game_core::scoring`) through the real input path on flat ground,
-//! without imported data:
+//! Combos and lines (Skate 3's scoring: `game_core::scoring`) through the game on flat ground, without
+//! imported data (a synthetic state graph pops the flips, pushes and wipes out):
 //!
 //! - Three flips in a row make a line: the first is scored at x1 and starts the multiplier (x1.5 once
 //!   its reward is in the combo timer), the next two are multiplied, and the line's score is more than
 //!   their rewards.
-//! - A bail (a grab still tweaked into the landing) scores nothing for its trick and ends the line: the
+//! - A bail (the graph's wipeout in the air) scores nothing for its trick and ends the line: the
 //!   multiplier is back to x1 and what the line had is banked.
 //! - Rolling on with nothing done, the line timer runs out and the line ends.
 //! - With the player's imported data (`FG_DATA`, else `dist/apps/flatground/data`; skipped without it):
@@ -13,19 +13,16 @@
 use std::path::PathBuf;
 
 use game_core::Game;
-use game_core::input::{PadRaw, btn, flag};
+use game_core::gesture::{Flick, Trick};
+use game_core::input::{PadRaw, flag};
 use game_core::math::v3;
 use game_core::park::Park;
 use game_core::scoring::catalog;
-use game_core::skater::Event;
+use game_core::skater::{Event, GraphControl};
 
 const TICK: f32 = 1.0 / 60.0;
-/// Raw C-stick: pulled back (the wind-up), flicked forward-right and forward-left (a kickflip and a
-/// heelflip for the built-in shapes), pushed to the side (a grab's tweak).
-const BACK: (i8, i8) = (0, -92);
-const UP_RIGHT: (i8, i8) = (50, 62);
-const UP_LEFT: (i8, i8) = (-50, 62);
-const TWEAK: (i8, i8) = (80, 20);
+const UP_RIGHT: Trick = Trick::Kickflip;
+const UP_LEFT: Trick = Trick::Heelflip;
 
 fn flat() -> Park {
     Park {
@@ -68,39 +65,23 @@ fn frame(g: &mut Game, p: &PadRaw, landed: &mut Vec<(String, u32)>, bailed: &mut
     }
 }
 
-/// Winds up, flicks `end` (grabbing and tweaking in the air when `tweak`), and rides until back on the
-/// ground and settled (pushing back up to speed).
-fn flip(g: &mut Game, end: (i8, i8), tweak: bool, landed: &mut Vec<(String, u32)>) -> bool {
+/// The state graph pops `trick` (wiping out in the air when `wipe`), and rides until back on the ground
+/// and settled (pushing back up to speed).
+fn flip(g: &mut Game, trick: Trick, wipe: bool, landed: &mut Vec<(String, u32)>) -> bool {
     let mut bailed = false;
     for _ in 0..20 {
-        let p = PadRaw {
-            cstick_x: BACK.0,
-            cstick_y: BACK.1,
-            ..pad()
-        };
-        frame(g, &p, landed, &mut bailed);
+        frame(g, &pad(), landed, &mut bailed);
     }
-    let p = PadRaw {
-        cstick_x: end.0,
-        cstick_y: end.1,
-        ..pad()
-    };
-    frame(g, &p, landed, &mut bailed);
+    g.skater.graph.pop = Some((Flick::of(trick), 1.0));
+    frame(g, &pad(), landed, &mut bailed);
+    g.skater.graph = GraphControl::default();
     let mut ticks = 0;
     while ticks < 200 {
         ticks += 1;
         let air = g.skater.is_airborne();
-        let p = if tweak && air {
-            PadRaw {
-                trig_l: 255,
-                cstick_x: TWEAK.0,
-                cstick_y: TWEAK.1,
-                ..pad()
-            }
-        } else {
-            pad()
-        };
-        frame(g, &p, landed, &mut bailed);
+        // The motion graph going to its WipeOut state on its own (a grab tweaked into the landing).
+        g.skater.graph.wipeout = wipe && air && ticks == 15;
+        frame(g, &pad(), landed, &mut bailed);
         if ticks > 10 && !air && g.skater.rolling() {
             break;
         }
@@ -108,18 +89,19 @@ fn flip(g: &mut Game, end: (i8, i8), tweak: bool, landed: &mut Vec<(String, u32)
             break;
         }
     }
+    g.skater.graph = GraphControl::default();
     // Roll a moment, pushing if it slowed (three ticks publish the sequence).
     for _ in 0..12 {
-        let p = PadRaw {
-            buttons: if g.skater.speed < 6.0 && g.skater.rolling() {
-                btn::A
-            } else {
-                0
-            },
-            ..pad()
+        let push = g.skater.speed < 6.0 && g.skater.rolling();
+        g.skater.graph = GraphControl {
+            push_contact: push,
+            push_target: push.then_some(7.0),
+            pushing: push,
+            ..GraphControl::default()
         };
-        frame(g, &p, landed, &mut bailed);
+        frame(g, &pad(), landed, &mut bailed);
     }
+    g.skater.graph = GraphControl::default();
     bailed
 }
 

@@ -95,32 +95,6 @@ impl PlantKind {
             PlantKind::NoComply => "NO COMPLY",
         }
     }
-
-    /// Skate 3's action graph (`OnGround/Grabbing/LeftGrab|RightGrab`, `Goofy|Regular`): a ground grab
-    /// with the left trigger or the right, the right foot's push (A, `RightPush`) or the left's (B), for
-    /// the rider's poses mirrored (regular stance) or not. The front hand's grab is frontside; the
-    /// back foot's push (the usual one) a boneless, the front foot's a fastplant.
-    pub fn from_grab(left_trigger: bool, right_push: bool, mirrored: bool) -> PlantKind {
-        let fs = left_trigger != mirrored;
-        let boneless = right_push != mirrored;
-        match (fs, boneless) {
-            (true, true) => PlantKind::FsBoneless,
-            (false, true) => PlantKind::BsBoneless,
-            (true, false) => PlantKind::FsFastplant,
-            (false, false) => PlantKind::BsFastplant,
-        }
-    }
-
-    /// Without the graphs: seconds from the plant to the board being lifted (`ANIMSKATEBOARD`), and on to
-    /// the jump (`FOOTJUMP`), as Skate 3's graphs play them at riding speed (its `PushTrick` states'
-    /// clips and transitions, measured from the push press; a no-comply from its flick).
-    pub fn timing(self) -> (f32, f32) {
-        match self {
-            PlantKind::FsBoneless | PlantKind::BsBoneless => (0.225, 0.233),
-            PlantKind::FsFastplant | PlantKind::BsFastplant => (0.258, 0.167),
-            PlantKind::NoComply => (0.125, 0.2),
-        }
-    }
 }
 
 /// Skate 3's name for a foot plant in the air (its graphs' `ScoringGrabs`): the grab's side (the
@@ -448,54 +422,6 @@ mod tests {
     use alloc::vec::Vec;
 
     const T: PlantTuning = PlantTuning::BUILT_IN;
-
-    #[test]
-    fn the_skate_3_table_picks_the_plant() {
-        // Goofy (not mirrored): left trigger is the front hand.
-        assert_eq!(
-            PlantKind::from_grab(true, true, false),
-            PlantKind::FsBoneless
-        );
-        assert_eq!(
-            PlantKind::from_grab(true, false, false),
-            PlantKind::FsFastplant
-        );
-        assert_eq!(
-            PlantKind::from_grab(false, true, false),
-            PlantKind::BsBoneless
-        );
-        assert_eq!(
-            PlantKind::from_grab(false, false, false),
-            PlantKind::BsFastplant
-        );
-        // Regular (mirrored).
-        assert_eq!(
-            PlantKind::from_grab(true, false, true),
-            PlantKind::BsBoneless
-        );
-        assert_eq!(
-            PlantKind::from_grab(true, true, true),
-            PlantKind::BsFastplant
-        );
-        assert_eq!(
-            PlantKind::from_grab(false, false, true),
-            PlantKind::FsBoneless
-        );
-        assert_eq!(
-            PlantKind::from_grab(false, true, true),
-            PlantKind::FsFastplant
-        );
-        for k in [
-            PlantKind::FsBoneless,
-            PlantKind::BsBoneless,
-            PlantKind::FsFastplant,
-            PlantKind::BsFastplant,
-            PlantKind::NoComply,
-        ] {
-            assert_eq!(PlantKind::from_trick(k.trick()), Some(k));
-        }
-        assert_eq!(PlantKind::from_trick("Ollie"), None);
-    }
 
     #[test]
     fn the_foot_jump_on_flat_jumps_three_metres_a_second_up() {

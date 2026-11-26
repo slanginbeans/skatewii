@@ -257,8 +257,6 @@ pub struct Tuning {
     pub natural_air_max_dist: f32,
     pub natural_air_min_dist: f32,
     pub natural_air_time: f32,
-    /// How quickly the board's drawn up follows the ground under it (per tick).
-    pub ground_normal_blend: f32,
     /// Hitting a wall: the speed it pushes the board away at (m/s), the most it may change the velocity,
     /// and the yaw that turns the board along it (rad per tick, against the angle / pi between travel and
     /// the wall's normal) for `collision_torque_time` s, fading by `collision_torque_fade` per tick.
@@ -1223,7 +1221,6 @@ impl Tuning {
         natural_air_max_dist: 0.12,
         natural_air_min_dist: 0.06,
         natural_air_time: 0.2,
-        ground_normal_blend: 0.3,
         wall_push_away: 0.8,
         wall_max_vel_delta: 10.0,
         collision_torque: Curve::new(&[
@@ -1629,8 +1626,7 @@ impl Tuning {
             "physics_airstates/default/NaturalAirMinDist" => scalar!(self.natural_air_min_dist),
             "physics_airstates/default/NaturalAirTime" => scalar!(self.natural_air_time),
             "physics_reckoning/default/GroundNormalSmoothing" => {
-                let reckoning = self.reckoning.set(name, f, c(), v);
-                scalar!(self.ground_normal_blend) || reckoning
+                self.reckoning.set(name, f, c(), v)
             }
             "physics_reckoning/default/VertJumpAlignMaxGroundNormalY" => {
                 scalar!(self.vert_align_max_ny)

@@ -1,11 +1,14 @@
-//! Off the board (Skate 3's biped, `skater::biped`), on the built-in park without imported data:
+//! Off the board (Skate 3's biped, `skater::biped`), on the built-in park without imported data (a
+//! synthetic state graph times getting off and on, as the graphs' dismount and mount clips do):
 //!
-//! - Y gets off the board on the ground and back on it on foot; the board's nose then points the way the
-//!   rider faced, rolling at his speed.
+//! - Getting off the board on the ground and back on it on foot; the board's nose then points the way
+//!   the rider faced, rolling at his speed.
 //! - The stick ahead walks and runs at Skate 3's speeds (`physics_biped/SpeedVsInput`: 6 m/s pushed
 //!   fully), A sprints a burst towards 10 m/s that fades while held, the stick pulled back turns the
 //!   rider round on the spot.
 //! - B jumps 0.9 m (`JumpHeight`); walking off a ledge falls; a wall too high to step up stops him.
+
+mod common;
 
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
@@ -42,9 +45,8 @@ fn on_foot(pos: game_core::math::Vec3, heading: f32) -> Game {
     let mut g = Game::new();
     g.place_rider(pos, heading, 0.0);
     run(&mut g, 30, [0, 0], 0);
-    run(&mut g, 1, [0, 0], btn::Y);
+    common::get_off(&mut g);
     assert!(g.skater.walking(), "Y gets off the board standing");
-    assert!(g.events.contains(&Event::SteppedOff));
     run(&mut g, 60, [0, 0], 0);
     g
 }
@@ -55,7 +57,7 @@ fn y_gets_off_the_board_and_back_on() {
     g.place_rider(LANE, 0.0, 3.0);
     run(&mut g, 20, [0, 0], 0);
     let speed = g.skater.speed;
-    run(&mut g, 1, [0, 0], btn::Y);
+    common::get_off(&mut g);
     assert!(g.skater.walking());
     // Off at the board's speed, facing its way, slowing to a stop with the stick let go.
     assert!(
@@ -76,9 +78,8 @@ fn y_gets_off_the_board_and_back_on() {
     run(&mut g, 60, [0, 100], 0);
     let heading = g.skater.biped.heading;
     let walking = g.skater.biped.speed;
-    run(&mut g, 1, [0, 100], btn::Y);
+    common::get_on_with(&mut g, [0, 100]);
     assert!(g.skater.rolling(), "Y gets back on");
-    assert!(g.events.contains(&Event::SteppedOn));
     assert!(wrap_angle(g.skater.heading - heading).abs() < 0.05);
     assert!(
         (g.skater.speed - walking).abs() < 0.5,
@@ -99,11 +100,11 @@ fn getting_back_on_keeps_the_stance() {
         g.place_rider(LANE, 0.0, 3.0);
         g.skater.switch = switch;
         run(&mut g, 20, [0, 0], 0);
-        run(&mut g, 1, [0, 0], btn::Y);
+        common::get_off(&mut g);
         assert!(g.skater.walking());
         assert_eq!(g.skater.switch, switch, "off the board");
         run(&mut g, 60, [0, 0], 0);
-        run(&mut g, 1, [0, 0], btn::Y);
+        common::get_on(&mut g);
         assert!(g.skater.rolling());
         assert_eq!(g.skater.switch, switch, "back on");
         run(&mut g, 120, [0, 0], 0);

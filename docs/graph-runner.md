@@ -10,8 +10,9 @@ Skate 3's camera graph (`Default_cameragraph`) runs on the same runner and choos
 
 Nothing of the graphs is in this repository. `fg_import motion` compiles both from the player's disc into
 the `motion/graph` entry of `motion.fgpak`, and types every operation once (`motion/graph/ops`, names
-already resolved against the graph's strings and the motion library); without them the game uses its own
-hand-written riding logic.
+already resolved against the graph's strings and the motion library). Without them there is nothing to
+play: the game shows how to import them (`Game::require_disc_data`). Tests without the player's data set
+the graphs' decisions for the physics themselves (a synthetic `GraphControl`).
 
 How the graphs are read and run follows SK8-ENGINE/skate-3-rust-engine (GPL-3.0), a Rust port of Skate 3
 that runs the disc's graphs: crates/skate-data state_graph (binding), crates/skate-core graph (selection,
@@ -243,7 +244,7 @@ else flatground's own):
 - `BodyFlippingSignal`, `IsBodyFlipping` (below, "Body flips").
 
 The graphs start over when the physics puts the rider back on the board after a wipeout or runout.
-Without the entry everything above is flatground's hand-written logic, unchanged.
+There is no hand-written stand-in for any of this: the physics reads `GraphControl` every tick.
 
 ## The board and turning round (`skater/board.rs`, `rider.rs`, `game.rs`)
 
@@ -322,7 +323,7 @@ the revert and checkpoint classes), else flatground's own.
   surface, from the nearer end) over the angle limit against that speed (lenient enough that riding
   speeds never bail on it), into the ground faster than `Wipeout_AirMaxSpeedIntoGround` (onto stairs,
   surface category 8, `Wipeout_AirMaxSpeedIntoStairs`; onto a rail, `..IntoCollisionNearGrind`), the board
-  not caught (above), or (without the graphs, flatground's own rule) still tweaking a grab. The speed
+  not caught (above), or the motion graph's own wipeout. The speed
   along the surface is kept, times `LandingSpeedScalarVsGroundNormalY` (transitions gain); the board keeps
   its heading and the wheels' grip and straightening take out the sideways part. The landing type
   (`CalcLandingQuality`) uses `LandingSketchySideSpeed` and `LandingSketchyTwistSpin`; a spin landing
@@ -497,8 +498,7 @@ the balance forces) are used as SK8 documents them.
   (`Into`, `GrabCycle`, `Out`; `IsCrouchedEnoughForBlendToGrabCycle`, `CurrentGrabType`, `HandBusy`) play
   them, score `<grind>_<grab>` in the cycle (`ScoringTrick`), and publish `PhysGrindGrabMinHeight` (0.2),
   which holds a 5-0's free end up (SK8 control.rs). The physics reads the grab from the scored name and the
-  height from the packet (`GraphControl::grind_grab`, `grind_grab_min_height`). Without the graphs, the
-  same table: 50-50s FS/BS grab, 5-0s and salads FS grab/nosegrab, nosegrinds and crooks tailgrab/BS
+  height from the packet (`GraphControl::grind_grab`, `grind_grab_min_height`). Skate 3's table: 50-50s FS/BS grab, 5-0s and salads FS grab/nosegrab, nosegrinds and crooks tailgrab/BS
   grab, nose slides and noseblunts tailgrab (frontside hand), blunts tailgrab and tailslides nosegrab
   (backside hand). A grab held 0.2 s or more is scored with the grind (`FS 5-0 NOSEGRAB`, plus 200 points
   and 150 a second, as air grabs).
@@ -513,8 +513,7 @@ the balance forces) are used as SK8 documents them.
   0.291 outwards, blunts 0.109 inwards, others halfway between the rail's up and the board's), sideways the
   main stick x 1.8 less the high side's push (0.5, slides 0.9 on ledges), capped at 1.8 m/s; each pop costs
   0.6 energy, back at 0.0035 a tick; under 0.31 the pop goes off to a side and grind targeting waits 10
-  ticks. A rail left without a pop can't be taken again for 0.5 s (ours). Without the graphs the flick
-  pops with the grind's group (Nose for the front truck's grinds and nose slides, Tail for the back's).
+  ticks. A rail left without a pop can't be taken again for 0.5 s (ours).
 - **Names** (SK8 grind_chromosome.rs, pose.rs, grind_names): FS or BS from the rider's chest against the
   side of the rail the rider came from (the pose at take-off, or 30 ticks of riding before); the truck or
   tip on the rail; straight (the deck within 20 degrees of the rail); low (the free end under the rail's
@@ -560,8 +559,7 @@ FootPlantManager and physical state 601) and `skate-core/src/air/known/footplant
   at 6 m/s) and goes `Hash_6D781EFAF01E707D` x `Hash_C9112CCD0BCB1850` up the normal (3 m/s on flat), the
   rest keeps the velocity and only sets its up speed; a change of over 10 m/s keeps the velocity, and at
   least 1.92 m/s goes along the facing. The landing scores the graph's `ScoringTrick` (`FS BONELESS`,
-  `NO COMPLY` ...). Without the graphs the same buttons start them, timed as the graphs play them
-  (`PlantKind::timing`: the board up 0.225 s after the press and the jump 0.233 s later for a boneless).
+  `NO COMPLY` ...).
 - **In the air** (foot plants on ledges, coping and walls: wallplants). A grab and a push is the action
   graph's `InAir/Grabbing/*/OneFootRight|OneFootLeft`; the motion graph's `OneFootAir` states carry the
   `OneFootAir` attribute (`GraphControl::one_foot_air`), which runs the manager (`plant::Manager`) once
@@ -581,8 +579,7 @@ FootPlantManager and physical state 601) and `skate-core/src/air/known/footplant
   the leg. Over `Hash_52436D9F4FE56BCB` (10 m/s) down or `Hash_149A5D0D4768D2B1` (11 m/s) across while
   planted wipes out. `IsFootPlanting` holds through the swing (the graph's `Absorb`), `FootPlantAbsorb`
   hands its time to the absorb clips as `absorblength`, and the graph's `JumpOut` follows. Scored by the
-  graph's `ScoringGrabs` names (`fsgrab_fs_footplant` ...; without the graphs the same names from the grab's
-  hand and the free foot).
+  graph's `ScoringGrabs` names (`fsgrab_fs_footplant` ...).
 - **Not done**: SK8's snap of the foot's contact to a nearby grind edge (`nearby_edge`), the foot IK and
   collision volumes (the rider has no body), `BodyAdjustX/Z` moving the release, and the camera graph's
   `SkaterIsPerformingFootPlant` / `SkaterIsPerformingBoneless` (still false).
@@ -602,7 +599,7 @@ FootPlantManager and physical state 601) and `skate-core/src/air/known/footplant
   `OB_SteerMagnitude` (`TryToLeave`'s -0.5 goes `BackToLoco`, and the physics walks on). Y let go goes
   `OutOfDropIn`: the rider is on the board, still, its tail on the coping; the world reads a grind
   (`phys::GRIND`) with `IsDroppingIn`, so 0.2 s in the graph goes `OnBoard/Grinding/DroppingIn/Nose`.
-  After `LOCK_TIME` (0.4 s) there (without the graphs 0.6 s after letting go) the board is let go 0.1 m
+  After `LOCK_TIME` (0.4 s) there the board is let go 0.1 m
   behind the coping rolling at 1.2 m/s (under SK8's 1.45 m/s drop-in admission): the rolling drop-in takes
   it over the coping into the transition. `IsDropInWithoutTransition` is an edge with no ramp under it.
   `IsDroppingIn` is also on for a tip slide entered as a drop-in. Not done: the clips' `DropInLock` /
@@ -647,7 +644,7 @@ FootPlantManager and physical state 601) and `skate-core/src/air/known/footplant
   `DismountTrans` states play). `hand_release` (0.25 s) past the apex the hand lets go and the rider falls
   on into the ramp. Scored by `ScoringHandPlants` (the tweak by ScoringGrabs' windows: `FS_handplant_up`
   ...) or the one-foot / no-foot states' `ScoringTrick`, with Skate 3's points (100, 150 for the
-  variants); without the graphs the same names from the C-stick and the buttons. Not done: the hand's IK
+  variants). Not done: the hand's IK
   (`ik.rs`), the feet lifting the path (SK8 `values`' foot correction), the neighbouring coping segments'
   extension in the search, the `to_fakie` / `to_revert` / mount variants (no records on the disc) and the
   camera's `SkaterIsPerformingHandPlant`.
@@ -695,7 +692,7 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   ground under the feet.
 - **Getting on**: Y on foot. The motion graph's `Mount` states play a mount clip from the stand, walk, run or
   sprint; when its `OB_TRAJ` window ends the rider is on the board, its nose the way he faced, rolling at
-  his forward speed, and the graph goes on to `OnBoard`. Without the state graphs Y gets off and on at once.
+  his forward speed, and the graph goes on to `OnBoard`.
 - **What the graphs read** (`drive::walking`): `PhysFilteredState` offboard / offboardair, `LocoState`,
   `IsHoldingSkateboard` (the board in the hands: `skater::possession`), `IsDeckFree` (free, hidden or
   flying back), `IsDroppingSkateboard` / `IsRetrievingSkateboard` (below), `IsInBipedAir`,
@@ -778,8 +775,7 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   of the distance, weighted by `RetrievalSpeedCurve`. Getting on (`OB_Mounting`, the mount states'
   attribute from `OB_Mount`) fetches a free board the same way from at most `DistanceForMountedReturn` (5
   m) in at most `MinTimeToRetrieveBoardWhileMounting` (0.1 s), so the mount clips (board in hand) play as
-  in Skate 3; without the graphs Y next to the board (within 5 m) steps onto it where it lies, at its
-  rolling speed, its nose or tail ahead, further away fetches it first. The board off the feet is drawn
+  in Skate 3. The board off the feet is drawn
   where its body is (the imported board's bones placed there, blended back into the clips' board as it
   reaches the hands; the placeholder board likewise). The physics' possession values are Skate 3's
   (`physics_skatecontroller`, `tuning/possession.rs`), with the rules pack's taking over.
@@ -791,7 +787,7 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   and within `landing_assist_limit` of the jump's own (3.5 m/s at take-off, 0.5 m/s from 0.19 s: biped_air
   orientation.rs) and the board is upright (`DeckMinUprightness`). That is `CanLandOnBoard`: the motion
   graph goes from `OffBoard/OBAir/InAir` into `Mount/Air/IntoLandingOnBoard`, whose `DoLandOnBoard` starts
-  the landing on deck in the physics (at once without the graphs), then `OnBoard/LandingOnBoard`
+  the landing on deck in the physics, then `OnBoard/LandingOnBoard`
   (LandOnBoard: coming down onto the board the wrong way round, it asks for its tail to be taken ahead,
   Skate 3's FlipBoardBackwards; flatground takes the board's frame that way rather than turning the
   rider). Touching down with the feet within 0.55 m of the deck rides on it from where it is, keeping the
@@ -1200,7 +1196,7 @@ field of view).
   `PredictedHeightDistanceRatio` (the top over the camera's distance at take-off), `LaunchInclineAngle`,
   `LandingInclineAngle`, `IsReentry` (up a wall and back down one), `TransferAngle`, `FrontsideAngle`,
   `IsInManual`, `IsPreparingToJump` (the motion graph's wind-up states' `IsAnticipating`, Skate 3's
-  anticipating flag; without the graphs a crouch), `TurningCentredTime` / `TurningTime` (seconds since the
+  anticipating flag), `TurningCentredTime` / `TurningTime` (seconds since the
   steering was last hard over / has been: SK8's `steering_for_turn`, the physics' turn or the stick's turn
   or kick-turn input when that agrees and is larger), `CameraSubjectSpeed` (the board rolls on the
   pop's tick, so it doesn't read a one-tick stop), `GrindInclineAngle`, `IsPreviousShot`, `IsGrindLedgeLeft` /

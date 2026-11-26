@@ -882,6 +882,11 @@ impl RiderBody {
         self.live = true;
     }
 
+    /// Whether the body was stepped this tick (with the board's solve).
+    pub fn stepped(&self) -> bool {
+        self.live && self.idle == 0
+    }
+
     /// A tick passes: a body not stepped in it restarts at the animated pose next time.
     pub fn tick(&mut self) {
         self.idle += 1;

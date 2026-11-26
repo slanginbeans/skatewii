@@ -593,6 +593,18 @@ fn main() {
             }
         );
     }
+    // Without the disc data (--rules, --skater, --motion) there is nothing to play: the game's import
+    // screen, as the Wii shows it.
+    if !game.require_disc_data() {
+        game.render(&mut raster);
+        raster.save(&out.join("import_screen.png"));
+        println!(
+            "no disc data (missing: {}): wrote the import screen to {}",
+            game.missing.as_deref().unwrap_or(""),
+            out.join("import_screen.png").display()
+        );
+        return;
+    }
     // --poses: still shots of each stance (goofy, fakie, switch, regular) to check facing and mirroring,
     // and of a held carve each way (the rider leans into the turn), each also close up from the side
     // and from behind.
@@ -652,7 +664,6 @@ fn main() {
             raster.save(&out.join(format!("pose_{name}_back.png")));
             g.render(&mut CloseUp::board(&mut raster, g.skater.pos, side));
             raster.save(&out.join(format!("pose_{name}_wheels.png")));
-            let fakie = g.rider().map_or(0.0, |r| r.fakie_weight());
             // The riding trees' parameters, as the graph's behaviours set them.
             let params = match (&g.graph, g.motion.as_ref().map(|m| &m.db)) {
                 (Some(d), Some(db)) => d
@@ -679,7 +690,7 @@ fn main() {
                 _ => String::new(),
             };
             println!(
-                "{name}: fakie {} mirrored {} fakie look {fakie:.2}, yaw rate {:.2} | {}",
+                "{name}: fakie {} mirrored {}, yaw rate {:.2} | {}",
                 g.skater.fakie,
                 g.skater.mirrored(),
                 g.skater.yaw_rate,
@@ -1030,16 +1041,12 @@ fn main() {
             .map(|(_, l)| *l)
             .or_else(|| every.filter(|n| frame % n == 0).map(|_| "every"));
         if let Some(label) = label {
-            let clip = game
-                .rider()
-                .map(|r| format!(", clip {} @ {:.2}s", r.current().role, r.current().time))
-                .unwrap_or_default();
             if label != "every" || park.is_some() || tour || autoplay {
                 game.render(&mut raster);
                 let path = out.join(format!("frame_{frame:04}.png"));
                 raster.save(&path);
                 println!(
-                    "        wrote {} ({label}{clip}, {:?}, camera {})",
+                    "        wrote {} ({label}, {:?}, camera {})",
                     path.display(),
                     game.skater.state(),
                     game.camera().shot_name
@@ -1050,7 +1057,7 @@ fn main() {
                 game.render(&mut CloseUp::rider(&mut raster, game.skater.pos, side));
                 let path = out.join(format!("close_{frame:04}.png"));
                 raster.save(&path);
-                println!("        wrote {} ({label}{clip})", path.display());
+                println!("        wrote {} ({label})", path.display());
             }
         }
     }

@@ -203,7 +203,7 @@ impl Skater {
             field_856_secondary: t.natural_air_min_dist,
             field_7692: t.natural_air_time,
         };
-        let animated = self.graph.is_some_and(|g| g.board_animated);
+        let animated = self.graph.board_animated;
         StateSelectionInput {
             processed: ProcessedStateInput {
                 grind_type_1248: grind.unwrap_or(6),
@@ -351,7 +351,7 @@ mod tests {
         let mut s = Skater::spawn(&park);
         s.since_spawn = 10.0;
         s.speed = speed;
-        s.graph = Some(GraphControl::default());
+        s.graph = GraphControl::default();
         (park, s)
     }
 
@@ -368,10 +368,10 @@ mod tests {
         let (park, mut s) = rolling(3.0);
         step(&mut s, &park, 5);
         assert_eq!(s.state(), State::PhysicsGround);
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             pop: Some((crate::gesture::Flick::OLLIE, 1.0)),
             ..GraphControl::default()
-        });
+        };
         step(&mut s, &park, 1);
         // SK8: the jump starts the state frames over, and `field_2572 == 1` is the ground states' way
         // into the air.

@@ -736,6 +736,14 @@ pub struct BoardInput {
     /// The animated board the deck is hooked to (deck centre, axes): SK8's hook drive, on while the
     /// rider's animation holds the board (the air).
     pub hook: Option<(Vec3, Mat3)>,
+    /// How fast the animated board moves (m/s, world): the hook's own velocity, so its damping pulls
+    /// the deck towards the animated board's motion, not to a stop (SK8's hook target is the animated
+    /// board placed at the predicted physical one, moving with it).
+    pub hook_velocity: Vec3,
+    /// And how it accelerates (m/s/s): a flight falls with the deck.
+    pub hook_gravity: Vec3,
+    /// And how fast it turns (rad/s, world).
+    pub hook_spin: Vec3,
 }
 
 /// The board's seven bodies.
@@ -959,8 +967,10 @@ impl Board {
         let mut rows: [DriveRow; 3] = [drives[0], drives[1], drives[0]];
         let mut n_drives = 2;
         if let Some((at, axes)) = input.hook {
-            let mut hook = Body::new(deck_mass(), at, Quat::from_mat3(&axes), Vec3::ZERO);
+            let mut hook = Body::new(deck_mass(), at, Quat::from_mat3(&axes), input.hook_gravity);
             hook.active = false;
+            hook.velocity = input.hook_velocity;
+            hook.spin = input.hook_spin;
             all[PARTS] = hook;
             rows[2] = DriveRow::build(&all, PARTS, DECK, &here, &here, &HOOK_DRIVE);
             n_drives = 3;

@@ -65,11 +65,11 @@ fn scripted_flip(stance: Stance, switch: bool, fakie: bool, front: bool) -> Swee
     };
     let mut k = 0;
     while g.skater.is_airborne() && k < 300 {
-        g.skater.graph = Some(GraphControl {
+        g.skater.graph = GraphControl {
             body_flip: (k < 20).then_some(front),
             grabbing: true,
             ..GraphControl::default()
-        });
+        };
         g.update(&idle(), TICK);
         let Some(f) = g.skater.body_flip else {
             k += 1;

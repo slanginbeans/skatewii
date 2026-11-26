@@ -1,14 +1,13 @@
 //! Foot plants (Skate 3's boneless, fastplant and no-comply on the ground, the foot plant in the air off
 //! a wall: `skater::plant`), on synthetic parks and without imported data:
 //!
-//! - A trigger fully in on the ground (Skate 3's ground grab) and a push button plant a foot: A (the
-//!   right foot's push) a boneless, B a fastplant. The rider jumps off the planted foot on the clips'
-//!   timing with Skate 3's FootJump launch (3 m/s up on flat), higher than the board alone would go, and
-//!   the landing scores the plant.
-//! - A flick while a push's foot is still coming down is a no-comply.
-//! - In the air, a grab and a push button (the one-foot grab) reach the free foot for what the flight is
-//!   about to meet: against a wall it plants on the wall's face, the rider swings up over the foot and
-//!   flies off it (a wallplant), scored as Skate 3 names it.
+//! - With a synthetic state graph (`GraphControl`, as the game's graphs hand it to the physics): the
+//!   ground plant's clips hold the board, and on their `FOOTJUMP` the rider jumps off the planted foot
+//!   with Skate 3's FootJump launch (3 m/s up on flat), higher than the board alone would go, and the
+//!   landing scores the plant.
+//! - In the air, the graph's one-foot grab reaches the free foot for what the flight is about to meet:
+//!   against a wall it plants on the wall's face, the rider swings up over the foot and flies off it (a
+//!   wallplant), scored as Skate 3 names it.
 //! - With the player's imported data (`FG_DATA`, else `dist/apps/flatground/data`; skipped without it):
 //!   Skate 3's graphs play their boneless and no-comply states and the physics jumps off the planted foot
 //!   on their clips' `FOOTJUMP`; a one-foot grab against a wall plays their foot plant states.
@@ -17,12 +16,11 @@ use std::path::PathBuf;
 
 use game_core::Game;
 use game_core::flick::FlickOut;
-use game_core::gesture::Flick;
 use game_core::input::{Pad, PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
 use game_core::park::{Park, Shape};
 use game_core::skater::plant::PlantKind;
-use game_core::skater::{DECK_HEIGHT, Event, Skater};
+use game_core::skater::{DECK_HEIGHT, Event, GraphControl, Skater};
 use game_core::tuning::plant::PlantTuning;
 
 const TICK: f32 = 1.0 / 60.0;
@@ -104,31 +102,44 @@ fn ride_out(s: &mut Skater, p: &Park, pad: &Pad, ticks: usize, ev: &mut Vec<Even
     top
 }
 
+/// The state graph's ground plant (as the game's graph hands it to the physics): its clips hold the
+/// board (`ANIMSKATEBOARD`) for `held` ticks, then jump off the planted foot (`FOOTJUMP`).
+fn graph_plant(s: &mut Skater, p: &Park, kind: PlantKind, held: usize, ev: &mut Vec<Event>) {
+    s.graph.plant = Some(kind);
+    s.graph.anim_skateboard = true;
+    step(s, p, &Pad::default(), &FlickOut::default(), held, ev);
+    s.graph.foot_jump = true;
+    step(s, p, &Pad::default(), &FlickOut::default(), 1, ev);
+    s.graph = GraphControl::default();
+}
+
 #[test]
-fn a_ground_grab_and_a_push_is_a_boneless_that_jumps_off_the_planted_foot() {
+fn the_graphs_boneless_holds_the_board_then_jumps_off_the_planted_foot() {
     let p = flat();
     let mut s = rolling(&p, 5.0);
     let mut ev = Vec::new();
-    // The left trigger fully in and A: the goofy rider's front hand, the back foot's push.
-    let held = pad(1.0, btn::A, btn::A);
-    step(&mut s, &p, &held, &FlickOut::default(), 1, &mut ev);
-    assert!(s.ground_plant.is_some(), "{ev:?}");
-    assert!(
-        s.push.is_none(),
-        "the push button planted the foot instead of pushing"
+    s.graph.plant = Some(PlantKind::FsBoneless);
+    s.graph.anim_skateboard = true;
+    step(
+        &mut s,
+        &p,
+        &Pad::default(),
+        &FlickOut::default(),
+        20,
+        &mut ev,
     );
-    let hold = pad(1.0, 0, 0);
-    let mut ticks = 1;
-    while !ev.iter().any(|e| matches!(e, Event::FootJump(_))) {
-        step(&mut s, &p, &hold, &FlickOut::default(), 1, &mut ev);
-        ticks += 1;
-        assert!(ticks < 60, "{ev:?}");
-        if s.rolling() {
-            assert!(s.speed > 4.5, "rolls on while planted: {}", s.speed);
-        }
-    }
-    // On Skate 3's timing: its graphs' boneless from the press to the clips' FOOTJUMP, 0.47 s.
-    assert!((27..=29).contains(&ticks), "{ticks}");
+    assert!(s.ground_plant.is_some() && s.rolling(), "{ev:?}");
+    assert!(s.speed > 4.5, "rolls on while planted: {}", s.speed);
+    s.graph.foot_jump = true;
+    step(
+        &mut s,
+        &p,
+        &Pad::default(),
+        &FlickOut::default(),
+        1,
+        &mut ev,
+    );
+    s.graph = GraphControl::default();
     assert!(
         ev.contains(&Event::FootJump(PlantKind::FsBoneless)),
         "{ev:?}"
@@ -147,54 +158,29 @@ fn a_ground_grab_and_a_push_is_a_boneless_that_jumps_off_the_planted_foot() {
 }
 
 #[test]
-fn b_with_the_ground_grab_is_a_fastplant_and_without_it_a_push() {
+fn every_ground_plant_jumps_off_its_foot_and_scores_its_name() {
     let p = flat();
-    let mut s = rolling(&p, 4.0);
-    let mut ev = Vec::new();
-    step(
-        &mut s,
-        &p,
-        &pad(1.0, btn::B, btn::B),
-        &FlickOut::default(),
-        1,
-        &mut ev,
-    );
-    for _ in 0..40 {
-        if s.is_airborne() {
-            break;
-        }
-        step(
-            &mut s,
-            &p,
-            &pad(1.0, 0, 0),
-            &FlickOut::default(),
-            1,
-            &mut ev,
-        );
+    for (kind, name) in [
+        (PlantKind::FsFastplant, "FS FASTPLANT"),
+        (PlantKind::NoComply, "NO COMPLY"),
+    ] {
+        let mut s = rolling(&p, 4.0);
+        let mut ev = Vec::new();
+        graph_plant(&mut s, &p, kind, 15, &mut ev);
+        assert!(ev.contains(&Event::FootJump(kind)), "{ev:?}");
+        let top = ride_out(&mut s, &p, &Pad::default(), 120, &mut ev);
+        assert!(top > 0.4, "{top}");
+        assert!(landed(&ev).iter().any(|n| n == name), "{ev:?}");
     }
-    assert!(
-        ev.contains(&Event::FootJump(PlantKind::FsFastplant)),
-        "{ev:?}"
-    );
-    ride_out(&mut s, &p, &Pad::default(), 120, &mut ev);
-    assert!(landed(&ev).iter().any(|n| n == "FS FASTPLANT"), "{ev:?}");
-
-    // The trigger only partly in is a crouch, not a ground grab: B pushes.
+    // Without the graph's FOOTJUMP the plant never jumps.
     let mut s = rolling(&p, 4.0);
     let mut ev = Vec::new();
+    s.graph.plant = Some(PlantKind::FsBoneless);
+    s.graph.anim_skateboard = true;
     step(
         &mut s,
         &p,
-        &pad(0.5, btn::B, btn::B),
-        &FlickOut::default(),
-        1,
-        &mut ev,
-    );
-    assert!(s.ground_plant.is_none());
-    step(
-        &mut s,
-        &p,
-        &pad(0.5, btn::B, 0),
+        &Pad::default(),
         &FlickOut::default(),
         40,
         &mut ev,
@@ -204,45 +190,6 @@ fn b_with_the_ground_grab_is_a_fastplant_and_without_it_a_push() {
         "{ev:?}"
     );
     assert!(s.rolling());
-}
-
-#[test]
-fn a_flick_while_the_push_foot_comes_down_is_a_no_comply() {
-    let p = flat();
-    let mut s = rolling(&p, 4.0);
-    let mut ev = Vec::new();
-    step(
-        &mut s,
-        &p,
-        &pad(0.0, btn::A, btn::A),
-        &FlickOut::default(),
-        1,
-        &mut ev,
-    );
-    assert!(s.push.is_some_and(|p| p.stage().0 == 0), "{:?}", s.push);
-    let flick = FlickOut {
-        flick: Some(Flick::OLLIE),
-        strength: 1.0,
-        ..FlickOut::default()
-    };
-    step(&mut s, &p, &pad(0.0, btn::A, 0), &flick, 1, &mut ev);
-    assert!(
-        !ev.iter().any(|e| matches!(e, Event::Popped(_))),
-        "a no-comply, not an ollie: {ev:?}"
-    );
-    assert_eq!(s.ground_plant.map(|g| g.kind), Some(PlantKind::NoComply));
-    step(
-        &mut s,
-        &p,
-        &Pad::default(),
-        &FlickOut::default(),
-        20,
-        &mut ev,
-    );
-    assert!(ev.contains(&Event::FootJump(PlantKind::NoComply)), "{ev:?}");
-    let top = ride_out(&mut s, &p, &Pad::default(), 120, &mut ev);
-    assert!(top > 0.4, "{top}");
-    assert!(landed(&ev).iter().any(|n| n == "NO COMPLY"), "{ev:?}");
 }
 
 /// In the air at `deck` moving `vel`, the board level and its nose along +z.
@@ -267,15 +214,10 @@ fn a_one_foot_grab_at_a_wall_plants_on_it_and_flies_off_it() {
     // Coming up at the wall at 5 m/s, rising.
     let mut s = in_air(&p, v3(0.0, 0.6, 1.6), v3(0.0, 5.0, 5.0));
     let mut ev = Vec::new();
-    // Grab (left trigger) and A: the right foot off the board.
-    step(
-        &mut s,
-        &p,
-        &pad(0.6, btn::A, btn::A),
-        &FlickOut::default(),
-        1,
-        &mut ev,
-    );
+    // Grab (left trigger) and A: the graph's one-foot grab (`OneFootAir`), its clips reaching for a
+    // plant (`FootPlanting`).
+    s.graph.one_foot_air = true;
+    s.graph.foot_planting = true;
     let one_foot = pad(0.6, btn::A, 0);
     let mut planted = None;
     for _ in 0..60 {
@@ -302,6 +244,7 @@ fn a_one_foot_grab_at_a_wall_plants_on_it_and_flies_off_it() {
     assert!(s.vel.z < -1.0, "{:?} (planted at {at:?})", s.vel);
     assert!(s.pos.z < 3.0, "{:?}", s.pos);
     let names = {
+        s.graph = GraphControl::default();
         ride_out(&mut s, &p, &Pad::default(), 240, &mut ev);
         landed(&ev)
     };

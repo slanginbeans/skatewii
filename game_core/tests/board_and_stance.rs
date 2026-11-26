@@ -74,43 +74,6 @@ fn riding_fakie_the_stick_turns_the_travel_its_own_way() {
     assert!(fakie_right < -0.1, "{fakie_right}");
 }
 
-/// The drawn rider's chest (toe side, mirrored with the stance) and the board's nose, as drawn.
-fn drawn_placeholder(g: &Game) -> (Vec3, Vec3) {
-    let x = g.imported_xform();
-    let side = x.rot.cols[0];
-    let chest = if g.skater.mirrored() { -side } else { side };
-    (chest, x.rot.cols[2])
-}
-
-#[test]
-fn pushing_from_fakie_turns_nothing_in_the_world_at_50_hz() {
-    // flatground's own rules (no state graphs): A riding fakie turns the rider round to push switch.
-    let mut g = Game::new();
-    g.place_rider(v3(0.0, 0.0, -8.0), 0.0, -3.0);
-    let dt = 1.0 / 50.0;
-    for _ in 0..30 {
-        g.update(&pad(0, 0), dt);
-    }
-    assert!(g.skater.fakie);
-    let (mut chest, mut nose) = drawn_placeholder(&g);
-    let mut switched = false;
-    for i in 0..40 {
-        g.update(&pad(0, if i < 5 { btn::A } else { 0 }), dt);
-        switched |= g.events.contains(&Event::Switched);
-        let (c, n) = drawn_placeholder(&g);
-        assert!(
-            yaw_step(chest, c) < 3.0,
-            "tick {i}: chest {chest:?} -> {c:?}"
-        );
-        assert!(
-            axis_step(nose, n) < 3.0,
-            "tick {i}: board {nose:?} -> {n:?}"
-        );
-        (chest, nose) = (c, n);
-    }
-    assert!(switched && g.skater.switch && !g.skater.fakie);
-}
-
 // ---- With the player's imported data ----
 
 fn data_dir() -> Option<PathBuf> {
@@ -171,12 +134,13 @@ fn wheel_gap(g: &Game) -> f32 {
         .fold(f32::MAX, f32::min)
 }
 
-/// The lowest wheel touches the ground (within 3 mm; a wheel's rim rolling over a ramp's kink dips a
-/// few millimetres into the slope ahead, as a round wheel does).
+/// The lowest wheel touches the ground: Skate 3 draws the physical deck, and the imported wheels are 6 mm
+/// smaller than its physical 31 mm ones, so they ride up to that over it (a wheel's rim rolling over a
+/// ramp's kink, the deck rigid over the trucks, dips up to a centimetre into the slope ahead).
 fn assert_on_ground(g: &Game, what: &str) {
     let gap = wheel_gap(g);
     assert!(
-        (-0.004..0.003).contains(&gap),
+        (-0.010..0.008).contains(&gap),
         "{what}: wheels {:.1} mm over the ground",
         gap * 1000.0
     );
@@ -193,10 +157,12 @@ fn imported_wheels_rest_on_the_ground_and_trucks_on_the_rail() {
         g.update(&pad(0, 0), TICK);
     }
     assert_on_ground(&g, "flat ground");
-    // The clips' board (the character's origin) is the deck's centre, about Skate 3's deck height over
-    // the contact point (the imported wheels are a little smaller than Skate 3's physical ones).
-    let deck = (g.imported_xform().pos - g.skater.pos).dot(g.skater.normal);
-    assert!((deck - DECK_HEIGHT).abs() < 0.006, "deck {deck}");
+    // The drawn board is the physical deck: Skate 3's deck height over the contact point.
+    let c = &g.rider().unwrap().character;
+    let m = c.world()[c.bone("SKATEBOARD_ROOT").unwrap()];
+    let board = g.imported_xform().point(v3(m[3][0], m[3][1], m[3][2]));
+    let deck = (board - g.skater.pos).dot(g.skater.normal);
+    assert!((deck - DECK_HEIGHT).abs() < 0.003, "deck {deck}");
     // Up the bank (16 degrees) and on the funbox's ramp, its kink onto the deck.
     g.place_rider(v3(14.8, 0.0, 0.0), core::f32::consts::FRAC_PI_2, 2.5);
     for _ in 0..12 {

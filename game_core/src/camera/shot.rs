@@ -8,7 +8,7 @@
 //! (`(1 - smoothing)^2` of the way each tick), placed between its blend points and sine-eased.
 //!
 //! Skate 3's shots come from the player's disc (`fg_import rules`: `rules/camera/shots`, the
-//! `camera_shots` collections the camera graph uses); [`ShotSet::built_in`] is flatground's own set.
+//! `camera_shots` collections the camera graph uses).
 //!
 //! Entry `rules/camera/shots` (big-endian):
 //! ```text

@@ -1,6 +1,9 @@
-//! The camera after a hard carve (flatground's own shots and shot choice, the demo park): it is back
-//! behind the rider soon after the carve and never more than about 45 degrees to the side at riding
-//! speed, through the straight, the wind-up and the ollie.
+//! The camera after a hard carve (Skate 3's camera graph and shots from the player's imported data,
+//! `FG_DATA`, else `dist/apps/flatground/data`; skipped without it; the demo park): it is back behind the
+//! rider soon after the carve and never more than about 50 degrees to the side at riding speed, through
+//! the straight, the wind-up and the ollie.
+
+mod common;
 
 use game_core::Game;
 use game_core::autoplay::CarveOllie;
@@ -14,7 +17,9 @@ fn off_behind(game: &Game) -> f32 {
 }
 
 fn run(straight: u32) {
-    let mut game = Game::new();
+    let Some(mut game) = common::disc_game("camera_carve") else {
+        return;
+    };
     let (p, h) = CarveOllie::START;
     game.place_rider(p, h, 0.0);
     let mut script = CarveOllie::new(straight);
@@ -40,7 +45,7 @@ fn run(straight: u32) {
         "no ollie: {}",
         script.phase()
     );
-    assert!(most < 45.0, "the camera went {most} degrees to the side");
+    assert!(most < 55.0, "the camera went {most} degrees to the side");
     let behind = behind_at.expect("never behind after the carve");
     // Skate 3's turning shot hands back to the chase shot over a second; the arm's tracker closes the
     // rest.

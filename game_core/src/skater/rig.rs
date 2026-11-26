@@ -10,6 +10,7 @@
 use super::*;
 use crate::math::Mat3;
 use crate::math::Xform;
+use crate::physics::Quat;
 use crate::physics::board::{self as pb, Board, BoardInput};
 use crate::physics::rider_body::{RiderBody, RiderInput};
 use crate::tuning::Curve;
@@ -24,6 +25,9 @@ const FOOT_LANDING_FORCE: f32 = 100.0;
 const FOOT_LANDING_TIME: f32 = 0.1;
 /// Skate 3's manual corrective drag (N per m/s, SK8 manual/controller.rs `apply_correction`).
 const MANUAL_CORRECTIVE_DRAG: f32 = 400.0;
+/// A board further than this (m) from the skater's frame was left behind by a move from outside:
+/// put where the skater is rather than adopted or flown to.
+const LANDING_REACH: f32 = 0.5;
 
 /// Sideways friction (SK8 riding/slide_friction.rs): against the ground's angle (quarter turns),
 /// `physics_friction/SlideVsNormal`; against the speed / 10, `SlideVsSpeed`; building over the
@@ -95,6 +99,8 @@ pub struct Rig {
     pub airborne: bool,
     /// The skater's frame is turned end for end against the deck (a switch or a revert's turn).
     pub flip: bool,
+    /// The air hook's last turn (world), for how fast the animated board turns.
+    hook_turn: Option<Mat3>,
 }
 
 impl Skater {
@@ -112,7 +118,7 @@ impl Skater {
     }
 
     /// -1 while the skater's frame is turned end for end against the physical deck.
-    fn rig_sign(&self) -> f32 {
+    pub(super) fn rig_sign(&self) -> f32 {
         if self.rig.as_ref().is_some_and(|r| r.flip) {
             -1.0
         } else {
@@ -134,7 +140,7 @@ impl Skater {
             && r.airborne
         {
             r.airborne = false;
-            if (r.board.deck().position - deck).length() < 0.5 {
+            if (r.board.deck().position - deck).length() < LANDING_REACH {
                 self.adopt_rig();
                 self.mark_rig();
                 return;
@@ -182,6 +188,7 @@ impl Skater {
                     last_sync: Vec3::ZERO,
                     airborne: false,
                     flip: false,
+                    hook_turn: None,
                 });
             }
         }
@@ -222,18 +229,99 @@ impl Skater {
     /// skateboard root, which carries the board adjust: the target is the adjusted deck
     /// ([`Skater::frame`]), so the board flies adjusted and the landing adopts it as lined up. The
     /// target is the physical deck's way round (end for end while the skater's frame is turned).
-    pub(super) fn fly_rig(&mut self, park: &dyn Terrain) {
+    pub(super) fn fly_rig(&mut self, park: &dyn Terrain, landing: bool) {
         let f = self.frame();
         let sign = self.rig_sign();
-        let target = (f.deck, Mat3::from_cols(f.right * sign, f.up, f.fwd * sign));
+        let mut target = (f.deck, Mat3::from_cols(f.right * sign, f.up, f.fwd * sign));
+        // A body flip turns board and rider about the centre of mass (as the drawn frame,
+        // `Game::skater_base`).
+        if let Some(flip) = &self.body_flip {
+            let pivot = self.pos + f.up * flip::PIVOT;
+            let m = &target.1;
+            target = (
+                pivot + flip.apply(target.0 - pivot),
+                Mat3::from_cols(
+                    flip.apply(m.cols[0]),
+                    flip.apply(m.cols[1]),
+                    flip.apply(m.cols[2]),
+                ),
+            );
+        }
+        // SK8's hook turns the deck to the animated board (the clips' board adjust and flips
+        // included); without an imported rider, flatground's adjusted deck. Either way round, the
+        // physical deck's.
+        if let Some(a) = self.anim_board {
+            let turned = a.cols[2].dot(target.1.cols[2]) < 0.0;
+            target.1 = if turned {
+                Mat3::from_cols(-a.cols[0], a.cols[1], -a.cols[2])
+            } else {
+                a
+            };
+        }
+        let vel = self.vel;
         let Some(r) = &mut self.rig else { return };
         r.airborne = true;
+        // How fast the animated board turns (rad/s, world), from its last turn.
+        let spin = match r.hook_turn {
+            Some(last) if !landing => {
+                let q = Quat::from_mat3(&target.1).compose(Quat::from_mat3(&last).conjugate());
+                let q = if q.w < 0.0 {
+                    Quat {
+                        x: -q.x,
+                        y: -q.y,
+                        z: -q.z,
+                        w: -q.w,
+                    }
+                } else {
+                    q
+                };
+                let v = q.vector();
+                let s = v.length();
+                if s > 1e-6 {
+                    v * (2.0 * libm::atan2f(s, q.w) / (s * crate::physics::STEP))
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            _ => Vec3::ZERO,
+        };
+        r.hook_turn = (!landing).then_some(target.1);
+        // Moved far from the flight (a respawn, a scripted drop): put there, as `sync_rig` does.
+        if (r.board.deck().position - target.0).length() > LANDING_REACH {
+            r.board.place(target.0, &target.1, vel, Vec3::ZERO);
+        }
+        // SK8 flies the board on its own physics (the hook only turns it) and places the rider on
+        // it; flatground's flight is the skater's, so the hook moves with it: its damping holds the
+        // deck to the flight's velocity instead of dragging it behind (it would land late).
+        // The tick the flight lands, the board comes down on its own physics as it flew (the landed
+        // frame is the ground's, not where the flight put the board).
         let input = BoardInput {
-            hook: Some(target),
+            hook: (!landing).then_some((target.0 - vel * crate::physics::STEP, target.1)),
+            hook_velocity: vel,
+            hook_spin: spin,
+            hook_gravity: pb::GRAVITY,
             wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
             ..BoardInput::default()
         };
         self.step_board(park, &input, true);
+    }
+
+    /// One tick of the board left rolling on its own under a hippie jump (Skate 3's LandingOnDeck):
+    /// the rigid board on the ground with nothing on it, no hook and no rider's body, until he lands on
+    /// it again.
+    pub(super) fn roll_rig_alone(&mut self, park: &dyn Terrain) {
+        let Some(r) = &mut self.rig else { return };
+        r.airborne = true;
+        r.hook_turn = None;
+        self.rider_body = None;
+        let input = BoardInput {
+            wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
+            ..BoardInput::default()
+        };
+        let t0 = self.clock.now();
+        r.board.step_with(park, &input, None);
+        self.body_us = 0;
+        self.board_us = self.clock.now().wrapping_sub(t0);
     }
 
     /// The rider's body's input this tick: the animated pose at the deck where it will be at the end

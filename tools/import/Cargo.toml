@@ -7,6 +7,6 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-game_core = { path = "../../game_core" }
+game_core = { path = "../../game_core", default-features = false }
 miniz_oxide = "0.8"
 png = "0.17"

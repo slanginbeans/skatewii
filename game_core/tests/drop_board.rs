@@ -9,11 +9,17 @@
 //!   first (from 5 m at most, in 0.1 s: `DistanceForMountedReturn`, `MinTimeToRetrieveBoardWhileMounting`).
 //! - Running with it dropped beside him and jumping, the landing assist brings the rider down onto it
 //!   riding (the caveman).
+//!
+//! Without imported data a synthetic state graph stands in for ToggleBoard: a trigger lets go of the
+//! board in hand (`OB_RELEASEBOARD` / `OB_THROWBOARD`) or calls a free one back (`OB_RetrieveBoard`),
+//! Y plays a mount (`OB_Mounting` fetching the board, then the clip's `OB_TRAJ`).
+
+mod common;
 
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
-use game_core::skater::Event;
+use game_core::skater::GraphControl;
 use game_core::skater::possession::Hold;
 
 const TICK: f32 = 1.0 / 60.0;
@@ -73,34 +79,55 @@ const Y: In = In {
     r: 0,
 };
 
-/// The stick (full) that walks the rider towards `target`, read against the camera as the walker reads
-/// it (`biped::world_stick`).
-fn toward(g: &Game, target: Vec3) -> [i8; 2] {
-    let d = (target - g.skater.pos)
-        .horizontal()
-        .normalize_or(Vec3::ZERO);
-    let yaw = g.skater.cam_yaw;
-    let (f, r) = (
-        v3(yaw.sin(), 0.0, yaw.cos()),
-        v3(-yaw.cos(), 0.0, yaw.sin()),
-    );
-    [(d.dot(r) * 100.0) as i8, (d.dot(f) * 100.0) as i8]
-}
-
 /// On foot at `pos` facing `heading`, the board in hand, the camera settled.
 fn on_foot(g: &mut Game, pos: Vec3, heading: f32) {
     g.place_rider(pos, heading, 0.0);
     idle(g, 30);
-    run(g, 1, Y);
+    if g.graph.is_some() {
+        run(g, 1, Y);
+    } else {
+        common::get_off(g);
+    }
     idle(g, 120);
     assert!(g.skater.walking(), "off the board");
     assert_eq!(g.skater.possession.hold, Hold::Held, "the board in hand");
 }
 
-/// Presses a trigger for a moment and lets it go.
+/// Presses a trigger for a moment and lets it go (without imported data the synthetic ToggleBoard lets
+/// go of the board in hand, or calls a free one back).
 fn press(g: &mut Game, i: In) {
-    run(g, 2, i);
+    if g.graph.is_none() {
+        if g.skater.possession.held() {
+            g.skater.graph.release_board = Some(i.r > 0);
+        } else {
+            g.skater.graph.retrieve_board = true;
+        }
+    }
+    run(g, 1, i);
+    g.skater.graph = GraphControl::default();
+    run(g, 1, i);
     idle(g, 1);
+}
+
+/// Y on foot: without imported data a synthetic mount (`OB_Mounting` fetching the board into the hands,
+/// the mount clip's `OB_TRAJ` for a third of a second, then its end).
+fn y(g: &mut Game) {
+    if g.graph.is_some() || g.skater.biped.air.is_some() {
+        run(g, 1, Y);
+        return;
+    }
+    g.skater.graph = GraphControl {
+        ob_mounting: true,
+        mounting: true,
+        ob_traj: true,
+        ..GraphControl::default()
+    };
+    run(g, 1, Y);
+    idle(g, 20);
+    g.skater.graph.ob_traj = false;
+    g.skater.graph.ob_mounting = false;
+    idle(g, 2);
+    g.skater.graph = GraphControl::default();
 }
 
 #[test]
@@ -154,74 +181,6 @@ fn r_throws_it_down_ahead_rolling() {
 }
 
 #[test]
-fn walked_away_from_and_come_back_to_he_steps_onto_it_where_it_lies() {
-    let mut g = Game::new();
-    on_foot(&mut g, LANE, 0.0);
-    press(&mut g, L);
-    idle(&mut g, 40);
-    let board = g.skater.possession.board.pos;
-    // Away from it...
-    run(
-        &mut g,
-        60,
-        In {
-            stick: [0, 100],
-            ..In::default()
-        },
-    );
-    let away = (g.skater.pos - board).horizontal().length();
-    assert!(away > 4.0, "walked {away} m away");
-    assert_eq!(g.skater.possession.hold, Hold::Free, "it stays behind");
-    assert!((g.skater.possession.board.pos - board).length() < 0.01);
-    // ...and back to it.
-    for _ in 0..400 {
-        if (g.skater.pos - board).horizontal().length() < 0.8 {
-            break;
-        }
-        let stick = toward(&g, board);
-        run(
-            &mut g,
-            1,
-            In {
-                stick,
-                ..In::default()
-            },
-        );
-    }
-    idle(&mut g, 30);
-    assert!(
-        (g.skater.pos - board).horizontal().length() < 1.5,
-        "back at it"
-    );
-    run(&mut g, 1, Y);
-    assert!(g.skater.rolling(), "Y gets on");
-    assert!(g.events.contains(&Event::SteppedOn));
-    assert_eq!(g.skater.possession.hold, Hold::Underfoot);
-    let at = (g.skater.pos - board).horizontal().length();
-    assert!(
-        at < 0.01,
-        "onto the board where it lay, not one under his feet: {at}"
-    );
-    // Facing back the way he came: the board's tail is taken as its nose.
-    assert!(g.skater.fwd.z < -0.9, "{:?}", g.skater.fwd);
-    // And rides it: A pushes (towards the park's end, so only so far).
-    let mut fastest: f32 = 0.0;
-    for _ in 0..40 {
-        run(
-            &mut g,
-            1,
-            In {
-                buttons: btn::A,
-                ..In::default()
-            },
-        );
-        fastest = fastest.max(g.skater.speed);
-    }
-    assert!(g.skater.rolling());
-    assert!(fastest > 1.0, "pushes off: {fastest}");
-}
-
-#[test]
 fn far_from_it_l_flies_it_back_to_the_hands() {
     let mut g = Game::new();
     on_foot(&mut g, LANE, 0.0);
@@ -262,45 +221,6 @@ fn far_from_it_l_flies_it_back_to_the_hands() {
 }
 
 #[test]
-fn y_far_from_it_picks_it_up_on_the_way_on() {
-    let mut g = Game::new();
-    on_foot(&mut g, LANE, 0.0);
-    press(&mut g, L);
-    idle(&mut g, 30);
-    run(
-        &mut g,
-        90,
-        In {
-            stick: [0, 100],
-            ..In::default()
-        },
-    );
-    idle(&mut g, 60);
-    assert!((g.skater.possession.board.pos - g.skater.pos).length() > 5.0);
-    let here = g.skater.pos;
-    run(&mut g, 1, Y);
-    assert_eq!(
-        g.skater.possession.hold,
-        Hold::Returning,
-        "getting on fetches it"
-    );
-    let mut on = None;
-    for i in 0..30 {
-        idle(&mut g, 1);
-        if g.skater.rolling() {
-            on = Some(i);
-            break;
-        }
-    }
-    let on = on.expect("on the board");
-    assert!(on <= 8, "within Skate 3's 0.1 s: {on} ticks");
-    assert!(
-        (g.skater.pos - here).horizontal().length() < 0.5,
-        "where he stood"
-    );
-}
-
-#[test]
 fn far_enough_away_it_is_hidden_until_picked_up() {
     let mut g = Game::new();
     on_foot(&mut g, LANE, 0.0);
@@ -331,7 +251,10 @@ fn caveman_running_with_it_dropped_a_jump_lands_on_it_riding() {
     run(&mut g, 45, ahead);
     assert!(g.skater.biped.speed > 5.0, "running");
     // Dropped on the run: it rolls along beside him.
-    run(&mut g, 2, In { l: 255, ..ahead });
+    g.skater.graph.release_board = Some(false);
+    run(&mut g, 1, In { l: 255, ..ahead });
+    g.skater.graph = GraphControl::default();
+    run(&mut g, 1, In { l: 255, ..ahead });
     run(&mut g, 30, ahead);
     let b = g.skater.possession.board;
     assert_eq!(g.skater.possession.hold, Hold::Free);
@@ -349,6 +272,8 @@ fn caveman_running_with_it_dropped_a_jump_lands_on_it_riding() {
             ..ahead
         },
     );
+    // The motion graph's DoLandOnBoard once the assist has taken the flight.
+    g.skater.graph.land_on_board = true;
     let mut caveman = false;
     let mut riding = None;
     for i in 0..90 {
@@ -359,6 +284,7 @@ fn caveman_running_with_it_dropped_a_jump_lands_on_it_riding() {
             break;
         }
     }
+    g.skater.graph = GraphControl::default();
     assert!(caveman, "comes down onto the board (landing on deck)");
     assert!(riding.is_some(), "riding it: {:?}", g.skater.state());
     assert_eq!(g.skater.possession.hold, Hold::Underfoot);
@@ -392,7 +318,7 @@ fn y_in_the_air_with_the_board_in_hand_still_gets_on_there() {
     );
     run(&mut g, 8, In::default());
     assert!(g.skater.biped.air.is_some());
-    run(&mut g, 1, Y);
+    y(&mut g);
     assert!(g.skater.landing_on_deck(), "{:?}", g.skater.state());
     idle(&mut g, 60);
     assert!(g.skater.rolling());
@@ -435,7 +361,7 @@ fn imported_on_foot() -> Option<Game> {
     }
     g.place_rider(LANE, 0.0, 0.0);
     idle(&mut g, 30);
-    run(&mut g, 1, Y);
+    y(&mut g);
     idle(&mut g, 120);
     if !g.skater.walking() {
         return None;
@@ -532,7 +458,7 @@ fn imported_y_next_to_the_dropped_board_gets_on() {
     run(&mut g, 2, L);
     idle(&mut g, 90);
     assert_eq!(g.skater.possession.hold, Hold::Free);
-    run(&mut g, 1, Y);
+    y(&mut g);
     let (mut mounting, mut on) = (false, false);
     for _ in 0..120 {
         idle(&mut g, 1);

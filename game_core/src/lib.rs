@@ -37,6 +37,7 @@ pub mod physics;
 pub mod player;
 pub mod rails;
 pub mod reader;
+pub mod render_pose;
 pub mod replay;
 pub mod rider;
 pub mod scoring;

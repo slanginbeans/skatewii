@@ -31,8 +31,6 @@ use alloc::boxed::Box;
 /// How long the drawn character takes to move its origin between the deck and the feet (s).
 const FOOT_ORIGIN_BLEND: f32 = 0.2;
 const SKY: u32 = rgb(150, 196, 232);
-/// Imported character space (Skate 3: Y up, travelling along +Z) to board space (+Z nose, Y up).
-const IMPORTED_TO_BOARD: Mat3 = Mat3::IDENTITY;
 const POPUP_TIME: f32 = 1.8;
 const HINT_TIME: f32 = 12.0;
 /// The trick name's text size (pixels per font cell): small enough to leave the skater in view.
@@ -40,8 +38,6 @@ const POPUP_PX: f32 = 3.5;
 /// The simulation's fixed step: Skate 3's tuning is per 1/60 s tick, so the skater, the flick reader and
 /// the camera always step at 60 Hz whatever the TV runs at (PAL50 draws between two ticks).
 pub const TICK: f32 = 1.0 / 60.0;
-/// The drawn board rises at most this much (m) to keep its wheels out of the ground under them.
-const WHEEL_LIFT_MAX: f32 = 0.04;
 /// A drawn skater further than this (m) from where it was a tick ago was teleported: not blended.
 const TELEPORT: f32 = 2.0;
 /// How white the screen goes at the end of the hold back to the marker.
@@ -192,6 +188,29 @@ impl BoardWatch {
     const SWING: f32 = 45.0;
 }
 
+/// Which board the drawn one is (the physical deck or the clips'), how the clips' board lies on the
+/// deck, the blend between them and the deck's wobble.
+#[derive(Clone, Copy, Debug)]
+struct BoardState {
+    physical: bool,
+    turn: Mat3,
+    blend: crate::render_pose::BoardBlend,
+    wobble: crate::render_pose::Wobble,
+    air: bool,
+}
+
+impl Default for BoardState {
+    fn default() -> Self {
+        BoardState {
+            physical: false,
+            turn: Mat3::IDENTITY,
+            blend: crate::render_pose::BoardBlend::default(),
+            wobble: crate::render_pose::Wobble::default(),
+            air: false,
+        }
+    }
+}
+
 pub struct Game {
     pub park: Park,
     park_mesh: Vec<Vertex>,
@@ -238,6 +257,9 @@ pub struct Game {
     pub frame_cost: Option<FrameCost>,
     /// A status line shown under the controls hint (for example whether the imported skater loaded).
     pub notice: Option<String>,
+    /// The player's disc data the game can't run without and didn't find (see
+    /// [`Game::require_disc_data`]): the game shows how to import it instead of playing.
+    pub missing: Option<String>,
     /// Development log lines from the last updates; the platform takes them (`log.drain(..)`) and writes
     /// them out. Capped while nobody takes them.
     pub log: Vec<String>,
@@ -255,7 +277,17 @@ pub struct Game {
     board_watch: Option<BoardWatch>,
     /// Riding on the ground the drawn rider is turned about the posed board by this (rad, about the
     /// board's up) so the posed board lies on the physical one ([`Game::ground_alignment`]).
-    board_align: f32,
+    /// Skate 3's root frames for the drawn rider (`render_pose`), the board drawn last frame (world)
+    /// and its source's state, and the character's frame drawn.
+    roots: crate::render_pose::RootFrames,
+    board_drawn: Option<Xform>,
+    board_state: BoardState,
+    drawn_root: Xform,
+    /// Switching the drawn root between the board's (Skate 3's root frames) and the feet's (getting
+    /// off or on): what was riding then, the old root on the new one, and
+    /// how much of it is left (1 to 0 over `FOOT_ORIGIN_BLEND`).
+    root_riding: bool,
+    root_handover: (Xform, f32),
     /// The player changed a setting since the platform last saved them.
     settings_changed: bool,
     /// Simulated time minus shown time (s): ticks run until the simulation is at or just past the frame.
@@ -365,6 +397,7 @@ impl Game {
             events: Vec::new(),
             frame_cost: None,
             notice: None,
+            missing: None,
             rider: None,
             motion: None,
             graph: None,
@@ -381,7 +414,12 @@ impl Game {
             world_us: core::cell::Cell::new(0),
             draw_distance: crate::world::DRAW_DISTANCE,
             board_watch: None,
-            board_align: 0.0,
+            roots: crate::render_pose::RootFrames::default(),
+            board_drawn: None,
+            board_state: BoardState::default(),
+            drawn_root: Xform::IDENTITY,
+            root_riding: false,
+            root_handover: (Xform::IDENTITY, 0.0),
             settings_changed: false,
             ahead: 0.0,
             period: TICK,
@@ -636,18 +674,26 @@ impl Game {
         if w.frames > BoardWatch::FRAMES || self.skater.is_airborne() {
             return;
         }
-        // Against the physical board's long axis, not the travel: a wall pushes a rider rolling tail
-        // first back nose first (`hit_wall`), turning his travel round with the board as it was. Either
-        // end: pushing out of fakie turns the board's frame end for end (`frame_turned`), not the board.
-        let deck = self.skater.fwd.horizontal();
-        let axes = self.board_axes_in_character();
-        let Some((_, nose)) = axes.filter(|_| deck.length() >= 0.5 && self.skater.rolling()) else {
+        // The drawn board against the physical one (either way round: pushing out of fakie turns
+        // flatground's frame end for end, not the board): Skate 3 draws the physical board, so on the
+        // ground only a blend from the clips' board may turn it, and that settles.
+        let deck = self
+            .skater
+            .rig
+            .as_ref()
+            .map(|r| r.board.deck().axes.cols[2].horizontal());
+        let (Some(deck), Some(board)) = (
+            deck.filter(|d| d.length() >= 0.5 && self.skater.rolling()),
+            self.board_drawn,
+        ) else {
             self.board_watch = Some(w);
             return;
         };
-        let nose = self.imported_xform().rot.apply(nose);
+        let nose = board.rot.cols[2];
         let rel = crate::math::wrap_angle(
-            2.0 * (crate::math::atan2f(nose.x, nose.z) - crate::math::atan2f(deck.x, deck.z)),
+            2.0 * (crate::math::atan2f(nose.x, nose.z)
+                - crate::math::atan2f(deck.x, deck.z)
+                - self.skater.board_yaw_offset()),
         ) * 0.5;
         if let Some(last) = w.last {
             w.turned += crate::math::wrap_angle(2.0 * (rel - last)) * 0.5;
@@ -788,13 +834,9 @@ impl Game {
             .and_then(|s| s.1.iter().find(|x| x.name == name))
     }
 
-    /// The gesture files for the graph's input: the disc's, else flatground's own flick shapes.
+    /// The gesture files for the graph's input (the disc's).
     fn gesture_sets(&self) -> Vec<(&'static str, Vec<gesture::Shape>)> {
-        if self.gesture_sets.is_empty() {
-            alloc::vec![("skater", gesture::built_in())]
-        } else {
-            self.gesture_sets.clone()
-        }
+        self.gesture_sets.clone()
     }
 
     /// Sets the rider's natural stance (Skate 3's default is goofy).
@@ -877,6 +919,14 @@ impl Game {
     /// rider once. A PAL50 frame is drawn between the last two ticks.
     pub fn update(&mut self, raw: &PadRaw, dt: f32) {
         self.frame_dt = dt;
+        if self.missing.is_some() {
+            // START goes back to the loader.
+            if raw.buttons & !self.menu_prev & crate::input::btn::START != 0 {
+                self.request = Some(Request::Quit);
+            }
+            self.menu_prev = raw.buttons;
+            return;
+        }
         self.connected = raw.flags & flag::CONNECTED != 0;
         self.events.clear();
         let pressed = raw.buttons & !self.menu_prev;
@@ -1004,117 +1054,11 @@ impl Game {
         }
         self.alpha = (1.0 - self.ahead / self.period).clamp(0.0, 1.0);
         // The rider's pose follows the simulation: in slow motion a frame that ran no tick isn't posed
-        // again, and one that did is posed for the ticks' time (so the pose is the same tick by tick as
-        // without slow motion).
-        let pose_dt = if self.period > TICK {
-            ran as f32 * TICK
-        } else {
-            dt
-        };
+        // again.
         let now = |c: Option<fn() -> u32>| c.map_or(0, |f| f());
         let t1 = now(self.timer);
         if self.rider.is_some() && (ran > 0 || self.period <= TICK) {
-            let xf = self.imported_xform();
-            let rot = xf.rot;
-            let place = self.board_place();
-            // In a bail the ragdoll's parts pose the bones (character space, between the ticks).
-            let doll = self.skater.ragdoll_active().then(|| {
-                let inv = crate::character::rigid_inverse(&xform_rows(&xf));
-                self.skater
-                    .wipeout
-                    .frames(self.alpha)
-                    .map(|f| crate::character::mul(&f, &inv))
-            });
-            if let Some(r) = &mut self.rider {
-                r.set_ragdoll(doll, pose_dt);
-            }
-            // Off the board, the ground under the toes for the foot placement (SK8's skeleton line
-            // tests from the last pose: 0.33 m over each toe to 1.5 m under it).
-            let feet =
-                (self.skater.walking() && !self.skater.climbing() && self.foot_origin >= 1.0)
-                    .then(|| {
-                        let toes = self.rider.as_ref()?.toes()?;
-                        let at = self.imported_xform_on(self.skater_base());
-                        let ground: &dyn Terrain = terrain(&self.world, &self.park);
-                        let hit = |p: crate::math::Vec3| {
-                            let w = at.point(p);
-                            let top = w.y + crate::foot_ik::LINE_UP;
-                            let g = ground.ground(w.x, w.z, top);
-                            (g.height > f32::MIN / 2.0
-                                && g.height
-                                    >= top - crate::foot_ik::LINE_UP - crate::foot_ik::LINE_DOWN)
-                                .then_some((v3(w.x, g.height, w.z), g.normal))
-                        };
-                        Some(crate::foot_ik::Frame {
-                            to_world: at,
-                            ground: toes.map(hit),
-                            air: self.skater.biped.air.is_some(),
-                            vel_y: self.skater.biped.vel.y,
-                        })
-                    })
-                    .flatten();
-            if let Some(r) = &mut self.rider {
-                r.set_feet(feet);
-            }
-            let s = &self.skater;
-            let ground: &dyn Terrain = terrain(&self.world, &self.park);
-            let land_in = s.time_to_land(ground);
-            let mut posed = false;
-            if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
-            {
-                // A hippie jump (Skate 3's LandingOnDeck): the rider flies off the board and it rolls on
-                // along the ground under him, where his clips' board (which follows him) isn't. (Getting on
-                // in the air, his clips put the board under his feet themselves.)
-                r.set_board_floor(
-                    s.hippie_air()
-                        .then(|| ground.ground(s.pos.x, s.pos.z, s.pos.y + 0.5).height - s.pos.y),
-                );
-                // The board off the feet is drawn where its own body is.
-                r.set_board_place(place);
-                g.runner.pose(&mut self.pose);
-                posed = r.update_graph(lib, &self.pose, rot, self.skater.frame_turned);
-            }
-            if !posed && let Some(r) = &mut self.rider {
-                r.set_board_place(place);
-                r.update(&self.skater, self.clock, land_in, pose_dt, rot);
-            }
-            self.board_align = self.ground_alignment(posed);
-            // The clips' pose as ragdoll points: where a bail starts the body, and in a bail where
-            // the drives pull it.
-            let points = self
-                .rider
-                .as_ref()
-                .and_then(|r| r.ragdoll_points())
-                .map(|p| {
-                    // Placed on the tick's frame, not the frame drawn between ticks: the simulation
-                    // stays the same whatever the display rate.
-                    let at = self.imported_xform_on(self.skater_base());
-                    p.map(|q| at.point(q))
-                });
-            if self.skater.ragdoll_active() {
-                self.skater.wipeout.anim = points;
-            } else {
-                self.skater.pose_seed = points;
-            }
-            // The rider's physical body is driven to the clips' pose with its board at the physical
-            // deck (it rides with the board until the next tick's solve), standing on the reckoning:
-            // SK8 `SkeletonRootFrames::update` places the animation by the reckoning's frame and the
-            // rider's heading at the predicted board, not turned with the deck.
-            let deck = self.skater.rig.as_ref().map(|r| r.board.deck().position);
-            let bones = self.rider.as_ref().and_then(|r| r.physical_bones());
-            self.skater.rider_pose = match (bones, deck) {
-                (Some((bones, mirrored)), Some(deck)) => {
-                    let base = self.skater_base();
-                    let at = self.imported_xform_on(base);
-                    let world = crate::physics::rider_body::pose_from_bones(&bones, &at, mirrored);
-                    let up = self.skater.reckoning.up.normalize_or(v3(0.0, 1.0, 0.0));
-                    let nose = crate::skater::tangent(base.rot.cols[2], up);
-                    self.skater.rider_axes = Mat3::from_cols(up.cross(nose), up, nose);
-                    let on_board = crate::physics::rider_body::inverse(&Xform::new(base.rot, deck));
-                    Some(world.map(|x| on_board.then(&x)))
-                }
-                _ => None,
-            };
+            self.pose_rider(ran);
         }
         let t2 = now(self.timer);
         self.times.skin_us = t2.wrapping_sub(t1);
@@ -1188,6 +1132,275 @@ impl Game {
                 self.meat = None;
             }
         }
+    }
+
+    /// Poses the imported rider for this frame and draws what the physics solved (`render_pose`):
+    /// the motion graph's clips, then Skate 3's physical pose job over them on the board (the physical
+    /// skeleton's parts, the physical board), placed by Skate 3's root frames; off the board the clips
+    /// on the ground under the feet, the board off the feet where its own body is, the ragdoll in a
+    /// bail. Then the next tick's drive targets for the rider's body, and the ragdoll's seed points.
+    fn pose_rider(&mut self, ran: u32) {
+        let foot = self.foot_xform(self.drawn_base());
+        // In a bail the ragdoll's parts pose the bones (character space, between the ticks).
+        let doll = self.skater.ragdoll_active().then(|| {
+            let inv = crate::character::rigid_inverse(&xform_rows(&foot));
+            self.skater
+                .wipeout
+                .frames(self.alpha)
+                .map(|f| crate::character::mul(&f, &inv))
+        });
+        if let Some(r) = &mut self.rider {
+            r.set_ragdoll(doll);
+        }
+        // Off the board, the ground under the toes for the foot placement (SK8's skeleton line
+        // tests from the last pose: 0.33 m over each toe to 1.5 m under it).
+        let feet = (self.skater.walking() && !self.skater.climbing() && self.foot_origin >= 1.0)
+            .then(|| {
+                let toes = self.rider.as_ref()?.toes()?;
+                let at = self.foot_xform(self.skater_base());
+                let ground: &dyn Terrain = terrain(&self.world, &self.park);
+                let hit = |p: crate::math::Vec3| {
+                    let w = at.point(p);
+                    let top = w.y + crate::foot_ik::LINE_UP;
+                    let g = ground.ground(w.x, w.z, top);
+                    (g.height > f32::MIN / 2.0
+                        && g.height >= top - crate::foot_ik::LINE_UP - crate::foot_ik::LINE_DOWN)
+                        .then_some((v3(w.x, g.height, w.z), g.normal))
+                };
+                Some(crate::foot_ik::Frame {
+                    to_world: at,
+                    ground: toes.map(hit),
+                    air: self.skater.biped.air.is_some(),
+                    vel_y: self.skater.biped.vel.y,
+                })
+            })
+            .flatten();
+        if let Some(r) = &mut self.rider {
+            r.set_feet(feet);
+        }
+        if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion) {
+            g.runner.pose(&mut self.pose);
+            r.update_graph(lib, &self.pose, self.skater.frame_turned);
+        }
+        // The rider's axes: the reckoning's up, the board's heading (SK8's reckoning frame), which
+        // doesn't turn round when flatground's board frame does (`frame_turned`: its clips turn with it).
+        // In a body flip they turn over with it (board and rider about the centre of mass).
+        let base = self.skater_base();
+        let (up, nose) = if self.skater.body_flip.is_some() {
+            (base.rot.cols[1], base.rot.cols[2])
+        } else {
+            let up = self.skater.reckoning.up.normalize_or(v3(0.0, 1.0, 0.0));
+            (up, crate::skater::tangent(base.rot.cols[2], up))
+        };
+        let nose = if self.skater.frame_turned {
+            -nose
+        } else {
+            nose
+        };
+        self.skater.rider_axes = Mat3::from_cols(up.cross(nose), up, nose);
+        let s = &self.skater;
+        let anim_board = self.rider.as_ref().and_then(|r| r.board_frame());
+        let deck = s.rig.as_ref().map(|r| {
+            let d = r.board.deck();
+            Xform::new(d.axes, d.position)
+        });
+        let riding = !s.walking() && !s.ragdoll_active();
+        let mut drawn = foot;
+        if let (Some(anim_board), Some(deck)) = (anim_board, deck) {
+            // Skate 3 takes the heading alignment afresh every ground tick (Ground's
+            // `prepare_ground`), not while the clips move the board or in the air.
+            if s.rolling() && !s.graph.board_animated {
+                self.roots.initialize_heading = true;
+            }
+            // In a hippie jump the board rolls on alone under the rider, whose clips carry their
+            // board with him: the animation is placed at the flight's deck, not the physical one.
+            let at = if s.hippie_air() {
+                s.frame().deck
+            } else {
+                deck.pos
+            };
+            self.roots.update(at, s.rider_axes, &anim_board);
+            if riding {
+                drawn = self.draw_physical(ran, &anim_board, &deck);
+            }
+        }
+        // The clips' board in the world for the next tick's air hook (on the tick's frame).
+        self.skater.anim_board = anim_board
+            .filter(|_| deck.is_some())
+            .map(|b| self.roots.animation_to_world.then(&b).rot);
+        // Getting off or on, the drawn root goes from the board's to the feet's (or back) over
+        // `FOOT_ORIGIN_BLEND` instead of jumping between them (flatground's: SK8 doesn't draw this
+        // handover from here).
+        let riding_root = riding && anim_board.is_some() && deck.is_some();
+        if riding_root != self.root_riding && ran > 0 {
+            // Taken against the old root where it is this tick (getting on, the feet's root as the
+            // rider moved on), not where it was drawn last: else the rider is held back a tick's
+            // travel at the handover.
+            let old = if riding_root { foot } else { self.drawn_root };
+            let inv = crate::physics::rider_body::inverse(&drawn);
+            self.root_handover = (inv.then(&old), 1.0);
+            self.root_riding = riding_root;
+        }
+        let drawn = if self.root_handover.1 > 0.0 {
+            let (c, k) = self.root_handover;
+            let k = (k - ran as f32 * TICK / FOOT_ORIGIN_BLEND).max(0.0);
+            self.root_handover.1 = k;
+            drawn.then(&blend_xform(&Xform::IDENTITY, &c, k))
+        } else {
+            drawn
+        };
+        self.drawn_root = drawn;
+        if !riding {
+            let to_char = crate::physics::rider_body::inverse(&drawn);
+            if let (Some((pos, up, nose, _)), Some(r)) = (self.free_board_frame(), &mut self.rider)
+            {
+                // The board off the feet is drawn where its own body is.
+                let world = Xform::new(Mat3::from_cols(up.cross(nose), up, nose), pos);
+                r.place_board(&to_char.then(&world));
+                self.board_drawn = Some(world);
+            } else if let (Some(b), Some(r)) = (anim_board, &mut self.rider) {
+                // In the hands (or under the feet getting on): the clips' board, what is left of a
+                // blend from the physical one taken out first.
+                let world = drawn.then(&b);
+                let st = &mut self.board_state;
+                if st.physical {
+                    if let Some(last) = self.board_drawn {
+                        st.blend.capture(&world, &last);
+                    }
+                    st.physical = false;
+                }
+                let at = st.blend.apply(&world, false);
+                if st.blend.blending {
+                    r.place_board(&to_char.then(&at));
+                }
+                self.board_drawn = Some(at);
+            }
+        }
+        if let Some(r) = &mut self.rider {
+            r.skin(drawn.rot);
+        }
+        // The clips' pose as ragdoll points: where a bail starts the body, and in a bail where
+        // the drives pull it (on the tick's frame, not the one drawn between ticks: the simulation
+        // stays the same whatever the display rate).
+        let at = self.foot_xform(self.skater_base());
+        let points = self
+            .rider
+            .as_ref()
+            .and_then(|r| r.ragdoll_points())
+            .map(|p| p.map(|q| at.point(q)));
+        if self.skater.ragdoll_active() {
+            self.skater.wipeout.anim = points;
+        } else {
+            self.skater.pose_seed = points;
+        }
+        // The rider's physical body is driven to the clips' pose next tick: standing on the reckoning
+        // at the predicted board (SK8 `SkeletonRootFrames::update`), the animated board on it.
+        let bones = self.rider.as_ref().and_then(|r| r.physical_bones());
+        self.skater.rider_pose = match (bones, anim_board, deck) {
+            (Some((bones, _)), Some(b), Some(_)) => {
+                Some(crate::physics::rider_body::pose_from_bones(
+                    &bones,
+                    &self.roots.on_board(&b),
+                    false,
+                ))
+            }
+            _ => None,
+        };
+    }
+
+    /// On the board: Skate 3's physical pose job (`render_pose`). The physical skeleton's parts (the
+    /// rider's body, or the clips' pose where it has none yet) and the board: the physical deck while
+    /// the physics owns it (and a hippie jump's, rolling on alone), the clips' board while they move
+    /// it (in the air, where the air hook turns the deck to it, a take-off), the rotation between them blended out on Skate 3's `PhysToAnim` curves when one takes over
+    /// from the other. Returns the character's frame drawn.
+    fn draw_physical(&mut self, ran: u32, anim_board: &Xform, deck: &Xform) -> Xform {
+        use crate::physics::skeleton::ANIMATED_PARTS;
+        let to_world = self.roots.animation_to_world;
+        let s = &self.skater;
+        let animated = to_world.then(anim_board);
+        // A hippie jump's board rolls on the ground on its own physics (Skate 3's LandingOnDeck).
+        let physical = s.hippie_air()
+            || ((s.rolling() || s.grinding())
+                && !s.graph.board_animated
+                && s.possession.hold == crate::skater::possession::Hold::Underfoot);
+        let air = s.is_airborne() && !s.hippie_air();
+        let st = &mut self.board_state;
+        // The deck's wobble: on a landing and a take-off.
+        if ran > 0 && air != st.air {
+            st.wobble.trigger(!air, s.mirrored());
+        }
+        st.air = air;
+        for _ in 0..ran {
+            st.wobble.update();
+        }
+        if physical != st.physical {
+            if physical {
+                // Which way round the clips' board lies on the deck (the deck's frame turns with the
+                // stance: `rig.flip`).
+                let rel = deck.rot.transpose_mul(&animated.rot);
+                st.turn = if rel.cols[2].z >= 0.0 {
+                    Mat3::IDENTITY
+                } else {
+                    Mat3::rot_y(PI)
+                };
+            }
+            if let Some(last) = self.board_drawn {
+                let target = if physical {
+                    Xform::new(deck.rot.mul(&st.turn), deck.pos)
+                } else {
+                    animated
+                };
+                st.blend.capture(&target, &last);
+            }
+            st.physical = physical;
+        }
+        let fast = s.graph.board_animated;
+        let board = if physical {
+            // A powerslide still turns the board in flatground's older ground model, which the rigid
+            // board doesn't carry: the deck drawn turned by its angle.
+            let slide = Mat3::from_cols(
+                v3(
+                    libm::cosf(s.board_yaw_offset()),
+                    0.0,
+                    -libm::sinf(s.board_yaw_offset()),
+                ),
+                v3(0.0, 1.0, 0.0),
+                v3(
+                    libm::sinf(s.board_yaw_offset()),
+                    0.0,
+                    libm::cosf(s.board_yaw_offset()),
+                ),
+            );
+            let at = Xform::new(deck.rot.mul(&slide).mul(&st.turn), deck.pos);
+            st.wobble.apply(&st.blend.apply(&at, fast))
+        } else {
+            st.blend.apply(&animated, fast)
+        };
+        self.board_drawn = Some(board);
+        // The rider's body where this tick's solve put it; where it only followed the clips (or
+        // wasn't stepped: the older ground model's turns), the clips' pose itself.
+        let mut parts: [Xform; ANIMATED_PARTS] = match &s.rider_body {
+            Some(b) if b.stepped() && b.solved => b.pose(),
+            _ => match self.rider.as_ref().and_then(|r| r.physical_bones()) {
+                Some((bones, _)) => {
+                    crate::physics::rider_body::pose_from_bones(&bones, &to_world, false)
+                }
+                None => return to_world,
+            },
+        };
+        parts[0] = board.then(&crate::physics::rider_body::PHYS_BONES[0].volume());
+        let pb = s.rig.as_ref().map(|r| crate::render_pose::PhysicalBoard {
+            bodies: core::array::from_fn(|i| {
+                Xform::new(r.board.parts[i].axes, r.board.parts[i].position)
+            }),
+            deck: *deck,
+        });
+        let wobble = self.board_state.wobble;
+        let board_bodies = pb.as_ref().filter(|_| physical).map(|pb| (pb, &wobble));
+        if let Some(r) = &mut self.rider {
+            r.draw_physical(&parts, &to_world, board_bodies);
+        }
+        to_world
     }
 
     /// One fixed 1/60 s step of the simulation: input, flick reader (so flicks are sampled at 60 Hz, as
@@ -1297,7 +1510,7 @@ impl Game {
                 control.pose_deck = posed_deck(Some(r), self.skater.mirrored());
                 control.pose_lift = (r.board_rest_height() - crate::skater::DECK_HEIGHT).max(0.0);
             }
-            self.skater.graph = Some(control);
+            self.skater.graph = control;
             self.times.graph_us = g.cost_us;
             if self.log.len() < LOG_CAP {
                 if let Some(state) = g.state_change() {
@@ -1348,10 +1561,8 @@ impl Game {
         self.score = libm::roundf(self.scoring.total()) as u32;
         let off_clips = self.graph.is_some()
             && (self.skater.walking()
-                || self
-                    .skater
-                    .graph
-                    .is_some_and(|c| c.mounting || c.dismounting));
+                || self.skater.graph.mounting
+                || self.skater.graph.dismounting);
         let step = dt / FOOT_ORIGIN_BLEND;
         self.foot_origin =
             (self.foot_origin + if off_clips { step } else { -step }).clamp(0.0, 1.0);
@@ -1419,14 +1630,14 @@ impl Game {
         self.rider.as_ref().and_then(|r| r.board_in_character())
     }
 
-    /// Where the drawn board's centre is (the posed `SKATEBOARD_ROOT` placed in the world), with the
-    /// imported rider; else the physics board's deck.
+    /// Where the drawn board's centre is (the drawn `SKATEBOARD_ROOT` placed in the world: the
+    /// physical deck where Skate 3 draws it), with the imported rider; else the physics board's deck.
     pub fn drawn_board(&self) -> crate::math::Vec3 {
         let x = self.imported_xform();
         self.rider
             .as_ref()
-            .and_then(|r| r.board_in_character())
-            .map_or(x.pos, |b| x.point(b))
+            .and_then(|r| r.board_frame())
+            .map_or(x.pos, |b| x.point(b.pos))
     }
 
     /// The board off the feet in the world: its centre, up and nose (a thrown board pitched as it
@@ -1453,18 +1664,6 @@ impl Game {
             b.pos
         };
         Some((pos, up, nose, weight))
-    }
-
-    /// [`Game::free_board_frame`] in the imported character's space, for [`Rider::set_board_place`].
-    fn board_place(&self) -> Option<(crate::character::Rows, f32)> {
-        let (pos, up, nose, weight) = self.free_board_frame()?;
-        let x = self.imported_xform();
-        let c = &x.rot.cols;
-        let local = |v: crate::math::Vec3| [c[0].dot(v), c[1].dot(v), c[2].dot(v)];
-        Some((
-            [[0.0; 3], local(up), local(nose), local(pos - x.pos)],
-            weight,
-        ))
     }
 
     /// The camera to draw with (blended like the skater).
@@ -1494,7 +1693,59 @@ impl Game {
         self.drawn_base().pos
     }
 
+    /// Checks the player's disc data is all there: the skater (`skater.fgpak`), Skate 3's state graphs
+    /// (`motion.fgpak`) and its rules (`rules.fgpak`: tuning, gestures, camera). The platforms call it
+    /// once their packs are loaded; without any of them the game has nothing to play and only shows how
+    /// to run the importer ([`Game::missing`]). Returns whether everything is there.
+    pub fn require_disc_data(&mut self) -> bool {
+        let mut missing = Vec::new();
+        if self.rider.is_none() {
+            missing.push("SKATER");
+        }
+        if self.graph.is_none() {
+            missing.push("MOTION");
+        }
+        if self.gesture_sets.is_empty() || self.cam.data.graph.is_none() {
+            missing.push("RULES");
+        }
+        self.missing = (!missing.is_empty()).then(|| missing.join(" "));
+        self.missing.is_none()
+    }
+
+    /// The screen without the disc data: what to run, and what is missing.
+    fn render_missing(&self, gfx: &mut dyn Gfx, missing: &str) {
+        let cam = self.cam.camera();
+        gfx.begin_frame(&cam, rgb(0, 0, 0));
+        let mut m = MeshBuilder::new();
+        m.rect_2d(0.0, 0.0, SCREEN_W, SCREEN_H, rgb(0, 0, 0));
+        let cx = SCREEN_W / 2.0;
+        let white = rgb(255, 255, 255);
+        hud::text_centered(&mut m, cx, 120.0, 4.0, "NO SKATE 3 DATA", rgb(255, 230, 90));
+        let lines = [
+            "FLATGROUND PLAYS WITH DATA FROM",
+            "YOUR OWN SKATE 3 DISC.",
+            "",
+            "PUT AN ISO OF YOUR DISC NEXT TO BUILD.BAT",
+            "AND RUN IT, OR RUN THE IMPORTER: TOOLS/IMPORT.",
+            "THEN COPY DIST/APPS/FLATGROUND TO THE SD CARD.",
+            "SEE DOCS/IMPORTING.MD.",
+            "",
+            "START: BACK TO THE LOADER",
+        ];
+        for (i, l) in lines.iter().enumerate() {
+            hud::text_centered(&mut m, cx, 190.0 + i as f32 * 24.0, 2.0, l, white);
+        }
+        let what = format!("MISSING: {missing}");
+        hud::text_centered(&mut m, cx, 360.0, 2.0, &what, rgb(255, 120, 100));
+        gfx.draw_2d(&m.verts);
+        gfx.end_frame();
+    }
+
     pub fn render(&self, gfx: &mut dyn Gfx) {
+        if let Some(missing) = &self.missing {
+            self.render_missing(gfx, missing);
+            return;
+        }
         let now = || self.timer.map_or(0, |f| f());
         let t0 = now();
         let cam = self.shown_camera();
@@ -1559,12 +1810,7 @@ impl Game {
     /// the board unless the rider's clip does it).
     fn skater_base(&self) -> Xform {
         let s = &self.skater;
-        let clip_turns = self.rider.as_ref().is_some_and(|r| r.turns_board());
-        let extra = if clip_turns {
-            0.0
-        } else {
-            s.board_yaw_offset()
-        };
+        let extra = s.board_yaw_offset();
         // The board's own frame (its nose and the surface, or its up in the air), turned about its up by
         // a powerslide or revert.
         let frame = s.board_frame();
@@ -1580,108 +1826,21 @@ impl Game {
         Xform::new(Mat3::from_cols(up.cross(nose), up, nose), s.pos)
     }
 
-    /// Where the imported character is drawn: board space, tipped over on a bail. The clips' board
-    /// (`SKATEBOARD_ROOT`, the character's origin) is the deck's centre, which Skate 3 puts on the
-    /// physical deck: riding, high enough over the board's contact point for its lowest wheel to rest
-    /// on the ground ([`Rider::board_rest_height`], about [`crate::skater::DECK_HEIGHT`]), elsewhere
-    /// the deck's height.
+    /// Where the imported character is drawn: on the board Skate 3's root frames (the animated board at
+    /// the physical board, on the reckoning: `render_pose::RootFrames`), off it the clips' origin on
+    /// the ground under the feet.
     pub fn imported_xform(&self) -> Xform {
-        self.imported_xform_on(self.drawn_base())
+        if self.rider.is_none() {
+            return self.foot_xform(self.drawn_base());
+        }
+        self.drawn_root
     }
 
-    /// [`Game::imported_xform`] on a board frame (the drawn one, or the tick's).
-    fn imported_xform_on(&self, base: Xform) -> Xform {
-        // Without bail clips in the pack, show a bail by tipping the rider over.
-        let animated = self
-            .rider
-            .as_ref()
-            .is_some_and(|r| r.character.has_clip("bail/fall"));
-        let tip = match self.skater.off_board() {
-            _ if self.skater.ragdoll_active() => Mat3::IDENTITY,
-            Some(time) if !animated => Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
-            _ => Mat3::IDENTITY,
-        };
-        // Riding, the board's lowest wheel on the ground (a manual's pitch lifts the deck).
-        let height = match (
-            &self.rider,
-            self.skater.rolling(),
-            self.skater.is_airborne(),
-        ) {
-            (Some(r), true, _) => r.board_rest_height() + self.wheel_lift(&base),
-            (_, _, true) => crate::skater::DECK_HEIGHT + self.skater.air_lift,
-            // On foot the off-board clips' origin is on the ground under the feet.
-            _ => crate::skater::DECK_HEIGHT,
-        };
-        // On foot (and getting off or on) the off-board clips' origin is on the ground under the feet.
-        let height = height * (1.0 - self.foot_origin);
-        let placed = base
-            .then(&Xform::new(tip, v3(0.0, 0.0, 0.0)))
-            .then(&Xform::new(IMPORTED_TO_BOARD, v3(0.0, height, 0.0)));
-        // Turned about the posed board's centre, which stays where it is.
-        let Some(b) = self
-            .rider
-            .as_ref()
-            .and_then(|r| r.board_in_character())
-            .filter(|_| self.board_align != 0.0)
-        else {
-            return placed;
-        };
-        let pivot = v3(b.x, 0.0, b.z);
-        placed
-            .then(&Xform::new(Mat3::IDENTITY, pivot))
-            .then(&Xform::new(Mat3::rot_y(-self.board_align), -pivot))
-    }
-
-    /// The drawn rider's turn about the posed board (rad, about its up; [`Game::board_align`]). Skate 3
-    /// riding on the ground places its animation so the posed board lies on the physical deck, every
-    /// tick (SK8 `SkeletonRootFrames::update`'s heading alignment, which `prepare_ground` re-initialises
-    /// on every Ground update; the reckoning frame it turns follows the deck): a posed board turned
-    /// against the body (the board-adjust clips still blending out after a landing on an adjusted
-    /// deck) turns the rider round the board, never the board under him. In the air, on a rail and
-    /// while the clips move the board (SK8's `GroundAnimation`: a take-off) the turn is kept as it was;
-    /// off the board, and with the built-in clips, there is none.
-    fn ground_alignment(&self, posed: bool) -> f32 {
-        let s = &self.skater;
-        if !posed || s.ragdoll_active() {
-            return 0.0;
-        }
-        // The clips move the board (what Skate 3's GroundAnimation state follows).
-        match s.state() {
-            _ if s.rolling() && !s.graph.is_some_and(|g| g.board_animated) => {}
-            _ if s.rolling() || s.is_airborne() || s.grinding() => return self.board_align,
-            _ => return 0.0,
-        }
-        let Some((_, nose)) = self.board_axes_in_character() else {
-            return 0.0;
-        };
-        // The clips are a goofy rider's: mirrored, the posed board's nose points back (`posed_deck`).
-        let nose = if s.mirrored() { -nose } else { nose };
-        // Stood up on an end (a nose or tail stall) its heading is unclear: keep the turn.
-        if nose.x * nose.x + nose.z * nose.z < 0.25 {
-            return self.board_align;
-        }
-        crate::math::atan2f(nose.x, nose.z)
-    }
-
-    /// How far (m, along the board's up) the drawn board must rise so none of its wheels is in the
-    /// ground under it. The physics puts the board on its two trucks' contacts along their middle, and
-    /// the drawn board's roll follows the smoothed ground normal: on a transition ridden across, a
-    /// side's wheels would dip into it. The drawing takes that out, at most `WHEEL_LIFT_MAX`.
-    fn wheel_lift(&self, base: &Xform) -> f32 {
-        let ground: &dyn Terrain = terrain(&self.world, &self.park);
-        let up = base.rot.cols[1];
-        let mut lift: f32 = 0.0;
-        // Under each wheel: `wheel_x_distance` (SK8 construction/authored_transforms.rs) each side of
-        // each truck.
-        for (x, z) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
-            let p = base.point(v3(x * 0.095, 0.0, z * crate::skater::AXLE));
-            let g = ground.ground(p.x, p.z, p.y + WHEEL_LIFT_MAX);
-            let along = g.normal.dot(up);
-            if g.height > f32::MIN / 2.0 && along > 0.5 {
-                lift = lift.max((g.height - p.y) * g.normal.y / along);
-            }
-        }
-        lift.clamp(0.0, WHEEL_LIFT_MAX)
+    /// Off the board (and getting off or on) the off-board clips' origin is on the ground under the
+    /// feet; between, the board's deck height over it.
+    fn foot_xform(&self, base: Xform) -> Xform {
+        let height = crate::skater::DECK_HEIGHT * (1.0 - self.foot_origin);
+        base.then(&Xform::new(Mat3::IDENTITY, v3(0.0, height, 0.0)))
     }
 
     /// What is drawn of the rider now (live): the imported character's placement, or the placeholder's
@@ -2350,11 +2509,12 @@ mod tests {
         }
         let mut g = Game::new();
         g.timer = Some(fake_clock);
-        let mut run = crate::autoplay::KickerRun::new();
+        g.skater.speed = 4.0;
         let mut gfx = Null;
-        for _ in 0..300 {
-            let pad = run.next(&g);
-            g.update(&pad, 1.0 / 60.0);
+        for i in 0..300 {
+            // A synthetic state graph pops an ollie a second in.
+            g.skater.graph.pop = (i == 60).then_some((crate::gesture::Flick::OLLIE, 1.0));
+            g.update(&PadRaw::default(), 1.0 / 60.0);
             g.render(&mut gfx);
         }
         assert!(g.log.iter().any(|l| l.starts_with("pop: ")), "{:?}", g.log);
@@ -2430,6 +2590,7 @@ mod tests {
     #[test]
     fn pal50_draws_between_the_last_two_ticks() {
         let mut g = Game::new();
+        g.skater.speed = 3.0;
         let mut seen_between = false;
         for _ in 0..50 {
             let before = g.skater.pos;
@@ -2446,16 +2607,6 @@ mod tests {
             }
         }
         assert!(seen_between);
-        // A press seen on a two-tick frame is one press, not two.
-        let mut g = Game::new();
-        g.update(&held(0), 1.0 / 50.0);
-        let mut pushes = 0;
-        for i in 0..5 {
-            let b = if i == 0 { crate::input::btn::A } else { 0 };
-            g.update(&held(b), 1.0 / 50.0);
-            pushes += g.skater.push.is_some() as u32;
-        }
-        assert!(pushes >= 1);
     }
 
     /// Keeps the 2D vertices drawn.

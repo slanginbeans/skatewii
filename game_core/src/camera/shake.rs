@@ -21,11 +21,11 @@
 //! a wipeout only in its broken-bone slow motion, which flatground doesn't have).
 //!
 //! The samples are a data file on Skate 3's disc (`data/camera/1.shk`, brought in by `fg_import rules` as
-//! [`ENTRY`]); without it flatground uses its own loop ([`Samples::built_in`]), of about the same size.
+//! [`ENTRY`]); the unit tests use a sine loop of about the same size (`Samples::built_in`).
 
 use alloc::vec::Vec;
 
-use crate::math::{Vec3, sinf};
+use crate::math::Vec3;
 use crate::tuning::camera::ShakeTuning;
 use libm::acosf;
 
@@ -67,9 +67,18 @@ impl Samples {
         })
     }
 
-    /// flatground's own loop: 128 samples of a few sines a loop on each axis (seamless round the loop),
+    /// No shake (before the rules pack is loaded).
+    pub fn still() -> Samples {
+        Samples {
+            rotation: alloc::vec![[0.0; 3]],
+            translation: alloc::vec![[0.0; 3]],
+        }
+    }
+
+    /// The unit tests' loop: 128 samples of a few sines a loop on each axis (seamless round the loop),
     /// sized like Skate 3's (about 0.003 to 0.006 rad and 0.3 to 0.7 m standard deviation; the
     /// translation multiplier scales it down to centimetres).
+    #[cfg(any(test, feature = "fixtures"))]
     pub fn built_in() -> Samples {
         const N: usize = 128;
         // Per axis: (cycles a loop, weight, phase) of three sines, and the axis' standard deviation.
@@ -98,7 +107,10 @@ impl Samples {
                 let a = core::f32::consts::TAU * i as f32 / N as f32;
                 let mut r = [0.0; 6];
                 for (k, (waves, sd)) in AXES.iter().enumerate() {
-                    let v: f32 = waves.iter().map(|(c, w, p)| w * sinf(c * a + p)).sum();
+                    let v: f32 = waves
+                        .iter()
+                        .map(|(c, w, p)| w * crate::math::sinf(c * a + p))
+                        .sum();
                     r[k] = v * sd / unit;
                 }
                 r

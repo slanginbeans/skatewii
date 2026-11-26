@@ -359,7 +359,7 @@ fn a_carves_lean_is_the_reckonings_as_sk8s() {
         "{:?}",
         &full[120..140]
     );
-    let packet = g.skater.graph.and_then(|c| c.turn_packet);
+    let packet = g.skater.graph.turn_packet;
     assert!(packet.is_none(), "let go: no Turn packet ({packet:?})");
     // Half a stick: the conditioned 0.5 (0.25 + 0.5 x 0.7 of the range past the dead zone).
     let half = carve(&mut g, -60, 6.75);

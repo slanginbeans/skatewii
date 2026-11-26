@@ -8,7 +8,7 @@
 //! through the shape is the flick's strength (a faster flick pops higher).
 //!
 //! Shapes come from the player's disc (`rules/gestures`, converted by `fg_import rules` from Skate 3's
-//! `skater.pat`); without it a built-in set of flatground's own shapes is used. Positions are in
+//! `skater.pat`). Positions are in
 //! gesture space: x right, **y towards the player** (stick pulled back is +y).
 //!
 //! The recognition rules follow SK8-ENGINE/skate-3-rust-engine's reading of the game (GPL-3.0).
@@ -18,8 +18,6 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-
-use crate::math::{PI, cosf, sinf};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shape {
@@ -230,130 +228,6 @@ pub fn parse(data: &[u8]) -> Option<Vec<Shape>> {
         });
     }
     Some(out)
-}
-
-/// A point on the stick's rim, `deg` degrees clockwise from straight forward (0 = forward, 90 = right,
-/// 180 = back), in gesture space.
-fn rim(deg: f32, r: f32) -> [f32; 2] {
-    let a = deg * PI / 180.0;
-    [sinf(a) * r, -cosf(a) * r]
-}
-
-/// flatground's own shapes (used without a rules pack): flicks from the back of the stick for tricks
-/// off the tail, from the front for nollies. Kickflips end to the right of forward and heelflips to the
-/// left (for a goofy rider; the stance mirrors them), shove-its roll around the rim, combinations roll
-/// and then flick across.
-pub fn built_in() -> Vec<Shape> {
-    let shape = |name: &str, tol: f32, pts: &[(f32, f32)]| Shape {
-        name: name.into(),
-        points: pts.iter().map(|&(d, r)| rim(d, r)).collect(),
-        tol2: tol * tol,
-    };
-    let mut v = Vec::new();
-    for (prefix, base) in [("", 180.0f32), ("N_", 0.0)] {
-        let at = |d: f32| base + d;
-        let nm = |n: &str| {
-            let mut s = String::from(prefix);
-            s.push_str(n);
-            s
-        };
-        let ollie = if prefix.is_empty() { "Ollie" } else { "Nollie" };
-        v.push(shape(ollie, 0.5, &[(at(0.0), 0.95), (at(180.0), 0.95)]));
-        v.push(shape(
-            &nm("Kickflip"),
-            0.42,
-            &[(at(0.0), 0.8), (at(-130.0), 0.95)],
-        ));
-        v.push(shape(
-            &nm("Heelflip"),
-            0.42,
-            &[(at(0.0), 0.8), (at(130.0), 0.95)],
-        ));
-        // Shove-its: half way round the rim; 360s start further round.
-        v.push(shape(
-            &nm("PopShuvit"),
-            0.36,
-            &[(at(-20.0), 0.95), (at(-70.0), 0.95), (at(-110.0), 0.95)],
-        ));
-        v.push(shape(
-            &nm("FSPopShuvit"),
-            0.36,
-            &[(at(20.0), 0.95), (at(70.0), 0.95), (at(110.0), 0.95)],
-        ));
-        v.push(shape(
-            &nm("360PopShuvit"),
-            0.36,
-            &[(at(60.0), 0.95), (at(-15.0), 0.95), (at(-95.0), 0.95)],
-        ));
-        v.push(shape(
-            &nm("FS360PopShuvit"),
-            0.36,
-            &[(at(-60.0), 0.95), (at(15.0), 0.95), (at(95.0), 0.95)],
-        ));
-        // Roll a quarter round, then flick across to the far side.
-        v.push(shape(
-            &nm("VarialKickflip"),
-            0.42,
-            &[(at(45.0), 0.95), (at(-10.0), 0.95), (at(-120.0), 0.95)],
-        ));
-        v.push(shape(
-            &nm("VarialHeelflip"),
-            0.42,
-            &[(at(-45.0), 0.95), (at(10.0), 0.95), (at(150.0), 0.9)],
-        ));
-        v.push(shape(
-            &nm("Hardflip"),
-            0.42,
-            &[(at(-45.0), 0.95), (at(10.0), 0.95), (at(-140.0), 0.95)],
-        ));
-        v.push(shape(
-            &nm("InwardHeelflip"),
-            0.42,
-            &[(at(45.0), 0.95), (at(-10.0), 0.95), (at(135.0), 0.95)],
-        ));
-        // Three-quarters round, then across.
-        v.push(shape(
-            &nm("360Flip"),
-            0.42,
-            &[
-                (at(80.0), 0.95),
-                (at(35.0), 0.95),
-                (at(-15.0), 0.95),
-                (at(-115.0), 0.95),
-            ],
-        ));
-        v.push(shape(
-            &nm("Laserflip"),
-            0.42,
-            &[
-                (at(-80.0), 0.95),
-                (at(-35.0), 0.95),
-                (at(15.0), 0.95),
-                (at(120.0), 0.95),
-            ],
-        ));
-        v.push(shape(
-            &nm("360Hardflip"),
-            0.42,
-            &[
-                (at(-80.0), 0.95),
-                (at(-35.0), 0.95),
-                (at(10.0), 0.95),
-                (at(-140.0), 0.95),
-            ],
-        ));
-        v.push(shape(
-            &nm("360InwardHeelflip"),
-            0.42,
-            &[
-                (at(80.0), 0.95),
-                (at(35.0), 0.95),
-                (at(-10.0), 0.95),
-                (at(140.0), 0.95),
-            ],
-        ));
-    }
-    v
 }
 
 /// What a flick does: the board's motion and how it is named and scored.
@@ -570,7 +444,131 @@ pub fn select(flick: Flick, group: Group, mirrored: bool) -> Flick {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// A point on the stick's rim, `deg` degrees clockwise from straight forward (0 = forward, 90 = right,
+    /// 180 = back), in gesture space.
+    fn rim(deg: f32, r: f32) -> [f32; 2] {
+        let a = deg * crate::math::PI / 180.0;
+        [crate::math::sinf(a) * r, -crate::math::cosf(a) * r]
+    }
+
+    /// Test shapes (synthetic, flatground's own): flicks from the back of the stick for tricks
+    /// off the tail, from the front for nollies. Kickflips end to the right of forward and heelflips to the
+    /// left (for a goofy rider; the stance mirrors them), shove-its roll around the rim, combinations roll
+    /// and then flick across.
+    pub(crate) fn built_in() -> Vec<Shape> {
+        let shape = |name: &str, tol: f32, pts: &[(f32, f32)]| Shape {
+            name: name.into(),
+            points: pts.iter().map(|&(d, r)| rim(d, r)).collect(),
+            tol2: tol * tol,
+        };
+        let mut v = Vec::new();
+        for (prefix, base) in [("", 180.0f32), ("N_", 0.0)] {
+            let at = |d: f32| base + d;
+            let nm = |n: &str| {
+                let mut s = String::from(prefix);
+                s.push_str(n);
+                s
+            };
+            let ollie = if prefix.is_empty() { "Ollie" } else { "Nollie" };
+            v.push(shape(ollie, 0.5, &[(at(0.0), 0.95), (at(180.0), 0.95)]));
+            v.push(shape(
+                &nm("Kickflip"),
+                0.42,
+                &[(at(0.0), 0.8), (at(-130.0), 0.95)],
+            ));
+            v.push(shape(
+                &nm("Heelflip"),
+                0.42,
+                &[(at(0.0), 0.8), (at(130.0), 0.95)],
+            ));
+            // Shove-its: half way round the rim; 360s start further round.
+            v.push(shape(
+                &nm("PopShuvit"),
+                0.36,
+                &[(at(-20.0), 0.95), (at(-70.0), 0.95), (at(-110.0), 0.95)],
+            ));
+            v.push(shape(
+                &nm("FSPopShuvit"),
+                0.36,
+                &[(at(20.0), 0.95), (at(70.0), 0.95), (at(110.0), 0.95)],
+            ));
+            v.push(shape(
+                &nm("360PopShuvit"),
+                0.36,
+                &[(at(60.0), 0.95), (at(-15.0), 0.95), (at(-95.0), 0.95)],
+            ));
+            v.push(shape(
+                &nm("FS360PopShuvit"),
+                0.36,
+                &[(at(-60.0), 0.95), (at(15.0), 0.95), (at(95.0), 0.95)],
+            ));
+            // Roll a quarter round, then flick across to the far side.
+            v.push(shape(
+                &nm("VarialKickflip"),
+                0.42,
+                &[(at(45.0), 0.95), (at(-10.0), 0.95), (at(-120.0), 0.95)],
+            ));
+            v.push(shape(
+                &nm("VarialHeelflip"),
+                0.42,
+                &[(at(-45.0), 0.95), (at(10.0), 0.95), (at(150.0), 0.9)],
+            ));
+            v.push(shape(
+                &nm("Hardflip"),
+                0.42,
+                &[(at(-45.0), 0.95), (at(10.0), 0.95), (at(-140.0), 0.95)],
+            ));
+            v.push(shape(
+                &nm("InwardHeelflip"),
+                0.42,
+                &[(at(45.0), 0.95), (at(-10.0), 0.95), (at(135.0), 0.95)],
+            ));
+            // Three-quarters round, then across.
+            v.push(shape(
+                &nm("360Flip"),
+                0.42,
+                &[
+                    (at(80.0), 0.95),
+                    (at(35.0), 0.95),
+                    (at(-15.0), 0.95),
+                    (at(-115.0), 0.95),
+                ],
+            ));
+            v.push(shape(
+                &nm("Laserflip"),
+                0.42,
+                &[
+                    (at(-80.0), 0.95),
+                    (at(-35.0), 0.95),
+                    (at(15.0), 0.95),
+                    (at(120.0), 0.95),
+                ],
+            ));
+            v.push(shape(
+                &nm("360Hardflip"),
+                0.42,
+                &[
+                    (at(-80.0), 0.95),
+                    (at(-35.0), 0.95),
+                    (at(10.0), 0.95),
+                    (at(-140.0), 0.95),
+                ],
+            ));
+            v.push(shape(
+                &nm("360InwardHeelflip"),
+                0.42,
+                &[
+                    (at(80.0), 0.95),
+                    (at(35.0), 0.95),
+                    (at(-10.0), 0.95),
+                    (at(140.0), 0.95),
+                ],
+            ));
+        }
+        v
+    }
+
     use super::*;
     use alloc::vec;
 

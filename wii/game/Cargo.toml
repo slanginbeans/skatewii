@@ -11,4 +11,4 @@ test = false
 doctest = false
 
 [dependencies]
-game_core = { path = "../../game_core" }
+game_core = { path = "../../game_core", default-features = false }

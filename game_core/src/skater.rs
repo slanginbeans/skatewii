@@ -62,7 +62,7 @@ pub use respawn::{Checkpoints, Recovery};
 pub use states::State;
 
 use crate::flick::FlickOut;
-use crate::gesture::{self, Flick, Group, Trick};
+use crate::gesture::{Flick, Group, Trick};
 use crate::input::{Pad, btn};
 use crate::math::{PI, Vec3, atan2f, clamp, cosf, sinf, smooth, sqrtf, v3, wrap_angle, yaw_dir};
 #[cfg(test)]
@@ -74,8 +74,6 @@ use plant::{AirPlant, GroundPlant, PlantKind};
 
 /// Highest ledge a bailed rider walks up (m).
 pub const STEP: f32 = 0.12;
-/// Below this speed a hard sideways stick kick-turns on the spot.
-const KICKTURN_SPEED: f32 = 1.0;
 /// Kick turns (ours, measured against SK8's simulation of Skate 3's `KickTurnSteering` at its stock
 /// spin scale 0.5): the yaw rate the turn builds to against the board's speed (rad/s: 3.2 standing,
 /// 2.7 at 1.8 m/s, 2.0 at 3.4 m/s), the share of the gap it closes a tick, and what is left of it a tick
@@ -84,17 +82,12 @@ const KICKTURN_RATES: [(f32, f32); 4] = [(0.0, 3.2), (1.8, 2.72), (3.4, 2.0), (5
 const KICKTURN_BUILD: f32 = 0.09;
 const KICKTURN_RELEASE: f32 = 0.7;
 const KICKTURN_SPIN_SCALE: f32 = 0.5;
-const KICKTURN_STICK: f32 = 0.75;
 /// Rolling tail first faster than this is fakie at once; above `FAKIE_SLOW` after `FAKIE_TIME`; never
 /// within `FAKIE_GRACE` of a spawn (Skate 3's riding-fakie rules).
 const FAKIE_FAST: f32 = 1.0;
 const FAKIE_SLOW: f32 = 0.5;
 const FAKIE_TIME: f32 = 0.2;
 const FAKIE_GRACE: f32 = 1.0;
-/// Turning round from fakie to push switch takes this long (the push waits for it).
-const SWITCH_TURN_TIME: f32 = 0.15;
-/// A push press is remembered this long while the button is held (Skate 3's new-push window).
-const PUSH_MEMORY: f32 = 0.3;
 /// How fast the board follows the animated centre of mass in the air: the share of the gap closed a
 /// tick (SK8's rider body is physical and follows its animation; fit to its ollies' COM over the deck).
 const AIR_LEGS_FOLLOW: f32 = 0.15;
@@ -105,8 +98,6 @@ const ROLL_OFF_TIME: f32 = 0.3;
 const LAND_SIDE_FRICTION: f32 = 0.41;
 /// The posed board lifted this far (m) means the pop's tail strike has started.
 const POP_LIFT_MIN: f32 = 0.002;
-/// A repeated push puts the foot down this long after the re-push point (s, ours).
-const PUSH_REPEAT_DOWN: f32 = 0.1;
 /// Powerslides: the board angle eases at this rate (rad/s, ours); a held slide relaxes after this long
 /// (s).
 const SLIDE_TURN_RATE: f32 = 8.0;
@@ -117,25 +108,12 @@ const RUNOUT_TIME: f32 = 1.2;
 const DISMOUNT_MIN_UP: f32 = 0.64;
 /// Y's request lapses if the graphs haven't got off (or on) the board by then (s).
 const TOGGLE_WAIT: f32 = 2.0;
-/// How long a landing is remembered (drawn: the landing clip), and how long after it a revert counts
-/// (flatground's own rules; with the state graphs the revert gesture decides).
+/// How long a landing is remembered (drawn: the landing clip).
 const LANDING_SHOW: f32 = 1.5;
-const REVERT_WINDOW: f32 = 0.4;
 /// A spin landing keeps pivoting the board this long (s, ours), fading as a wall hit's turn does.
 const SPIN_PIVOT_TIME: f32 = 0.15;
-/// Without the state graphs: landing while still grabbing with the C-stick tweaking the grab this far
-/// (0..1) wipes out (ours; the graphs have their own rule).
-const GRAB_TWEAK_BAIL: f32 = 0.45;
 /// The C-stick past this picks a grab's variant (Skate 3's dead zone for `ScoringGrabs`).
 const GRAB_VARIANT_DEAD: f32 = 0.5;
-/// Manuals: C-stick deflection that holds one (beyond is the tail or nose brake), how long it must be
-/// held before the manual starts (so a quick flick doesn't start one), the balance sweet spot.
-const MANUAL_MIN: f32 = 0.1;
-const MANUAL_BRAKE: f32 = 0.9;
-const MANUAL_ENGAGE: f32 = 0.12;
-const MANUAL_SWEET: f32 = 0.35;
-/// The C-stick deflection a manual balances at (for the log).
-pub const MANUAL_BALANCED_AT: f32 = MANUAL_MIN + MANUAL_SWEET * (MANUAL_BRAKE - MANUAL_MIN);
 const MANUAL_MIN_TIME: f32 = 0.5;
 /// Analog trigger past this holds a grab: any pressure, as Skate 3 and the state graphs' grab intents
 /// (`graph::input`) count it; the pad's trigger dead zone (`input::TRIGGER_DEAD_ZONE`) already took out a
@@ -143,8 +121,6 @@ const MANUAL_MIN_TIME: f32 = 0.5;
 const GRAB_TRIGGER: f32 = 0.0;
 /// Both push buttons pressed within this of each other wind up a hippie jump.
 const HIPPY_CHORD: f32 = 0.08;
-/// Most flips a held kickflip or heelflip can reach (Skate 3: four).
-const MAX_FLIPS: u8 = 4;
 
 /// Which foot the rider naturally has forward.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -155,9 +131,6 @@ pub enum Stance {
     Regular,
 }
 
-/// How long the built-in board's flick trick animation takes (s). Without the state graphs this is the
-/// one clock the drawn board and the landing check share (landing before it ends is landing with the
-/// board not caught); with them the clips' own `DANGERZONE` decides.
 /// The yaw rate a kick turn builds to at `speed` (rad/s, [`KICKTURN_RATES`]).
 pub fn kickturn_rate(speed: f32) -> f32 {
     let r = KICKTURN_RATES;
@@ -545,65 +518,6 @@ impl Default for ClipTiming {
     }
 }
 
-/// A push in progress: the foot comes down (`down` s; the first push of a run winds up with the `into`
-/// clip), stays on the ground (`contact` s) while the board chases `target`, then swings back
-/// (`recover` s). The next push may start `out` of the way through the swing.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Push {
-    /// Seconds since this push started (it waits for a switch turn first).
-    pub t: f32,
-    /// How long the button has been held during this push.
-    pub held: f32,
-    /// The mongo push set (front foot).
-    pub mongo: bool,
-    /// Speed when the foot came down.
-    pub base: f32,
-    /// Pushes in a row (0 = the first, which starts from riding).
-    pub count: u32,
-    /// The button doing the pushing.
-    pub button: u32,
-    /// Seconds left of the turn from fakie to switch before the foot goes down.
-    pub turning: f32,
-    /// How long that turn took (the push's own clock starts after it).
-    pub delay: f32,
-    pub down: f32,
-    pub contact: f32,
-    pub recover: f32,
-    /// Speed the board chases while the foot is down (set when it touches).
-    pub target: Option<f32>,
-    /// Re-push point as a share of the swing back.
-    pub out: f32,
-    /// A later press waiting for the re-push point.
-    pub queued: Option<u32>,
-    /// Started by holding the button on from the last push (its strength is capped).
-    pub held_repeat: bool,
-}
-
-impl Push {
-    /// Seconds into the push itself (after any switch turn).
-    pub fn time(&self) -> f32 {
-        (self.t - self.delay).max(0.0)
-    }
-
-    /// Which part of the push it is (0 foot coming down, 1 on the ground, 2 swinging back) and the
-    /// seconds into that part.
-    pub fn stage(&self) -> (usize, f32) {
-        let t = self.time();
-        if t < self.down {
-            (0, t)
-        } else if t < self.down + self.contact {
-            (1, t - self.down)
-        } else {
-            (2, t - self.down - self.contact)
-        }
-    }
-
-    /// The pushing foot is on the ground.
-    pub fn in_contact(&self) -> bool {
-        self.turning <= 0.0 && self.stage().0 == 1
-    }
-}
-
 /// Braking with the foot (X).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FootBrake {
@@ -747,9 +661,6 @@ pub struct Skater {
     /// Seconds since the rider was put on the board (spawn or respawn).
     pub since_spawn: f32,
     takeoff: Takeoff,
-    pub push: Option<Push>,
-    /// The last push press, while it is remembered (button, seconds since).
-    push_press: Option<(u32, f32)>,
     /// Steering is weaker while a pushing foot is down (1 = full).
     push_steer: f32,
     /// Smoothed turn input, -1..1 (drawn: the rider leans into turns).
@@ -856,9 +767,8 @@ pub struct Skater {
     grind_sticks_x: f32,
     /// The numbers behind the last landing check (for the log).
     pub last_landing: Option<LandingCheck>,
-    /// What Skate 3's state graphs decided this tick, when they run (`crate::graph`); `None` rides on
-    /// flatground's own rules.
-    pub graph: Option<GraphControl>,
+    /// What Skate 3's state graphs decided this tick (`crate::graph`; the game sets it every tick).
+    pub graph: GraphControl,
     /// A body flip in the air (`skater::flip`), and the last one landed (front, whole turns) for the
     /// landing's name.
     pub body_flip: Option<flip::BodyFlip>,
@@ -880,6 +790,9 @@ pub struct Skater {
     pub rider_pose: Option<[crate::math::Xform; crate::physics::skeleton::ANIMATED_PARTS]>,
     /// The axes the rider's pose stands on (the reckoning's up, the rider's heading).
     pub rider_axes: crate::math::Mat3,
+    /// The clips' board in the world as Skate 3's root frames place it (set each tick by the game with
+    /// an imported rider): what the air's hook drive pulls the physical deck's turn to.
+    pub anim_board: Option<crate::math::Mat3>,
     pub body_us: u32,
     air_com: Option<f32>,
     /// How far the legs have lifted the board over the flight's path (m, world up), and how fast it
@@ -902,11 +815,9 @@ pub struct Skater {
     /// Where the board is when it isn't under the feet: in the hands, free in the park, hidden, flying
     /// back (`skater::possession`).
     pub possession: possession::Possession,
-    /// The triggers fully in last tick (drop and throw, off the board).
-    trig_full: [bool; 2],
     /// Off the board in the air, Skate 3's landing assist has taken a flight down onto the free board
     /// (`CanLandOnBoard`): the landing on it starts once the motion graph's `DoLandOnBoard` says so (at
-    /// once without the graphs).
+    /// once the graph says so).
     pub deck_assist: bool,
     /// A hippie jump's landing on deck: something in the way of the landing on the board, and the
     /// hippie hurdle (`IsHippyHurdling`; `skater::hurdle`).
@@ -921,9 +832,6 @@ pub struct Skater {
     pub footplant: plant::Manager,
     pub air_plant: Option<plant::AirPlant>,
     pub footplanted: Option<&'static str>,
-    /// The one-foot grab without the graphs: the grab's front hand and the free foot's push (true: the
-    /// right foot's, A) as Skate 3's action graph names them (frontside grab, frontside foot).
-    one_foot: Option<(bool, bool)>,
     /// Seconds since take-off, or since the last foot plant flew off (Skate 3's air state's clock).
     plant_clock: f32,
     /// Off the board: the edge ahead of the feet (`skater::dropin::find_edge`, Skate 3's `DistToEdge`),
@@ -931,12 +839,9 @@ pub struct Skater {
     pub edge: Option<dropin::Edge>,
     pub drop_in: Option<dropin::DropIn>,
     /// Hand plants (`skater::handplant`): the manager looking for a coping riding up a ramp with the
-    /// world grab held, the plant itself (SK8 physical state 600) and, without the graphs, the tweak and
-    /// the feet held in it.
+    /// world grab held, and the plant itself (SK8 physical state 600).
     pub handplant: handplant::Manager,
     pub hand_plant: Option<handplant::Plant>,
-    hand_plant_tweak: [f32; 2],
-    hand_plant_feet: handplant::Feet,
     /// The name the graphs score the hand plant under, latched while they play it.
     hand_plant_name: Option<&'static str>,
     /// The stall the last grind was (`skater::stall`), if it was one.
@@ -1217,8 +1122,6 @@ impl Skater {
             fakie_timer: 0.0,
             since_spawn: 0.0,
             takeoff: Takeoff::default(),
-            push: None,
-            push_press: None,
             push_steer: 1.0,
             steer: 0.0,
             turn_input: 0.0,
@@ -1268,7 +1171,7 @@ impl Skater {
             since_b: f32::INFINITY,
             bail_reason: None,
             last_landing: None,
-            graph: None,
+            graph: GraphControl::default(),
             body_flip: None,
             flipped: None,
             graph_push: None,
@@ -1278,6 +1181,7 @@ impl Skater {
             rider_body: None,
             rider_pose: None,
             rider_axes: crate::math::Mat3::IDENTITY,
+            anim_board: None,
             body_us: 0,
             air_com: None,
             air_lift: 0.0,
@@ -1296,7 +1200,6 @@ impl Skater {
             mount_traj: false,
             deck_adjust: adjust::DeckAdjust::NONE,
             possession: possession::Possession::new(),
-            trig_full: [false; 2],
             deck_assist: false,
             hurdle: hurdle::Hurdle::default(),
             ground_plant: None,
@@ -1304,14 +1207,11 @@ impl Skater {
             footplant: plant::Manager::default(),
             air_plant: None,
             footplanted: None,
-            one_foot: None,
             plant_clock: 0.0,
             edge: None,
             drop_in: None,
             handplant: handplant::Manager::default(),
             hand_plant: None,
-            hand_plant_tweak: [0.0; 2],
-            hand_plant_feet: handplant::Feet::Both,
             hand_plant_name: None,
             stalled: None,
             wipeout: wipeout::Wipeout::default(),
@@ -1442,8 +1342,8 @@ impl Skater {
     }
 
     /// The stick's spin input: the state graph's `PhysBodySpin` when it runs, else the main stick's x.
-    fn spin_input(&self, pad: &Pad) -> f32 {
-        self.graph.map_or(pad.stick[0], |g| g.body_spin)
+    fn spin_input(&self) -> f32 {
+        self.graph.body_spin
     }
 
     /// Keeps `heading` in step with `fwd` (left alone while the nose points straight up or down).
@@ -1612,7 +1512,7 @@ impl Skater {
             || pad.trig_r > 0.0;
         self.idle = if touched { 0.0 } else { self.idle + dt };
         self.since_spawn += dt;
-        self.dark = self.graph.is_some_and(|g| g.dark);
+        self.dark = self.graph.dark;
         let rolling = self.rolling();
         let crouch = if rolling && self.manual.is_none() {
             flick
@@ -1656,23 +1556,23 @@ impl Skater {
             self.since_b + dt
         };
         if !self.is_airborne() {
-            self.body.ground(self.spin_input(pad));
+            self.body.ground(self.spin_input());
             self.air_com = None;
             self.air_lift = 0.0;
         }
         // The rider's body over the board: the animation's while riding; following it only so fast
         // from the pop's tail strike (SK8's GroundAnimation) until the jump's top (measured: SK8's
         // COM over the deck lags its animation there, and follows it again coming down).
-        self.body_com = match (self.graph.and_then(|g| g.pose_com), self.body_com) {
+        self.body_com = match (self.graph.pose_com, self.body_com) {
             (Some(c), Some(d))
                 if (self.is_airborne() && self.vel.y > 0.0)
-                    || self.graph.is_some_and(|g| g.pose_lift > POP_LIFT_MIN) =>
+                    || self.graph.pose_lift > POP_LIFT_MIN =>
             {
                 Some(d + (c - d) * (AIR_LEGS_FOLLOW * dt * 60.0).min(1.0))
             }
             (c, _) => c,
         };
-        if self.graph.is_some_and(|g| g.wipeout) && (self.rolling() || self.is_airborne()) {
+        if self.graph.wipeout && (self.rolling() || self.is_airborne()) {
             if self.is_airborne() {
                 self.vel = self.vel * 0.5;
             }
@@ -1690,7 +1590,6 @@ impl Skater {
                 self.regrind_block = None;
             }
         }
-        let triggers = crate::graph::input::board_triggers(pad, &mut self.trig_full);
         self.read_wipe_buttons(pad, events);
         self.toggle_board(park, pad, dt, events);
         // A wipeout or a dismount asked for by the input (the bail buttons, the graphs' wipeout, Y's
@@ -1700,23 +1599,17 @@ impl Skater {
         if early {
             self.select_state();
         }
+        let flying = self.is_airborne();
         self.step_mode(park, pad, flick, dt, events);
-        self.update_possession(park, triggers, dt, events);
+        self.update_possession(park, dt, events);
         // Skate 3's state selector picks the state from what the tick's movement published.
         if !early {
             self.select_state();
         }
         if self.rolling() {
-            // The drawn board follows the ground smoothly; the velocity is the ground's.
-            let k = 1.0
-                - libm::powf(
-                    1.0 - self.tuning.ground_normal_blend.clamp(0.0, 1.0),
-                    dt * 60.0,
-                );
-            self.normal = self
-                .normal
-                .lerp(self.contact_n, k)
-                .normalize_or(self.contact_n);
+            // The board's up is the ground's under it (what is drawn is the physical deck; Skate 3
+            // smooths the ground normal only in its reckoning); the velocity is the ground's.
+            self.normal = self.contact_n;
             self.vel = self.ground_velocity() + self.contact_n * self.vn;
             self.update_reckoning(dt);
             // A safe spot to be put back on after a bail.
@@ -1731,14 +1624,22 @@ impl Skater {
                 .observe(&self.tuning, park, at, self.riding_ticks, since);
             let pose = self.approach_pose();
             self.approach.ride(pose);
+            // The tick the flight lands, the board flies its last step onto the ground under the
+            // landed skater (the ground ride adopts it from the next tick), as Skate 3's board lands
+            // on its own physics the tick the rider does.
+            if flying {
+                self.fly_rig(park, true);
+            }
         } else {
             self.riding_ticks = 0;
             // Off the ground: Skate 3 resets the wobble on entering it again. Its air, grind and
             // off-board reckonings clear the lean.
             self.wobble.reset();
             self.reckoning.lean = 0.0;
-            if self.is_airborne() {
-                self.fly_rig(park);
+            if self.hippie_air() {
+                self.roll_rig_alone(park);
+            } else if self.is_airborne() {
+                self.fly_rig(park, false);
             } else {
                 self.rig = None;
             }
@@ -1868,14 +1769,14 @@ impl Skater {
                 }
             }
             s if s.category() == 100 => {
-                if !self.update_handplant(park, pad, events) {
+                if !self.update_handplant(park, events) {
                     self.roll(park, pad, flick, dt, events)
                 }
             }
-            s if s.is_grind() => self.slide_rail(park, pad, flick, dt, events),
+            s if s.is_grind() => self.slide_rail(park, pad, dt, events),
             s if s.category() == 500 => self.walk(park, pad, dt),
             State::Sleeping | State::Teleporting => {}
-            _ => self.fly(park, pad, flick, self.air_time + dt, dt, events),
+            _ => self.fly(park, pad, self.air_time + dt, dt, events),
         }
     }
 
@@ -1920,25 +1821,10 @@ impl Skater {
         let t = t + dt;
         self.board_toggle = Some(t);
         let on_board = self.rolling();
-        let go = match (on_board, self.walking(), self.graph) {
-            (true, _, None) => true,
-            // Without the state graphs: on at once with the board in hand; next to the free board, onto it
-            // where it is; further away, once it has flown back (getting on retrieves it).
-            (_, true, None) => match self.possession.hold {
-                possession::Hold::Held | possession::Hold::Underfoot => true,
-                possession::Hold::Free if self.free_board_in_reach() => {
-                    self.step_onto_free_board(park, events);
-                    return;
-                }
-                possession::Hold::Free | possession::Hold::Hidden => {
-                    let rider = self.rider_frame();
-                    self.possession.retrieve(&self.tuning, rider, true);
-                    false
-                }
-                possession::Hold::Returning => false,
-            },
-            (true, _, Some(g)) => g.ob_traj && g.dismounting,
-            (_, true, Some(g)) => {
+        let g = self.graph;
+        let go = match (on_board, self.walking()) {
+            (true, _) => g.ob_traj && g.dismounting,
+            (_, true) => {
                 if g.mounting && g.ob_traj {
                     self.mount_traj = true;
                 }
@@ -1993,64 +1879,12 @@ impl Skater {
         (held, new)
     }
 
-    /// The free board is close enough to step onto where it lies (Skate 3 retrieves from at most
-    /// `DistanceForMountedReturn` getting on), on its wheels.
-    fn free_board_in_reach(&self) -> bool {
-        let b = &self.possession.board;
-        self.possession.hold == possession::Hold::Free
-            && b.on_ground
-            && b.up.y > self.tuning.possession.deck_min_up
-            && (b.pos - self.pos).horizontal().length()
-                <= self.tuning.possession.mounted_return_distance
-    }
-
-    /// Without the state graphs, getting on next to the free board: the rider steps onto it where it is,
-    /// riding it on at its own speed, its nose (or tail) the end nearer the way he faces.
-    fn step_onto_free_board(&mut self, park: &dyn Terrain, events: &mut Vec<Event>) {
-        let b = self.possession.board;
-        let g = park.ground(b.pos.x, b.pos.z, b.pos.y + STEP);
-        let n = if g.height > f32::MIN / 2.0 {
-            g.normal
-        } else {
-            b.up
-        };
-        self.pos = v3(b.pos.x, g.height.max(b.pos.y - DECK_HEIGHT - STEP), b.pos.z);
-        let facing = self.biped.forward();
-        let nose = if b.nose.dot(facing) < 0.0 {
-            -b.nose
-        } else {
-            b.nose
-        };
-        self.contact_n = n;
-        self.normal = n;
-        self.fwd = tangent(nose, n);
-        self.speed = b.vel.dot(self.fwd);
-        self.slip = 0.0;
-        self.vn = 0.0;
-        self.vel = self.fwd * self.speed;
-        self.fakie = false;
-        self.fakie_timer = 0.0;
-        self.spin = 0.0;
-        self.spin_rate = 0.0;
-        self.states.facts.mount = Some(true);
-        self.board_toggle = None;
-        self.possession.under_feet();
-        self.sync_heading();
-        events.push(Event::SteppedOn);
-    }
-
     /// The board off the feet each tick: off the board, L fully in drops it and R throws it ahead
     /// (Skate 3's LT / RT); with it out of the hands either picks it back up. With the state graphs their
     /// ToggleBoard times it (the throw clips' release, the retrieve cycle), and getting on (`Mount`)
     /// retrieves a free board; then the board's own body moves on. In the air off the board over the
     /// free board, Skate 3's landing assist may bring the rider down onto it (the caveman).
-    fn update_possession(
-        &mut self,
-        park: &dyn Terrain,
-        triggers: [bool; 2],
-        dt: f32,
-        events: &mut Vec<Event>,
-    ) {
+    fn update_possession(&mut self, park: &dyn Terrain, dt: f32, events: &mut Vec<Event>) {
         // Under the feet riding or grinding, as the selector keeps it (not getting off, not wiping out).
         if (self.rolling() || self.grinding())
             && matches!(self.selects(|_| {}).category(), 100 | 400)
@@ -2061,35 +1895,22 @@ impl Skater {
         let t = self.tuning;
         if self.walking() && !self.climb.holding() {
             let p = &mut self.possession;
-            match self.graph {
-                None => {
-                    let [drop, throw] = triggers;
-                    if p.held() && (drop || throw) {
-                        p.let_go(&t, rider, throw);
-                    } else if (drop || throw)
-                        && matches!(p.hold, possession::Hold::Free | possession::Hold::Hidden)
-                    {
-                        p.retrieve(&t, rider, false);
-                    }
-                }
-                Some(g) => {
-                    if let Some(throw) = g.release_board {
-                        p.let_go(&t, rider, throw);
-                    }
-                    if g.retrieve_board {
-                        p.retrieve(&t, rider, false);
-                    }
-                    if g.ob_mounting {
-                        p.retrieve(&t, rider, true);
-                    }
-                }
+            let g = self.graph;
+            if let Some(throw) = g.release_board {
+                p.let_go(&t, rider, throw);
+            }
+            if g.retrieve_board {
+                p.retrieve(&t, rider, false);
+            }
+            if g.ob_mounting {
+                p.retrieve(&t, rider, true);
             }
         }
         self.possession.step(&t, park, rider, dt);
         // Off the board in the air over the free board: Skate 3's landing assist (SK8 biped_air
         // update.rs, landing_deck `assist`) takes a flight down onto its deck when it is near enough to
         // the jump's own (by `landing_assist_limit` of the time in the air) and long enough (0.4 s); the
-        // motion graph then starts the landing on it (`DoLandOnBoard`), or at once without the graphs.
+        // motion graph then starts the landing on it (`DoLandOnBoard`).
         if !self.walking() || self.biped.air.is_none() {
             self.deck_assist = false;
             return;
@@ -2109,7 +1930,7 @@ impl Skater {
             self.sync_walk();
             self.deck_assist = true;
         }
-        if self.deck_assist && self.graph.is_none_or(|g| g.land_on_board) {
+        if self.deck_assist && self.graph.land_on_board {
             self.deck_assist = false;
             let flight = self.biped.vel;
             self.land_on_free_board_from(flight, events);
@@ -2303,10 +2124,10 @@ impl Skater {
     ) {
         let t = self.tuning;
         let ticks = dt * 60.0;
-        let tail_brake = self.update_manual(flick, dt, events);
+        let tail_brake = self.update_manual(dt, events);
         let st = steering(pad.stick);
         self.update_fakie(dt);
-        if self.graph.is_some_and(|g| g.turn_round) && (self.fakie || self.speed < 0.0) {
+        if self.graph.turn_round && (self.fakie || self.speed < 0.0) {
             // Skate 3 turns the rider round: same travel, the other foot forward.
             self.flip_board();
             self.switch = !self.switch;
@@ -2318,7 +2139,7 @@ impl Skater {
         // Revert: the board turned half round on its wheels, the travel kept (Skate 3's yaw servo).
         if self.revert.is_some() {
             self.update_revert(dt, events);
-        } else if let Some(fs) = self.graph.and_then(|g| g.revert) {
+        } else if let Some(fs) = self.graph.revert {
             self.revert = Some(Revert {
                 side: if fs { 1.0 } else { -1.0 },
                 time: 0.0,
@@ -2327,38 +2148,13 @@ impl Skater {
             });
             self.slide = None;
             self.landing = None;
-        } else if self.graph.is_none()
-            && st.slide != 0.0
-            && self.landing.is_some_and(|l| l.time < REVERT_WINDOW)
-            && self.manual.is_none()
-            && self.speed.abs() > 1.0
-        {
-            self.revert = Some(Revert {
-                side: st.slide,
-                time: 0.0,
-                turned: 0.0,
-                rate: 0.0,
-            });
-            self.landing = None;
         }
 
         self.update_slide(&st, dt);
 
-        // Kick turn: slow, stick hard to the side.
-        // With the state graphs, its KickTurn state (speed and stick gates) turns the board.
-        let graph_kick = self.graph.and_then(|g| g.kickturn);
-        let kick = match (self.graph, graph_kick) {
-            (Some(_), Some(_)) => pad.stick[0] != 0.0 && self.manual.is_none(),
-            (Some(_), None) => false,
-            (None, _) => {
-                self.speed.abs() < KICKTURN_SPEED
-                    && pad.stick[0].abs() > KICKTURN_STICK
-                    && self.manual.is_none()
-                    && self.slide.is_none()
-                    && self.revert.is_none()
-                    && self.push.is_none_or(|p| p.stage().0 == 2)
-            }
-        };
+        // Kick turn: the state graph's KickTurn state (speed and stick gates) turns the board.
+        let graph_kick = self.graph.kickturn;
+        let kick = graph_kick.is_some() && pad.stick[0] != 0.0 && self.manual.is_none();
         // The kick turn's yaw rate builds up towards its speed's rate and, let go, runs down (SK8's rider
         // turning the board through its feet).
         if kick {
@@ -2402,15 +2198,16 @@ impl Skater {
         }
         // Foot plants (a boneless, fastplant or no-comply): no push, brake or pop until the jump off the
         // planted foot.
-        if self.update_ground_plant(pad, flick, dt, events) {
+        if self.update_ground_plant(dt, events) {
             return;
         }
         let planting = self.ground_plant.is_some();
         // With the state graphs, a push only drives while the push clip's foot is down, and the foot
         // brake only once the brake clip's foot touches.
-        let push_target = match self.graph {
+        let g = self.graph;
+        let push_target = match g {
             _ if planting => None,
-            Some(g) if g.push_posed => {
+            g if g.push_posed => {
                 // Skate 3 (SK8 contact_events.rs, push.rs): while the push clip's foot is down the
                 // board chases the posed trajectory's speed, within the push's change a tick.
                 self.graph_push = None;
@@ -2418,16 +2215,10 @@ impl Skater {
                     .filter(|_| g.push_contact)
                     .map(|v| v.min(self.tuning.push_max_speed))
             }
-            Some(g) => self.graph_push(g.push_contact, g.push_target, dt),
-            None => self.update_push(pad, dt, events),
+            g => self.graph_push(g.push_contact, g.push_target, dt),
         };
-        let foot_brake = match self.graph {
-            Some(g) => {
-                self.update_brake(pad, dt);
-                self.brake.is_some() && g.brake_contact
-            }
-            None => self.update_brake(pad, dt),
-        };
+        self.update_brake(pad, dt);
+        let foot_brake = self.brake.is_some() && g.brake_contact;
         let brake = t.braking_scalar
             * if tail_brake {
                 t.tail_brake
@@ -2437,17 +2228,8 @@ impl Skater {
                 0.0
             };
 
-        // The trick to pop: the state graph's (its takeoff clip reached the jump), else the flick.
-        let pop = match self.graph {
-            _ if planting => None,
-            Some(g) => g.pop,
-            None => flick.flick.map(|f| {
-                (
-                    gesture::select(f, self.flick_group(), self.mirrored()),
-                    flick.strength,
-                )
-            }),
-        };
+        // The trick to pop: the state graph's (its takeoff clip reached the jump).
+        let pop = if planting { None } else { g.pop };
         if let Some((f, strength)) = pop {
             if let Some(w) = self.wallride.take() {
                 // Popping off a wall: away from it as well as up.
@@ -2482,10 +2264,7 @@ impl Skater {
                 st.turn
             },
             push_target,
-            pushing: match self.graph {
-                Some(g) => g.pushing,
-                None => push_target.is_some(),
-            },
+            pushing: g.pushing,
             brake,
             manual: self.manual.is_some(),
             manual_correction: self.manual.is_some_and(|m| m.correcting),
@@ -2513,20 +2292,13 @@ impl Skater {
     fn update_revert(&mut self, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
         let n = self.contact_n;
-        let fs_side = self.frontside_sign(self.speed < 0.0);
-        let graphs = self.graph.is_some();
         let Some(r) = &mut self.revert else { return };
         r.time += dt;
         let left = PI - r.turned;
         let tolerance = t.revert_tolerance.eval(n.y) * PI / 180.0;
         if left < tolerance || r.time > t.revert_duration {
-            // Skate 3's fsrevert / bsrevert: the graphs say which (+1 frontside); without them, the
-            // turn's way for the stance.
-            let fs = if graphs {
-                r.side > 0.0
-            } else {
-                r.side * fs_side > 0.0
-            };
+            // Skate 3's fsrevert / bsrevert: the graphs say which (+1 frontside).
+            let fs = r.side > 0.0;
             let id = crate::scoring::catalog::id(if fs { "fsrevert" } else { "bsrevert" });
             let held = r.time;
             self.revert = None;
@@ -2570,7 +2342,6 @@ impl Skater {
                     side: st.slide,
                     ..Powerslide::default()
                 });
-                self.push = None;
             }
             return;
         };
@@ -2641,143 +2412,6 @@ impl Skater {
         Some(end)
     }
 
-    /// Pushing: returns the speed the board chases while the pushing foot is on the ground.
-    fn update_push(&mut self, pad: &Pad, dt: f32, events: &mut Vec<Event>) -> Option<f32> {
-        let t = self.tuning;
-        // A press is remembered for a moment while the button is held.
-        let pressed = [btn::A, btn::B].into_iter().find(|b| pad.was_pressed(*b));
-        if let Some(b) = pressed {
-            self.push_press = Some((b, 0.0));
-        } else if let Some((b, s)) = &mut self.push_press {
-            *s += dt;
-            if *s > PUSH_MEMORY || !pad.is_held(*b) {
-                self.push_press = None;
-            }
-        }
-        let both = pad.is_held(btn::A) && pad.is_held(btn::B);
-        let steep =
-            libm::acosf(self.contact_n.y.clamp(-1.0, 1.0)) > t.push_slope_limit * PI / 180.0;
-        let blocked = self.manual.is_some()
-            || self.slide.is_some()
-            || self.revert.is_some()
-            || self.hippy.is_some()
-            || self.wallride.is_some()
-            || both
-            || steep
-            || self.brake.is_some_and(|b| b.released.is_none());
-        if blocked {
-            self.push = None;
-            return None;
-        }
-        let Some(mut p) = self.push else {
-            if let Some((b, _)) = self.push_press.take() {
-                self.start_push(b, 0, events);
-            }
-            return None;
-        };
-        p.t += dt;
-        if p.turning > 0.0 {
-            p.turning -= dt;
-            self.push = Some(p);
-            return None;
-        }
-        let held = pad.is_held(p.button);
-        if let Some(b) = pressed {
-            p.queued = Some(b);
-        }
-        let (stage, _) = p.stage();
-        if stage == 0 {
-            p.base = self.speed;
-            if held {
-                p.held += dt;
-            }
-        }
-        let mut target = None;
-        if stage == 1 {
-            if held {
-                p.held += dt;
-            }
-            // How hard: from how long the button was held (a held repeat is capped).
-            let mut dv = t.push_gain(p.held, p.base.max(0.0));
-            if p.held_repeat {
-                dv = dv.min(t.push_hold_cap);
-            }
-            let (_, _, _, gentle_end, strong_end, slow_b, fast_b) = self.clips.blend(p.base);
-            let lo = gentle_end.min(strong_end);
-            let end = (dv + p.base.max(0.0)).clamp(lo, strong_end.max(lo));
-            let end = end.min(t.push_max_speed);
-            let tgt = p.target.map_or(end, |old| old.max(end));
-            p.target = Some(tgt);
-            target = Some(tgt);
-            // Where in the swing back the next push may start (Skate 3's out factor).
-            let dv0 = t.push_dv.eval(0.0);
-            let dv1 = t.push_dv.eval(1.0);
-            let first = slow_b + dv0;
-            let speed_k = if fast_b - first > 1e-3 {
-                ((p.base.max(0.0) - first) / (fast_b - first)).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let strength_k = if dv1 - dv0 > 1e-3 {
-                ((dv - dv0) / (dv1 - dv0)).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
-            let w = t.push_out_speed_weight.clamp(0.0, 1.0);
-            p.out = (strength_k * (1.0 - w) + speed_k * w)
-                .max(0.0)
-                .min(t.push_out_max);
-        }
-        let pt = p.time();
-        let repush = p.down + p.contact + p.out * p.recover;
-        let end = p.down + p.contact + p.recover;
-        let next = if held { Some(p.button) } else { p.queued };
-        if stage == 2 && pt >= repush && next.is_some() {
-            let count = p.count + 1;
-            let by_hold = held && p.queued.is_none();
-            self.push = None;
-            self.start_push(next.unwrap_or(btn::A), count, events);
-            if let Some(q) = &mut self.push {
-                q.held_repeat = by_hold;
-            }
-        } else if pt >= end {
-            self.push = None;
-        } else {
-            self.push = Some(p);
-        }
-        target
-    }
-
-    fn start_push(&mut self, button: u32, count: u32, events: &mut Vec<Event>) {
-        let mut turning = 0.0;
-        if self.fakie || self.speed < -FAKIE_SLOW {
-            // Skate 3 turns the rider round to push switch: same travel, the other foot forward.
-            self.flip_board();
-            self.switch = !self.switch;
-            self.fakie = false;
-            self.fakie_timer = 0.0;
-            turning = SWITCH_TURN_TIME;
-            events.push(Event::Switched);
-        }
-        // Skate 3 pushes with the mongo set when riding switch (for a rider who pushes regular).
-        let mongo = (button == btn::B) != self.switch;
-        let (into, contact, recover, ..) = self.clips.blend(self.speed.max(0.0));
-        self.push_press = None;
-        self.push = Some(Push {
-            mongo,
-            base: self.speed,
-            count,
-            button,
-            turning,
-            delay: turning,
-            down: if count == 0 { into } else { PUSH_REPEAT_DOWN },
-            contact,
-            recover,
-            out: self.tuning.push_out_max,
-            ..Push::default()
-        });
-    }
-
     /// The foot brake (X): returns whether the braking foot is on the ground.
     fn update_brake(&mut self, pad: &Pad, dt: f32) -> bool {
         let t = self.tuning;
@@ -2792,7 +2426,6 @@ impl Skater {
         match &mut self.brake {
             Some(b) if held && b.released.is_none() => {
                 b.time += dt;
-                self.push = None;
                 // The foot has to reach the ground first.
                 return b.time >= self.clips.brake_down;
             }
@@ -2808,7 +2441,6 @@ impl Skater {
                     time: 0.0,
                     released: None,
                 });
-                self.push = None;
             }
             None => {}
         }
@@ -2872,7 +2504,6 @@ impl Skater {
                 && self.slide.is_none() =>
             {
                 self.hippy = Some(0.0);
-                self.push = None;
             }
             None => {}
         }
@@ -2902,64 +2533,11 @@ impl Skater {
         }
     }
 
-    /// Manuals from the C-stick: held lightly back (towards the player) or forward, for a moment. The
-    /// stick past the manual zone drags the tail (or nose) to brake: returns whether it is.
-    fn update_manual(&mut self, flick: &FlickOut, dt: f32, events: &mut Vec<Event>) -> bool {
+    /// Manuals: the state graph engages, holds and leaves them. The stick past the manual zone drags the
+    /// tail (or nose) to brake: returns whether it is.
+    fn update_manual(&mut self, dt: f32, events: &mut Vec<Event>) -> bool {
         self.manual_exit = false;
-        if let Some(g) = self.graph {
-            return self.graph_manual(g.manual, dt, events);
-        }
-        let [x, y] = flick.stick;
-        let len = sqrtf(x * x + y * y);
-        // Mostly up or down only.
-        let vertical = y.abs() > 1.5 * x.abs();
-        if len < MANUAL_MIN {
-            self.manual_lock = false;
-        }
-        let Some(m) = &mut self.manual else {
-            let zone = vertical && (MANUAL_MIN..MANUAL_BRAKE).contains(&len);
-            self.manual_engage = if zone { self.manual_engage + dt } else { 0.0 };
-            if self.manual_engage >= MANUAL_ENGAGE
-                && !self.manual_lock
-                && self.speed.abs() > 0.5
-                && self.slide.is_none()
-                && self.revert.is_none()
-            {
-                self.manual = Some(Manual {
-                    // Stick away from the player: the front wheels.
-                    nose: y < 0.0,
-                    ..Manual::default()
-                });
-                self.push = None;
-                self.brake = None;
-            }
-            return false;
-        };
-        // How hard the stick leans towards the manual's wheels.
-        let toward = if m.nose { -y } else { y };
-        if toward < MANUAL_MIN || !vertical {
-            self.end_manual(events);
-            return false;
-        }
-        m.time += dt;
-        // Skate 3's tail brake: full force at once in the brake zone, the deck tipped to its angle.
-        m.brake = if len > MANUAL_BRAKE { 1.0 } else { 0.0 };
-        let pitch = m.brake * self.tuning.manual_brake_tilt * PI / 180.0;
-        m.pitch = approach(m.pitch, pitch, 3.0 * dt);
-        let push = ((toward - MANUAL_MIN) / (MANUAL_BRAKE - MANUAL_MIN)).min(1.0);
-        // Unstable like a real manual: any tilt grows, the stick past its sweet spot tips you further
-        // over, and a steady wobble keeps you correcting.
-        m.balance +=
-            (m.balance * 1.6 + (push - MANUAL_SWEET) * 2.0 + 0.5 * sinf(m.time * 2.3)) * dt;
-        let braking = m.brake > 0.0;
-        if m.balance.abs() >= 1.0 {
-            self.manual = None;
-            self.manual_lock = true;
-            self.speed *= 0.85;
-            events.push(Event::ManualLost);
-            return false;
-        }
-        braking
+        self.graph_manual(self.graph.manual, dt, events)
     }
 
     /// A manual the state graph holds (engaged and left as the graph says): the deck pitch servoes to a
@@ -2993,7 +2571,6 @@ impl Skater {
                 nose,
                 ..Manual::default()
             });
-            self.push = None;
             self.brake = None;
         }
         // Skate 3's balance sign: the tail's positive, the nose's negative.
@@ -3074,7 +2651,7 @@ impl Skater {
     fn pop(&mut self, f: Flick, strength: f32, stick: [f32; 2], events: &mut Vec<Event>) {
         self.end_manual(events);
         // A trick the clip marks as out of a manual jumps from the mode's manual low end.
-        let low = if self.graph.is_some_and(|g| g.pop_from_manual) {
+        let low = if self.graph.pop_from_manual {
             self.tuning.jump_low_manual
         } else {
             self.tuning.jump_low
@@ -3083,9 +2660,8 @@ impl Skater {
         // Skate 3 pops the centre of mass from where the animation has it at the jump (SK8
         // ground_jump `animation_com_position`): over the deck, which the tail strike has already
         // pitched up off its riding height. Without the imported rider, from `AbsoluteMinHeight`.
-        let posed = self
-            .graph
-            .and_then(|g| Some((self.body_com.or(g.pose_com)?, g.pose_lift)));
+        let g = self.graph;
+        let posed = self.body_com.or(g.pose_com).map(|c| (c, g.pose_lift));
         let speed = match posed {
             Some((com, lift)) => {
                 let now = DECK_HEIGHT - WHEEL_RADIUS + lift + com;
@@ -3123,7 +2699,6 @@ impl Skater {
         self.landing = None;
         self.grab = None;
         self.grabbed = None;
-        self.push = None;
         self.brake = None;
         self.slide = None;
         self.revert = None;
@@ -3157,7 +2732,6 @@ impl Skater {
         self.footplant = plant::Manager::default();
         self.air_plant = None;
         self.footplanted = None;
-        self.one_foot = None;
         self.plant_clock = 0.0;
         self.air_com = self.body_com;
         self.air_lift = 0.0;
@@ -3169,70 +2743,27 @@ impl Skater {
         DECK_HEIGHT + self.body_com.unwrap_or(air::COM_TO_DECK)
     }
 
-    /// Skate 3's foot plants on the ground (`skater::plant`). With the graphs their clips time them: the
-    /// board in hand while they carry `ANIMSKATEBOARD` (SK8's physical state 602), the jump off the
-    /// planted foot on their `FOOTJUMP`. Without them a ground grab (one trigger fully in) and a push
-    /// button start a boneless or fastplant (Skate 3's action graph's table), a flick while a push's foot
-    /// is still coming down a no-comply, timed as Skate 3's clips are. True: jumped off.
-    fn update_ground_plant(
-        &mut self,
-        pad: &Pad,
-        flick: &FlickOut,
-        dt: f32,
-        events: &mut Vec<Event>,
-    ) -> bool {
-        if let Some(g) = self.graph {
-            let kind = g.plant.or(self.ground_plant.map(|p| p.kind));
-            if g.foot_jump
-                && let Some(kind) = kind
-            {
-                self.foot_jump_off(kind, events);
-                return true;
-            }
-            if g.anim_skateboard {
-                let p = self.ground_plant.get_or_insert(GroundPlant {
-                    kind: kind.unwrap_or(PlantKind::FsBoneless),
-                    time: 0.0,
-                    lifted: true,
-                });
-                p.time += dt;
-            } else {
-                self.ground_plant = None;
-            }
-            return false;
-        }
-        if self.ground_plant.is_none() && self.manual.is_none() && self.hippy.is_none() {
-            use crate::graph::input::TRIGGER_FULL;
-            let full = (pad.trig_l >= TRIGGER_FULL, pad.trig_r >= TRIGGER_FULL);
-            let (a, b) = (pad.was_pressed(btn::A), pad.was_pressed(btn::B));
-            let kind = if full.0 != full.1 && a != b {
-                Some(PlantKind::from_grab(full.0, a, self.mirrored()))
-            } else if flick.flick.is_some() && self.push.is_some_and(|p| p.stage().0 == 0) {
-                Some(PlantKind::NoComply)
-            } else {
-                None
-            };
-            if let Some(kind) = kind {
-                self.ground_plant = Some(GroundPlant {
-                    kind,
-                    time: 0.0,
-                    lifted: false,
-                });
-                self.push = None;
-                self.brake = None;
-                self.slide = None;
-            }
-        }
-        let Some(p) = &mut self.ground_plant else {
-            return false;
-        };
-        p.time += dt;
-        let (plant, lift) = p.kind.timing();
-        p.lifted = p.time >= plant;
-        if p.time >= plant + lift {
-            let kind = p.kind;
+    /// Skate 3's foot plants on the ground (`skater::plant`), timed by the graphs' clips: the board in
+    /// hand while they carry `ANIMSKATEBOARD` (SK8's physical state 602), the jump off the planted foot
+    /// on their `FOOTJUMP`. True: jumped off.
+    fn update_ground_plant(&mut self, dt: f32, events: &mut Vec<Event>) -> bool {
+        let g = self.graph;
+        let kind = g.plant.or(self.ground_plant.map(|p| p.kind));
+        if g.foot_jump
+            && let Some(kind) = kind
+        {
             self.foot_jump_off(kind, events);
             return true;
+        }
+        if g.anim_skateboard {
+            let p = self.ground_plant.get_or_insert(GroundPlant {
+                kind: kind.unwrap_or(PlantKind::FsBoneless),
+                time: 0.0,
+                lifted: true,
+            });
+            p.time += dt;
+        } else {
+            self.ground_plant = None;
         }
         false
     }
@@ -3259,31 +2790,8 @@ impl Skater {
     /// In the air: the one-foot grab (Skate 3's `OneFootAir`: a grab and a push button; with the graphs
     /// their one-foot states) runs the foot plant manager; when the free foot meets something it plants
     /// and the swing over it starts (SK8 known/footplant.rs, footplant/update.rs, pose.rs).
-    fn update_footplant(
-        &mut self,
-        park: &dyn Terrain,
-        pad: &Pad,
-        now: f32,
-        events: &mut Vec<Event>,
-    ) {
-        let one_foot = match self.graph {
-            Some(g) => g.one_foot_air,
-            None => {
-                let pushing = pad.is_held(btn::A) || pad.is_held(btn::B);
-                let new = pad.was_pressed(btn::A) || pad.was_pressed(btn::B);
-                if self.grab.is_none() || !pushing {
-                    self.one_foot = None;
-                } else if self.one_foot.is_none() && new {
-                    // Skate 3's action graph: the left hand's grab is its FSGrab and the right foot's
-                    // push its RightOneFootAir, for the unmirrored rider.
-                    let left = pad.trig_l > 0.0 && pad.trig_l >= pad.trig_r;
-                    let m = self.mirrored();
-                    self.one_foot = Some((left != m, pad.is_held(btn::A) != m));
-                }
-                self.one_foot.is_some()
-            }
-        };
-        let runs = one_foot
+    fn update_footplant(&mut self, park: &dyn Terrain, now: f32, events: &mut Vec<Event>) {
+        let runs = self.graph.one_foot_air
             && self.plant_clock > plant::MIN_AIR_TIME
             && !(self.takeoff.hippy || self.takeoff.mount || self.takeoff.onto_free);
         if !runs {
@@ -3304,8 +2812,7 @@ impl Skater {
             landing_normal,
             landing_time,
             candidate: true,
-            // Without the graphs the clips would reach for it as soon as it is near.
-            planting: self.graph.is_none_or(|g| g.foot_planting),
+            planting: self.graph.foot_planting,
         };
         self.footplant.update(&t.plant, park, &frame);
         if !self.footplant.perform {
@@ -3315,12 +2822,9 @@ impl Skater {
         self.air_plant = Some(AirPlant::start(
             &t.plant, com, self.vel, m.contact, m.normal,
         ));
-        self.footplanted = Some(match self.graph.and_then(|g| g.grab_name) {
+        self.footplanted = Some(match self.graph.grab_name {
             Some(n) if n.ends_with("footplant") => n,
-            _ => {
-                let (fs_grab, fs_foot) = self.one_foot.unwrap_or((true, true));
-                plant::footplant_name(fs_grab, fs_foot)
-            }
+            _ => plant::footplant_name(true, true),
         });
         self.plan = None;
         self.selector = air::Selector::default();
@@ -3350,7 +2854,6 @@ impl Skater {
                 + p.normal * 0.02
                 + Vec3::UP * (plant::RELEASE_LIFT - plant::RELEASE_BOARD_DROP);
             self.footplant = plant::Manager::default();
-            self.one_foot = None;
             self.plant_clock = 0.0;
             self.plan = None;
             self.selector = air::Selector::default();
@@ -3393,15 +2896,7 @@ impl Skater {
         }
     }
 
-    fn fly(
-        &mut self,
-        park: &dyn Terrain,
-        pad: &Pad,
-        flick: &FlickOut,
-        time: f32,
-        dt: f32,
-        events: &mut Vec<Event>,
-    ) {
+    fn fly(&mut self, park: &dyn Terrain, pad: &Pad, time: f32, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
         let now = time - dt;
         self.plant_clock += dt;
@@ -3410,7 +2905,7 @@ impl Skater {
             return;
         }
         if self.hand_plant.is_some() {
-            self.in_hand_plant(pad, time, dt, events);
+            self.in_hand_plant(time, dt, events);
             return;
         }
         self.update_prediction(park, now);
@@ -3422,7 +2917,7 @@ impl Skater {
         // known landing and the stick let go, the assist turns the body towards the landing direction
         // (or the other way round when that is nearer); without one the stick's spin goes through the
         // assist's path.
-        let stick = self.spin_input(pad);
+        let stick = self.spin_input();
         let auto = match &self.plan {
             Some(p) => match p.heading {
                 Some(h) if stick == 0.0 && p.grind.is_none() => {
@@ -3511,20 +3006,10 @@ impl Skater {
             self.air_lift_rate = (c0 - d - self.air_lift) / dt.max(1e-4);
             self.air_lift = c0 - d;
         }
-        if let Some(g) = self.graph {
-            self.follow_graph_trick(&g);
-        } else if let Some(tr) = &mut self.trick {
-            tr.t += dt;
-            // Holding a kickflip or heelflip on the stick keeps it flipping.
-            let flip_only = matches!(tr.flick.trick, Trick::Kickflip | Trick::Heelflip);
-            let one = trick_duration(tr.flick.trick);
-            if flip_only && flick.holding_flip && tr.flips < MAX_FLIPS && tr.t > tr.duration - 0.1 {
-                tr.flips += 1;
-                tr.duration += one;
-            }
-        }
-        self.update_grab(pad, flick, dt);
-        self.update_footplant(park, pad, now, events);
+        let g = self.graph;
+        self.follow_graph_trick(&g);
+        self.update_grab(pad, dt);
+        self.update_footplant(park, now, events);
         if self.air_plant.is_some() {
             self.air_time = time;
             return;
@@ -3648,7 +3133,7 @@ impl Skater {
     /// the rider is falling upside down without the grab (a bail).
     fn update_body_flip(&mut self, now: f32, dt: f32) -> bool {
         let m = self.tuning.moves;
-        let g = self.graph.unwrap_or_default();
+        let g = self.graph;
         let grabbing = g.grabbing || self.grab.is_some();
         if self.body_flip.is_none()
             && let (Some(front), true, Some(p)) = (g.body_flip, grabbing, &self.plan)
@@ -3756,7 +3241,6 @@ impl Skater {
         self.grabbed = None;
         self.manual = None;
         self.landing = None;
-        self.push = None;
         self.brake = None;
         self.slide = None;
         self.revert = None;
@@ -3830,16 +3314,7 @@ impl Skater {
     /// (where the camera and the reset look) follows the pelvis.
     fn step_wipeout(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32) {
         let control = biped::world_stick(pad.stick, self.cam_yaw);
-        let gesture = match self.graph {
-            Some(g) => g.wipe_gesture,
-            None => {
-                let m = &self.tuning.moves;
-                let blend = [m.wipe_gesture_x_blend, m.wipe_gesture_y_blend];
-                self.wipeout
-                    .gesture_from_stick(pad.flick, self.wipe_request, blend);
-                self.wipeout.gesture
-            }
-        };
+        let gesture = self.graph.wipe_gesture;
         let input = wipeout::Input {
             control,
             gesture,
@@ -3875,7 +3350,6 @@ impl Skater {
         self.grabbed = None;
         self.manual = None;
         self.landing = None;
-        self.push = None;
         self.brake = None;
         self.slide = None;
         self.revert = None;
@@ -3945,7 +3419,7 @@ impl Skater {
     /// right: which grab that is depends on the stance. The C-stick picks the grab's variant and tweaks
     /// it (with the state graphs, their `ScoringGrabs` name and `TweakX`/`TweakY`). Letting go keeps the
     /// longest grab of the jump.
-    fn update_grab(&mut self, pad: &Pad, flick: &FlickOut, dt: f32) {
+    fn update_grab(&mut self, pad: &Pad, dt: f32) {
         let (l, r) = (pad.trig_l > GRAB_TRIGGER, pad.trig_r > GRAB_TRIGGER);
         // The clips' goofy rider has the right hand at the back.
         let (rear, front) = if self.mirrored() { (l, r) } else { (r, l) };
@@ -3956,25 +3430,10 @@ impl Skater {
             (false, false) => None,
         };
         let free = self.trick.is_none_or(|t| t.progress() >= 1.0);
-        // The C-stick in gesture space has y towards the player: up is -y.
-        let [cx, cy] = flick.stick;
-        let (x, y) = if self.mirrored() {
-            (-cx, -cy)
-        } else {
-            (cx, -cy)
-        };
+        // The grab's name is the graph's (its `ScoringGrabs` variant), else the hand's base grab.
         let graph = self.graph;
-        let name_of = |kind: GrabKind| match graph.and_then(|g| g.grab_name) {
-            Some(n) => n,
-            None => {
-                let (base, variants) = kind.names();
-                select_grab(base, variants, x, y)
-            }
-        };
-        let tweak = match graph {
-            Some(g) => g.tweak,
-            None => sqrtf(cx * cx + cy * cy).min(1.0),
-        };
+        let name_of = |kind: GrabKind| graph.grab_name.unwrap_or(kind.names().0);
+        let tweak = graph.tweak;
         match (&mut self.grab, held) {
             (Some(g), Some(kind)) => {
                 g.time += dt;
@@ -4022,8 +3481,20 @@ impl Skater {
         if self.takeoff.onto_free && !self.land_on_free_board(normal, events) {
             return;
         }
-        // The board lands as the rider lined it up (board adjust): its nose is the landing's.
+        // The board lands as the rider lined it up (board adjust): its nose is the landing's. The
+        // physical board flew turned to the animated one (the clips' adjust, `fly_rig`): Skate 3
+        // lands that board, so its nose is the landing's.
         self.bake_deck_adjust();
+        if self.body_flip.is_none()
+            && let Some(r) = self.rig.as_ref().filter(|r| r.airborne)
+        {
+            let up = self.normal.normalize_or(Vec3::UP);
+            let nose = tangent(r.board.deck().axes.cols[2] * self.rig_sign(), up);
+            if nose.length() > 0.5 {
+                self.fwd = nose;
+                self.sync_heading();
+            }
+        }
         self.air_com = None;
         self.air_lift = 0.0;
         let n = normal.normalize_or(Vec3::UP);
@@ -4067,12 +3538,8 @@ impl Skater {
         let backwards = off.abs() > PI / 2.0;
         let crooked_signed = if backwards { wrap_angle(off + PI) } else { off };
         let crooked = crooked_signed.abs();
-        // The board isn't caught yet: the clips' `DANGERZONE` with the state graphs, else the built-in
-        // board's trick animation.
-        let danger = match self.graph {
-            Some(g) => g.danger,
-            None => self.trick.is_some_and(|t| t.progress() < 1.0),
-        };
+        // The board isn't caught yet: the clips' `DANGERZONE`.
+        let danger = self.graph.danger;
         let stairs = crate::park::surface_category(surface) == crate::park::STAIRS;
         // Skate 3's bad landing (SK8 wipeout/air.rs `bad_landing`): made only where the physics mode
         // checks it, its limits times the mode's scale.
@@ -4089,7 +3556,6 @@ impl Skater {
         } else {
             f32::INFINITY
         };
-        let tweaked = self.graph.is_none() && self.grab.is_some_and(|g| g.tweak >= GRAB_TWEAK_BAIL);
         let reason = if danger
             && air_time * 60.0 > t.danger_ignore_ticks
             && (closing_up > t.danger_max_impact || closing_side > t.danger_max_side)
@@ -4103,8 +3569,6 @@ impl Skater {
             } else {
                 "hit the ground too hard"
             })
-        } else if tweaked {
-            Some("landed still tweaking a grab")
         } else {
             None
         };
@@ -4256,12 +3720,7 @@ impl Skater {
         let b = self.possession.board;
         self.pos.x = b.pos.x;
         self.pos.z = b.pos.z;
-        let (reversed, asked) = match self.graph {
-            Some(g) => (g.land_backwards, true),
-            None => (false, false),
-        };
-        let facing = self.fwd;
-        let nose = if (asked && reversed) || (!asked && b.nose.dot(facing) < 0.0) {
+        let nose = if self.graph.land_backwards {
             -b.nose
         } else {
             b.nose
@@ -4363,14 +3822,15 @@ mod tests {
         s
     }
 
-    fn flicked(f: Flick) -> FlickOut {
-        FlickOut {
-            flick: Some(f),
-            strength: 1.0,
-            ..FlickOut::default()
-        }
+    /// One tick with the state graph popping `f` at full strength (its takeoff clip reaching the jump,
+    /// as the game's graph hands it to the physics).
+    fn popped(s: &mut Skater, park: &dyn Terrain, pad: &Pad, f: Flick, ev: &mut Vec<Event>) {
+        s.graph.pop = Some((f, 1.0));
+        s.step(park, pad, &FlickOut::default(), DT, ev);
+        s.graph.pop = None;
     }
 
+    /// `n` ticks; with `flick` the state graph pops it on the first.
     fn steps(
         s: &mut Skater,
         park: &dyn Terrain,
@@ -4380,11 +3840,10 @@ mod tests {
     ) -> Vec<Event> {
         let mut ev = Vec::new();
         for i in 0..n {
-            let f = match flick {
-                Some(f) if i == 0 => flicked(f),
-                _ => FlickOut::default(),
-            };
-            s.step(park, pad, &f, DT, &mut ev);
+            match flick {
+                Some(f) if i == 0 => popped(s, park, pad, f, &mut ev),
+                _ => s.step(park, pad, &FlickOut::default(), DT, &mut ev),
+            }
         }
         ev
     }
@@ -4424,90 +3883,6 @@ mod tests {
         let a = 65.0 * PI / 180.0;
         let s = steering([-sinf(a), -cosf(a)]);
         assert!(s.hard < 0.0 && s.slide == 0.0, "{s:?}");
-    }
-
-    #[test]
-    fn a_tap_pushes_less_than_a_hold_and_pushing_caps() {
-        let park = flat();
-        let mut tap = spawn(&park);
-        steps(&mut tap, &park, &press(btn::A), None, 1);
-        steps(&mut tap, &park, &Pad::default(), None, 60);
-        let mut held = spawn(&park);
-        steps(&mut held, &park, &press(btn::A), None, 1);
-        steps(&mut held, &park, &hold(btn::A), None, 30);
-        steps(&mut held, &park, &Pad::default(), None, 30);
-        assert!(tap.speed > 0.5, "{}", tap.speed);
-        assert!(
-            held.speed > tap.speed + 1.0,
-            "{} vs {}",
-            held.speed,
-            tap.speed
-        );
-        // Holding A keeps pushing, up to the top push speed.
-        let mut s = spawn(&park);
-        steps(&mut s, &park, &press(btn::A), None, 1);
-        steps(&mut s, &park, &hold(btn::A), None, 60 * 3);
-        assert!(s.speed <= s.tuning.push_max_speed + 1e-3);
-        assert!(s.speed > s.tuning.push_max_speed - 1.0, "{}", s.speed);
-        assert!(s.pos.z > 5.0, "rolled forward along +z");
-        // Rolling resistance slows a coasting board, more once the controls are left alone.
-        let v = s.speed;
-        steps(&mut s, &park, &Pad::default(), None, 60 * 5);
-        assert!(s.speed < v - 0.3, "{} -> {}", v, s.speed);
-    }
-
-    #[test]
-    fn pushes_follow_the_clip_timing_and_caps() {
-        let park = flat();
-        let c = ClipTiming::BUILT_IN;
-        // From a standstill nothing happens until the foot comes down (the push's wind-up).
-        let mut s = spawn(&park);
-        steps(&mut s, &park, &press(btn::A), None, 1);
-        let wind_up = (c.push[0].into * 60.0) as usize;
-        steps(&mut s, &park, &hold(btn::A), None, wind_up - 2);
-        assert!(s.speed.abs() < 1e-3, "{}", s.speed);
-        // Then the board chases the push's end speed, a limited amount a tick.
-        let mut last = s.speed;
-        for _ in 0..6 {
-            steps(&mut s, &park, &hold(btn::A), None, 1);
-            assert!(s.speed - last <= s.tuning.push_tick_limit_slow + 1e-4);
-            last = s.speed;
-        }
-        assert!(s.speed > 0.5);
-        // A full first push ends at the strong slow clip's end speed.
-        steps(&mut s, &park, &Pad::default(), None, 40);
-        assert!((s.speed - c.push[0].vel_e).abs() < 0.15, "{}", s.speed);
-        // A tap ends at the gentle one's.
-        let mut tap = spawn(&park);
-        steps(&mut tap, &park, &press(btn::A), None, 1);
-        steps(&mut tap, &park, &Pad::default(), None, 60);
-        assert!((tap.speed - c.push[2].vel_e).abs() < 0.15, "{}", tap.speed);
-        // Holding on: each repeat adds at most the held-push cap, and never past the top push speed.
-        let mut s = spawn(&park);
-        steps(&mut s, &park, &press(btn::A), None, 1);
-        let mut at = Vec::new();
-        let mut gains = Vec::new();
-        let mut base = 0.0;
-        for _ in 0..(60 * 6) {
-            let before = s.push.map(|p| p.count);
-            steps(&mut s, &park, &hold(btn::A), None, 1);
-            if let (Some(b), Some(p)) = (before, s.push)
-                && p.count != b
-            {
-                at.push(s.speed);
-                gains.push(s.speed - base);
-                base = s.speed;
-            }
-            assert!(s.speed <= s.tuning.push_max_speed + 1e-3);
-        }
-        assert!(at.len() >= 3, "{at:?}");
-        assert!(
-            gains[1..]
-                .iter()
-                .all(|g| *g <= s.tuning.push_hold_cap + 0.05),
-            "{gains:?}"
-        );
-        assert!(s.speed > s.tuning.push_max_speed - 0.5, "{}", s.speed);
     }
 
     #[test]
@@ -4557,58 +3932,6 @@ mod tests {
             ClipTiming::BUILT_IN.push[1],
             "missing sets stay built in"
         );
-    }
-
-    #[test]
-    fn a_press_during_a_push_waits_for_the_repush_point() {
-        let park = flat();
-        let mut s = spawn(&park);
-        steps(&mut s, &park, &press(btn::A), None, 1);
-        let into = (s.clips.push[0].into * 60.0) as usize;
-        steps(&mut s, &park, &Pad::default(), None, into + 1);
-        let p = s.push.expect("pushing");
-        assert_eq!(p.stage().0, 1, "{p:?}");
-        // A tap while the foot is down is kept, and starts the next push only at the re-push point.
-        steps(&mut s, &park, &press(btn::A), None, 1);
-        assert_eq!(
-            s.push.map(|p| (p.count, p.queued.is_some())),
-            Some((0, true))
-        );
-        let mut next_at = None;
-        for i in 0..90 {
-            steps(&mut s, &park, &Pad::default(), None, 1);
-            if next_at.is_none() && s.push.is_some_and(|p| p.count == 1) {
-                next_at = Some(i);
-            }
-        }
-        let next_at = next_at.expect("the next push started");
-        assert!(next_at as f32 >= p.contact * 60.0 - 3.0, "{next_at}");
-        // Both buttons cancel a push.
-        let mut s = spawn(&park);
-        steps(&mut s, &park, &press(btn::A), None, 1);
-        steps(&mut s, &park, &hold(btn::A | btn::B), None, 1);
-        assert!(s.push.is_none());
-    }
-
-    #[test]
-    fn b_pushes_mongo_and_the_brake_waits_for_the_foot() {
-        let park = flat();
-        let mut s = spawn(&park);
-        steps(&mut s, &park, &press(btn::B), None, 1);
-        assert!(s.push.is_some_and(|p| p.mongo));
-        steps(&mut s, &park, &hold(btn::B), None, 120);
-        assert!(s.speed > 2.0);
-        // Nothing until the braking foot reaches the ground...
-        let v = s.speed;
-        let down = (s.clips.brake_down * 60.0) as usize;
-        steps(&mut s, &park, &hold(btn::X), None, down - 1);
-        assert!(s.brake.is_some());
-        assert!(s.speed > v - 0.05, "{v} -> {}", s.speed);
-        // ...then it slows the board and holds it still.
-        steps(&mut s, &park, &hold(btn::X), None, 40);
-        assert!(s.speed < v - 1.0, "foot brake: {v} -> {}", s.speed);
-        steps(&mut s, &park, &hold(btn::X), None, 300);
-        assert_eq!(s.speed, 0.0);
     }
 
     /// The main stick at `deg` degrees from straight back (+ right), fully over.
@@ -4742,10 +4065,10 @@ mod tests {
         let rate = |pushing: bool| {
             let mut s = spawn(&park);
             s.speed = 6.65;
-            s.graph = Some(GraphControl {
+            s.graph = GraphControl {
                 pushing,
                 ..GraphControl::default()
-            });
+            };
             steps(&mut s, &park, &half, None, 60);
             s.yaw_rate.abs()
         };
@@ -4769,6 +4092,8 @@ mod tests {
             stick: [-1.0, 0.0],
             ..Pad::default()
         };
+        // The graph's KickTurn state, at its stock spin scale.
+        s.graph.kickturn = Some(KICKTURN_SPIN_SCALE);
         let mut peak: f32 = 0.0;
         for _ in 0..60 {
             let before = yaw(&s);
@@ -4779,6 +4104,7 @@ mod tests {
         assert!((135.0..160.0).contains(&turned), "{turned} degrees");
         assert!((peak - 3.2).abs() < 0.15, "peak {peak} rad/s");
         let before = yaw(&s);
+        s.graph.kickturn = None;
         steps(&mut s, &park, &Pad::default(), None, 1);
         let after = wrap_angle(yaw(&s) - before).abs() * 60.0;
         assert!((after - 0.7 * peak).abs() < 0.3, "let go: {after} rad/s");
@@ -4792,6 +4118,8 @@ mod tests {
         let park = flat();
         let mut s = spawn(&park);
         s.speed = 6.65;
+        // The brake clip's foot is down (its `BRAKE_CONTACT`).
+        s.graph.brake_contact = true;
         steps(&mut s, &park, &hold(btn::X), None, 20);
         let v0 = s.speed;
         steps(&mut s, &park, &hold(btn::X), None, 30);
@@ -4845,12 +4173,9 @@ mod tests {
             let mut s = spawn(&park);
             s.speed = 4.0;
             let mut ev = Vec::new();
-            let f = FlickOut {
-                flick: Some(Flick::OLLIE),
-                strength,
-                ..FlickOut::default()
-            };
-            s.step(&park, &Pad::default(), &f, DT, &mut ev);
+            s.graph.pop = Some((Flick::OLLIE, strength));
+            s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
+            s.graph.pop = None;
             let mut top: f32 = 0.0;
             for _ in 0..90 {
                 s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
@@ -4864,7 +4189,7 @@ mod tests {
     #[test]
     fn every_flick_trick_lands_on_flat() {
         let park = flat();
-        for t in gesture::TRICKS {
+        for t in crate::gesture::TRICKS {
             for nollie in [false, true] {
                 let f = Flick { trick: t, nollie };
                 let mut s = spawn(&park);
@@ -4883,49 +4208,6 @@ mod tests {
         };
         let ev = steps(&mut s, &park, &Pad::default(), Some(f), 120);
         assert_eq!(landed(&ev), ["NOLLIE 360 FLIP"]);
-    }
-
-    #[test]
-    fn regular_stance_mirrors_the_flick() {
-        let park = flat();
-        let mut s = Skater::spawn_with(&park, Tuning::BUILT_IN, Stance::Regular);
-        s.speed = 4.0;
-        let ev = steps(
-            &mut s,
-            &park,
-            &Pad::default(),
-            Some(Flick::of(Trick::Kickflip)),
-            120,
-        );
-        assert_eq!(landed(&ev), ["HEELFLIP"]);
-    }
-
-    #[test]
-    fn holding_the_kickflip_flips_it_again() {
-        let park = flat();
-        let mut s = spawn(&park);
-        s.speed = 4.0;
-        // A big pop so there is time for two flips.
-        s.tuning.jump_high = 2.4;
-        let mut ev = Vec::new();
-        s.step(
-            &park,
-            &Pad::default(),
-            &flicked(Flick::of(Trick::Kickflip)),
-            DT,
-            &mut ev,
-        );
-        let holding = FlickOut {
-            holding_flip: true,
-            ..FlickOut::default()
-        };
-        for _ in 0..30 {
-            s.step(&park, &Pad::default(), &holding, DT, &mut ev);
-        }
-        for _ in 0..90 {
-            s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
-        }
-        assert_eq!(landed(&ev), ["DOUBLE KICKFLIP"], "{ev:?}");
     }
 
     /// Touches down on flat ground moving at `speed` along +z (and `down` m/s into it) with the board
@@ -5122,7 +4404,10 @@ mod tests {
         assert_eq!(landed(&ev), ["BS 180 OLLIE"], "{ev:?}");
         // Travel stays along +z; the board's nose points back.
         assert!(s.travel_yaw().abs() < 0.1);
+        // The graph turns the rider round (pushing out of fakie).
+        s.graph.turn_round = true;
         let ev = steps(&mut s, &park, &press(btn::A), None, 1);
+        s.graph.turn_round = false;
         assert!(ev.contains(&Event::Switched));
         assert!(s.switch && !s.fakie && s.speed > 0.0 && s.mirrored());
         assert!(s.heading.abs() < 0.1, "nose leads again");
@@ -5177,12 +4462,10 @@ mod tests {
             }
         }
         assert!(s.fakie);
-        let a = 30.0 * PI / 180.0;
-        let slide = Pad {
-            stick: [sinf(a), -cosf(a)],
-            ..Default::default()
-        };
-        let mut ev = steps(&mut s, &park, &slide, None, 3);
+        // The graph's revert gesture (frontside).
+        s.graph.revert = Some(true);
+        let mut ev = steps(&mut s, &park, &Pad::default(), None, 1);
+        s.graph.revert = None;
         ev.extend(steps(&mut s, &park, &Pad::default(), None, 90));
         assert_eq!(landed(&ev), ["REVERT"], "{ev:?}");
         assert!(!s.fakie && s.speed > 0.0);
@@ -5215,11 +4498,9 @@ mod tests {
         s.speed = 5.0;
         steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
         s.set_spin(25.0 * PI / 180.0);
-        let nudge = Pad {
-            stick: [0.0001, 0.0],
-            ..Default::default()
-        };
-        let ev = steps(&mut s, &park, &nudge, None, 100);
+        // The graph's `PhysBodySpin` nudged off centre.
+        s.graph.body_spin = 0.0001;
+        let ev = steps(&mut s, &park, &Pad::default(), None, 100);
         assert!(
             landed(&ev).iter().any(|n| n.starts_with("SKETCHY")),
             "{ev:?}"
@@ -5231,15 +4512,14 @@ mod tests {
         let park = flat();
         let mut s = spawn(&park);
         s.speed = 4.0;
-        let left = Pad {
-            stick: [-1.0, 0.0],
-            ..Default::default()
-        };
         steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
-        steps(&mut s, &park, &left, None, 8);
+        // The graph's `PhysBodySpin`: the stick hard left, then let go.
+        s.graph.body_spin = -1.0;
+        steps(&mut s, &park, &Pad::default(), None, 8);
         let at_release = s.spin;
         let rate = s.spin_rate;
         assert!(rate > 1.0, "{rate}");
+        s.graph.body_spin = 0.0;
         steps(&mut s, &park, &Pad::default(), None, 8);
         assert!(s.is_airborne());
         assert!(s.spin > at_release + 0.2, "{} -> {}", at_release, s.spin);
@@ -5271,68 +4551,6 @@ mod tests {
         assert!(ev.contains(&Event::Bailed));
     }
 
-    /// Holds a manual (C-stick lightly back) for `secs`, correcting the balance when `correct`.
-    fn hold_manual(s: &mut Skater, park: &Park, secs: f32, correct: bool) -> Vec<Event> {
-        let mut ev = Vec::new();
-        for _ in 0..(secs / DT) as usize {
-            s.speed = 5.0; // stay rolling
-            let b = s.manual.map_or(0.0, |m| m.balance);
-            let push = if correct {
-                MANUAL_SWEET - 1.2 * b
-            } else {
-                MANUAL_SWEET
-            };
-            let y = MANUAL_MIN + push.clamp(0.02, 0.98) * (MANUAL_BRAKE - MANUAL_MIN);
-            let f = FlickOut {
-                stick: [0.0, y],
-                ..FlickOut::default()
-            };
-            s.step(park, &Pad::default(), &f, DT, &mut ev);
-        }
-        ev
-    }
-
-    #[test]
-    fn manuals_score_when_balanced_and_tip_over_when_not() {
-        let park = flat();
-        let mut s = spawn(&park);
-        let ev = hold_manual(&mut s, &park, 2.0, true);
-        assert!(!ev.contains(&Event::ManualLost), "{ev:?}");
-        let m = s.manual.expect("in a manual");
-        assert!(!m.nose && m.time > 1.7);
-        let ev = steps(&mut s, &park, &Pad::default(), None, 1);
-        assert!(
-            matches!(&ev[..], [Event::Landed { name, score: crate::scoring::Scored::Ground { id, held }, .. }]
-                if name == "MANUAL" && *id == crate::scoring::catalog::id("tailmanual") && *held > 1.7),
-            "{ev:?}"
-        );
-        let ev = hold_manual(&mut s, &park, 5.0, false);
-        assert!(ev.contains(&Event::ManualLost), "{ev:?}");
-        // Stick forward: a nose manual.
-        let mut s = spawn(&park);
-        s.speed = 5.0;
-        let f = FlickOut {
-            stick: [0.0, -0.5],
-            ..FlickOut::default()
-        };
-        let mut ev = Vec::new();
-        for _ in 0..12 {
-            s.step(&park, &Pad::default(), &f, DT, &mut ev);
-        }
-        assert!(s.manual.is_some_and(|m| m.nose));
-        // Pushed past the manual zone: the nose drags and brakes.
-        let f = FlickOut {
-            stick: [0.0, -1.0],
-            ..FlickOut::default()
-        };
-        let v = s.speed;
-        for _ in 0..20 {
-            s.step(&park, &Pad::default(), &f, DT, &mut ev);
-        }
-        assert!(s.manual.is_some_and(|m| m.brake > 0.5), "{ev:?}");
-        assert!(s.speed < v - 0.5);
-    }
-
     #[test]
     fn a_quick_pull_for_an_ollie_is_not_a_manual() {
         let park = flat();
@@ -5359,13 +4577,13 @@ mod tests {
         let both = btn::A | btn::B;
         let mut ev = steps(&mut s, &park, &press(both), None, 1);
         ev.extend(steps(&mut s, &park, &hold(both), None, 20));
-        assert!(s.hippy.is_some() && s.push.is_none());
+        assert!(s.hippy.is_some());
         ev.extend(steps(&mut s, &park, &Pad::default(), None, 120));
         assert_eq!(landed(&ev), ["HIPPIE JUMP"], "{ev:?}");
     }
 
     #[test]
-    fn grabs_follow_the_hands_and_landing_tweaking_one_bails() {
+    fn grabs_follow_the_hands() {
         let park = flat();
         let grab = |trig_r: f32| Pad {
             trig_r,
@@ -5388,25 +4606,17 @@ mod tests {
         // Held into the landing without a tweak: it lands.
         let ev = steps(&mut s, &park, &grab(1.0), None, 80);
         assert_eq!(landed(&ev), ["OLLIE MELON"], "{ev:?}");
-        // The C-stick picks the variant (up on the front hand: a nosegrab) and tweaks it; landing still
-        // tweaking it wipes out.
+        // The graph names the variant (`ScoringGrabs`, from the C-stick).
         let mut s = spawn(&park);
         s.speed = 5.0;
         steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 5);
-        let up = FlickOut {
-            stick: [0.0, -0.9],
-            ..FlickOut::default()
-        };
+        s.graph.grab_name = Some("NOSEGRAB");
         let pad = Pad {
             trig_l: 1.0,
             ..Default::default()
         };
-        let mut ev = Vec::new();
-        for _ in 0..80 {
-            s.step(&park, &pad, &up, DT, &mut ev);
-        }
-        assert!(ev.contains(&Event::Bailed), "{ev:?}");
-        assert_eq!(s.bail_reason, Some("landed still tweaking a grab"));
+        steps(&mut s, &park, &pad, None, 5);
+        assert_eq!(s.grab.map(|g| g.name), Some("NOSEGRAB"));
     }
 
     #[test]
@@ -5451,7 +4661,7 @@ mod tests {
                 stick: [-1.0, 0.0],
                 ..Default::default()
             };
-            s.step(&park, &pad, &flicked(Flick::OLLIE), DT, &mut ev);
+            popped(&mut s, &park, &pad, Flick::OLLIE, &mut ev);
             for _ in 0..20 {
                 s.step(&park, &pad, &FlickOut::default(), DT, &mut ev);
             }
@@ -6067,10 +5277,10 @@ mod tests {
         place(&mut s, v3(0.0, 0.4, 1.5), n, f);
         s.speed = 6.0;
         let mut h = 0.5;
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             pose_com: Some(h),
             ..GraphControl::default()
-        });
+        };
         // Put down mid-transition with no pitch rate, the board's back wheels lift off the curve for
         // a few ticks before it rides it (a board riding in from the flat never does).
         const SETTLE: usize = 4;
@@ -6081,20 +5291,20 @@ mod tests {
             let mut p = spawn(&park);
             place(&mut p, v3(0.0, 0.4, 1.5), n, f);
             p.speed = 6.0;
-            p.graph = Some(GraphControl {
+            p.graph = GraphControl {
                 pose_com: Some(h),
                 ..GraphControl::default()
-            });
+            };
             steps(&mut p, &park, &Pad::default(), None, SETTLE + 7);
             p.speed
         };
         let mut most = 0.0f32;
         for _ in 0..7 {
             h += 0.02;
-            s.graph = Some(GraphControl {
+            s.graph = GraphControl {
                 pose_com: Some(h),
                 ..GraphControl::default()
-            });
+            };
             steps(&mut s, &park, &Pad::default(), None, 1);
             most = most.max(s.pump.dv);
         }
@@ -6734,10 +5944,10 @@ mod tests {
         let mut ev = Vec::new();
         let mut lowest = f32::MAX;
         for k in 1..=60 {
-            s.graph = Some(GraphControl {
+            s.graph = GraphControl {
                 pose_com: Some(0.8 + 0.1 * k as f32),
                 ..Default::default()
-            });
+            };
             s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
             lowest = lowest.min(s.pos.y);
             if !s.is_airborne() {
@@ -6876,7 +6086,7 @@ mod tests {
         place(&mut s, v3(0.0, 3.3, 3.0), v3(0.0, 0.0, -1.0), Vec3::UP);
         s.speed = 3.0;
         let mut ev = Vec::new();
-        s.step(&park, &Pad::default(), &flicked(Flick::OLLIE), DT, &mut ev);
+        popped(&mut s, &park, &Pad::default(), Flick::OLLIE, &mut ev);
         assert!(s.is_airborne(), "{ev:?}");
         // Straight up (a little back in), not thrown out over the flat.
         assert!(s.vel.y > 2.5, "{:?}", s.vel);
@@ -6885,7 +6095,7 @@ mod tests {
         let mut s = spawn(&park);
         s.pos = v3(0.0, 0.0, -10.0);
         s.speed = 3.0;
-        s.step(&park, &Pad::default(), &flicked(Flick::OLLIE), DT, &mut ev);
+        popped(&mut s, &park, &Pad::default(), Flick::OLLIE, &mut ev);
         assert!(s.vel.y > 2.0 && (s.vel.z - 3.0).abs() < 0.2, "{:?}", s.vel);
     }
 
@@ -6897,7 +6107,7 @@ mod tests {
         s.speed = 4.0;
         let z = s.pos.z;
         let mut ev = Vec::new();
-        s.step(&park, &Pad::default(), &flicked(Flick::OLLIE), DT, &mut ev);
+        popped(&mut s, &park, &Pad::default(), Flick::OLLIE, &mut ev);
         assert!(s.is_airborne(), "{ev:?}");
         // A tick's roll along the travel (the camera's anchor would read a stop otherwise).
         assert!(
@@ -6929,16 +6139,16 @@ mod tests {
     fn graph_pushes_drive_only_once_the_foot_is_down() {
         let park = flat();
         let mut s = spawn(&park);
-        s.graph = Some(GraphControl::default());
+        s.graph = GraphControl::default();
         steps(&mut s, &park, &hold(btn::A), None, 30);
         assert!(s.speed.abs() < 0.05, "no contact yet: {}", s.speed);
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             push_contact: true,
             push_target: Some(3.0),
             ..GraphControl::default()
-        });
+        };
         steps(&mut s, &park, &hold(btn::A), None, 1);
-        s.graph = Some(GraphControl::default());
+        s.graph = GraphControl::default();
         steps(&mut s, &park, &hold(btn::A), None, 30);
         assert!(s.speed > 1.0, "the push drove: {}", s.speed);
     }
@@ -6948,13 +6158,21 @@ mod tests {
         let park = flat();
         let mut s = spawn(&park);
         s.speed = 3.0;
-        s.graph = Some(GraphControl::default());
-        steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 5);
+        s.graph = GraphControl::default();
+        let flick = FlickOut {
+            flick: Some(Flick::OLLIE),
+            strength: 1.0,
+            ..FlickOut::default()
+        };
+        let mut ev = Vec::new();
+        for _ in 0..5 {
+            s.step(&park, &Pad::default(), &flick, DT, &mut ev);
+        }
         assert!(s.rolling(), "a flick alone doesn't pop");
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             pop: Some((Flick::of(crate::gesture::Trick::Kickflip), 1.0)),
             ..GraphControl::default()
-        });
+        };
         let ev = steps(&mut s, &park, &Pad::default(), None, 1);
         assert!(s.is_airborne());
         assert!(
@@ -6969,10 +6187,10 @@ mod tests {
         let park = flat();
         let mut s = spawn(&park);
         s.speed = 4.0;
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             manual: Some((false, 1.0, false)),
             ..GraphControl::default()
-        });
+        };
         steps(&mut s, &park, &Pad::default(), None, 600);
         let m = s.manual.expect("still manualing after 10 s");
         let full = m.pitch;
@@ -6992,16 +6210,16 @@ mod tests {
             lo > aim - wobble && hi < aim + wobble,
             "pitch {lo}..{hi}, aim {aim}"
         );
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             manual: Some((false, 0.0, false)),
             ..GraphControl::default()
-        });
+        };
         steps(&mut s, &park, &Pad::default(), None, 60);
         assert!(
             s.manual.unwrap().pitch < full * 0.5,
             "a light lean pitches less"
         );
-        s.graph = Some(GraphControl::default());
+        s.graph = GraphControl::default();
         steps(&mut s, &park, &Pad::default(), None, 1);
         assert!(s.manual.is_none(), "the graph ended it");
     }
@@ -7017,10 +6235,10 @@ mod tests {
             let mut s = spawn(&park);
             s.tuning.manual_corrective = corrective;
             s.speed = speed;
-            s.graph = Some(GraphControl {
+            s.graph = GraphControl {
                 manual: Some((nose, 1.0, brake)),
                 ..GraphControl::default()
-            });
+            };
             steps(&mut s, &park, &Pad::default(), None, 1);
             s.manual_exit
         };
@@ -7038,13 +6256,13 @@ mod tests {
         let mut s = spawn(&park);
         s.tuning.manual_corrective = false;
         s.speed = 4.0;
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             manual: Some((true, 1.0, true)),
             ..GraphControl::default()
-        });
+        };
         steps(&mut s, &park, &Pad::default(), None, 1);
         assert!(s.manual_exit);
-        s.graph = Some(GraphControl::default());
+        s.graph = GraphControl::default();
         steps(&mut s, &park, &Pad::default(), None, 1);
         assert!(!s.manual_exit && s.manual.is_none());
     }
@@ -7055,10 +6273,10 @@ mod tests {
         let park = flat();
         let mut s = spawn(&park);
         s.speed = speed;
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             manual: Some((nose, 1.0, true)),
             ..GraphControl::default()
-        });
+        };
         (0..ticks)
             .map(|_| {
                 steps(&mut s, &park, &Pad::default(), None, 1);
@@ -7126,10 +6344,10 @@ mod tests {
         let park = flat();
         let mut s = spawn(&park);
         s.speed = 4.0;
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             manual: Some((false, 1.0, false)),
             ..GraphControl::default()
-        });
+        };
         steps(&mut s, &park, &Pad::default(), None, 10);
         let m = s.manual.unwrap();
         assert!(m.correction > 0.0);
@@ -7183,10 +6401,10 @@ mod tests {
         s.speed = -2.0;
         s.fakie = true;
         let was = s.switch;
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             turn_round: true,
             ..GraphControl::default()
-        });
+        };
         let ev = steps(&mut s, &park, &Pad::default(), None, 1);
         assert_ne!(s.switch, was);
         assert!(!s.fakie && s.speed > 0.0);
@@ -7199,14 +6417,14 @@ mod tests {
         let park = flat();
         let mut s = spawn(&park);
         s.speed = 3.0;
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             pop: Some((Flick::OLLIE, 1.0)),
             ..GraphControl::default()
-        });
+        };
         let mut ev = steps(&mut s, &park, &Pad::default(), None, 1);
         let mut k = 0;
         while s.is_airborne() && k < 300 {
-            s.graph = Some(air(k));
+            s.graph = air(k);
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
             k += 1;
         }
@@ -7238,11 +6456,11 @@ mod tests {
         let mut k = 0;
         let mut most = 0.0f32;
         while s.is_airborne() && k < 300 {
-            s.graph = Some(GraphControl {
+            s.graph = GraphControl {
                 body_flip: (k < 20).then_some(front),
                 grabbing: grab(k),
                 ..GraphControl::default()
-            });
+            };
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
             if let Some(f) = &s.body_flip {
                 most = most.max(f.angle.abs());
@@ -7277,10 +6495,10 @@ mod tests {
         s.force_state(crate::skater::State::PhysicsAir);
         s.air_time = 0.0;
         s.states.time = 0.0;
-        s.graph = Some(GraphControl {
+        s.graph = GraphControl {
             grabbing: true,
             ..GraphControl::default()
-        });
+        };
         steps(&mut s, &park, &Pad::default(), None, 30);
         assert!(s.body_flip.is_none());
     }
@@ -7314,11 +6532,11 @@ mod tests {
             if !s.is_airborne() {
                 break;
             }
-            s.graph = Some(GraphControl {
+            s.graph = GraphControl {
                 body_flip: (k < 20).then_some(true),
                 grabbing: k < 25,
                 ..GraphControl::default()
-            });
+            };
             steps(&mut s, &park, &Pad::default(), None, 1);
         }
         assert_ne!(s.bail_reason, Some("fell upside down"));
@@ -7383,11 +6601,11 @@ mod tests {
             let mut s = spawn(&park);
             s.tuning.set_difficulty(d);
             s.speed = 3.0;
-            s.graph = Some(GraphControl {
+            s.graph = GraphControl {
                 pop: Some((Flick::OLLIE, 0.0)),
                 pop_from_manual: from_manual,
                 ..GraphControl::default()
-            });
+            };
             steps(&mut s, &park, &Pad::default(), None, 1);
             assert!(s.is_airborne());
             s.vel.y
@@ -7412,10 +6630,10 @@ mod tests {
             s.force_state(crate::skater::State::PhysicsAir);
             s.air_time = 0.5;
             s.states.time = 0.5;
-            s.graph = Some(GraphControl {
+            s.graph = GraphControl {
                 danger,
                 ..GraphControl::default()
-            });
+            };
             // The rider comes down leaning `tilt` across his travel.
             s.normal = rotate(Vec3::UP, v3(0.0, 0.0, 1.0), tilt);
             s.vel = v3(0.0, -into, 3.0);

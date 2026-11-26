@@ -1131,7 +1131,7 @@ impl Skater {
                     }
                 } else if self.riding_ticks > 30 {
                     let toward = (h.point - f.deck).dot(v) > 0.0;
-                    let on_nose = self.graph.is_some_and(|g| g.weight_on_nose);
+                    let on_nose = self.graph.weight_on_nose;
                     let forwards = if self.fakie { !on_nose } else { on_nose };
                     if forwards != toward {
                         return None;
@@ -1264,10 +1264,7 @@ impl Skater {
         category: Category,
         events: &mut Vec<Event>,
     ) -> bool {
-        let free = match self.graph {
-            Some(g) => !g.danger,
-            None => self.trick.is_none_or(|t| t.progress() >= 1.0),
-        };
+        let free = !self.graph.danger;
         if self.grab.is_some() || !free {
             return false;
         }
@@ -1496,7 +1493,6 @@ impl Skater {
         self.spin_rate = 0.0;
         self.manual = None;
         self.slide = None;
-        self.push = None;
         self.brake = None;
         self.revert = None;
         self.kickturn = None;
@@ -1536,22 +1532,8 @@ impl Skater {
     /// left one the frontside grab and the right one the backside grab (the other way round for the
     /// mirrored rider), each as this grind has it; both hands the frontside one where there is one. With
     /// the state graphs, the grab their grind-grab states score.
-    fn grind_grab(&self, g: &mut Grind, pad: &Pad, dt: f32) {
-        let now = match self.graph {
-            Some(gc) => gc.grind_grab,
-            None => {
-                let full = crate::graph::input::TRIGGER_FULL;
-                let (l, r) = (pad.trig_l >= full, pad.trig_r >= full);
-                let (fs, bs) = if self.mirrored() { (r, l) } else { (l, r) };
-                let [fs_grab, bs_grab] = balance::grind_grabs(g.base());
-                match (fs, bs) {
-                    (true, true) => fs_grab.or(bs_grab),
-                    (true, false) => fs_grab,
-                    (false, true) => bs_grab,
-                    (false, false) => None,
-                }
-            }
-        };
+    fn grind_grab(&self, g: &mut Grind, dt: f32) {
+        let now = self.graph.grind_grab;
         g.grab = match (g.grab, now) {
             (Some((a, t)), Some(b)) if a == b => Some((a, t + dt)),
             (_, Some(b)) => Some((b, 0.0)),
@@ -1570,7 +1552,6 @@ impl Skater {
         &mut self,
         park: &dyn Terrain,
         pad: &Pad,
-        flick: &FlickOut,
         dt: f32,
         events: &mut Vec<Event>,
     ) {
@@ -1593,12 +1574,8 @@ impl Skater {
         let last = self.frame();
 
         // Grind grabs, and the 5-0's free end they hold up (`PhysGrindGrabMinHeight`).
-        self.grind_grab(&mut g, pad, dt);
-        let grab_min = match self.graph {
-            Some(gc) => gc.grind_grab_min_height,
-            None if g.grab.is_some() && g.family == Family::FiveO => balance::GRAB_MIN_HEIGHT,
-            None => 0.0,
-        };
+        self.grind_grab(&mut g, dt);
+        let grab_min = self.graph.grind_grab_min_height;
 
         // Controls (SK8 control.rs): the stick's pitch, the sticks' yaw.
         let up_down = pad.flick[1];
@@ -1861,10 +1838,7 @@ impl Skater {
         let fwd_a = fwd.dot(across_s);
         let to_travel = g.dir;
         let slope = balance::pin_slope(&t.grind, grind_n.dot(n), g.relief);
-        g.preparing |= match self.graph {
-            Some(gc) => gc.anticipating,
-            None => flick.crouch > 0.0,
-        };
+        g.preparing |= self.graph.anticipating;
         let mut force = 0.0;
         let mut stop = false;
         match g.family {
@@ -1970,16 +1944,8 @@ impl Skater {
             return;
         }
 
-        // The pop: the state graph's takeoff (its jump), else the flick, read with the grind's group.
-        let pop = match self.graph {
-            Some(gc) => gc.pop,
-            None => flick.flick.map(|f| {
-                (
-                    gesture::select(f, g.group(), self.mirrored()),
-                    flick.strength,
-                )
-            }),
-        };
+        // The pop: the state graph's takeoff (its jump).
+        let pop = self.graph.pop;
         let off_end = g.s <= 0.0 || g.s >= rail.length();
         g.top_speed = g.top_speed.max(g.speed);
         let stopped = g.speed < STOP_SPEED && g.relief <= 0.0;

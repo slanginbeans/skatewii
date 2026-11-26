@@ -1,6 +1,6 @@
-//! flatground's own camera shots, used when the player's disc hasn't supplied Skate 3's
-//! (`rules/camera/shots`). The tree has the shots flatground's own shot choice (`select::built_in`)
-//! asks for, named like the camera graph's so either choice finds them. The low camera's numbers are
+//! The unit tests' camera shots, standing in for Skate 3's from the player's disc
+//! (`rules/camera/shots`; test builds only). The tree has the shots the tests' shot choice
+//! (`select::built_in`) asks for, named like the camera graph's. The low camera's numbers are
 //! ours; the high camera's shots (`bl_high_chase`, `high_grind`, `high_manual`, `bl_high_air`) and the
 //! on-foot shot take Skate 3's distances, angles, smoothing and options (read off the disc; the blend
 //! points of the high chase are ours).

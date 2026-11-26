@@ -158,6 +158,15 @@ impl Mat3 {
             self.apply(o.cols[2]),
         )
     }
+    /// `self^T * o` (`o` in this frame, for a rotation).
+    pub fn transpose_mul(&self, o: &Mat3) -> Mat3 {
+        let t = |v: Vec3| Vec3 {
+            x: self.cols[0].dot(v),
+            y: self.cols[1].dot(v),
+            z: self.cols[2].dot(v),
+        };
+        Mat3::from_cols(t(o.cols[0]), t(o.cols[1]), t(o.cols[2]))
+    }
 }
 
 /// 3x4 row-major affine matrix, the same layout as libogc's `Mtx` (`f32[3][4]`, translation in column 3).

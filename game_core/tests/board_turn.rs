@@ -89,7 +89,7 @@ fn axis_apart(a: f32, b: f32) -> f32 {
     d.min(180.0 - d)
 }
 
-/// What the run saw: the landing's name, and over the 45 frames after it the drawn board's largest
+/// What the run saw: the landing's name, and over the frames watched after it (45, or as asked) the drawn board's largest
 /// step (degrees a frame), its largest gap from the physical board's long axis, and the game's
 /// `board: ...` log lines.
 #[derive(Debug, Default)]
@@ -113,12 +113,12 @@ fn ride(g: &mut Game, fakie: bool, script: impl Fn(u32) -> PadRaw) -> Seen {
     } else {
         g.place_rider(v3(-18.0, 0.0, -15.0), PI / 2.0, 6.0);
     }
-    watch(g, script)
+    watch(g, script, 45)
 }
 
 /// Feeds `script(frame)` from where the rider is and watches the drawn board after the first trick
 /// landing ([`ride`]).
-fn watch(g: &mut Game, script: impl Fn(u32) -> PadRaw) -> Seen {
+fn watch(g: &mut Game, script: impl Fn(u32) -> PadRaw, frames: u32) -> Seen {
     let mut seen = Seen::default();
     let mut since: Option<u32> = None;
     let mut last = drawn_board_yaw(g);
@@ -146,7 +146,7 @@ fn watch(g: &mut Game, script: impl Fn(u32) -> PadRaw) -> Seen {
             }
             seen.bounced |= g.skater.speed * seen.landed_at.1 < 0.0;
             *n += 1;
-            if *n > 45 {
+            if *n > frames {
                 break;
             }
         }
@@ -268,7 +268,9 @@ fn a_180_landed_fakie_into_a_wall_does_not_turn_the_board_under_the_rider() {
             return;
         };
         g.place_rider(v3(-5.0, 0.0, -4.0), PI, 6.0);
-        let seen = watch(&mut g, ollie(false, spin, 24, 0, 0));
+        // A second to reach the wall: the board lands on its own physics, crooked (a sketchy 180),
+        // and how much speed its wheels scrub off decides whether that takes 42 frames or 48.
+        let seen = watch(&mut g, ollie(false, spin, 24, 0, 0), 60);
         assert!(seen.landed_at.1 < 0.0, "landed fakie: {seen:?}");
         assert!(seen.bounced, "the wall pushed him back: {seen:?}");
         assert!(!g.skater.fakie, "rolling nose first after the wall");

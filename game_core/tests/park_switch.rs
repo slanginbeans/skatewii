@@ -9,6 +9,7 @@ use game_core::collision;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::menu::{Location, Request, Screen};
 use game_core::pack::{Kind, name_hash};
+use game_core::skater::GraphControl;
 use game_core::world::{MESH_ALPHA_TEST, encode_mesh};
 
 /// Counts the bytes this thread has live (tests run on several threads).
@@ -149,11 +150,21 @@ fn serve(g: &mut Game, parks: &[&'static [u8]]) -> Option<Request> {
     r
 }
 
+/// `frames` frames holding `buttons`; a push button held pushes (a synthetic state graph's push, the
+/// foot down chasing 3 m/s: without imported data no graphs run).
 fn ride(g: &mut Game, frames: usize, buttons: u32) {
     for _ in 0..frames {
+        let push = buttons & (btn::A | btn::B) != 0 && g.menu.is_none();
+        g.skater.graph = GraphControl {
+            push_contact: push,
+            push_target: push.then_some(3.0),
+            pushing: push,
+            ..GraphControl::default()
+        };
         g.update(&held(buttons), 1.0 / 60.0);
         g.log.clear();
     }
+    g.skater.graph = GraphControl::default();
 }
 
 #[test]
@@ -258,13 +269,9 @@ fn the_menus_take_the_pad_and_ask_for_locations() {
     assert_eq!(serve(&mut g, &parks), Some(Request::Load(1)));
     assert!((g.skater.pos - game_core::math::v3(5.0, 3.0, -4.0)).length() < 0.05);
 
-    // The A that chose the location is still held: not a push until it is let go and pressed again.
+    // The location is ridden (the ticks run once the menu closes).
     ride(&mut g, 60, btn::A);
-    assert!(g.skater.push.is_none() && g.skater.speed == 0.0);
     assert!(g.ticks > ticks);
-    ride(&mut g, 1, 0);
-    ride(&mut g, 60, btn::A);
-    assert!(g.skater.speed.abs() > 0.1, "{}", g.skater.speed);
 
     // START pauses; the d-pad moves the menu, not the rider (no gesture, no ticks).
     ride(&mut g, 30, 0);
