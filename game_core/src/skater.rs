@@ -790,6 +790,9 @@ pub struct Skater {
     pub rider_pose: Option<[crate::math::Xform; crate::physics::skeleton::ANIMATED_PARTS]>,
     /// The axes the rider's pose stands on (the reckoning's up, the rider's heading).
     pub rider_axes: crate::math::Mat3,
+    /// The clips' board in the world as Skate 3's root frames place it (set each tick by the game with
+    /// an imported rider): what the air's hook drive pulls the physical deck's turn to.
+    pub anim_board: Option<crate::math::Mat3>,
     pub body_us: u32,
     air_com: Option<f32>,
     /// How far the legs have lifted the board over the flight's path (m, world up), and how fast it
@@ -1178,6 +1181,7 @@ impl Skater {
             rider_body: None,
             rider_pose: None,
             rider_axes: crate::math::Mat3::IDENTITY,
+            anim_board: None,
             body_us: 0,
             air_com: None,
             air_lift: 0.0,
@@ -3482,8 +3486,20 @@ impl Skater {
         if self.takeoff.onto_free && !self.land_on_free_board(normal, events) {
             return;
         }
-        // The board lands as the rider lined it up (board adjust): its nose is the landing's.
+        // The board lands as the rider lined it up (board adjust): its nose is the landing's. The
+        // physical board flew turned to the animated one (the clips' adjust, `fly_rig`): Skate 3
+        // lands that board, so its nose is the landing's.
         self.bake_deck_adjust();
+        if self.body_flip.is_none()
+            && let Some(r) = self.rig.as_ref().filter(|r| r.airborne)
+        {
+            let up = self.normal.normalize_or(Vec3::UP);
+            let nose = tangent(r.board.deck().axes.cols[2] * self.rig_sign(), up);
+            if nose.length() > 0.5 {
+                self.fwd = nose;
+                self.sync_heading();
+            }
+        }
         self.air_com = None;
         self.air_lift = 0.0;
         let n = normal.normalize_or(Vec3::UP);

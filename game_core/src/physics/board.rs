@@ -742,6 +742,8 @@ pub struct BoardInput {
     pub hook_velocity: Vec3,
     /// And how it accelerates (m/s/s): a flight falls with the deck.
     pub hook_gravity: Vec3,
+    /// And how fast it turns (rad/s, world).
+    pub hook_spin: Vec3,
 }
 
 /// The board's seven bodies.
@@ -968,6 +970,7 @@ impl Board {
             let mut hook = Body::new(deck_mass(), at, Quat::from_mat3(&axes), input.hook_gravity);
             hook.active = false;
             hook.velocity = input.hook_velocity;
+            hook.spin = input.hook_spin;
             all[PARTS] = hook;
             rows[2] = DriveRow::build(&all, PARTS, DECK, &here, &here, &HOOK_DRIVE);
             n_drives = 3;

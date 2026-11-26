@@ -1212,6 +1212,10 @@ impl Game {
                 drawn = self.draw_physical(ran, &anim_board, &deck);
             }
         }
+        // The clips' board in the world for the next tick's air hook (on the tick's frame).
+        self.skater.anim_board = anim_board
+            .filter(|_| deck.is_some())
+            .map(|b| self.roots.animation_to_world.then(&b).rot);
         // Getting off or on, the drawn root goes from the board's to the feet's (or back) over
         // `FOOT_ORIGIN_BLEND` instead of jumping between them (flatground's: SK8 doesn't draw this
         // handover from here).

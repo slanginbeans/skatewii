@@ -10,6 +10,7 @@
 use super::*;
 use crate::math::Mat3;
 use crate::math::Xform;
+use crate::physics::Quat;
 use crate::physics::board::{self as pb, Board, BoardInput};
 use crate::physics::rider_body::{RiderBody, RiderInput};
 use crate::tuning::Curve;
@@ -98,6 +99,8 @@ pub struct Rig {
     pub airborne: bool,
     /// The skater's frame is turned end for end against the deck (a switch or a revert's turn).
     pub flip: bool,
+    /// The air hook's last turn (world), for how fast the animated board turns.
+    hook_turn: Option<Mat3>,
 }
 
 impl Skater {
@@ -115,7 +118,7 @@ impl Skater {
     }
 
     /// -1 while the skater's frame is turned end for end against the physical deck.
-    fn rig_sign(&self) -> f32 {
+    pub(super) fn rig_sign(&self) -> f32 {
         if self.rig.as_ref().is_some_and(|r| r.flip) {
             -1.0
         } else {
@@ -185,6 +188,7 @@ impl Skater {
                     last_sync: Vec3::ZERO,
                     airborne: false,
                     flip: false,
+                    hook_turn: None,
                 });
             }
         }
@@ -228,10 +232,46 @@ impl Skater {
     pub(super) fn fly_rig(&mut self, park: &dyn Terrain, landing: bool) {
         let f = self.frame();
         let sign = self.rig_sign();
-        let target = (f.deck, Mat3::from_cols(f.right * sign, f.up, f.fwd * sign));
+        let mut target = (f.deck, Mat3::from_cols(f.right * sign, f.up, f.fwd * sign));
+        // SK8's hook turns the deck to the animated board (the clips' board adjust and flips
+        // included); without an imported rider, flatground's adjusted deck. Either way round, the
+        // physical deck's.
+        if let Some(a) = self.anim_board {
+            let turned = a.cols[2].dot(target.1.cols[2]) < 0.0;
+            target.1 = if turned {
+                Mat3::from_cols(-a.cols[0], a.cols[1], -a.cols[2])
+            } else {
+                a
+            };
+        }
         let vel = self.vel;
         let Some(r) = &mut self.rig else { return };
         r.airborne = true;
+        // How fast the animated board turns (rad/s, world), from its last turn.
+        let spin = match r.hook_turn {
+            Some(last) if !landing => {
+                let q = Quat::from_mat3(&target.1).compose(Quat::from_mat3(&last).conjugate());
+                let q = if q.w < 0.0 {
+                    Quat {
+                        x: -q.x,
+                        y: -q.y,
+                        z: -q.z,
+                        w: -q.w,
+                    }
+                } else {
+                    q
+                };
+                let v = q.vector();
+                let s = v.length();
+                if s > 1e-6 {
+                    v * (2.0 * libm::atan2f(s, q.w) / (s * crate::physics::STEP))
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            _ => Vec3::ZERO,
+        };
+        r.hook_turn = (!landing).then_some(target.1);
         // Moved far from the flight (a respawn, a scripted drop): put there, as `sync_rig` does.
         if (r.board.deck().position - target.0).length() > LANDING_REACH {
             r.board.place(target.0, &target.1, vel, Vec3::ZERO);
@@ -244,6 +284,7 @@ impl Skater {
         let input = BoardInput {
             hook: (!landing).then_some((target.0 - vel * crate::physics::STEP, target.1)),
             hook_velocity: vel,
+            hook_spin: spin,
             hook_gravity: pb::GRAVITY,
             wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
             ..BoardInput::default()
