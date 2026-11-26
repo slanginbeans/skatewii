@@ -218,9 +218,14 @@ impl Skater {
     }
 
     /// One air tick of the rigid board: no ground behaviours, the deck hooked to where the flight
-    /// draws it (SK8's hook drive while the animation holds the board).
+    /// draws it (SK8's hook drive while the animation holds the board). SK8's hook targets the animated
+    /// skateboard root, which carries the board adjust: the target is the adjusted deck
+    /// ([`Skater::frame`]), so the board flies adjusted and the landing adopts it as lined up. The
+    /// target is the physical deck's way round (end for end while the skater's frame is turned).
     pub(super) fn fly_rig(&mut self, park: &dyn Terrain) {
-        let target = (self.deck(), self.board_frame());
+        let f = self.frame();
+        let sign = self.rig_sign();
+        let target = (f.deck, Mat3::from_cols(f.right * sign, f.up, f.fwd * sign));
         let Some(r) = &mut self.rig else { return };
         r.airborne = true;
         let input = BoardInput {
@@ -681,41 +686,21 @@ impl Skater {
         let turned = nn.dot(tangent(old_fwd, nn).cross(f));
         self.yaw_rate = libm::asinf(turned.clamp(-1.0, 1.0)) / dt;
         self.wall_clock += dt;
+        // SK8 board_ground.rs `advance_contact_time`: the time with no wheel touching.
+        if board.wheels.iter().flatten().any(|w| w.load > 0.0) {
+            self.gap_time = 0.0;
+        } else {
+            self.gap_time += dt;
+        }
         if down.is_empty() {
             self.vn = v.dot(nn);
-            // How far the surface is below the deck along its up (a board tipped over a coping looks
-            // down the transition, not to the pipe's floor).
-            let up = deck.axes.cols[1];
-            let gap = park
-                .raycast(deck.position, -up, 1.0)
-                .map_or(f32::MAX, |h| h.t - pb::DECK_HEIGHT);
-            // A board tipping nose first over an edge stays on its physics for Skate 3's natural-air
-            // time (SK8's rigid board falls onto the transition below a coping on its own and lands
-            // there, a quarter second later, without the flight's kinematic path).
-            let nose = deck.axes.cols[2];
-            let lead = if deck.velocity.dot(nose) >= 0.0 {
-                nose
-            } else {
-                -nose
-            };
-            let tipping = lead.y < -0.2;
-            let leave = if tipping {
-                // Tipping over an edge, the natural-air time rule alone (SK8's rider goes into its
-                // air state a quarter second on, the board hooked to it).
-                gap == f32::MAX || {
-                    self.gap_time += dt;
-                    self.gap_time > t.natural_air_time
-                }
-            } else {
-                gap > t.natural_air_max_dist || {
-                    if gap > t.natural_air_min_dist {
-                        self.gap_time += dt;
-                    } else {
-                        self.gap_time = 0.0;
-                    }
-                    self.gap_time > t.natural_air_time
-                }
-            };
+            // Skate 3's off-ground test (SK8 player/selector/conditions.rs `condition_is_off_ground`,
+            // TU3 0x82D8BD50, fed by player_state/selection.rs): the nearest surface along the four
+            // wheel lines (board_ground.rs, 0.2 m down the reckoning's up from each wheel) further
+            // than NaturalAirMaxDist, or further than NaturalAirMinDist with no wheel touching for
+            // NaturalAirTime.
+            let gap = wheel_line_gap(park, board, self.normal);
+            let leave = off_ground(gap, self.gap_time, &t);
             if leave {
                 // The flight starts from the board as it is: a board tipped over an edge leaves it
                 // pitched, its deck below the edge.
@@ -729,7 +714,6 @@ impl Skater {
             }
         } else {
             self.vn = 0.0;
-            self.gap_time = 0.0;
         }
         let before = self.speed;
         self.update_pumping(d, dt);
@@ -759,11 +743,120 @@ impl Skater {
     }
 }
 
+/// SK8 board_ground.rs `WHEEL_LINE_LENGTH`: each wheel's line down the reckoning's up (m).
+pub const WHEEL_LINE_LENGTH: f32 = 0.2;
+
+/// SK8 board_ground.rs `wheel_lines` / `WheelLineState::publish`: the nearest surface along the four
+/// wheel lines (from each wheel's centre, `WHEEL_LINE_LENGTH` down `up`); a miss counts the whole line.
+fn wheel_line_gap(park: &dyn Terrain, board: &Board, up: Vec3) -> f32 {
+    board.parts[..4].iter().fold(WHEEL_LINE_LENGTH, |gap, w| {
+        park.raycast(w.position, -up, WHEEL_LINE_LENGTH)
+            .map_or(gap, |h| gap.min(h.t))
+    })
+}
+
+/// SK8 player/selector/conditions.rs `condition_is_off_ground` (TU3 0x82D8BD50): the wheel lines'
+/// gap beyond NaturalAirMaxDist, or beyond NaturalAirMinDist with no wheel touching for longer than
+/// NaturalAirTime (all strict).
+fn off_ground(gap: f32, no_wheel_time: f32, t: &crate::tuning::Tuning) -> bool {
+    gap > t.natural_air_max_dist
+        || (gap > t.natural_air_min_dist && no_wheel_time > t.natural_air_time)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::park::Park;
     use crate::physics::skeleton::ANIMATED_PARTS;
+
+    /// SK8 `condition_is_off_ground`: far beyond the max distance at once, between the two distances
+    /// only after the natural-air time without a wheel touching (all strict), never within the min.
+    #[test]
+    fn off_ground_is_skate_3s_two_stage_test() {
+        let t = crate::tuning::Tuning::BUILT_IN;
+        assert_eq!(
+            (
+                t.natural_air_max_dist,
+                t.natural_air_min_dist,
+                t.natural_air_time
+            ),
+            (0.12, 0.06, 0.2),
+            "physics_airstates/default"
+        );
+        assert!(off_ground(0.13, 0.0, &t));
+        assert!(!off_ground(0.1, 0.2, &t));
+        assert!(off_ground(0.1, 0.21, &t));
+        assert!(!off_ground(0.05, 1.0, &t));
+        // A miss on every wheel line counts the whole line: off.
+        assert!(off_ground(WHEEL_LINE_LENGTH, 0.0, &t));
+    }
+
+    /// A board at rest overhanging a ledge (its middle past the edge, its back wheels over the top)
+    /// stays on the ground: the wheel lines still find the ledge under the back wheels (the deck's
+    /// middle ray found the floor below and the rider went in and out of the air every tick).
+    #[test]
+    fn a_board_hanging_over_a_ledge_at_rest_does_not_loop_in_and_out_of_the_air() {
+        let park = Park {
+            shapes: alloc::vec![crate::park::Shape::Block {
+                min: v3(-2.0, 0.0, -6.0),
+                max: v3(2.0, 0.5, 0.0),
+                rgba: 0,
+            }],
+            half_size: 50.0,
+            wall_height: 2.0,
+            spawn: v3(0.0, 0.5, -3.0),
+            spawn_yaw: 0.0,
+            rails: Vec::new(),
+        };
+        for over in [0.02, 0.06, 0.1] {
+            let mut s = Skater::spawn(&park);
+            s.since_spawn = 10.0;
+            // On the ledge, then the board slid out over its edge.
+            s.put_at(&park, v3(0.0, 0.5, -0.5), 0.0, 0.0);
+            s.sync_rig(&park);
+            // Its wheels just off the top (no wheel touching), as a board left hanging by a grind.
+            let r = s.rig.as_mut().unwrap();
+            let d = *r.board.deck();
+            r.board.place(
+                d.position + v3(0.0, 0.015, 0.5 + over),
+                &d.axes,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            );
+            s.pos += v3(0.0, 0.015, 0.5 + over);
+            s.mark_rig();
+            let mut ev = Vec::new();
+            let step = |s: &mut Skater, ev: &mut Vec<Event>| {
+                s.step(
+                    &park,
+                    &crate::input::Pad::default(),
+                    &crate::flick::FlickOut::default(),
+                    1.0 / 60.0,
+                    ev,
+                )
+            };
+            step(&mut s, &mut ev);
+            assert!(!s.is_airborne(), "{over} m over: off the ground at rest");
+            let mut was = s.is_airborne();
+            let (mut flips, mut last) = (0, 0);
+            for tick in 0..180 {
+                step(&mut s, &mut ev);
+                if s.is_airborne() != was {
+                    flips += 1;
+                    last = tick;
+                    was = s.is_airborne();
+                }
+            }
+            // Off the ledge and down onto the floor (a bounce off the ledge's face at most), then
+            // settled on the ground.
+            assert!(
+                flips <= 4,
+                "{over} m over: {flips} flips between ground and air"
+            );
+            assert!(last < 60, "{over} m over: still flipping at tick {last}");
+            assert_eq!(s.mode, Mode::Rolling, "{over} m over");
+        }
+    }
 
     /// SK8 `SkeletonRootFrames::update`: the body's animated pose stands on the rider's axes (the
     /// reckoning's up) at the predicted deck, whatever the physical deck's pitch.
