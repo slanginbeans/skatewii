@@ -1550,31 +1550,3 @@ impl Autoplay {
         (pad, None)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn autoplay_repeats_the_tour() {
-        let mut game = Game::new();
-        let mut auto = Autoplay::new();
-        let mut lines = 0;
-        for _ in 0..(60 * 120) {
-            let (pad, line) = auto.next(&game);
-            lines += line.is_some_and(|l| l.contains(" done")) as u32;
-            if auto.take_restart() {
-                game.restart_at_spawn();
-            }
-            if let Some(p) = auto.take_place() {
-                game.place(&p);
-            }
-            game.update(&pad, 1.0 / 60.0);
-            if auto.rounds >= 2 {
-                break;
-            }
-        }
-        assert!(auto.rounds >= 2, "rounds {}", auto.rounds);
-        assert_eq!(lines, auto.rounds);
-    }
-}

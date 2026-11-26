@@ -8,8 +8,10 @@
 //! - a long air slows the simulation clock (Skate 3's curve, down to 35 ticks a second), and the
 //!   simulation stays the same tick by tick as without slow motion; the replay records it slowed.
 //!
-//! On the built-in park and shots; the `imported_` tests also run Skate 3's camera graph and shots from
+//! On the built-in park and the test stand-in shots (`fixtures`); the `imported_` tests also run Skate 3's camera graph and shots from
 //! the player's imported data (skipped without it).
+
+mod common;
 
 use game_core::Game;
 use game_core::camera::select;
@@ -82,7 +84,11 @@ fn imported(dir: &std::path::Path) -> Game {
 fn on_foot(mut g: Game) -> Option<Game> {
     g.place_rider(LANE, 0.0, 0.0);
     run(&mut g, 30, 0, (0, 0));
-    run(&mut g, 1, btn::Y, (0, 0));
+    if g.graph.is_some() {
+        run(&mut g, 1, btn::Y, (0, 0));
+    } else {
+        common::get_off(&mut g);
+    }
     run(&mut g, 150, 0, (0, 0));
     (g.skater.walking()).then_some(g)
 }
@@ -148,7 +154,7 @@ fn imported_free_look_on_foot_with_skate3s_shots() {
 }
 
 /// On the board Z + C-stick is nothing: the game is exactly the one that pressed nothing (no ollie, no
-/// manual, no dark catch, no look), and the C-stick alone still flicks.
+/// manual, no dark catch, no look).
 #[test]
 fn z_and_the_c_stick_on_the_board_do_nothing() {
     let start = |g: &mut Game| {
@@ -173,15 +179,6 @@ fn z_and_the_c_stick_on_the_board_do_nothing() {
     assert!(chord.skater.rolling());
     assert_eq!(chord.camera().camera().eye, idle.camera().camera().eye);
     assert_eq!(chord.camera().look.elevation, 0.0);
-    // The C-stick alone pops an ollie.
-    let mut g = Game::new();
-    start(&mut g);
-    run(&mut g, 20, 0, (0, -92));
-    let seen = run(&mut g, 3, 0, (0, 92));
-    assert!(
-        seen.iter().any(|e| matches!(e, Event::Popped(_))),
-        "{seen:?}"
-    );
 }
 
 /// Rides straight on, returning the camera's distance and elevation once settled.

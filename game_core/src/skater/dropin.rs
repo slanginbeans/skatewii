@@ -28,12 +28,11 @@ pub const SMALL_STEP: f32 = 0.4;
 pub const OUT_TIME: f32 = 0.2;
 /// Skate 3's `TryToLeave`: the stick this far back (`OB_SteerMagnitude` lessEqual -0.5) steps away.
 pub const BACK_OUT: f32 = -0.5;
-/// How long the step up to the edge takes without the graphs (s; flatground's, the clips' lengths are
-/// the player's data): a big step, a small one, none.
+/// How long the step up to the edge takes at most before the motion graph's `IntoDropIn/Cycle` (s, plus
+/// a second; flatground's, the clips' lengths are the player's data): a big step, a small one, none.
 pub const INTO_TIMES: [f32; 3] = [0.8, 0.6, 0.4];
 /// How long the board stays on the coping in `Grinding/DroppingIn` before it goes (s; flatground's, the
-/// `DroppingIn` clip's blend time); without the graphs this long after [`OUT_TIME`]. With them it goes
-/// anyway this long after `OutOfDropIn` started (s).
+/// `DroppingIn` clip's blend time), and it goes anyway this long after `OutOfDropIn` started (s).
 pub const LOCK_TIME: f32 = 0.4;
 pub const LOCK_LIMIT: f32 = 2.0;
 /// The rider stands this far back from the edge (m), the board's middle this far back on the deck while

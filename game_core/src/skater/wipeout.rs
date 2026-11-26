@@ -3,8 +3,7 @@
 //! `lifecycle.rs`, `prediction.rs`; `skate-core/src/player/wipeout_state/`: `profiles.rs`,
 //! `control_profile_air.rs`, `control_ground.rs`, `response.rs`, `weights.rs`, `recovery.rs`).
 //!
-//! - The wipeout gesture (the C-stick, blended by the motion graph's `Wipeout` behaviour, or here
-//!   without the graphs) picks one of Skate 3's five control profiles (`tuning::wipeout`): centred free
+//! - The wipeout gesture (the C-stick, blended by the motion graph's `Wipeout` behaviour) picks one of Skate 3's five control profiles (`tuning::wipeout`): centred free
 //!   fall, up cannon ball (a tuck), right judo kick, down swan dive, left torpedo; the profile is
 //!   `GestureType` to the graphs and `IsWipeoutBodyTweak` to the camera.
 //! - The control (the main stick, `WipeoutControlX/Y`, in the world as the camera sees it) steers the
@@ -36,8 +35,6 @@ const ENTER_MAX_SPEED: f32 = 20.0;
 const PREDICT_TIME: f32 = 3.0;
 const PREDICT_STEP: f32 = 0.1;
 const PREDICT_RADIUS: f32 = 0.3;
-/// Skate 3's Wipeout behaviour lets the gesture through after this many ticks anyway.
-const GESTURE_RELEASE_TICKS: u32 = 80;
 
 /// The gesture poses in the pelvis's frame (x right, y up, z forwards; m, ours): where the drives pull
 /// a cannon ball (a tuck), a judo kick (one leg out), a swan dive (arms spread, legs straight) and a
@@ -118,8 +115,7 @@ const GESTURE_POSES: [[Vec3; POINTS]; 4] = [
 pub struct Input {
     /// `WipeoutControlX/Y`: the main stick in the world (x, z), as the camera sees it.
     pub control: [f32; 2],
-    /// `WipeoutGestureX/Y` as the motion graph's Wipeout behaviour blended it (or this module's own
-    /// blend of the C-stick without the graphs, [`Wipeout::gesture_from_stick`]).
+    /// `WipeoutGestureX/Y` as the motion graph's Wipeout behaviour blended it.
     pub gesture: [f32; 2],
     /// `WipeOutPushOff` this tick.
     pub push_off: bool,
@@ -160,11 +156,6 @@ pub struct Wipeout {
     seed_targets: [Vec3; POINTS],
     /// The imported rider's animated pose to drive towards this tick (world), when the game has one.
     pub anim: Option<[Vec3; POINTS]>,
-    /// The wipeout gesture blended from the C-stick without the graphs (Skate 3's Wipeout behaviour),
-    /// its release and ticks.
-    pub gesture: [f32; 2],
-    gesture_released: bool,
-    gesture_ticks: u32,
     /// Hall of Meat: the injuries so far.
     pub meat: Meat,
 }
@@ -198,9 +189,6 @@ impl Default for Wipeout {
             predicted_time: f32::MAX,
             seed_targets: ragdoll::rest_local(),
             anim: None,
-            gesture: [0.0; 2],
-            gesture_released: false,
-            gesture_ticks: 0,
             meat: Meat::default(),
         }
     }
@@ -226,23 +214,6 @@ impl Wipeout {
         self.body.limit_speed(ENTER_MAX_SPEED, dt);
         self.seed_targets = self.body.target;
         self.active = true;
-    }
-
-    /// Skate 3's Wipeout behaviour without the graphs: the C-stick blended into the gesture once let
-    /// go to the middle (or after 80 ticks, or on a bail request), at `anim_wipeout`'s blends.
-    pub fn gesture_from_stick(&mut self, stick: [f32; 2], request: bool, blend: [f32; 2]) {
-        if request || self.gesture_ticks > GESTURE_RELEASE_TICKS {
-            self.gesture_released = true;
-        }
-        if !self.gesture_released && stick[0].abs() < 0.1 && stick[1].abs() < 0.1 {
-            self.gesture_released = true;
-        }
-        if self.gesture_released {
-            for k in 0..2 {
-                self.gesture[k] = (1.0 - blend[k]) * self.gesture[k] + stick[k] * blend[k];
-            }
-        }
-        self.gesture_ticks += 1;
     }
 
     /// Skate 3's response strength (SK8 `State::response_strength`): what a push off still has.
@@ -698,15 +669,6 @@ mod tests {
             );
             assert_eq!(w.profile, want, "{g:?}");
         }
-        // Without the graphs the C-stick waits to be centred, then blends in.
-        let mut w = start(v3(0.0, 5.0, 0.0), Vec3::ZERO);
-        w.gesture_from_stick([0.0, 1.0], false, [0.2, 0.2]);
-        assert_eq!(w.gesture, [0.0, 0.0]);
-        w.gesture_from_stick([0.0, 0.0], false, [0.2, 0.2]);
-        for _ in 0..20 {
-            w.gesture_from_stick([0.0, 1.0], false, [0.2, 0.2]);
-        }
-        assert!(w.gesture[1] > 0.95, "{:?}", w.gesture);
     }
 
     #[test]

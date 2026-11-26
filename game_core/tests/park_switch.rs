@@ -9,6 +9,7 @@ use game_core::collision;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::menu::{Location, Request, Screen};
 use game_core::pack::{Kind, name_hash};
+use game_core::skater::GraphControl;
 use game_core::world::{MESH_ALPHA_TEST, encode_mesh};
 
 /// Counts the bytes this thread has live (tests run on several threads).
@@ -149,11 +150,21 @@ fn serve(g: &mut Game, parks: &[&'static [u8]]) -> Option<Request> {
     r
 }
 
+/// `frames` frames holding `buttons`; a push button held pushes (a synthetic state graph's push, the
+/// foot down chasing 3 m/s: without imported data no graphs run).
 fn ride(g: &mut Game, frames: usize, buttons: u32) {
     for _ in 0..frames {
+        let push = buttons & (btn::A | btn::B) != 0 && g.menu.is_none();
+        g.skater.graph = GraphControl {
+            push_contact: push,
+            push_target: push.then_some(3.0),
+            pushing: push,
+            ..GraphControl::default()
+        };
         g.update(&held(buttons), 1.0 / 60.0);
         g.log.clear();
     }
+    g.skater.graph = GraphControl::default();
 }
 
 #[test]

@@ -77,18 +77,23 @@ pub fn get_off(g: &mut Game) {
 /// Y back on the board as Skate 3's graphs time it (the mount clip's `OB_TRAJ`, then its end), with a
 /// synthetic graph; the graph is cleared after.
 pub fn get_on(g: &mut Game) {
+    get_on_with(g, [0, 0]);
+}
+
+/// [`get_on`] with the stick held at `stick`.
+pub fn get_on_with(g: &mut Game, stick: [i8; 2]) {
     g.skater.graph = GraphControl {
         ob_traj: true,
         mounting: true,
         ..GraphControl::default()
     };
-    g.update(&pad([0, 0], btn::Y), TICK);
+    g.update(&pad(stick, btn::Y), TICK);
     g.skater.graph.ob_traj = false;
     for _ in 0..10 {
         if !g.skater.walking() {
             break;
         }
-        g.update(&pad([0, 0], 0), TICK);
+        g.update(&pad(stick, 0), TICK);
     }
     g.skater.graph = GraphControl::default();
 }

@@ -131,9 +131,6 @@ pub enum Stance {
     Regular,
 }
 
-/// How long the built-in board's flick trick animation takes (s). Without the state graphs this is the
-/// one clock the drawn board and the landing check share (landing before it ends is landing with the
-/// board not caught); with them the clips' own `DANGERZONE` decides.
 /// The yaw rate a kick turn builds to at `speed` (rad/s, [`KICKTURN_RATES`]).
 pub fn kickturn_rate(speed: f32) -> f32 {
     let r = KICKTURN_RATES;
@@ -817,7 +814,7 @@ pub struct Skater {
     pub possession: possession::Possession,
     /// Off the board in the air, Skate 3's landing assist has taken a flight down onto the free board
     /// (`CanLandOnBoard`): the landing on it starts once the motion graph's `DoLandOnBoard` says so (at
-    /// once without the graphs).
+    /// once the graph says so).
     pub deck_assist: bool,
     /// A hippie jump's landing on deck: something in the way of the landing on the board, and the
     /// hippie hurdle (`IsHippyHurdling`; `skater::hurdle`).
@@ -839,8 +836,7 @@ pub struct Skater {
     pub edge: Option<dropin::Edge>,
     pub drop_in: Option<dropin::DropIn>,
     /// Hand plants (`skater::handplant`): the manager looking for a coping riding up a ramp with the
-    /// world grab held, the plant itself (SK8 physical state 600) and, without the graphs, the tweak and
-    /// the feet held in it.
+    /// world grab held, and the plant itself (SK8 physical state 600).
     pub handplant: handplant::Manager,
     pub hand_plant: Option<handplant::Plant>,
     /// The name the graphs score the hand plant under, latched while they play it.
@@ -1908,7 +1904,7 @@ impl Skater {
         // Off the board in the air over the free board: Skate 3's landing assist (SK8 biped_air
         // update.rs, landing_deck `assist`) takes a flight down onto its deck when it is near enough to
         // the jump's own (by `landing_assist_limit` of the time in the air) and long enough (0.4 s); the
-        // motion graph then starts the landing on it (`DoLandOnBoard`), or at once without the graphs.
+        // motion graph then starts the landing on it (`DoLandOnBoard`).
         if !self.walking() || self.biped.air.is_none() {
             self.deck_assist = false;
             return;

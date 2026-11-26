@@ -20,9 +20,10 @@ Skate 3's: its Low or High camera (pause menu), free look on foot (Z + C-stick),
 slow motion through long airs. It has sound: the wheels rolling (by surface and speed), pops, catches, landings, grinds, slides,
 powerslides, the foot brake, pushes, footsteps and bails, placed by the camera; simple built-in sounds, or Skate 3's
 own converted from your disc.
-With your own Skate 3 disc the build also takes Skate 3's own riding numbers, trick points and
-flick shapes from it. Tested on the PC and on an emulated Wii CPU. **Not yet run on a Wii or in Dolphin.**
-Plan: [ROADMAP.md](ROADMAP.md).
+It plays with data from your own Skate 3 disc: the skater, Skate 3's state graphs (which decide every move
+and animation), its riding numbers, trick points, flick shapes and camera. Without it the game boots to a
+screen telling you to run the importer (below). Tested on the PC and on an emulated Wii CPU. **Not yet run
+on a Wii or in Dolphin.** Plan: [ROADMAP.md](ROADMAP.md).
 
 ## Controls (GameCube pad, port 1)
 Laid out like Skate 3 on an Xbox 360 pad, by where each button sits (Xbox A, X, B, Y are the GameCube's A, B,
@@ -198,7 +199,7 @@ game_core/       the game: no_std + alloc, unit-tested on the host and under qem
   district.rs      a district streamed in cells while riding: what to read, keep and drop
   reader.rs        background file reads (the Wii's reader thread; an in-memory one for tests)
   character.rs     imported skinned character: pack parsing, clip sampling, CPU skinning
-  rider.rs         picks and crossfades the imported skater's clips from the game state
+  rider.rs         poses the imported skater with the clips Skate 3's motion graph plays
   sound/           sound: the event layer (what plays when), the Audio trait, the shared mixer, DSP-ADPCM,
                    the sound bank (imported or the synthesised placeholders)
 wii/
@@ -215,9 +216,10 @@ Every session writes a log to the SD card (`apps/flatground/logs/`): frame timin
 and bail with its numbers, and the stick ranges seen. `tools\get_logs.ps1` fetches them from the card. See
 [docs/logging.md](docs/logging.md).
 
-The game ships with original placeholder art only. If you own Skate 3 for Xbox 360, `fg_import` can convert
-assets from your own disc image for your own use: see [docs/importing.md](docs/importing.md). No game data
-is ever included in this repository.
+The game ships with no game data: it needs Skate 3 for Xbox 360. If you own it, `fg_import` converts what
+the game uses from your own disc image for your own use (`build.bat` runs it for you): see
+[docs/importing.md](docs/importing.md). Without that data the game only shows how to import it. No game
+data is ever included in this repository.
 
 ## Building on Windows
 Double-click **`build.bat`**. It updates from GitHub, builds the game and puts it in

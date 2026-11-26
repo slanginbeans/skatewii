@@ -10,14 +10,17 @@
 //!   the replay poses the recorded skeleton (to the packing's millimetre) and puts the live one back on
 //!   leaving, and the state graphs follow the marker's return on the board and on foot.
 
+mod common;
+
 use std::path::PathBuf;
 
 use game_core::Game;
+use game_core::gesture::{Flick, Trick};
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::v3;
 use game_core::park::Park;
 use game_core::replay::FRAMES;
-use game_core::skater::Event;
+use game_core::skater::{Event, GraphControl};
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -65,19 +68,12 @@ fn chord(g: &mut Game, dpad: u32, hold: usize) -> Vec<Event> {
     ev
 }
 
-/// An ollie-sized kickflip with the built-in shapes, then rolling on until back on the ground.
+/// A kickflip the (synthetic) state graph pops, then rolling on until back on the ground.
 fn kickflip(g: &mut Game) {
-    let back = PadRaw {
-        cstick_y: -92,
-        ..pad(0)
-    };
-    run(g, 20, back);
-    let flick = PadRaw {
-        cstick_x: 50,
-        cstick_y: 62,
-        ..pad(0)
-    };
-    run(g, 1, flick);
+    run(g, 20, pad(0));
+    g.skater.graph.pop = Some((Flick::of(Trick::Kickflip), 1.0));
+    run(g, 1, pad(0));
+    g.skater.graph.pop = None;
     for _ in 0..200 {
         run(g, 1, pad(0));
         if !g.skater.is_airborne() && g.skater.rolling() {
@@ -124,6 +120,14 @@ fn z_and_d_pad_up_puts_a_marker_down_and_z_and_down_takes_the_rider_back() {
     let ev = run(&mut g, 30, pad(btn::Z | btn::DPAD_DOWN));
     assert!(!ev.contains(&Event::MarkerReturned));
     run(&mut g, 1, pad(0));
+    g.skater.graph = GraphControl {
+        push_contact: true,
+        push_target: Some(3.0),
+        pushing: true,
+        ..GraphControl::default()
+    };
+    run(&mut g, 1, pad(btn::A));
+    g.skater.graph = GraphControl::default();
     run(&mut g, 60, pad(btn::A));
     assert!(g.skater.speed > 1.0, "rides on: {}", g.skater.speed);
 }
@@ -133,7 +137,7 @@ fn a_marker_on_foot_takes_the_rider_back_on_foot() {
     let mut g = Game::new();
     g.place_rider(v3(-7.0, 0.0, -18.0), 0.0, 0.0);
     run(&mut g, 30, pad(0));
-    run(&mut g, 1, pad(btn::Y));
+    common::get_off(&mut g);
     run(&mut g, 60, pad(0));
     assert!(g.skater.walking());
     let ev = chord(&mut g, btn::DPAD_UP, 1);

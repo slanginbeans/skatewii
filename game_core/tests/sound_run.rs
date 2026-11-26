@@ -1,12 +1,39 @@
 //! Sound end to end: scripted runs through the demo park with the sound layer listening, its commands
-//! recorded (and mixed), and the simulation shown to be the same with and without it.
+//! recorded (and mixed), and the simulation shown to be the same with and without it. Without imported
+//! data a synthetic state graph pushes, pops and wipes out; the kicker run and the trick tour play
+//! through Skate 3's own graphs with the player's imported data (skipped without it).
+
+mod common;
 
 use game_core::Game;
 use game_core::autoplay::{KickerRun, TrickTour};
-use game_core::skater::Event;
+use game_core::gesture::{Flick, Trick};
+use game_core::input::PadRaw;
+use game_core::skater::{Event, GraphControl};
 use game_core::sound::{Bank, Command, Cue, Mixer, Recorder, mix};
 
 const TICK: f32 = 1.0 / 60.0;
+
+/// A synthetic state graph's run at tick `t`: pushing for the first second, a kickflip at 1.5 s, another
+/// at 4 s that wipes out in the air.
+fn synthetic(game: &mut Game, t: u32) {
+    let push = t < 60;
+    game.skater.graph = GraphControl {
+        push_contact: push,
+        push_target: push.then_some(4.0),
+        pushing: push,
+        pop: (t == 90 || t == 240).then_some((Flick::of(Trick::Kickflip), 1.0)),
+        wipeout: t == 255,
+        ..GraphControl::default()
+    };
+}
+
+fn idle() -> PadRaw {
+    PadRaw {
+        flags: game_core::input::flag::CONNECTED,
+        ..Default::default()
+    }
+}
 
 /// The cue a clip index belongs to (the first that has it).
 fn cue_of(bank: &Bank, clip: u16) -> Option<Cue> {
@@ -32,8 +59,10 @@ fn plays(rec: &Recorder, bank: &Bank) -> Vec<(usize, Cue, f32)> {
 }
 
 #[test]
-fn the_kicker_run_sounds_like_a_kickflip() {
-    let mut game = Game::new();
+fn imported_the_kicker_run_sounds_like_a_kickflip() {
+    let Some(mut game) = common::disc_game("imported_the_kicker_run_sounds_like_a_kickflip") else {
+        return;
+    };
     let mut script = KickerRun::new();
     let mut rec = Recorder::default();
     let mut events = Vec::new();
@@ -91,6 +120,53 @@ fn the_kicker_run_sounds_like_a_kickflip() {
 fn listening_does_not_change_the_simulation() {
     let run = |listen: bool| {
         let mut game = Game::new();
+        let mut rec = Recorder::default();
+        for t in 0..(60 * 10) {
+            synthetic(&mut game, t);
+            game.update(&idle(), TICK);
+            if listen {
+                game.sound(&mut rec);
+            }
+        }
+        (
+            game.skater.pos,
+            game.skater.vel,
+            game.score,
+            game.ticks,
+            rec,
+        )
+    };
+    let (a, b) = (run(true), run(false));
+    assert_eq!((a.0, a.1, a.2, a.3), (b.0, b.1, b.2, b.3));
+    let bank = Bank::builtin();
+    let p = plays(&a.4, &bank);
+    let has = |cue: Cue| p.iter().any(|x| x.1 == cue);
+    assert!(has(Cue::Step), "the push: {p:?}");
+    assert!(has(Cue::Pop) && has(Cue::Land), "{p:?}");
+    assert!(has(Cue::Bail), "{p:?}");
+    let stops =
+        a.4.frames
+            .iter()
+            .flat_map(|f| f.0.iter())
+            .filter(|c| matches!(c, Command::Stop { .. }))
+            .count();
+    assert!(stops > 0);
+    let mut m = Mixer::new();
+    for (cmds, _) in a.4.frames.iter().take(120) {
+        m.apply(&bank, cmds);
+    }
+    let pcm = mix::render(&mut m, &bank, 0.2, 1.0);
+    assert!(pcm.iter().any(|s| *s != 0));
+}
+
+#[test]
+fn imported_listening_to_the_trick_tour_does_not_change_the_simulation() {
+    if common::data_dir().is_none() {
+        eprintln!("imported_listening_to_the_trick_tour: no imported data (FG_DATA): skipped");
+        return;
+    }
+    let run = |listen: bool| {
+        let mut game = common::disc_game("imported_listening").unwrap();
         let mut script = TrickTour::new();
         let mut rec = Recorder::default();
         for _ in 0..(60 * 60) {
@@ -113,13 +189,11 @@ fn listening_does_not_change_the_simulation() {
     };
     let (a, b) = (run(true), run(false));
     assert_eq!((a.0, a.1, a.2, a.3), (b.0, b.1, b.2, b.3));
-    // The tour grinds and bails: their sounds play, and the loops stop when the grind ends.
+    // The tour's tricks sound, and the loops stop.
     let bank = Bank::builtin();
     let p = plays(&a.4, &bank);
     let has = |cue: Cue| p.iter().any(|x| x.1 == cue);
     assert!(has(Cue::Pop) && has(Cue::Land), "{p:?}");
-    assert!(has(Cue::GrindMetal) || has(Cue::GrindLedge), "{p:?}");
-    assert!(has(Cue::Bail), "{p:?}");
     let stops =
         a.4.frames
             .iter()
@@ -139,11 +213,10 @@ fn listening_does_not_change_the_simulation() {
 #[test]
 fn the_menu_silences_the_loops() {
     let mut game = Game::new();
-    let mut script = KickerRun::new();
     let mut rec = Recorder::default();
-    for _ in 0..90 {
-        let pad = script.next(&game);
-        game.update(&pad, TICK);
+    for t in 0..90 {
+        synthetic(&mut game, t);
+        game.update(&idle(), TICK);
         game.sound(&mut rec);
     }
     assert!(game.director.rolling().is_some(), "rolling after the push");
@@ -187,7 +260,8 @@ fn imported_sounds_load_and_play() {
         "{} bytes: over the 4 MiB budget",
         pack.len()
     );
-    let mut game = Game::new();
+    // The rest of the player's data too, when it is there (the scripted run plays through the graphs).
+    let mut game = common::disc_game("imported_sounds_load_and_play").unwrap_or_default();
     let (cues, clips) = game.load_sounds(pack).expect("sound pack");
     assert_eq!(cues, Cue::COUNT, "every cue from the disc");
     assert!(clips >= Cue::COUNT);
@@ -234,7 +308,10 @@ fn imported_sounds_load_and_play() {
             );
         }
     }
-    // A scripted run with them: the same sounds fire as with the placeholders.
+    // A scripted run with them (through Skate 3's graphs): the same sounds fire as with the placeholders.
+    if game.graph.is_none() {
+        return;
+    }
     let mut script = KickerRun::new();
     let mut rec = Recorder::default();
     for _ in 0..(60 * 8) {

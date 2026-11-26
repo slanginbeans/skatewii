@@ -12,8 +12,10 @@
 //! - With the player's imported data, Skate 3's graphs play their wipeout states over the ragdoll, which
 //!   poses the imported skeleton.
 
+mod common;
+
 use game_core::Game;
-use game_core::input::{PadRaw, btn, flag};
+use game_core::input::{Pad, PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
 use game_core::park::{Park, Shape, Terrain};
 use game_core::skater::Event;
@@ -73,6 +75,10 @@ fn pad(i: In) -> PadRaw {
 fn run(g: &mut Game, frames: usize, i: In) -> Vec<Event> {
     let mut ev = Vec::new();
     for _ in 0..frames {
+        // Without imported data a synthetic graph's Wipeout behaviour: the C-stick as the gesture.
+        if g.graph.is_none() {
+            g.skater.graph.wipe_gesture = Pad::from_raw(&pad(i), 0).flick;
+        }
         g.update(&pad(i), TICK);
         ev.extend(g.events.iter().cloned());
     }
@@ -183,14 +189,7 @@ fn l_and_r_fully_in_with_z_bails_on_purpose() {
     g.park = flat();
     g.place_rider(v3(0.0, 0.0, -60.0), 0.0, 0.0);
     run(&mut g, 20, In::default());
-    run(
-        &mut g,
-        1,
-        In {
-            buttons: btn::Y,
-            ..In::default()
-        },
-    );
+    common::get_off(&mut g);
     run(&mut g, 30, In::default());
     assert!(g.skater.walking());
     let ev = run(&mut g, 1, CHORD);

@@ -60,9 +60,6 @@ pub const TIP_HOLD_TICKS: u32 = 8;
 pub const TIP_HOLD_SPEED: f32 = 1.8;
 /// The exit lean's push at full assist (N, SK8 support.rs).
 pub const EXIT_LEAN: f32 = 65.0;
-/// Grind grabs: the 5-0's free end is held at least this high (Skate 3's grind-grab states'
-/// `PhysGrindGrabMinHeight`), pushed up 10 per unit short of it (SK8 control.rs).
-pub const GRAB_MIN_HEIGHT: f32 = 0.2;
 pub const GRAB_LIFT: f32 = 10.0;
 
 /// SK8 `pin_slope`: the pins' share of their strength, full while the coping holds the board.
@@ -153,21 +150,6 @@ pub fn grab_lift(min_height: f32, height: f32, lift: f32) -> Option<f32> {
         let v = (min_height - height) * lift * GRAB_LIFT;
         if lift > 0.0 { v.min(lift) } else { v.max(lift) }
     })
-}
-
-/// Skate 3's grind grabs (its motion graph's `<grind>_<grab>` states under `OnBoard/Grinding`): for a
-/// grind (the graph name's base, without side or `BF_`), the grab the frontside hand plays and the grab
-/// the backside hand plays.
-pub fn grind_grabs(base: &str) -> [Option<&'static str>; 2] {
-    match base {
-        "50_50" => [Some("FSGRAB"), Some("BSGRAB")],
-        "5_O" | "SALAD" => [Some("FSGRAB"), Some("NOSEGRAB")],
-        "NOSEGRIND" | "CROOK" | "OVERCROOK" => [Some("TAILGRAB"), Some("BSGRAB")],
-        "NOSESLIDE" | "NOSEBLUNT" => [Some("TAILGRAB"), None],
-        "BLUNT" => [None, Some("TAILGRAB")],
-        "TAILSLIDE" => [None, Some("NOSEGRAB")],
-        _ => [None, None],
-    }
 }
 
 /// How a grind grab is shown after the grind: `FS GRAB`, `NOSEGRAB` ...
@@ -262,21 +244,5 @@ mod tests {
         near(closing_xz(v3(0.0, -9.0, 0.0), rolled, fwd), 9.0 * s);
         assert!(closing_xz(v3(0.0, -9.0, 0.0), rolled, fwd) > Tuning::BUILT_IN.grind.wipeout_xz);
         assert!(closing_xz(v3(0.0, -6.0, 0.0), rolled, fwd) < Tuning::BUILT_IN.grind.wipeout_xz);
-    }
-
-    #[test]
-    fn grind_grabs_are_skate_3s() {
-        assert_eq!(grind_grabs("50_50"), [Some("FSGRAB"), Some("BSGRAB")]);
-        assert_eq!(grind_grabs("CROOK"), [Some("TAILGRAB"), Some("BSGRAB")]);
-        assert_eq!(grind_grabs("BLUNT"), [None, Some("TAILGRAB")]);
-        assert_eq!(grind_grabs("BOARD"), [None, None]);
-        assert_eq!(grab_of("BS_BF_5_O_NOSEGRAB"), Some("NOSEGRAB"));
-        assert_eq!(grab_of("FS_5_O"), None);
-        assert_eq!(grab_display("TAILGRAB"), "TAILGRAB");
-        // A 5-0 with the free end low is lifted to the grab's height, up to a full stick.
-        assert_eq!(grab_lift(0.2, 0.25, 1.0), None);
-        near(grab_lift(0.2, 0.15, 1.0).unwrap(), 0.5);
-        near(grab_lift(0.2, -0.3, -1.0).unwrap(), -1.0);
-        assert_eq!(grab_lift(0.0, -0.3, 1.0), None);
     }
 }

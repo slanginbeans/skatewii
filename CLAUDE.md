@@ -9,12 +9,15 @@ An original skateboarding game for the Nintendo Wii, written in Rust (see README
    Players supply data by running `tools/import` (`fg_import`) on a Skate 3 (Xbox 360) disc image they own.
    Its output goes outside the repo or to git-ignored `/imported`, and `tools/check_no_game_data.sh` (CI) must
    pass. Importer tests use synthetic data built in the test. Format knowledge from public research (notably
-   SK8-ENGINE/skate-3-rust-engine, GPL-3.0) is fine, with credit. `fg_import` is GPL-3.0-only. The game must
-   still boot and play with its built-in placeholder art when no imported data is present.
+   SK8-ENGINE/skate-3-rust-engine, GPL-3.0) is fine, with credit. `fg_import` is GPL-3.0-only. Without
+   imported data the game boots to a screen telling the player to run the importer (`Game::require_disc_data`);
+   nothing built-in stands in for the disc's skater, state graphs, gestures or camera. Tests drive the
+   physics with synthetic data (a synthetic `GraphControl`; the camera's test shots behind game_core's
+   `fixtures` feature, which the Wii game turns off), or run on the player's data and skip without it.
    Simple values are not assets: built-in defaults and constants should use the game's own tuning numbers,
    curve points, thresholds and timings (from the disc or SK8) wherever they are known, so the game plays like
-   Skate 3 even without imported data. Invent a value only when the real one isn't known. The rule is about
-   assets and data files, not individual numbers.
+   Skate 3 and the tests run on its numbers. Invent a value only when the real one isn't known. The rule is
+   about assets and data files, not individual numbers.
 2. **`game_core` stays `no_std` + `alloc`** and platform-free: it draws only through `gfx::Gfx` and reads
    only `input::PadRaw`. Use `libm`, not float intrinsics that need a C math library.
 3. **The C/Rust boundary is `wii/platform/fg_platform.h`.** Change it, `wii/game/src/ffi.rs` and the

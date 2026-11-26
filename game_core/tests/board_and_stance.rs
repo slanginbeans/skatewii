@@ -74,43 +74,6 @@ fn riding_fakie_the_stick_turns_the_travel_its_own_way() {
     assert!(fakie_right < -0.1, "{fakie_right}");
 }
 
-/// The drawn rider's chest (toe side, mirrored with the stance) and the board's nose, as drawn.
-fn drawn_placeholder(g: &Game) -> (Vec3, Vec3) {
-    let x = g.imported_xform();
-    let side = x.rot.cols[0];
-    let chest = if g.skater.mirrored() { -side } else { side };
-    (chest, x.rot.cols[2])
-}
-
-#[test]
-fn pushing_from_fakie_turns_nothing_in_the_world_at_50_hz() {
-    // flatground's own rules (no state graphs): A riding fakie turns the rider round to push switch.
-    let mut g = Game::new();
-    g.place_rider(v3(0.0, 0.0, -8.0), 0.0, -3.0);
-    let dt = 1.0 / 50.0;
-    for _ in 0..30 {
-        g.update(&pad(0, 0), dt);
-    }
-    assert!(g.skater.fakie);
-    let (mut chest, mut nose) = drawn_placeholder(&g);
-    let mut switched = false;
-    for i in 0..40 {
-        g.update(&pad(0, if i < 5 { btn::A } else { 0 }), dt);
-        switched |= g.events.contains(&Event::Switched);
-        let (c, n) = drawn_placeholder(&g);
-        assert!(
-            yaw_step(chest, c) < 3.0,
-            "tick {i}: chest {chest:?} -> {c:?}"
-        );
-        assert!(
-            axis_step(nose, n) < 3.0,
-            "tick {i}: board {nose:?} -> {n:?}"
-        );
-        (chest, nose) = (c, n);
-    }
-    assert!(switched && g.skater.switch && !g.skater.fakie);
-}
-
 // ---- With the player's imported data ----
 
 fn data_dir() -> Option<PathBuf> {

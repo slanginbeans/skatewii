@@ -265,7 +265,7 @@ fn slamming_down_onto_a_rail_with_the_board_rolled_wipes_out() {
 }
 
 #[test]
-fn a_trigger_in_on_a_50_50_is_a_grind_grab_scored_with_it() {
+fn the_graphs_grind_grab_on_a_50_50_is_scored_with_it() {
     let p = rail_park(12.0, None);
     let mut s = in_air(
         &p,
@@ -277,39 +277,18 @@ fn a_trigger_in_on_a_50_50_is_a_grind_grab_scored_with_it() {
     let mut ev = Vec::new();
     step(&mut s, &p, &Pad::default(), 2, &mut ev);
     assert_eq!(s.grind.as_ref().map(|g| g.family), Some(Family::FiftyFifty));
-    // The left trigger fully in: the frontside hand (the rider isn't mirrored goofy; mirrored, it is
-    // the backside one), held half a second.
-    let pad = Pad {
-        trig_l: 1.0,
-        ..Pad::default()
-    };
-    step(&mut s, &p, &pad, 30, &mut ev);
+    // The motion graph's grind-grab state (`FS_5050_FSGRAB`) scoring its grab, held half a second.
+    s.graph.grind_grab = Some("FSGRAB");
+    step(&mut s, &p, &Pad::default(), 30, &mut ev);
     let g = s.grind.as_ref().expect("grinding");
-    let want = if s.mirrored() { "BSGRAB" } else { "FSGRAB" };
-    assert_eq!(g.grab.map(|(n, _)| n), Some(want));
+    assert_eq!(g.grab.map(|(n, _)| n), Some("FSGRAB"));
+    s.graph.grind_grab = None;
     step(&mut s, &p, &Pad::default(), 200, &mut ev);
     let names = landed(&ev);
-    let shown = if s.mirrored() { "BS GRAB" } else { "FS GRAB" };
     assert!(
-        names.iter().any(|n| n.ends_with(&format!("50-50 {shown}"))),
+        names.iter().any(|n| n.ends_with("50-50 FS GRAB")),
         "{names:?}"
     );
-    // A trigger only partly in is no grind grab.
-    let mut s = in_air(
-        &p,
-        v3(0.0, 0.56, 1.0),
-        Vec3::UP,
-        v3(0.0, 0.0, 1.0),
-        v3(0.0, -1.0, 5.0),
-    );
-    let mut ev = Vec::new();
-    step(&mut s, &p, &Pad::default(), 2, &mut ev);
-    let half = Pad {
-        trig_l: 0.5,
-        ..Pad::default()
-    };
-    step(&mut s, &p, &half, 20, &mut ev);
-    assert!(s.grind.as_ref().is_some_and(|g| g.grab.is_none()));
 }
 
 fn data_dir() -> Option<PathBuf> {

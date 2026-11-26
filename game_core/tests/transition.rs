@@ -15,6 +15,8 @@
 //!   Skate 3's graphs go through `Mount/Ground/IntoDropIn` into `OnBoard/Grinding/DroppingIn`, play their
 //!   grind states on the coping for the stalls, and their `HandPlantGround` and `HandPlantAir` states.
 
+mod common;
+
 use std::path::PathBuf;
 
 use game_core::Game;
@@ -135,7 +137,11 @@ fn at_the_edge(g: &mut Game, back: f32) {
     g.place_rider(v3(0.0, c.y, c.z + back), std::f32::consts::PI, 0.0);
     let mut ev = Vec::new();
     run(g, 30, NONE, &mut ev);
-    run(g, 1, Y, &mut ev);
+    if g.graph.is_some() {
+        run(g, 1, Y, &mut ev);
+    } else {
+        common::get_off(g);
+    }
     run(g, 120, NONE, &mut ev);
     assert!(g.skater.walking(), "off the board: {ev:?}");
     assert!(g.skater.possession.held(), "the board in hand");
@@ -151,8 +157,10 @@ fn y_at_the_edge_sets_the_board_on_the_coping_and_letting_go_drops_in() {
         "{e:?}"
     );
     let mut ev = Vec::new();
-    // Y held: up to the edge and standing on the board there.
+    // Y held: up to the edge and standing on the board there (the motion graph's `IntoDropIn/Cycle`).
+    g.skater.graph.drop_in_stand = true;
     run(&mut g, 90, Y, &mut ev);
+    g.skater.graph.drop_in_stand = false;
     assert!(ev.contains(&Event::DropInSet), "{ev:?}");
     let d = g.skater.drop_in.expect("dropping in");
     assert_eq!(d.phase, Phase::Stand);
@@ -189,7 +197,9 @@ fn the_stick_pulled_back_at_the_edge_steps_away() {
     let mut g = Game::new();
     at_the_edge(&mut g, 0.8);
     let mut ev = Vec::new();
+    g.skater.graph.drop_in_stand = true;
     run(&mut g, 60, Y, &mut ev);
+    g.skater.graph.drop_in_stand = false;
     assert!(ev.contains(&Event::DropInSet), "{ev:?}");
     // The camera looks along the rider's facing: the stick pulled back is away from the edge.
     let back = In {
@@ -214,12 +224,10 @@ fn y_away_from_an_edge_still_gets_on_the_board() {
     let mut g = Game::new();
     at_the_edge(&mut g, 3.0);
     assert!(g.skater.edge.is_none_or(|e| e.dist > 1.5));
-    let mut ev = Vec::new();
-    run(&mut g, 1, Y, &mut ev);
-    run(&mut g, 30, NONE, &mut ev);
+    let ev: Vec<Event> = Vec::new();
+    common::get_on(&mut g);
     assert!(g.skater.drop_in.is_none());
     assert!(g.skater.rolling(), "{ev:?}");
-    assert!(ev.contains(&Event::SteppedOn));
 }
 
 /// A skater in the air with its deck's middle at `deck`, nose `fwd`, moving at `vel`.
@@ -334,27 +342,6 @@ fn both_trucks_held_on_the_coping_are_an_axle_stall_back_down_the_ramp() {
     assert!(landed(&ev).iter().any(|n| n.ends_with("50-50")), "{ev:?}");
 }
 
-/// Rolling up the ramp from the flat at `speed` through the game (its scoring), Z held all along; in the
-/// plant the C-stick at `cstick` and `buttons` held. Stops once back rolling in the flat.
-fn handplant(g: &mut Game, speed: f32, cstick: [i8; 2], buttons: u32) -> Vec<Event> {
-    g.park = pipe();
-    g.place_rider(v3(0.0, 0.0, -3.0), 0.0, speed);
-    let mut ev = Vec::new();
-    for _ in 0..360 {
-        let plant = g.skater.hand_plant.is_some();
-        let i = In {
-            stick: [0, 0],
-            cstick: if plant { cstick } else { [0, 0] },
-            buttons: btn::Z | if plant { buttons } else { 0 },
-        };
-        run(g, 1, i, &mut ev);
-        if ev.contains(&Event::HandReleased) && g.skater.rolling() && g.skater.pos.y < 0.3 {
-            break;
-        }
-    }
-    ev
-}
-
 #[test]
 fn z_riding_up_the_ramp_plants_a_hand_on_the_coping_and_comes_back_down() {
     let mut g = Game::new();
@@ -363,6 +350,9 @@ fn z_riding_up_the_ramp_plants_a_hand_on_the_coping_and_comes_back_down() {
     let c = coping();
     let mut ev = Vec::new();
     let (mut found, mut upside_down, mut top) = (false, false, f32::MIN);
+    // The motion graph attaching the world grab (Z) and committing its hand plant.
+    g.skater.graph.grab_world = true;
+    g.skater.graph.handplant_committed = true;
     for _ in 0..360 {
         run(&mut g, 1, Z, &mut ev);
         found |= g.skater.handplant.found;
@@ -402,36 +392,6 @@ fn z_riding_up_the_ramp_plants_a_hand_on_the_coping_and_comes_back_down() {
         g.skater.state(),
         g.skater.speed
     );
-}
-
-#[test]
-fn the_c_stick_and_the_feet_name_the_hand_plant() {
-    let named = |cstick: [i8; 2], buttons: u32| {
-        let mut g = Game::new();
-        let ev = handplant(&mut g, 8.0, cstick, buttons);
-        let (name, points) = ev
-            .iter()
-            .find_map(|e| match e {
-                Event::Landed { name, points, .. } if name.contains("HANDPLANT") => {
-                    Some((name.clone(), *points))
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("{ev:?}"));
-        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
-        (name, points)
-    };
-    let (plain, _) = named([0, 0], 0);
-    let side = &plain[..3];
-    // Skate 3's points: 150 for each variant.
-    assert_eq!(named([0, 100], 0), (format!("{side}HANDPLANT UP"), 150));
-    assert_eq!(named([0, -100], 0), (format!("{side}HANDPLANT DOWN"), 150));
-    assert_eq!(
-        named([0, 0], btn::X),
-        (format!("{side}HANDPLANT NOFOOT"), 150)
-    );
-    let (one, points) = named([0, 0], btn::A);
-    assert!(one.contains("HANDPLANT ONEFOOT") && points == 150, "{one}");
 }
 
 #[test]

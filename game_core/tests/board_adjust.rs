@@ -47,17 +47,17 @@ fn ollie(p: &Park, stick: [f32; 2]) -> (Skater, Vec<Event>) {
     s.since_spawn = 10.0;
     s.speed = 5.0;
     let mut ev = Vec::new();
-    let pop = FlickOut {
-        flick: Some(Flick::OLLIE),
-        strength: 1.0,
-        ..FlickOut::default()
-    };
-    s.step(p, &Pad::default(), &pop, TICK, &mut ev);
+    // The state graph pops an ollie (its takeoff clip's jump).
+    s.graph.pop = Some((Flick::OLLIE, 1.0));
+    s.step(p, &Pad::default(), &FlickOut::default(), TICK, &mut ev);
+    s.graph.pop = None;
     assert!(s.is_airborne(), "popped");
     let pad = Pad {
         flick: stick,
         ..Pad::default()
     };
+    // The action graph's BoardAdjust runs while the C-stick is held.
+    s.graph.board_adjust = stick != [0.0, 0.0];
     for _ in 0..90 {
         s.step(p, &pad, &FlickOut::default(), TICK, &mut ev);
         if !s.is_airborne() {
@@ -117,6 +117,8 @@ fn a_board_lined_up_with_the_travel_lands_clean_where_the_body_would_not() {
             flick: stick,
             ..Pad::default()
         };
+        // The action graph's BoardAdjust runs while the C-stick is held.
+        s.graph.board_adjust = lined_up;
         let mut ev = Vec::new();
         for _ in 0..30 {
             s.step(&p, &pad, &FlickOut::default(), TICK, &mut ev);
@@ -310,17 +312,16 @@ fn an_adjusted_landing_keeps_its_heading_after_touching_down() {
         for _ in 0..10 {
             s.step(&p, &Pad::default(), &FlickOut::default(), TICK, &mut ev);
         }
-        let pop = FlickOut {
-            flick: Some(Flick::OLLIE),
-            strength: 1.0,
-            ..FlickOut::default()
-        };
-        s.step(&p, &Pad::default(), &pop, TICK, &mut ev);
+        // The state graph pops an ollie (its takeoff clip's jump).
+        s.graph.pop = Some((Flick::OLLIE, 1.0));
+        s.step(&p, &Pad::default(), &FlickOut::default(), TICK, &mut ev);
+        s.graph.pop = None;
         assert!(s.is_airborne(), "popped");
         let pad = Pad {
             flick: [x, 0.0],
             ..Pad::default()
         };
+        s.graph.board_adjust = true;
         for _ in 0..90 {
             s.step(&p, &pad, &FlickOut::default(), TICK, &mut ev);
             if !s.is_airborne() {
