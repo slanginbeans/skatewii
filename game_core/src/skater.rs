@@ -2699,7 +2699,7 @@ impl Skater {
         let pose = self.approach_pose();
         self.approach.take_off(pose);
         self.air_assist = None;
-        // Off the ground: the rigid board flies on, hooked to the flight (`skater::rig`).
+        // Off the ground: the rigid board flies on under the air states (`Skater::fly_board`).
         if let Some(r) = &mut self.rig {
             r.airborne = true;
         }
@@ -4368,6 +4368,65 @@ mod tests {
             top
         };
         assert!(apex(1.0) > apex(0.0) + 0.2, "{} {}", apex(1.0), apex(0.0));
+    }
+
+    #[test]
+    fn the_physical_board_carries_the_known_air_and_lands_on_its_wheels() {
+        // SK8's ollie: the jump launches the prediction, known that tick (straight into KnownAir); the
+        // physical board follows the trajectory with its hook turning it only, and touches down on its
+        // own wheels when the trajectory meets the ground.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 5.0;
+        let mut ev = steps(&mut s, &park, &Pad::default(), None, 5);
+        popped(&mut s, &park, &Pad::default(), Flick::OLLIE, &mut ev);
+        assert_eq!(s.state(), State::KnownAir);
+        let contact = s.plan.as_ref().map(|p| p.contact.time).unwrap();
+        let mut ticks = 0;
+        let mut follows = true;
+        while s.is_airborne() && ticks < 120 {
+            let before = s
+                .plan
+                .map(|p| p.target(s.air_time + DT, s.tuning.traj_error_blend));
+            ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+            ticks += 1;
+            // The board is where the trajectory puts it (the deck over the flight's point).
+            if let (Some(p), true) = (before, s.is_airborne()) {
+                let d = s.rig.as_ref().unwrap().board.deck().position - s.deck();
+                follows &= d.length() < 0.01 && (s.pos - p).length() < 0.01;
+            }
+        }
+        assert!(follows, "the board follows the known air");
+        assert!(s.rolling(), "{ev:?}");
+        assert_eq!(landed(&ev), ["OLLIE"], "{ev:?}");
+        // Down when the trajectory meets the ground, within a tick or two of the prediction.
+        let air = ticks as f32 * DT;
+        assert!((air - contact).abs() < 2.5 * DT, "{air} vs {contact}");
+        // On its wheels: the deck at its riding height.
+        let deck = s.rig.as_ref().unwrap().board.deck().position;
+        assert!((deck.y - DECK_HEIGHT).abs() < 0.02, "{deck:?}");
+    }
+
+    #[test]
+    fn a_board_rolled_off_a_ledge_flies_free_and_lands_on_its_own_physics() {
+        // PhysicsAir without a pop: no jump velocity, the board falls on its own and its wheels meet the
+        // ground below; the selector takes it down once the air state has settled.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.pos = v3(0.0, 0.3, 0.0);
+        s.vel = v3(0.0, 0.0, 3.0);
+        s.force_state(State::PhysicsAir);
+        let mut ev = Vec::new();
+        let mut ticks = 0;
+        while s.is_airborne() && ticks < 60 {
+            ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
+            ticks += 1;
+        }
+        assert!(s.rolling(), "{ev:?}");
+        assert!(!ev.contains(&Event::Bailed), "{ev:?}");
+        // About the fall's time (0.25 s for 0.3 m), not held up.
+        assert!((10..=20).contains(&ticks), "{ticks}");
+        assert!((s.speed - 3.0).abs() < 0.3, "{}", s.speed);
     }
 
     #[test]

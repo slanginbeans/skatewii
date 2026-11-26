@@ -15,7 +15,7 @@
 //!
 //! | SK8 field | flatground |
 //! |---|---|
-//! | `wheel_contact_count_2556`, `SkateboardBody+869` | [`Facts::wheels`]: the rigid board's loaded wheels, 4 at a touchdown |
+//! | `wheel_contact_count_2556`, `SkateboardBody+869` | [`Facts::wheels`]: the rigid board's loaded wheels (in the air, those on a surface it can land on) |
 //! | `SkateboardBody+856`, `+7692` | [`Facts::gap`], [`Facts::no_wheel_time`]: the wheel lines' nearest surface and the time with no wheel down |
 //! | `field_2572` (state frames, reset by Processed2480 bit13) | [`Facts::jumped`]: a jump off the board's ground (a pop, a wallride's jump off) |
 //! | Processed2468 bit8 (grinds flag_322) | [`Facts::left_grind`]: popped or come off the rail |

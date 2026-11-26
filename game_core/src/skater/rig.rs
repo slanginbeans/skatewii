@@ -107,7 +107,7 @@ pub struct Rig {
     pub(super) velocity: Vec3,
     /// The velocity change last brought in from outside the ride (diagnostics).
     pub last_sync: Vec3,
-    /// Flying: the board follows the flight on SK8's hook drive and lands on its own physics.
+    /// Flying: the board carries the flight (SK8 PhysicsAir/KnownAir) and lands on its own wheels.
     pub airborne: bool,
     /// The skater's frame is turned end for end against the deck (a switch or a revert's turn).
     pub flip: bool,
