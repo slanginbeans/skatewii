@@ -465,13 +465,15 @@ void fg_draw_2d(const FgVertex *verts, uint32_t count) {
 }
 
 void fg_end_frame(void) {
-    u32 t0 = fg_time_us();
-    GX_DrawDone();
-    u32 t1 = fg_time_us();
+    // libogc's standard order: the copy to the framebuffer is queued behind the frame's drawing, then
+    // DrawDone waits for both before the framebuffer is shown.
     cur_fb ^= 1;
     GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
     GX_SetColorUpdate(GX_TRUE);
     GX_CopyDisp(xfb[cur_fb], GX_TRUE);
+    u32 t0 = fg_time_us();
+    GX_DrawDone();
+    u32 t1 = fg_time_us();
     VIDEO_SetNextFramebuffer(xfb[cur_fb]);
     VIDEO_Flush();
     VIDEO_WaitVSync();
