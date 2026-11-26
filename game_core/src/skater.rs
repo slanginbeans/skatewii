@@ -1607,16 +1607,9 @@ impl Skater {
             self.select_state();
         }
         if self.rolling() {
-            // The drawn board follows the ground smoothly; the velocity is the ground's.
-            let k = 1.0
-                - libm::powf(
-                    1.0 - self.tuning.ground_normal_blend.clamp(0.0, 1.0),
-                    dt * 60.0,
-                );
-            self.normal = self
-                .normal
-                .lerp(self.contact_n, k)
-                .normalize_or(self.contact_n);
+            // The board's up is the ground's under it (what is drawn is the physical deck; Skate 3
+            // smooths the ground normal only in its reckoning); the velocity is the ground's.
+            self.normal = self.contact_n;
             self.vel = self.ground_velocity() + self.contact_n * self.vn;
             self.update_reckoning(dt);
             // A safe spot to be put back on after a bail.

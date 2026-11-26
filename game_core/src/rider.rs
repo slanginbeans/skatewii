@@ -111,6 +111,10 @@ pub struct Rider {
     /// Skate 3's physical pose job's mapping from the physical skeleton to this one (`render_pose`),
     /// when the rig has every bone for it.
     drawn: Option<crate::render_pose::Mapping>,
+    /// Its buffers, kept between frames: the skeleton's parents, the animated pose and the drawn one.
+    drawn_parents: Vec<i16>,
+    drawn_anim: Vec<Xform>,
+    drawn_rows: Vec<Rows>,
     a: Vec<Local>,
     b: Vec<Local>,
     /// The state graphs' pose stack: poses and their bones' channel weights (see
@@ -215,6 +219,9 @@ impl Rider {
             mirror: false,
             graph_posed: false,
             drawn,
+            drawn_parents: bone_parents,
+            drawn_anim: Vec::with_capacity(n),
+            drawn_rows: Vec::with_capacity(n),
             a: vec![Local::IDENTITY; n],
             b: vec![Local::IDENTITY; n],
             stack: Vec::new(),
@@ -411,12 +418,18 @@ impl Rider {
             return false;
         };
         let ch = &mut self.character;
-        let n = ch.bones();
-        let parents: Vec<i16> = (0..n).map(|b| ch.parent(b)).collect();
-        let anim: Vec<Xform> = ch.world().iter().map(rows_to_xform).collect();
-        let out = map.publish(&anim, &parents, parts, to_world, board);
-        let rows: Vec<Rows> = out.iter().map(xform_to_rows).collect();
-        ch.set_world(&rows);
+        self.drawn_anim.clear();
+        self.drawn_anim.extend(ch.world().iter().map(rows_to_xform));
+        let out = map.publish(
+            &self.drawn_anim,
+            &self.drawn_parents,
+            parts,
+            to_world,
+            board,
+        );
+        self.drawn_rows.clear();
+        self.drawn_rows.extend(out.iter().map(xform_to_rows));
+        ch.set_world(&self.drawn_rows);
         true
     }
 
