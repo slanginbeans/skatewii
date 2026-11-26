@@ -14,7 +14,7 @@ use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::{Vec3, Xform, atan2f, v3, wrap_angle};
 use game_core::park::Terrain;
-use game_core::skater::{DECK_HEIGHT, Event, Mode};
+use game_core::skater::{DECK_HEIGHT, Event};
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -202,12 +202,12 @@ fn imported_wheels_rest_on_the_ground_and_trucks_on_the_rail() {
     for _ in 0..12 {
         g.update(&pad(0, 0), TICK);
     }
-    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(g.skater.rolling());
     assert_on_ground(&g, "the bank");
     g.place_rider(v3(8.0, 0.0, -1.0), 0.0, 3.0);
     for i in 0..50 {
         g.update(&pad(0, 0), TICK);
-        if g.skater.mode == Mode::Rolling && i % 5 == 0 {
+        if g.skater.rolling() && i % 5 == 0 {
             assert_on_ground(&g, &format!("the funbox, tick {i}"));
         }
     }
@@ -234,11 +234,13 @@ fn imported_wheels_rest_on_the_ground_and_trucks_on_the_rail() {
         g.update(&pad(0, 0), TICK);
     }
     g.skater.pos.y += 0.6;
-    g.skater.mode = Mode::Air { time: 0.3 };
+    g.skater.force_state(game_core::skater::State::PhysicsAir);
+    g.skater.air_time = 0.3;
+    g.skater.states.time = 0.3;
     let mut landed = None;
     for i in 0..60 {
         g.update(&pad(0, 0), TICK);
-        if landed.is_none() && g.skater.mode == Mode::Rolling {
+        if landed.is_none() && g.skater.rolling() {
             landed = Some(i);
         }
         if landed.is_some_and(|l| i - l < 20) {
@@ -251,18 +253,20 @@ fn imported_wheels_rest_on_the_ground_and_trucks_on_the_rail() {
     let s = &mut g.skater;
     s.pos = v3(4.0, 0.55, 10.3);
     s.vel = v3(0.0, -0.5, 4.0);
-    s.mode = Mode::Air { time: 0.5 };
+    s.force_state(game_core::skater::State::PhysicsAir);
+    s.air_time = 0.5;
+    s.states.time = 0.5;
     let mut grinding = 0;
     for _ in 0..90 {
         g.update(&pad(0, 0), TICK);
-        if g.skater.mode == Mode::Grind {
+        if g.skater.grinding() {
             grinding += 1;
             if grinding > 30 {
                 break;
             }
         }
     }
-    assert!(grinding > 30, "grinding: {:?}", g.skater.mode);
+    assert!(grinding > 30, "grinding: {:?}", g.skater.state());
     let lowest = part_points(&g, "skatetruck")
         .into_iter()
         .map(|p| p.y - 0.35)

@@ -10,8 +10,8 @@
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::{v3, wrap_angle};
+use game_core::skater::Event;
 use game_core::skater::biped::Loco;
-use game_core::skater::{Event, Mode};
 
 const TICK: f32 = 1.0 / 60.0;
 /// A clear lane across the built-in park (nothing in the way along +z for 38 m).
@@ -43,7 +43,7 @@ fn on_foot(pos: game_core::math::Vec3, heading: f32) -> Game {
     g.place_rider(pos, heading, 0.0);
     run(&mut g, 30, [0, 0], 0);
     run(&mut g, 1, [0, 0], btn::Y);
-    assert_eq!(g.skater.mode, Mode::Walk, "Y gets off the board standing");
+    assert!(g.skater.walking(), "Y gets off the board standing");
     assert!(g.events.contains(&Event::SteppedOff));
     run(&mut g, 60, [0, 0], 0);
     g
@@ -56,7 +56,7 @@ fn y_gets_off_the_board_and_back_on() {
     run(&mut g, 20, [0, 0], 0);
     let speed = g.skater.speed;
     run(&mut g, 1, [0, 0], btn::Y);
-    assert_eq!(g.skater.mode, Mode::Walk);
+    assert!(g.skater.walking());
     // Off at the board's speed, facing its way, slowing to a stop with the stick let go.
     assert!(
         (g.skater.biped.speed - speed).abs() < 0.3,
@@ -77,7 +77,7 @@ fn y_gets_off_the_board_and_back_on() {
     let heading = g.skater.biped.heading;
     let walking = g.skater.biped.speed;
     run(&mut g, 1, [0, 100], btn::Y);
-    assert_eq!(g.skater.mode, Mode::Rolling, "Y gets back on");
+    assert!(g.skater.rolling(), "Y gets back on");
     assert!(g.events.contains(&Event::SteppedOn));
     assert!(wrap_angle(g.skater.heading - heading).abs() < 0.05);
     assert!(
@@ -87,7 +87,7 @@ fn y_gets_off_the_board_and_back_on() {
     );
     // And rides on: A pushes.
     run(&mut g, 60, [0, 0], btn::A);
-    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(g.skater.rolling());
 }
 
 /// Getting off while riding switch and back on rides on switch: the stance isn't set back to natural
@@ -100,11 +100,11 @@ fn getting_back_on_keeps_the_stance() {
         g.skater.switch = switch;
         run(&mut g, 20, [0, 0], 0);
         run(&mut g, 1, [0, 0], btn::Y);
-        assert_eq!(g.skater.mode, Mode::Walk);
+        assert!(g.skater.walking());
         assert_eq!(g.skater.switch, switch, "off the board");
         run(&mut g, 60, [0, 0], 0);
         run(&mut g, 1, [0, 0], btn::Y);
-        assert_eq!(g.skater.mode, Mode::Rolling);
+        assert!(g.skater.rolling());
         assert_eq!(g.skater.switch, switch, "back on");
         run(&mut g, 120, [0, 0], 0);
         assert_eq!(g.skater.switch, switch, "and riding on");
@@ -116,10 +116,12 @@ fn no_getting_off_in_the_air() {
     let mut g = Game::new();
     g.place_rider(v3(0.0, 0.0, -8.0), 0.0, 4.0);
     run(&mut g, 10, [0, 0], 0);
-    g.skater.mode = Mode::Air { time: 0.0 };
+    g.skater.force_state(game_core::skater::State::PhysicsAir);
+    g.skater.air_time = 0.0;
+    g.skater.states.time = 0.0;
     g.skater.vel.y = 3.0;
     run(&mut g, 1, [0, 0], btn::Y);
-    assert_ne!(g.skater.mode, Mode::Walk);
+    assert!(!g.skater.walking());
 }
 
 #[test]
@@ -195,7 +197,7 @@ fn b_jumps_skate_3s_height() {
     }
     assert!((top - 0.9).abs() < 0.05, "jumped {top} m");
     assert!(g.skater.biped.air.is_none(), "lands");
-    assert_eq!(g.skater.mode, Mode::Walk);
+    assert!(g.skater.walking());
     // About 2 sqrt(2 h / g) in the air.
     let t = ticks as f32 * TICK;
     assert!((t - 0.857).abs() < 0.05, "{t} s in the air");
@@ -277,17 +279,13 @@ fn imported_graphs_get_off_walk_and_get_back_on() {
     g.place_rider(LANE, 0.0, 3.0);
     run(&mut g, 30, [0, 0], 0);
     run(&mut g, 1, [0, 0], btn::Y);
-    assert_eq!(
-        g.skater.mode,
-        Mode::Rolling,
-        "the dismount clip plays first"
-    );
+    assert!(g.skater.rolling(), "the dismount clip plays first");
     let (mut dismount, mut off) = (None, None);
     for i in 0..90 {
         if dismount.is_none() && path(&g).starts_with("Dismount/") {
             dismount = Some(i);
         }
-        if g.skater.mode == Mode::Walk {
+        if g.skater.walking() {
             off = Some(i);
             break;
         }
@@ -323,7 +321,7 @@ fn imported_graphs_get_off_walk_and_get_back_on() {
     let mut on = false;
     for _ in 0..90 {
         run(&mut g, 1, [0, 0], 0);
-        on |= g.skater.mode == Mode::Rolling;
+        on |= g.skater.rolling();
     }
     assert!(on, "back on the board: {}", path(&g));
     assert!(path(&g).starts_with("OnBoard/"), "{}", path(&g));
@@ -342,9 +340,9 @@ fn y_in_the_air_off_the_board_gets_on_there() {
     run(&mut g, 1, [0, 0], btn::Y);
     assert!(g.events.contains(&Event::SteppedOn));
     assert!(
-        matches!(g.skater.mode, Mode::Air { .. }) && g.skater.landing_on_deck(),
+        g.skater.is_airborne() && g.skater.landing_on_deck(),
         "{:?}",
-        g.skater.mode
+        g.skater.state()
     );
     // ...and riding once down, still going his way, with no trick scored for it.
     let mut scored = false;
@@ -352,7 +350,7 @@ fn y_in_the_air_off_the_board_gets_on_there() {
     for i in 0..60 {
         run(&mut g, 1, [0, 0], 0);
         scored |= g.events.iter().any(|e| matches!(e, Event::Landed { .. }));
-        if g.skater.mode == Mode::Rolling {
+        if g.skater.rolling() {
             on = Some(i);
             break;
         }
@@ -388,7 +386,7 @@ fn imported_y_around_a_jump_keeps_the_graphs_with_the_physics() {
         run(&mut g, 30, [0, 0], 0);
         run(&mut g, 1, [0, 0], btn::Y);
         run(&mut g, 120, [0, 0], 0);
-        if g.skater.mode != Mode::Walk {
+        if !g.skater.walking() {
             eprintln!("offboard: the motion pack has no off-board clips: skipped");
             return;
         }
@@ -400,7 +398,7 @@ fn imported_y_around_a_jump_keeps_the_graphs_with_the_physics() {
         let mut mixed = 0;
         for _ in 0..150 {
             run(&mut g, 1, [0, 0], 0);
-            let riding = matches!(g.skater.mode, Mode::Rolling | Mode::Air { .. });
+            let riding = g.skater.rolling() || g.skater.is_airborne();
             mixed = if riding && path(&g).starts_with("OffBoard/") {
                 mixed + 1
             } else {
@@ -408,9 +406,13 @@ fn imported_y_around_a_jump_keeps_the_graphs_with_the_physics() {
             };
         }
         let p = path(&g);
-        match g.skater.mode {
-            Mode::Rolling => assert!(p.starts_with("OnBoard/"), "Y at {at} for {hold}: {p}"),
-            Mode::Walk => assert!(p.starts_with("OffBoard/"), "Y at {at} for {hold}: {p}"),
+        match g.skater.state() {
+            _ if g.skater.rolling() => {
+                assert!(p.starts_with("OnBoard/"), "Y at {at} for {hold}: {p}")
+            }
+            _ if g.skater.walking() => {
+                assert!(p.starts_with("OffBoard/"), "Y at {at} for {hold}: {p}")
+            }
             m => panic!("Y at {at} for {hold}: {m:?} {p}"),
         }
         assert_eq!(
@@ -438,7 +440,7 @@ fn imported_getting_on_switch_stays_switch() {
     run(&mut g, 30, [0, 0], 0);
     run(&mut g, 1, [0, 0], btn::Y);
     run(&mut g, 120, [0, 0], 0);
-    if g.skater.mode != Mode::Walk {
+    if !g.skater.walking() {
         eprintln!("offboard: the motion pack has no off-board clips: skipped");
         return;
     }
@@ -447,7 +449,7 @@ fn imported_getting_on_switch_stays_switch() {
     let mut on = false;
     for i in 0..150 {
         run(&mut g, 1, [0, 0], 0);
-        on |= g.skater.mode == Mode::Rolling;
+        on |= g.skater.rolling();
         assert_eq!(g.skater.mirrored(), mirrored, "tick {i}");
     }
     assert!(on && g.skater.switch, "riding switch");
@@ -477,7 +479,7 @@ fn imported_y_in_the_air_plays_the_air_mount() {
         run(&mut g, 30, [0, 0], 0);
         run(&mut g, 1, [0, 0], btn::Y);
         run(&mut g, 120, [0, 0], 0);
-        if g.skater.mode != Mode::Walk {
+        if !g.skater.walking() {
             eprintln!("offboard: the motion pack has no off-board clips: skipped");
             return;
         }
@@ -492,7 +494,7 @@ fn imported_y_in_the_air_plays_the_air_mount() {
             let p = path(&g);
             assert!(!p.starts_with("WipeOut"), "Y {at} ticks up: {p}");
             mounted |= p.starts_with("Mount/Air");
-            riding |= g.skater.mode == Mode::Rolling && p.starts_with("OnBoard/");
+            riding |= g.skater.rolling() && p.starts_with("OnBoard/");
         }
         assert!(mounted && riding, "Y {at} ticks up: {}", path(&g));
     }
@@ -511,7 +513,7 @@ fn imported_the_walk_and_run_cycles_play_through() {
     run(&mut g, 30, [0, 0], 0);
     run(&mut g, 1, [0, 0], btn::Y);
     run(&mut g, 120, [0, 0], 0);
-    if g.skater.mode != Mode::Walk {
+    if !g.skater.walking() {
         eprintln!("offboard: the motion pack has no off-board clips: skipped");
         return;
     }
@@ -548,7 +550,7 @@ fn imported_hippie_jump_winds_up_and_leaves_the_board_rolling() {
     for _ in 0..40 {
         run(&mut g, 1, [0, 0], btn::A | btn::B);
         wound |= path(&g).starts_with("OnBoard/HippyJump/Antic");
-        assert_eq!(g.skater.mode, Mode::Rolling, "winding up on the board");
+        assert!(g.skater.rolling(), "winding up on the board");
     }
     assert!(wound, "the wind-up plays: {}", path(&g));
     let (mut top, mut board_hi, mut landed) = (0.0f32, f32::MIN, false);
@@ -568,7 +570,7 @@ fn imported_hippie_jump_winds_up_and_leaves_the_board_rolling() {
     assert!(top > 0.5, "the rider jumps: {top}");
     assert!(board_hi < 0.15, "the board stays on the ground: {board_hi}");
     assert!(landed, "lands the hippie jump");
-    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(g.skater.rolling());
     assert!(path(&g).starts_with("OnBoard/"), "{}", path(&g));
 }
 
@@ -591,7 +593,7 @@ fn imported_mounts_from_stand_run_and_sprint_get_on_promptly() {
         run(&mut g, 30, [0, 0], 0);
         run(&mut g, 1, [0, 0], btn::Y);
         run(&mut g, 150, [0, 0], 0);
-        if g.skater.mode != Mode::Walk {
+        if !g.skater.walking() {
             eprintln!("offboard: the motion pack has no off-board clips: skipped");
             return;
         }
@@ -600,7 +602,7 @@ fn imported_mounts_from_stand_run_and_sprint_get_on_promptly() {
         run(&mut g, 1, stick, buttons | btn::Y);
         let on = (0..40).position(|_| {
             run(&mut g, 1, stick, buttons);
-            g.skater.mode == Mode::Rolling
+            g.skater.rolling()
         });
         assert!(on.is_some(), "{what}: never got on");
     }

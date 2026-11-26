@@ -1273,9 +1273,10 @@ impl Skater {
         }
         match category {
             Category::Air => {
-                let air = match self.mode {
-                    Mode::Air { time } => time,
-                    _ => 0.0,
+                let air = if self.is_airborne() {
+                    self.air_time
+                } else {
+                    0.0
                 };
                 if air < REGRIND_AIR || self.jumper.since_jump <= REGRIND_TICKS {
                     return false;
@@ -1296,6 +1297,10 @@ impl Skater {
             .regrind_block
             .is_some_and(|(r, t)| r == c.rail && t > 0.0)
         {
+            return false;
+        }
+        // Onto the rail only as Skate 3's state selector takes the contact (its grind states).
+        if !self.grind_taken(c.family as u32) {
             return false;
         }
         // Onto the rail as the deck was lined up (the family was picked from the adjusted deck).
@@ -1501,7 +1506,6 @@ impl Skater {
         self.plan = None;
         self.air_assist = None;
         self.vn = 0.0;
-        self.mode = Mode::Grind;
         self.approach.away = 0;
         true
     }

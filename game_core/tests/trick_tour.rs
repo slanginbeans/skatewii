@@ -3,7 +3,7 @@
 
 use game_core::Game;
 use game_core::autoplay::{MANUAL_TICKS, TrickTour};
-use game_core::skater::{Event, Mode};
+use game_core::skater::Event;
 
 #[test]
 fn trick_tour_does_every_move() {
@@ -26,8 +26,8 @@ fn trick_tour_does_every_move() {
         manual_frames += s.manual.is_some() as u32;
         grab_frames += s.grab.is_some() as u32;
         slide_frames += s.slide.is_some() as u32;
-        fakie_frames += (s.fakie && s.mode == Mode::Rolling) as u32;
-        if s.mode == Mode::Rolling {
+        fakie_frames += (s.fakie && s.rolling()) as u32;
+        if s.rolling() {
             leaned.0 |= s.steer < -0.5;
             leaned.1 |= s.steer > 0.5;
         }

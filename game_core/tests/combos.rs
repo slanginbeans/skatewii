@@ -17,7 +17,7 @@ use game_core::input::{PadRaw, btn, flag};
 use game_core::math::v3;
 use game_core::park::Park;
 use game_core::scoring::catalog;
-use game_core::skater::{Event, Mode};
+use game_core::skater::Event;
 
 const TICK: f32 = 1.0 / 60.0;
 /// Raw C-stick: pulled back (the wind-up), flicked forward-right and forward-left (a kickflip and a
@@ -101,7 +101,7 @@ fn flip(g: &mut Game, end: (i8, i8), tweak: bool, landed: &mut Vec<(String, u32)
             pad()
         };
         frame(g, &p, landed, &mut bailed);
-        if ticks > 10 && !air && g.skater.mode == Mode::Rolling {
+        if ticks > 10 && !air && g.skater.rolling() {
             break;
         }
         if bailed {
@@ -111,7 +111,7 @@ fn flip(g: &mut Game, end: (i8, i8), tweak: bool, landed: &mut Vec<(String, u32)
     // Roll a moment, pushing if it slowed (three ticks publish the sequence).
     for _ in 0..12 {
         let p = PadRaw {
-            buttons: if g.skater.speed < 6.0 && g.skater.mode == Mode::Rolling {
+            buttons: if g.skater.speed < 6.0 && g.skater.rolling() {
                 btn::A
             } else {
                 0

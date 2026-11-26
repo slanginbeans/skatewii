@@ -16,7 +16,7 @@
 use crate::input::{Pad, PadRaw, btn};
 use crate::math::{Vec3, v3};
 use crate::park::Terrain;
-use crate::skater::{Mode, Skater, respawn};
+use crate::skater::{Skater, respawn};
 use crate::tuning::Tuning;
 
 /// A marker: where the rider was, which way he faced (yaw), his stance and whether he was riding.
@@ -112,10 +112,12 @@ impl Markers {
 
     /// Where the rider stands now as a marker, if one may go down here.
     pub fn here(t: &Tuning, park: &dyn Terrain, s: &Skater) -> Option<Marker> {
-        let (on_board, heading) = match s.mode {
-            Mode::Rolling if s.board_frame().cols[1].y > DECK_UP_MIN => (true, s.heading),
-            Mode::Walk if s.biped.air.is_none() => (false, s.biped.heading),
-            _ => return None,
+        let (on_board, heading) = if s.rolling() && s.board_frame().cols[1].y > DECK_UP_MIN {
+            (true, s.heading)
+        } else if s.walking() && s.biped.air.is_none() {
+            (false, s.biped.heading)
+        } else {
+            return None;
         };
         let y = respawn::marker_ground(t, park, s.pos)?;
         Some(Marker {
@@ -130,9 +132,7 @@ impl Markers {
     pub fn tick(&mut self, held: bool, s: &Skater) -> bool {
         let usable = self.marker.is_some();
         let distance = self.marker.map_or(0.0, |m| (s.pos - m.pos).length());
-        let ready = !matches!(s.mode, Mode::Bailed { .. } | Mode::Runout { .. })
-            && !s.is_airborne()
-            && s.biped.air.is_none();
+        let ready = s.off_board().is_none() && !s.is_airborne() && s.biped.air.is_none();
         let step = self.hold.update(held, usable, distance, ready);
         self.progress = step.progress;
         step.relocate
@@ -340,9 +340,12 @@ mod tests {
         let m = Markers::here(&t, &park, &s).expect("on the ground at the spawn");
         assert!(m.on_board);
         assert_eq!(m.heading, s.heading);
-        s.mode = Mode::Air { time: 0.1 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.1;
+        s.states.time = 0.1;
         assert_eq!(Markers::here(&t, &park, &s), None);
-        s.mode = Mode::Bailed { time: 0.1 };
+        s.force_state(crate::skater::State::WipeoutGround);
+        s.states.time = 0.1;
         assert_eq!(Markers::here(&t, &park, &s), None);
     }
 
@@ -359,9 +362,11 @@ mod tests {
             }),
             ..Markers::default()
         };
-        s.mode = Mode::Air { time: 0.1 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.1;
+        s.states.time = 0.1;
         assert!(!(0..60).any(|_| m.tick(true, &s)));
-        s.mode = Mode::Rolling;
+        s.force_state(crate::skater::State::PhysicsGround);
         assert!((0..60).any(|_| m.tick(true, &s)));
     }
 

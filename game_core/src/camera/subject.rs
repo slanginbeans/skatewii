@@ -4,7 +4,7 @@
 
 use crate::math::{Vec3, v3};
 use crate::park::Terrain;
-use crate::skater::{Mode, Skater};
+use crate::skater::Skater;
 
 use super::shot::{
     REF_ANCHOR, REF_BOARD, REF_COM, REF_DAMPED_COM, REF_FEET, REF_GRIND, REF_HEAD, REF_HIPS,
@@ -144,7 +144,7 @@ impl Default for SubjectHistory {
 impl SubjectHistory {
     pub fn read(&mut self, s: &Skater, park: &dyn Terrain, reset: bool, tracked: Vec3) -> Subject {
         let airborne = s.is_airborne();
-        let on_ground = matches!(s.mode, Mode::Rolling | Mode::Grind);
+        let on_ground = s.rolling() || s.grinding();
         if on_ground {
             self.ground_up = s.contact_n.normalize_or(Vec3::UP);
             self.takeoff = None;
@@ -158,8 +158,9 @@ impl SubjectHistory {
         } else {
             nose
         };
-        let trajectory = match (s.mode, &s.plan) {
-            (Mode::Air { time }, Some(p)) => {
+        let trajectory = match (s.is_airborne(), &s.plan) {
+            (true, Some(p)) => {
+                let time = s.air_time;
                 let (launch, launch_normal) =
                     self.takeoff.unwrap_or((p.flight.pos, self.ground_up));
                 let g = p.flight.gravity.max(0.1);
@@ -187,13 +188,13 @@ impl SubjectHistory {
             _ => None,
         };
         // The body's up: the ground's on it, in the air the take-off's turning to the landing's.
-        let body_up = match (&trajectory, s.mode) {
-            (Some(t), _) => t
+        let body_up = match (&trajectory, on_ground, airborne) {
+            (Some(t), _, _) => t
                 .launch_normal
                 .lerp(t.landing_normal, (t.time / t.duration).clamp(0.0, 1.0))
                 .normalize_or(Vec3::UP),
-            (None, Mode::Rolling | Mode::Grind) => s.normal.normalize_or(Vec3::UP),
-            (None, Mode::Air { .. }) => self.body_up,
+            (None, true, _) => s.normal.normalize_or(Vec3::UP),
+            (None, _, true) => self.body_up,
             _ => Vec3::UP,
         };
         self.body_up = body_up;
@@ -211,11 +212,7 @@ impl SubjectHistory {
         let mut refs = [Vec3::ZERO; REFS];
         refs[REF_HEAD] = head;
         refs[REF_HIPS] = com;
-        refs[REF_GRIND] = if s.mode == Mode::Grind {
-            grind_point
-        } else {
-            s.pos
-        };
+        refs[REF_GRIND] = if s.grinding() { grind_point } else { s.pos };
         refs[REF_COM] = com;
         refs[REF_BOARD] = s.pos;
         refs[REF_TRAJECTORY] = com;
@@ -235,14 +232,11 @@ impl SubjectHistory {
             }
         }
         // On a rail the travel is along the rail (a boardslide's nose points across it).
-        let fwd = if s.mode == Mode::Grind {
-            self.grind_dir
+        let fwd = if s.grinding() { self.grind_dir } else { fwd };
+        let vel = if s.rolling() {
+            s.ground_velocity()
         } else {
-            fwd
-        };
-        let vel = match s.mode {
-            Mode::Rolling => s.ground_velocity(),
-            _ => s.vel,
+            s.vel
         };
         Subject {
             pos: s.pos,
@@ -258,12 +252,12 @@ impl SubjectHistory {
                 Vec3::UP
             },
             trajectory,
-            grinding: s.mode == Mode::Grind,
-            ground: s.mode == Mode::Rolling,
-            wiping_out: matches!(s.mode, Mode::Bailed { .. }),
+            grinding: s.grinding(),
+            ground: s.rolling(),
+            wiping_out: s.bailed(),
             wipe_tweak: s.wipeout.profile as u32,
-            off_board: matches!(s.mode, Mode::Runout { .. } | Mode::Walk) || s.hippie_air(),
-            air_off_board: s.mode == Mode::Walk && s.biped.air.is_some(),
+            off_board: s.running_out() || s.walking() || s.hippie_air(),
+            air_off_board: s.walking() && s.biped.air.is_some(),
             pushing: s.push.is_some(),
             at_pushable_speed: s.speed.abs() < s.tuning.push_max_speed,
             pumping: if s.pump.time > 0.0 && s.pump.turn_rate > 0.0 {
@@ -278,8 +272,7 @@ impl SubjectHistory {
             manual: s.manual.is_some(),
             // Skate 3: the playing clips' `Anticipating` attribute (the ollie wind-up); without the
             // graphs, a crouch.
-            preparing: s.mode == Mode::Rolling
-                && s.graph.map_or(s.crouch > 0.35, |g| g.anticipating),
+            preparing: s.rolling() && s.graph.map_or(s.crouch > 0.35, |g| g.anticipating),
             onboard_air: airborne && !s.hippie_air(),
             hippy: s.hippie_air(),
             ledge_left,

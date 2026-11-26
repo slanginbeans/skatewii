@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use game_core::Game;
 use game_core::input::{PadRaw, flag};
 use game_core::math::{Vec3, v3};
-use game_core::skater::{GraphControl, Mode, Stance};
+use game_core::skater::{GraphControl, Stance};
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -54,7 +54,9 @@ fn scripted_flip(stance: Stance, switch: bool, fakie: bool, front: bool) -> Swee
     let side = Vec3::UP.cross(travel);
     s.pos.y += 0.05;
     s.vel = travel * 2.0 + v3(0.0, 6.5, 0.0);
-    s.mode = Mode::Air { time: 0.0 };
+    s.force_state(game_core::skater::State::PhysicsAir);
+    s.air_time = 0.0;
+    s.states.time = 0.0;
     let mut sweep = Sweep {
         along: (0.0, 0.0),
         side: 0.0,
@@ -62,7 +64,7 @@ fn scripted_flip(stance: Stance, switch: bool, fakie: bool, front: bool) -> Swee
         turned: 0.0,
     };
     let mut k = 0;
-    while matches!(g.skater.mode, Mode::Air { .. }) && k < 300 {
+    while g.skater.is_airborne() && k < 300 {
         g.skater.graph = Some(GraphControl {
             body_flip: (k < 20).then_some(front),
             grabbing: true,
@@ -201,7 +203,9 @@ fn imported_flip(test: &str, gesture: &str) -> Option<Sweep> {
     let s = &mut g.skater;
     s.pos.y += 0.05;
     s.vel = travel * 2.0 + v3(0.0, 6.5, 0.0);
-    s.mode = Mode::Air { time: 0.0 };
+    s.force_state(game_core::skater::State::PhysicsAir);
+    s.air_time = 0.0;
+    s.states.time = 0.0;
     let shape = g
         .gesture_shape("skaterls", gesture)
         .expect("flip gesture")
@@ -220,7 +224,7 @@ fn imported_flip(test: &str, gesture: &str) -> Option<Sweep> {
             (pad.stick_x, pad.stick_y) = stick(p);
         }
         g.update(&pad, TICK);
-        if !matches!(g.skater.mode, Mode::Air { .. }) {
+        if !g.skater.is_airborne() {
             break;
         }
         let Some(f) = g.skater.body_flip else {

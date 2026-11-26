@@ -23,7 +23,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::math::Vec3;
-use crate::skater::{Mode, Skater};
+use crate::skater::Skater;
 pub use catalog::Catalog;
 pub use rules::Rules;
 use timer::{ComboTimer, PointTimer};
@@ -100,12 +100,16 @@ pub struct Frame {
 
 impl Frame {
     pub fn of(s: &Skater) -> Frame {
-        let collector = match s.mode {
-            Mode::Air { .. } => Collector::Air,
-            Mode::Grind => Collector::Grind,
-            Mode::Rolling => Collector::Ground,
-            Mode::Walk | Mode::Runout { .. } => Collector::Offboard,
-            Mode::Bailed { .. } => Collector::None,
+        let collector = if s.is_airborne() {
+            Collector::Air
+        } else if s.grinding() {
+            Collector::Grind
+        } else if s.rolling() {
+            Collector::Ground
+        } else if s.walking() || s.running_out() {
+            Collector::Offboard
+        } else {
+            Collector::None
         };
         let manual = s.manual.is_some();
         Frame {

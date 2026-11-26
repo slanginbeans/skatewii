@@ -21,7 +21,7 @@ use game_core::input::{Pad, PadRaw, flag};
 use game_core::math::{Vec3, v3};
 use game_core::park::Park;
 use game_core::rails::Rail;
-use game_core::skater::{DECK_HEIGHT, Event, Family, Mode, Skater};
+use game_core::skater::{DECK_HEIGHT, Event, Family, Skater};
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -49,7 +49,9 @@ fn in_air(p: &Park, deck: Vec3, up: Vec3, fwd: Vec3, vel: Vec3) -> Skater {
     s.fwd = fwd;
     s.heading = game_core::math::atan2f(fwd.x, fwd.z);
     s.vel = vel;
-    s.mode = Mode::Air { time: 0.5 };
+    s.force_state(game_core::skater::State::PhysicsAir);
+    s.air_time = 0.5;
+    s.states.time = 0.5;
     s
 }
 
@@ -81,7 +83,7 @@ fn a_50_50_drifting_sideways_onto_the_rail_is_pulled_back_over_it() {
     );
     let mut ev = Vec::new();
     step(&mut s, &p, &Pad::default(), 2, &mut ev);
-    assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+    assert!(s.grinding(), "{ev:?}");
     let g = s.grind.as_ref().unwrap();
     assert_eq!(g.family, Family::FiftyFifty);
     assert!(
@@ -134,7 +136,7 @@ fn leaning_the_wrong_way_out_of_a_nose_slide_falls_off_the_rail() {
     let mut s = nose_slide(&p);
     let mut ev = Vec::new();
     step(&mut s, &p, &Pad::default(), 40, &mut ev);
-    assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+    assert!(s.grinding(), "{ev:?}");
     assert_eq!(s.grind.as_ref().unwrap().family, Family::Tipslide);
     // The main stick right pushes the board to the rider's right of the travel (-x here): out
     // along the nose, off its tip.
@@ -145,7 +147,7 @@ fn leaning_the_wrong_way_out_of_a_nose_slide_falls_off_the_rail() {
         ..Pad::default()
     };
     let mut ticks = 0;
-    while s.mode == Mode::Grind && ticks < 120 {
+    while s.grinding() && ticks < 120 {
         step(&mut s, &p, &out, 1, &mut ev);
         ticks += 1;
     }
@@ -161,7 +163,7 @@ fn leaning_the_wrong_way_out_of_a_nose_slide_falls_off_the_rail() {
         ..Pad::default()
     };
     step(&mut s, &p, &inward, 60, &mut ev);
-    assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+    assert!(s.grinding(), "{ev:?}");
     assert_eq!(s.grind.as_ref().unwrap().family, Family::Boardslide);
 }
 
@@ -206,7 +208,9 @@ fn a_boardslide_on_a_ledge_pushed_off_its_side_falls_off() {
         s.fwd = v3(1.0, 0.0, 0.0);
         s.heading = core::f32::consts::FRAC_PI_2;
         s.vel = v3(0.0, -1.0, 4.0);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(game_core::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         let mut ev = Vec::new();
         s.step(&m, &Pad::default(), &FlickOut::default(), TICK, &mut ev);
         assert_eq!(
@@ -219,7 +223,7 @@ fn a_boardslide_on_a_ledge_pushed_off_its_side_falls_off() {
             ..Pad::default()
         };
         let mut ticks = 0;
-        while s.mode == Mode::Grind && ticks < 90 {
+        while s.grinding() && ticks < 90 {
             s.step(&m, &pad, &FlickOut::default(), TICK, &mut ev);
             ticks += 1;
         }
@@ -227,7 +231,7 @@ fn a_boardslide_on_a_ledge_pushed_off_its_side_falls_off() {
     };
     // Untouched it slides on (the ledge leans it off only after its 2 s delay).
     let (s, ticks, ev) = slide(0.0);
-    assert!(s.mode == Mode::Grind && ticks == 90, "{ev:?}");
+    assert!(s.grinding() && ticks == 90, "{ev:?}");
     // The stick right pushes it to -x: off the ledge's low side.
     let (s, ticks, ev) = slide(1.0);
     assert_eq!(s.grind_exit, Some("fell off"), "{ev:?}");
@@ -251,12 +255,12 @@ fn slamming_down_onto_a_rail_with_the_board_rolled_wipes_out() {
     };
     // 9.5 m/s down: 6.7 m/s of it across the rolled rider's ground plane, over Skate 3's 6.
     let (s, ev) = drop(9.5);
-    assert!(ev.contains(&Event::Bailed), "{:?} {ev:?}", s.mode);
-    assert!(matches!(s.mode, Mode::Bailed { .. }));
+    assert!(ev.contains(&Event::Bailed), "{:?} {ev:?}", s.state());
+    assert!(s.bailed());
     assert_eq!(s.bail_reason, Some("slammed into the rail"));
     // 5 m/s: 3.5 m/s across, a grind.
     let (s, ev) = drop(5.0);
-    assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+    assert!(s.grinding(), "{ev:?}");
     assert!(!ev.contains(&Event::Bailed), "{ev:?}");
 }
 
@@ -358,7 +362,9 @@ fn imported_a_trigger_in_on_a_rail_plays_skate_3s_grind_grab() {
     let s = &mut g.skater;
     s.pos = v3(4.0, 0.55, 10.3);
     s.vel = v3(0.0, -0.5, 4.0);
-    s.mode = Mode::Air { time: 0.5 };
+    s.force_state(game_core::skater::State::PhysicsAir);
+    s.air_time = 0.5;
+    s.states.time = 0.5;
     let mut states = Vec::new();
     let mut grabs = Vec::new();
     let mut names = Vec::new();

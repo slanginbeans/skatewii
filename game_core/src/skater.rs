@@ -40,6 +40,7 @@ pub mod reckoning;
 pub mod respawn;
 pub mod rig;
 pub mod stall;
+pub mod states;
 pub mod wipeout;
 pub mod wobble;
 
@@ -58,6 +59,7 @@ pub use grind::{
 };
 pub use landing::Quality;
 pub use respawn::{Checkpoints, Recovery};
+pub use states::State;
 
 use crate::flick::FlickOut;
 use crate::gesture::{self, Flick, Group, Trick};
@@ -180,35 +182,6 @@ pub fn trick_duration(t: Trick) -> f32 {
         (false, _) => 0.5,
         (true, s) if s <= 1.0 => 0.48,
         (true, _) => 0.56,
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Mode {
-    Rolling,
-    Air {
-        time: f32,
-    },
-    Bailed {
-        time: f32,
-    },
-    /// Stepped off the board after hitting something (Skate 3's runout): back on it where it stopped.
-    Runout {
-        time: f32,
-    },
-    /// On a rail (details in `Skater::grind`).
-    Grind,
-    /// Off the board on foot, the board in hand (details in `Skater::biped`).
-    Walk,
-}
-
-impl Mode {
-    /// Off the board: a bail or a runout (drawn the same for now), and seconds since.
-    pub fn off_board(&self) -> Option<f32> {
-        match *self {
-            Mode::Bailed { time } | Mode::Runout { time } => Some(time),
-            _ => None,
-        }
     }
 }
 
@@ -745,7 +718,11 @@ pub struct Skater {
     pub normal: Vec3,
     /// The ground's normal under the trucks (unsmoothed: what the physics rides on).
     pub contact_n: Vec3,
-    pub mode: Mode,
+    /// Skate 3's physical state, the selector's counters and this tick's facts for it
+    /// (`skater::states`).
+    pub states: states::States,
+    /// Seconds since the board left the ground (in the air).
+    pub air_time: f32,
     /// Extra yaw spun in the air (about the board's up), relative to `heading` at take-off.
     pub spin: f32,
     pub spin_rate: f32,
@@ -909,7 +886,7 @@ pub struct Skater {
     /// moved last tick (m/s).
     pub air_lift: f32,
     air_lift_rate: f32,
-    /// Off the board (`Mode::Walk`): the walker.
+    /// Off the board (the off-board states): the walker.
     pub biped: Biped,
     /// Climbing ledges on foot (SK8's own extension: `climb`).
     pub climb: climb::Climber,
@@ -1224,7 +1201,8 @@ impl Skater {
             vel: Vec3::ZERO,
             normal: Vec3::UP,
             contact_n: Vec3::UP,
-            mode: Mode::Rolling,
+            states: states::States::default(),
+            air_time: 0.0,
             spin: 0.0,
             spin_rate: 0.0,
             body: BodySpin::default(),
@@ -1408,7 +1386,7 @@ impl Skater {
         self.switch = m.switch;
         if !m.on_board {
             self.biped = Biped::new(m.heading, Vec3::ZERO, self.normal);
-            self.mode = Mode::Walk;
+            self.force_state(State::BipedGround);
             self.possession.hold();
             self.sync_walk();
         }
@@ -1416,8 +1394,8 @@ impl Skater {
 
     /// Seconds until the board lands: the known landing's, else straight down onto the ground below.
     pub fn time_to_land(&self, park: &dyn Terrain) -> f32 {
-        if let (Mode::Air { time }, Some(p)) = (self.mode, &self.plan) {
-            return p.remaining(time).max(0.0);
+        if let (true, Some(p)) = (self.is_airborne(), &self.plan) {
+            return p.remaining(self.air_time).max(0.0);
         }
         let h = park
             .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
@@ -1425,10 +1403,6 @@ impl Skater {
         let g = self.tuning.gravity.max(0.1);
         let vy = self.vel.y;
         (vy + sqrtf((vy * vy + 2.0 * g * (self.pos.y - h).max(0.0)).max(0.0))) / g
-    }
-
-    pub fn is_airborne(&self) -> bool {
-        matches!(self.mode, Mode::Air { .. })
     }
 
     /// The deck's centre: over the board's contact point, lifted in the air as far as the legs have
@@ -1442,8 +1416,8 @@ impl Skater {
     pub fn board_frame(&self) -> crate::math::Mat3 {
         // The nose along `fwd` (rolling on both trucks, along the chord between their contacts, so both
         // wheels sit on the surface over a kink), the up from the smoothed normal square to it.
-        let f = match (self.mode, self.chord) {
-            (Mode::Rolling, Some(ch)) if ch.dot(self.fwd) > 0.9 => ch,
+        let f = match (self.rolling(), self.chord) {
+            (true, Some(ch)) if ch.dot(self.fwd) > 0.9 => ch,
             _ => self.fwd,
         };
         let f = f.normalize_or(yaw_dir(self.heading));
@@ -1503,7 +1477,7 @@ impl Skater {
 
     /// The rider as the possession reads him: on foot the walker's facing and velocity.
     pub fn rider_frame(&self) -> possession::RiderFrame {
-        let forward = if self.mode == Mode::Walk {
+        let forward = if self.walking() {
             self.biped.forward()
         } else {
             self.fwd
@@ -1536,7 +1510,7 @@ impl Skater {
 
     /// In a bail with the ragdoll (`skater::wipeout`).
     pub fn ragdoll_active(&self) -> bool {
-        self.wipeout.active && matches!(self.mode, Mode::Bailed { .. })
+        self.wipeout.active && self.bailed()
     }
 
     /// The drawn rider is the mirror image of the clips (they are authored goofy).
@@ -1547,8 +1521,8 @@ impl Skater {
     /// Direction of travel (yaw): the board's heading, turned round when rolling tail first (a
     /// standing rigid board's micrometre-a-second jitter is not rolling).
     pub fn travel_yaw(&self) -> f32 {
-        match self.mode {
-            Mode::Air { .. } | Mode::Bailed { .. } if self.vel.horizontal().length() > 0.5 => {
+        match self.state() {
+            _ if (self.is_airborne() || self.bailed()) && self.vel.horizontal().length() > 0.5 => {
                 let h = self.vel.horizontal();
                 atan2f(h.x, h.z)
             }
@@ -1626,6 +1600,8 @@ impl Skater {
         events: &mut Vec<Event>,
     ) {
         self.body_us = 0;
+        // SK8 state_timer_2664: the time in the state, this tick included.
+        self.states.time += dt;
         if let Some(b) = &mut self.rider_body {
             b.tick();
         }
@@ -1637,7 +1613,7 @@ impl Skater {
         self.idle = if touched { 0.0 } else { self.idle + dt };
         self.since_spawn += dt;
         self.dark = self.graph.is_some_and(|g| g.dark);
-        let rolling = self.mode == Mode::Rolling;
+        let rolling = self.rolling();
         let crouch = if rolling && self.manual.is_none() {
             flick
                 .crouch
@@ -1663,7 +1639,7 @@ impl Skater {
         };
         self.grind_sticks_x = clamp(pad.stick[0] + pad.flick[0], -1.0, 1.0);
         self.jumper.tick();
-        if self.mode != Mode::Grind {
+        if !self.grinding() {
             self.approach.away = self.approach.away.saturating_add(1);
         }
         if flick.crouch > 0.0 {
@@ -1696,9 +1672,7 @@ impl Skater {
             }
             (c, _) => c,
         };
-        if self.graph.is_some_and(|g| g.wipeout)
-            && matches!(self.mode, Mode::Rolling | Mode::Air { .. })
-        {
+        if self.graph.is_some_and(|g| g.wipeout) && (self.rolling() || self.is_airborne()) {
             if self.is_airborne() {
                 self.vel = self.vel * 0.5;
             }
@@ -1719,9 +1693,20 @@ impl Skater {
         let triggers = crate::graph::input::board_triggers(pad, &mut self.trig_full);
         self.read_wipe_buttons(pad, events);
         self.toggle_board(park, pad, dt, events);
+        // A wipeout or a dismount asked for by the input (the bail buttons, the graphs' wipeout, Y's
+        // clip) is selected before this tick's movement, as Skate 3's input phase precedes its
+        // selection; the movement's facts then wait for the next tick's selection.
+        let early = self.states.facts.wipeout || self.states.facts.dismount;
+        if early {
+            self.select_state();
+        }
         self.step_mode(park, pad, flick, dt, events);
         self.update_possession(park, triggers, dt, events);
-        if self.mode == Mode::Rolling {
+        // Skate 3's state selector picks the state from what the tick's movement published.
+        if !early {
+            self.select_state();
+        }
+        if self.rolling() {
             // The drawn board follows the ground smoothly; the velocity is the ground's.
             let k = 1.0
                 - libm::powf(
@@ -1752,7 +1737,7 @@ impl Skater {
             // off-board reckonings clear the lean.
             self.wobble.reset();
             self.reckoning.lean = 0.0;
-            if matches!(self.mode, Mode::Air { .. }) {
+            if self.is_airborne() {
                 self.fly_rig(park);
             } else {
                 self.rig = None;
@@ -1831,17 +1816,10 @@ impl Skater {
             self.step_drop_in(park, pad, dt, events);
             return;
         }
-        match self.mode {
-            Mode::Rolling => {
-                if !self.update_handplant(park, pad, events) {
-                    self.roll(park, pad, flick, dt, events)
-                }
-            }
-            Mode::Air { time } => self.fly(park, pad, flick, time + dt, dt, events),
-            Mode::Grind => self.slide_rail(park, pad, flick, dt, events),
-            Mode::Walk => self.walk(park, pad, dt),
-            Mode::Bailed { time } if self.wipeout.active => {
-                let time = time + dt;
+        // Each state's movement (Skate 3's physical states; `skater::states` moves between them).
+        match self.state() {
+            State::WipeoutGround if self.wipeout.active => {
+                let time = self.state_time();
                 self.step_wipeout(park, pad, dt);
                 // Skate 3's push buttons (A, B: `WipeOutRecover`) put the rider back early once settled.
                 let press = pad.was_pressed(btn::A) || pad.was_pressed(btn::B);
@@ -1852,50 +1830,52 @@ impl Skater {
                 {
                     self.respawn(park);
                     events.push(Event::Respawned);
-                } else {
-                    self.mode = Mode::Bailed { time };
                 }
             }
-            Mode::Bailed { time } | Mode::Runout { time } => {
-                let time = time + dt;
+            State::WipeoutGround => {
+                let time = self.state_time();
                 let h = self.vel.horizontal() * (1.0 - smooth(3.0, dt));
                 self.vel = Vec3 { y: 0.0, ..h };
                 self.try_move(park, self.vel * dt);
                 self.pos.y = park
                     .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
                     .height;
-                let reset = matches!(self.mode, Mode::Bailed { .. }) && {
+                let reset = self.bailed() && {
                     // Skate 3's push buttons (A, B) put the rider back early once settled.
                     let press = pad.was_pressed(btn::A) || pad.was_pressed(btn::B);
                     let speed = self.vel.length();
                     let t = self.tuning;
                     self.recovery.update(&t, time, speed, press, dt)
                 };
-                match self.mode {
-                    Mode::Bailed { .. } if reset => {
-                        self.respawn(park);
-                        events.push(Event::Respawned);
-                    }
-                    Mode::Runout { .. } if time >= RUNOUT_TIME => {
-                        // Back on the board where it stopped.
-                        let n = park
-                            .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
-                            .normal;
-                        self.contact_n = n;
-                        self.normal = n;
-                        self.fwd = tangent(self.fwd, n);
-                        self.speed = 0.0;
-                        self.slip = 0.0;
-                        self.vn = 0.0;
-                        self.vel = Vec3::ZERO;
-                        self.fakie = false;
-                        self.fakie_timer = 0.0;
-                        self.mode = Mode::Rolling;
-                    }
-                    Mode::Bailed { .. } => self.mode = Mode::Bailed { time },
-                    _ => self.mode = Mode::Runout { time },
+                if reset {
+                    self.respawn(park);
+                    events.push(Event::Respawned);
+                } else if self.running_out() && time >= RUNOUT_TIME {
+                    // Back on the board where it stopped (the runout's end puts the state there).
+                    let n = park
+                        .ground(self.pos.x, self.pos.z, self.pos.y + STEP)
+                        .normal;
+                    self.contact_n = n;
+                    self.normal = n;
+                    self.fwd = tangent(self.fwd, n);
+                    self.speed = 0.0;
+                    self.slip = 0.0;
+                    self.vn = 0.0;
+                    self.vel = Vec3::ZERO;
+                    self.fakie = false;
+                    self.fakie_timer = 0.0;
+                    self.force_state(State::PhysicsGround);
                 }
             }
+            s if s.category() == 100 => {
+                if !self.update_handplant(park, pad, events) {
+                    self.roll(park, pad, flick, dt, events)
+                }
+            }
+            s if s.is_grind() => self.slide_rail(park, pad, flick, dt, events),
+            s if s.category() == 500 => self.walk(park, pad, dt),
+            State::Sleeping | State::Teleporting => {}
+            _ => self.fly(park, pad, flick, self.air_time + dt, dt, events),
         }
     }
 
@@ -1926,7 +1906,7 @@ impl Skater {
         // In the air off the board (a jump, or stepping off a ledge mid-mount), Y gets on it there: the
         // rider comes down onto the board under him (Skate 3's air mount, its `Mount/Air` clips). A board
         // out of the hands is picked up first (Skate 3's `OB_Mounting` retrieves it, quickly).
-        if self.mode == Mode::Walk && self.biped.air.is_some() {
+        if self.walking() && self.biped.air.is_some() {
             match self.possession.hold {
                 possession::Hold::Held | possession::Hold::Underfoot => self.mount_in_air(events),
                 possession::Hold::Returning => {}
@@ -1939,11 +1919,12 @@ impl Skater {
         }
         let t = t + dt;
         self.board_toggle = Some(t);
-        let go = match (self.mode, self.graph) {
-            (Mode::Rolling, None) => true,
+        let on_board = self.rolling();
+        let go = match (on_board, self.walking(), self.graph) {
+            (true, _, None) => true,
             // Without the state graphs: on at once with the board in hand; next to the free board, onto it
             // where it is; further away, once it has flown back (getting on retrieves it).
-            (Mode::Walk, None) => match self.possession.hold {
+            (_, true, None) => match self.possession.hold {
                 possession::Hold::Held | possession::Hold::Underfoot => true,
                 possession::Hold::Free if self.free_board_in_reach() => {
                     self.step_onto_free_board(park, events);
@@ -1956,8 +1937,8 @@ impl Skater {
                 }
                 possession::Hold::Returning => false,
             },
-            (Mode::Rolling, Some(g)) => g.ob_traj && g.dismounting,
-            (Mode::Walk, Some(g)) => {
+            (true, _, Some(g)) => g.ob_traj && g.dismounting,
+            (_, true, Some(g)) => {
                 if g.mounting && g.ob_traj {
                     self.mount_traj = true;
                 }
@@ -1969,9 +1950,10 @@ impl Skater {
             }
         };
         if go {
-            if self.mode == Mode::Walk {
+            if self.walking() {
                 self.step_on(park, events);
-            } else {
+            } else if self.selects(|f| f.dismount = true).category() == 500 {
+                // Off the board once the selector takes the rider off it (Skate 3's BipedGround).
                 self.step_off(events);
             }
         } else if t > TOGGLE_WAIT {
@@ -1986,12 +1968,12 @@ impl Skater {
         if self.board_toggle.is_some() || self.drop_in.is_some() || !pad.was_pressed(btn::Y) {
             return false;
         }
-        match self.mode {
+        if self.rolling() {
             // SK8 DisableDismount: not on ground steeper than this.
-            Mode::Rolling => self.contact_n.y >= DISMOUNT_MIN_UP,
+            self.contact_n.y >= DISMOUNT_MIN_UP
+        } else {
             // On the ground or in the air: in the air the rider gets on the board as he comes down.
-            Mode::Walk => true,
-            _ => false,
+            self.walking()
         }
     }
 
@@ -2000,7 +1982,7 @@ impl Skater {
     /// down (in the air, on steep ground) doesn't start the clips without it.
     /// Holding a ledge (climbing on foot).
     pub fn climbing(&self) -> bool {
-        self.mode == Mode::Walk && self.climb.holding()
+        self.walking() && self.climb.holding()
     }
 
     pub fn board_toggle_intent(&self, pad: &Pad) -> (bool, bool) {
@@ -2050,7 +2032,7 @@ impl Skater {
         self.fakie_timer = 0.0;
         self.spin = 0.0;
         self.spin_rate = 0.0;
-        self.mode = Mode::Rolling;
+        self.states.facts.mount = Some(true);
         self.board_toggle = None;
         self.possession.under_feet();
         self.sync_heading();
@@ -2069,12 +2051,15 @@ impl Skater {
         dt: f32,
         events: &mut Vec<Event>,
     ) {
-        if matches!(self.mode, Mode::Rolling | Mode::Grind) {
+        // Under the feet riding or grinding, as the selector keeps it (not getting off, not wiping out).
+        if (self.rolling() || self.grinding())
+            && matches!(self.selects(|_| {}).category(), 100 | 400)
+        {
             self.possession.under_feet();
         }
         let rider = self.rider_frame();
         let t = self.tuning;
-        if self.mode == Mode::Walk && !self.climb.holding() {
+        if self.walking() && !self.climb.holding() {
             let p = &mut self.possession;
             match self.graph {
                 None => {
@@ -2105,7 +2090,7 @@ impl Skater {
         // update.rs, landing_deck `assist`) takes a flight down onto its deck when it is near enough to
         // the jump's own (by `landing_assist_limit` of the time in the air) and long enough (0.4 s); the
         // motion graph then starts the landing on it (`DoLandOnBoard`), or at once without the graphs.
-        if self.mode != Mode::Walk || self.biped.air.is_none() {
+        if !self.walking() || self.biped.air.is_none() {
             self.deck_assist = false;
             return;
         }
@@ -2178,7 +2163,7 @@ impl Skater {
             self.travel_yaw()
         };
         self.biped = Biped::new(heading, self.vel, self.contact_n);
-        self.mode = Mode::Walk;
+        self.states.facts.dismount = true;
         self.board_toggle = None;
         // The board into the hands.
         self.possession.hold();
@@ -2212,7 +2197,7 @@ impl Skater {
         // round a moment after getting on.
         self.spin = 0.0;
         self.spin_rate = 0.0;
-        self.mode = Mode::Rolling;
+        self.states.facts.mount = Some(true);
         self.board_toggle = None;
         // From the hands (or wherever the mount's retrieval had it) under the feet.
         self.possession.under_feet();
@@ -2412,7 +2397,7 @@ impl Skater {
 
         // Pushing (A: the usual push, B: mongo), hippie jump (both), foot brake (X).
         self.update_hippy(pad, dt, events);
-        if self.mode != Mode::Rolling {
+        if !self.stays_rolling() {
             return;
         }
         // Foot plants (a boneless, fastplant or no-comply): no push, brake or pop until the jump off the
@@ -2443,8 +2428,7 @@ impl Skater {
             }
             None => self.update_brake(pad, dt),
         };
-        let brake = t.brake_scale
-            * t.braking_scalar
+        let brake = t.braking_scalar
             * if tail_brake {
                 t.tail_brake
             } else if foot_brake {
@@ -2518,7 +2502,7 @@ impl Skater {
         self.ride(park, &drive, dt, events);
         // Riding onto a rail: into coping, off a ledge's top, up a bank into a ledge; not while the
         // board tips over an edge on its trailing wheels (a slow roll off a deck drops in).
-        if self.mode == Mode::Rolling && !self.tipping_over_edge() {
+        if self.stays_rolling() && !self.tipping_over_edge() {
             self.try_grind(park, Category::Ground, events);
         }
     }
@@ -3128,7 +3112,11 @@ impl Skater {
         if let Some(r) = &mut self.rig {
             r.airborne = true;
         }
-        self.mode = Mode::Air { time: 0.0 };
+        self.publish_jump();
+        if self.walking() {
+            self.states.facts.mount = Some(false);
+        }
+        self.air_time = 0.0;
         // Rolling off a ledge mid-manual just ends it (no points: it wasn't finished).
         self.manual = None;
         self.manual_engage = 0.0;
@@ -3370,7 +3358,7 @@ impl Skater {
         } else {
             self.air_plant = Some(p);
         }
-        self.mode = Mode::Air { time };
+        self.air_time = time;
     }
 
     /// The landing prediction (SK8 PhysicsAir / trajectory selector): while no landing is known, a
@@ -3538,7 +3526,7 @@ impl Skater {
         self.update_grab(pad, flick, dt);
         self.update_footplant(park, pad, now, events);
         if self.air_plant.is_some() {
-            self.mode = Mode::Air { time };
+            self.air_time = time;
             return;
         }
 
@@ -3588,6 +3576,19 @@ impl Skater {
                     if self.try_grind(park, category, events) {
                         return;
                     }
+                    if !self.touchdown_lands() {
+                        // Down on the surface before Skate 3's state selector takes the board out of the air (its
+                        // air states settle first): held on it, its speed into it gone, touching.
+                        // (A millimetre over it, so the next tick's test along the path meets it again.)
+                        self.pos = h.point + h.normal * 1e-3;
+                        let into = self.vel.dot(h.normal);
+                        if into < 0.0 {
+                            self.vel -= h.normal * into;
+                        }
+                        self.publish_wheels(4);
+                        self.air_time = time;
+                        return;
+                    }
                     self.land(h.normal, h.surface, time, events);
                     return;
                 }
@@ -3618,7 +3619,7 @@ impl Skater {
             self.respawn(park);
             events.push(Event::Respawned);
         } else {
-            self.mode = Mode::Air { time };
+            self.air_time = time;
         }
     }
 
@@ -3739,15 +3740,17 @@ impl Skater {
     fn bail(&mut self, reason: &'static str, events: &mut Vec<Event>) {
         self.body_flip = None;
         self.bail_reason = Some(reason);
-        if self.mode == Mode::Grind || self.grind.is_some() {
+        if self.grinding() || self.grind.is_some() {
             self.grind_exit = Some("wiped out");
             self.grind = None;
         }
-        if !self.is_airborne() && self.mode != Mode::Grind && self.vel == Vec3::ZERO {
+        if !self.is_airborne() && !self.grinding() && self.vel == Vec3::ZERO {
             self.vel = self.surface_forward() * self.speed;
         }
         self.wallride = None;
-        self.mode = Mode::Bailed { time: 0.0 };
+        // The selector takes the rider into Skate 3's WipeoutGround.
+        self.states.facts.wipeout = true;
+        self.states.runout = false;
         self.trick = None;
         self.grab = None;
         self.grabbed = None;
@@ -3813,12 +3816,10 @@ impl Skater {
             && pad.is_held(btn::Z)
             && (new[0] || new[1] || pad.was_pressed(btn::Z));
         self.wipe_push_off = new[1];
-        let can = matches!(
-            self.mode,
-            Mode::Rolling | Mode::Air { .. } | Mode::Grind | Mode::Walk
-        ) && self.drop_in.is_none();
+        let can = (self.rolling() || self.is_airborne() || self.grinding() || self.walking())
+            && self.drop_in.is_none();
         if self.wipe_request && can {
-            if self.mode == Mode::Walk {
+            if self.walking() {
                 self.vel = self.biped.vel;
             }
             self.bail("bailed on purpose", events);
@@ -3866,7 +3867,9 @@ impl Skater {
     fn run_out(&mut self, reason: &'static str, events: &mut Vec<Event>) {
         self.bail_reason = Some(reason);
         self.wallride = None;
-        self.mode = Mode::Runout { time: 0.0 };
+        // Skate 3's runout is a wipeout state too (WipeoutGround), back on the board at its end.
+        self.states.facts.wipeout = true;
+        self.states.runout = true;
         self.trick = None;
         self.grab = None;
         self.grabbed = None;
@@ -3904,6 +3907,10 @@ impl Skater {
         if floor.dot(n) >= t.wallride_max_dot_floor || height < WALLRIDE_MIN_HEIGHT {
             return false;
         }
+        // Onto the wall's face only as the selector takes the board onto the ground.
+        if !self.touchdown_lands() {
+            return false;
+        }
         if let Some((name, trick)) = self.trick_label() {
             events.push(Event::Landed {
                 name: format!("{}{name}", self.stance_prefix()),
@@ -3914,7 +3921,7 @@ impl Skater {
                 }),
             });
         }
-        self.mode = Mode::Rolling;
+        self.publish_wheels(4);
         self.pos = h.point;
         self.contact_n = n;
         self.normal = n;
@@ -4208,7 +4215,7 @@ impl Skater {
                 score: crate::scoring::Scored::Air(score),
             });
         }
-        self.mode = Mode::Rolling;
+        self.publish_wheels(4);
         self.trick = None;
         self.plant_trick = None;
         self.spin = 0.0;
@@ -4234,7 +4241,7 @@ impl Skater {
                 self.heading
             };
             self.biped = Biped::new(heading, self.vel - n * self.vel.dot(n), n);
-            self.mode = Mode::Walk;
+            self.states.facts.dismount = true;
             self.trick = None;
             self.plan = None;
             self.sync_walk();
@@ -4831,7 +4838,7 @@ mod tests {
         let ev = steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 120);
         assert_eq!(ev[0], Event::Popped(Flick::OLLIE));
         assert_eq!(landed(&ev), ["OLLIE"], "{ev:?}");
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         assert!(s.pos.z > 3.0);
 
         let apex = |strength: f32| {
@@ -4927,12 +4934,15 @@ mod tests {
         let park = flat();
         let mut s = spawn(&park);
         s.take_off(Some(Flick::OLLIE));
+        s.select_state();
         let a = deg * PI / 180.0;
         s.fwd = v3(sinf(a), 0.0, cosf(a));
         s.vel = v3(0.0, -down, speed);
         s.body.speed = spin;
         let mut ev = Vec::new();
+        s.states.time = 0.6;
         s.land(Vec3::UP, 0, 0.6, &mut ev);
+        s.select_state();
         (s, ev)
     }
 
@@ -4941,7 +4951,7 @@ mod tests {
         // Skate 3's landing angle limit is past a right angle below about 9 m/s: no sideways bail.
         let (s, ev) = touch_down(80.0, 5.0, 3.0, 0.0);
         assert!(!ev.contains(&Event::Bailed), "{ev:?}");
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         // The board keeps its heading (no snap to the travel) and the wheels straighten it.
         assert!(s.fwd.x > 0.9, "{:?}", s.fwd);
         let park = flat();
@@ -5016,6 +5026,7 @@ mod tests {
         let park = flat();
         let mut s = spawn(&park);
         s.take_off(Some(Flick::OLLIE));
+        s.select_state();
         s.trick = None;
         let a = 0.98; // about 56 degrees
         let n = v3(0.0, cosf(a), -sinf(a));
@@ -5023,7 +5034,9 @@ mod tests {
         s.normal = n;
         s.vel = s.fwd * 5.0 - n * 2.0;
         let mut ev = Vec::new();
+        s.states.time = 0.6;
         s.land(n, 0, 0.6, &mut ev);
+        s.select_state();
         let gain = t.landing_speed_vs_ny.eval(n.y);
         assert!(gain > 1.05);
         assert!((s.speed - 5.0 * gain).abs() < 1e-3, "{}", s.speed);
@@ -5042,6 +5055,7 @@ mod tests {
         assert!(!s.checkpoints.is_empty());
         let rode_to = s.pos;
         s.bail("test", &mut Vec::new());
+        s.select_state();
         let mut ev = Vec::new();
         let mut ticks = 0;
         while !ev.contains(&Event::Respawned) && ticks < 60 * 25 {
@@ -5067,6 +5081,7 @@ mod tests {
         s.speed = 4.0;
         steps(&mut s, &park, &Pad::default(), None, 5);
         s.bail("test", &mut Vec::new());
+        s.select_state();
         let mut ev = steps(&mut s, &park, &Pad::default(), None, 100);
         ev.extend(steps(&mut s, &park, &press(btn::A), None, 1));
         ev.extend(steps(&mut s, &park, &Pad::default(), None, 4));
@@ -5157,7 +5172,7 @@ mod tests {
         s.set_spin(PI);
         for _ in 0..80 {
             steps(&mut s, &park, &Pad::default(), None, 1);
-            if s.mode == Mode::Rolling {
+            if s.rolling() {
                 break;
             }
         }
@@ -5237,10 +5252,11 @@ mod tests {
             let mut s = spawn(&park);
             s.pos.y = h;
             s.take_off(None);
+            s.select_state();
             let mut ev = Vec::new();
             for _ in 0..150 {
                 ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
-                if !s.is_airborne() && s.mode == Mode::Rolling {
+                if !s.is_airborne() && s.rolling() {
                     break;
                 }
             }
@@ -5504,7 +5520,7 @@ mod tests {
         s.set_spin(spin);
         for _ in 0..60 {
             ev.extend(steps(&mut s, park, &Pad::default(), None, 1));
-            if s.mode == Mode::Grind {
+            if s.grinding() {
                 break;
             }
         }
@@ -5515,7 +5531,7 @@ mod tests {
     fn ollie_onto_a_rail_grinds_and_scores_off_the_end() {
         let park = rail_park(4.0);
         let (mut s, ev) = ollie_at_rail(&park, 0.0);
-        assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+        assert!(s.grinding(), "{ev:?}");
         // Onto the rail's start on the front truck, both trucks on it a moment later.
         steps(&mut s, &park, &Pad::default(), None, 6);
         let g = s.grind.clone().unwrap();
@@ -5535,7 +5551,7 @@ mod tests {
             "{ev:?}"
         );
         assert!(!ev.contains(&Event::Bailed), "{ev:?}");
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         assert!(s.pos.z > 4.0);
     }
 
@@ -5545,7 +5561,7 @@ mod tests {
         let (mut s, _) = ollie_at_rail(&park, PI / 2.0);
         assert_eq!(s.grind.as_ref().map(|g| g.family), Some(Family::Boardslide));
         steps(&mut s, &park, &Pad::default(), None, 20);
-        assert_eq!(s.mode, Mode::Grind);
+        assert!(s.grinding());
         let ev = steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
         assert!(
             matches!(&ev[..], [Event::Landed { name, .. }, Event::Popped(_)]
@@ -5612,7 +5628,9 @@ mod tests {
             fwd,
         );
         s.vel = v3(0.0, -1.0, 2.0);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         (park, s)
     }
 
@@ -5716,7 +5734,7 @@ mod tests {
         ));
         park.rails[0] = crate::rails::Rail::new(park.rails[0].points.clone());
         let (mut s, ev) = ollie_at_rail(&park, 0.0);
-        assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+        assert!(s.grinding(), "{ev:?}");
         let mut ev = Vec::new();
         for _ in 0..90 {
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
@@ -5756,7 +5774,7 @@ mod tests {
                     s.pos.x = (s.pos.x + 0.012).min(0.0);
                 }
                 ev.extend(steps(&mut s, &park, &pad, None, 1));
-                if s.mode == Mode::Grind {
+                if s.grinding() {
                     break;
                 }
             }
@@ -5783,7 +5801,9 @@ mod tests {
             v3(1.0, 0.0, 0.0),
         );
         s.vel = v3(0.0, -1.0, 3.0);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         let c = s.investigate(&park, Category::Air, None, 0.0).unwrap();
         assert_eq!((c.family, c.front), (Family::Backslash, false));
         // The same tip with the board hanging over the low side: a tail slide.
@@ -5827,16 +5847,18 @@ mod tests {
             v3(0.0, 0.0, 1.0),
         );
         s.vel = v3(0.0, -0.5, 4.0);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         let mut ev = steps(&mut s, &park, &Pad::default(), None, 2);
-        assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+        assert!(s.grinding(), "{ev:?}");
         assert_eq!(
             s.grind.as_ref().map(|g| g.class),
             Some(crate::rails::RailClass::Ledge)
         );
         let mut leaned = 0.0f32;
         let mut ticks = 0;
-        while s.mode == Mode::Grind && ticks < 400 {
+        while s.grinding() && ticks < 400 {
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
             if let Some(g) = &s.grind {
                 leaned = leaned.max(g.lean.angle);
@@ -5844,7 +5866,7 @@ mod tests {
             ticks += 1;
         }
         // Off after the lean-off's delay (2 s) and its roll (about 1.3 s), before the ledge's end.
-        assert!(s.mode != Mode::Grind && ticks > 150, "{ticks} {ev:?}");
+        assert!(!s.grinding() && ticks > 150, "{ticks} {ev:?}");
         // Forced off past 15 degrees: there is ground under the low side.
         assert!(leaned > 10.0, "{leaned}");
         assert!(s.vel.x < -0.3, "pushed off the low side: {:?}", s.vel);
@@ -5862,15 +5884,18 @@ mod tests {
         let up = v3(0.0, 0.34, 0.94);
         place(&mut s, v3(0.0, 0.5, 5.0) - up * DECK_HEIGHT, up, fwd);
         s.vel = v3(0.0, -2.0, 2.0);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         let mut ev = Vec::new();
         let c = s.investigate(&park, Category::Air, None, 0.0);
         if let Some(c) = c {
             assert!(s.engage(&park, c, Category::Air, &mut ev));
+            s.select_state();
             assert!(ev.contains(&Event::Bailed), "{c:?} {ev:?}");
         } else {
             // No box crosses it: no grind either.
-            assert_eq!(s.mode, Mode::Air { time: 0.5 });
+            assert!(s.is_airborne() && s.air_time == 0.5);
         }
         // Crossing a thin rail fast: a wipeout.
         let (park, mut s) = over_rail(v3(0.0, 0.0, 1.0), 0.0, 0.0, 0.1);
@@ -5878,6 +5903,7 @@ mod tests {
         let mut ev = Vec::new();
         let c = s.investigate(&park, Category::Air, None, 0.0).unwrap();
         assert!(s.engage(&park, c, Category::Air, &mut ev));
+        s.select_state();
         assert!(ev.contains(&Event::Bailed), "{ev:?}");
     }
 
@@ -5918,13 +5944,15 @@ mod tests {
         s.pos.x = 0.25;
         s.vel.y = -1.0;
         let ev = steps(&mut s, &park, &Pad::default(), None, 4);
-        assert!(s.mode != Mode::Grind, "{ev:?}");
+        assert!(!s.grinding(), "{ev:?}");
         // A moment later it can.
         steps(&mut s, &park, &Pad::default(), None, 8);
         s.pos = v3(0.25, 0.5 + 0.05 - DECK_HEIGHT, s.pos.z);
         s.vel = v3(0.0, -1.0, 4.0);
         s.plan = None;
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         let ev = steps(&mut s, &park, &Pad::default(), None, 1);
         let now = s.grind.as_ref().map(|g| g.rail);
         assert_eq!(now, Some(1), "{ev:?} (first {first})");
@@ -5947,7 +5975,7 @@ mod tests {
         let mut ev = Vec::new();
         for _ in 0..120 {
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
-            if s.mode == Mode::Grind {
+            if s.grinding() {
                 break;
             }
         }
@@ -5987,13 +6015,15 @@ mod tests {
             v3(sinf(yaw), 0.0, cosf(yaw)),
         );
         s.vel = v3(0.0, -6.1, 5.7);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         let mut n = 0;
-        while s.mode != Mode::Rolling && n < 10 {
+        while !s.rolling() && n < 10 {
             steps(&mut s, &park, &Pad::default(), None, 1);
             n += 1;
         }
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         let side = 5.7 * sinf(yaw) - LAND_SIDE_FRICTION * 6.1;
         assert!((s.slip.abs() - side).abs() < 0.25, "{} vs {side}", s.slip);
     }
@@ -6011,7 +6041,7 @@ mod tests {
         for _ in 0..240 {
             steps(&mut s, &park, &Pad::default(), None, 1);
             assert!(
-                s.mode != Mode::Grind,
+                !s.grinding(),
                 "caught the coping at {:?} {:?}",
                 s.pos,
                 s.grind.as_ref().map(|g| (g.entry, g.family))
@@ -6094,11 +6124,11 @@ mod tests {
             let mut back_in = false;
             for _ in 0..300 {
                 ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
-                if s.mode == Mode::Grind && rocked.is_none() {
+                if s.grinding() && rocked.is_none() {
                     rocked = s.grind.clone();
                 }
                 // Back in the pipe after the rock, rolling down it.
-                back_in |= rocked.is_some() && s.mode == Mode::Rolling && s.pos.y < 3.5;
+                back_in |= rocked.is_some() && s.rolling() && s.pos.y < 3.5;
             }
             let ride_in = rocked.as_ref().is_some_and(|g| {
                 g.family == Family::Tipslide
@@ -6118,7 +6148,9 @@ mod tests {
         // Coming down 0.12 m to the side of the rail, along it.
         place(&mut s, v3(0.12, 0.9, 3.0), Vec3::UP, v3(0.0, 0.0, 1.0));
         s.vel = v3(0.0, -2.0, 4.0);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         let target = GrindTarget {
             rail: 0,
             seg: 0,
@@ -6143,7 +6175,9 @@ mod tests {
         let mut s = spawn(&park);
         place(&mut s, v3(0.5, 0.9, 3.0), Vec3::UP, v3(0.0, 0.0, 1.0));
         s.vel = v3(0.0, -2.0, 4.0);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         s.grind_air_assist(&park, target, DT);
         assert_eq!(s.air_assist.and_then(|a| a.kind), None);
     }
@@ -6164,7 +6198,7 @@ mod tests {
         );
         for _ in 0..40 {
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
-            assert_ne!(s.mode, Mode::Grind, "{ev:?}");
+            assert!(!s.grinding(), "{ev:?}");
         }
     }
 
@@ -6254,7 +6288,7 @@ mod tests {
         let (ev, top) = run(&mut s, &park, 60 * 5);
         assert!(!ev.contains(&Event::Bailed), "{ev:?}");
         assert!(top > 1.2 && top < 3.9, "climbed {top}");
-        assert_eq!(s.mode, Mode::Rolling, "{ev:?}");
+        assert!(s.rolling(), "{ev:?}");
         assert!(s.speed < -1.0 && s.fakie, "{} {}", s.speed, s.fakie);
         assert!(s.pos.z < 0.0, "back on the flat");
     }
@@ -6268,7 +6302,7 @@ mod tests {
         assert!(ev.contains(&Event::Launched), "{ev:?}");
         assert!(top > 4.3, "aired out: {top}");
         assert!(!ev.contains(&Event::Bailed), "{ev:?} {:?}", s.bail_reason);
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         assert!(
             s.fakie && s.speed < -1.0,
             "rolled back in fakie: {}",
@@ -6310,7 +6344,7 @@ mod tests {
                 !ev.contains(&Event::Bailed) && !ev.contains(&Event::RanOut),
                 "{speed} m/s: {ev:?}"
             );
-            assert_eq!(s.mode, Mode::Rolling);
+            assert!(s.rolling());
         }
     }
 
@@ -6335,7 +6369,7 @@ mod tests {
         let (s, ev) = wall_run(9.0, 0.0);
         assert!(ev.contains(&Event::RanOut), "{ev:?}");
         assert!(!ev.contains(&Event::Respawned));
-        assert_eq!(s.mode, Mode::Rolling, "back on the board");
+        assert!(s.rolling(), "back on the board");
         // Far over it: a bail.
         let (_, ev) = wall_run(14.0, 0.0);
         assert!(ev.contains(&Event::Bailed), "{ev:?}");
@@ -6379,6 +6413,7 @@ mod tests {
         s.normal = rotate(Vec3::UP, v3(0.0, 0.0, 1.0), -50.0 * PI / 180.0);
         s.fwd = tangent(v3(0.0, 0.0, 1.0), s.normal);
         s.take_off(None);
+        s.select_state();
         let mut ev = Vec::new();
         let mut tilt = PI;
         for _ in 0..90 {
@@ -6420,6 +6455,7 @@ mod tests {
         let mut s = spawn(&park);
         s.pos = v3(-3.2, 1.3, -5.8);
         s.take_off(None);
+        s.select_state();
         s.vel = v3(-3.0, 1.0, -1.0);
         let mut ev = Vec::new();
         let mut rode = false;
@@ -6601,7 +6637,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         (s.pos, s.contact_n, plan)
     }
 
@@ -6666,7 +6702,7 @@ mod tests {
         let (ev, gap, s) = over(1.5);
         assert!(!ev.contains(&Event::Launched), "{ev:?}");
         assert!(gap < 0.08, "{gap}");
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
     }
 
     #[test]
@@ -6690,7 +6726,9 @@ mod tests {
         let mut s = spawn(&park);
         place(&mut s, v3(0.0, 0.3, 0.0), Vec3::UP, v3(0.0, 0.0, 1.0));
         s.vel = v3(0.0, -1.0, 0.0);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         s.air_com = Some(0.8);
         s.body_com = Some(0.8);
         let mut ev = Vec::new();
@@ -6702,11 +6740,11 @@ mod tests {
             });
             s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
             lowest = lowest.min(s.pos.y);
-            if !matches!(s.mode, Mode::Air { .. }) {
+            if !s.is_airborne() {
                 break;
             }
         }
-        assert_eq!(s.mode, Mode::Rolling, "{ev:?}, lowest {lowest}");
+        assert!(s.rolling(), "{ev:?}, lowest {lowest}");
         assert!(lowest > -0.05, "went under the ground: {lowest}");
     }
 
@@ -6912,13 +6950,13 @@ mod tests {
         s.speed = 3.0;
         s.graph = Some(GraphControl::default());
         steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 5);
-        assert_eq!(s.mode, Mode::Rolling, "a flick alone doesn't pop");
+        assert!(s.rolling(), "a flick alone doesn't pop");
         s.graph = Some(GraphControl {
             pop: Some((Flick::of(crate::gesture::Trick::Kickflip), 1.0)),
             ..GraphControl::default()
         });
         let ev = steps(&mut s, &park, &Pad::default(), None, 1);
-        assert!(matches!(s.mode, Mode::Air { .. }));
+        assert!(s.is_airborne());
         assert!(
             ev.iter().any(
                 |e| matches!(e, Event::Popped(f) if f.trick == crate::gesture::Trick::Kickflip)
@@ -7133,6 +7171,7 @@ mod tests {
         // Launched clear of the ground (the rigid board's contact point is on it to a micrometre).
         s.pos.y += 0.5;
         s.take_off(None);
+        s.select_state();
         steps(&mut s, &park, &Pad::default(), None, 1);
         assert!(!s.wobble.active);
     }
@@ -7166,7 +7205,7 @@ mod tests {
         });
         let mut ev = steps(&mut s, &park, &Pad::default(), None, 1);
         let mut k = 0;
-        while matches!(s.mode, Mode::Air { .. }) && k < 300 {
+        while s.is_airborne() && k < 300 {
             s.graph = Some(air(k));
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
             k += 1;
@@ -7192,11 +7231,13 @@ mod tests {
         s.speed = 3.0;
         s.pos.y = 0.05;
         s.vel = v3(0.0, 6.5, 3.0);
-        s.mode = Mode::Air { time: 0.0 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.0;
+        s.states.time = 0.0;
         let mut ev = Vec::new();
         let mut k = 0;
         let mut most = 0.0f32;
-        while matches!(s.mode, Mode::Air { .. }) && k < 300 {
+        while s.is_airborne() && k < 300 {
             s.graph = Some(GraphControl {
                 body_flip: (k < 20).then_some(front),
                 grabbing: grab(k),
@@ -7216,7 +7257,7 @@ mod tests {
         let (s, ev, most) = body_flip_air(false, |_| true);
         assert!(most > 5.5, "turned {most} rad");
         assert!(!ev.contains(&Event::Bailed), "{ev:?}");
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         assert!(landed(&ev).iter().any(|n| n.contains("BACKFLIP")), "{ev:?}");
         // The graphs see it (IsBodyFlipping) only while it turns.
         assert!(s.body_flip.is_none());
@@ -7233,7 +7274,9 @@ mod tests {
         let mut s = spawn(&park);
         s.vel = v3(0.0, 6.5, 3.0);
         s.pos.y = 0.05;
-        s.mode = Mode::Air { time: 0.0 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.0;
+        s.states.time = 0.0;
         s.graph = Some(GraphControl {
             grabbing: true,
             ..GraphControl::default()
@@ -7264,9 +7307,11 @@ mod tests {
         s.speed = 3.0;
         s.pos.y = 0.05;
         s.vel = v3(0.0, 6.5, 3.0);
-        s.mode = Mode::Air { time: 0.0 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.0;
+        s.states.time = 0.0;
         for k in 0..300 {
-            if !matches!(s.mode, Mode::Air { .. }) {
+            if !s.is_airborne() {
                 break;
             }
             s.graph = Some(GraphControl {
@@ -7296,11 +7341,14 @@ mod tests {
             s.tuning.set_difficulty(d);
             s.tuning.bad_landing = check;
             s.take_off(Some(Flick::OLLIE));
+            s.select_state();
             let a = deg * PI / 180.0;
             s.fwd = v3(sinf(a), 0.0, cosf(a));
             s.vel = v3(0.0, -down, speed);
             let mut ev = Vec::new();
+            s.states.time = 0.6;
             s.land(Vec3::UP, 0, 0.6, &mut ev);
+            s.select_state();
             ev.contains(&Event::Bailed)
         };
         let hard = t.land_max_impact + 1.0;
@@ -7341,7 +7389,7 @@ mod tests {
                 ..GraphControl::default()
             });
             steps(&mut s, &park, &Pad::default(), None, 1);
-            assert!(matches!(s.mode, Mode::Air { .. }));
+            assert!(s.is_airborne());
             s.vel.y
         };
         assert!(pop(Difficulty::Easy, true) < pop(Difficulty::Easy, false) - 0.1);
@@ -7361,7 +7409,9 @@ mod tests {
         let park = flat();
         let touch = |tilt: f32, into: f32, danger: bool| {
             let mut s = spawn(&park);
-            s.mode = Mode::Air { time: 0.5 };
+            s.force_state(crate::skater::State::PhysicsAir);
+            s.air_time = 0.5;
+            s.states.time = 0.5;
             s.graph = Some(GraphControl {
                 danger,
                 ..GraphControl::default()
@@ -7370,8 +7420,10 @@ mod tests {
             s.normal = rotate(Vec3::UP, v3(0.0, 0.0, 1.0), tilt);
             s.vel = v3(0.0, -into, 3.0);
             let mut ev = Vec::new();
+            s.states.time = 0.6;
             s.land(Vec3::UP, 0, 0.5, &mut ev);
-            matches!(s.mode, Mode::Bailed { .. })
+            s.select_state();
+            s.bailed()
         };
         assert!(!touch(0.0, 0.5, true), "upright, 0.5 m/s into the ground");
         assert!(touch(0.0, 0.7, true), "0.7 m/s along his up");
@@ -7398,14 +7450,14 @@ mod tests {
             danger: true,
             ..GraphControl::default()
         });
-        assert!(matches!(s.mode, Mode::Bailed { .. }), "{:?}", s.mode);
+        assert!(s.bailed(), "{:?}", s.state());
         // The same trick caught in time: a clean landing, however long `trick_duration` says.
         let (s, ev) = graph_air(|k| GraphControl {
             air_trick: Some(trick(false)),
             danger: k < 10,
             ..GraphControl::default()
         });
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         assert!(ev.iter().any(|e| matches!(e, Event::Landed { .. })));
     }
 
@@ -7422,7 +7474,7 @@ mod tests {
             dark: k > 5,
             ..GraphControl::default()
         });
-        assert_eq!(s.mode, Mode::Rolling, "{ev:?}");
+        assert!(s.rolling(), "{ev:?}");
         let name = ev
             .iter()
             .find_map(|e| match e {

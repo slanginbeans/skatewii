@@ -142,13 +142,9 @@ pub struct Tuning {
     pub no_input_time: f32,
     /// Extra deceleration against speed on two wheels.
     pub friction_manual: Curve,
-    /// Foot brake and tail brake strength (deceleration = force * `brake_scale` * `braking_scalar`).
+    /// Foot brake and tail brake forces (N, times `braking_scalar`: SK8 braking.rs).
     pub foot_brake: f32,
     pub tail_brake: f32,
-    /// flatground's own calibration from Skate 3's brake forces to a deceleration (m/s^2 per unit),
-    /// measured against SK8's simulation: its foot brake (force 50 on smooth ground) slows the board
-    /// 4.08 m/s^2 once the foot drags.
-    pub brake_scale: f32,
     /// The surface's braking factor (smooth concrete).
     pub braking_scalar: f32,
     /// Below this speed (m/s) a braking board is held still.
@@ -159,7 +155,8 @@ pub struct Tuning {
     pub speed_general_amount: f32,
 
     // Steering.
-    /// How quickly steering follows the stick: 0 never, 1 at once (per 1/60 s).
+    /// Skate 3's steering damping (`physics_steering/Damping`): the turn read each tick is this share of
+    /// the stick's and the rest of the last tick's (SK8 riding/steering.rs `calculate_tilt`).
     pub steer_follow: f32,
     pub steer_scalar: f32,
     /// Deck tilt against stick deflection (0..1).
@@ -1129,7 +1126,6 @@ impl Tuning {
         friction_manual: Curve::new(&[(0.0, 0.1), (8.0, 0.45)]),
         foot_brake: 50.0,
         tail_brake: 32.0,
-        brake_scale: 0.0816,
         braking_scalar: 1.0,
         brake_slow_speed: 0.02,
         friction_max_change: 0.3,

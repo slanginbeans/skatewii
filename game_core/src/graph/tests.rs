@@ -728,7 +728,7 @@ mod wipeout_agreement {
     use crate::input::Pad;
     use crate::math::Vec3;
     use crate::park::Park;
-    use crate::skater::{Mode, Skater};
+    use crate::skater::Skater;
 
     fn cond(name: &str, extra: &[(&str, &str)]) -> Element {
         let mut a = vec![("name", name)];
@@ -798,7 +798,9 @@ mod wipeout_agreement {
             rails: Vec::new(),
         };
         let mut s = Skater::spawn(&park);
-        s.mode = Mode::Air { time: 0.2 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.2;
+        s.states.time = 0.2;
         s.pos.y = 1.0;
         let grab = Pad {
             trig_r: 1.0,
@@ -815,9 +817,9 @@ mod wipeout_agreement {
             assert_eq!(state, "OnBoard/InAir/Grab", "the physics is in the air");
         }
         // On a rail the trucks touch.
-        s.mode = Mode::Grind;
+        s.force_state(crate::skater::State::GrindFiftyFifty);
         assert!(d.world(&s, None, 0.0).trucks_or_deck);
-        s.mode = Mode::Rolling;
+        s.force_state(crate::skater::State::PhysicsGround);
         assert!(!d.world(&s, None, 0.0).trucks_or_deck);
     }
 }

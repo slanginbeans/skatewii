@@ -11,7 +11,6 @@ use game_core::Game;
 use game_core::graph::host::CHANNEL_BODY_TWEAK;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::v3;
-use game_core::skater::Mode;
 use game_core::skater::hurdle::{Flight, Hit, Hurdle};
 
 const TICK: f32 = 1.0 / 60.0;
@@ -103,7 +102,7 @@ fn a_hippie_jump_on_the_static_park_never_hurdles() {
                 "the query settles the flight"
             );
         }
-        landed |= g.skater.mode == Mode::Rolling;
+        landed |= g.skater.rolling();
     }
     assert!(landed, "back on the board");
 }
@@ -138,7 +137,7 @@ fn imported_the_c_stick_tweaks_the_body_jumping_on_foot() {
         run(&mut g, 30, [0, 0], [0, 0], 0);
         run(&mut g, 1, [0, 0], [0, 0], btn::Y);
         run(&mut g, 120, [0, 0], [0, 0], 0);
-        if g.skater.mode != Mode::Walk {
+        if !g.skater.walking() {
             eprintln!("offboard_air: the motion pack has no off-board clips: skipped");
             return;
         }
@@ -225,7 +224,7 @@ fn imported_a_moving_obstacle_hurdles_the_hippie_jump() {
             if hurdled && p.starts_with("OnBoard/HippyJump/LandingOnBoard") {
                 hurdle_then_landing = true;
             }
-            landed_riding |= g.skater.mode == Mode::Rolling && p.starts_with("OnBoard/");
+            landed_riding |= g.skater.rolling() && p.starts_with("OnBoard/");
         }
         assert_eq!(hurdled, hurdle, "hurdle {hurdle}: {}", path(&g));
         assert!(landed_riding, "hurdle {hurdle}: lands riding: {}", path(&g));

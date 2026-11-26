@@ -13,8 +13,8 @@
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
+use game_core::skater::Event;
 use game_core::skater::possession::Hold;
-use game_core::skater::{Event, Mode};
 
 const TICK: f32 = 1.0 / 60.0;
 /// A clear lane across the built-in park (nothing in the way along +z for 38 m).
@@ -93,7 +93,7 @@ fn on_foot(g: &mut Game, pos: Vec3, heading: f32) {
     idle(g, 30);
     run(g, 1, Y);
     idle(g, 120);
-    assert_eq!(g.skater.mode, Mode::Walk, "off the board");
+    assert!(g.skater.walking(), "off the board");
     assert_eq!(g.skater.possession.hold, Hold::Held, "the board in hand");
 }
 
@@ -115,7 +115,7 @@ fn l_drops_the_board_beside_him_where_it_stays() {
     assert!(b.vel.length() < 0.01, "and stays: {:?}", b.vel);
     let off = (b.pos - g.skater.pos).horizontal().length();
     assert!(off < 0.6, "at his side: {off} m");
-    assert_eq!(g.skater.mode, Mode::Walk, "still on foot");
+    assert!(g.skater.walking(), "still on foot");
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn walked_away_from_and_come_back_to_he_steps_onto_it_where_it_lies() {
         "back at it"
     );
     run(&mut g, 1, Y);
-    assert_eq!(g.skater.mode, Mode::Rolling, "Y gets on");
+    assert!(g.skater.rolling(), "Y gets on");
     assert!(g.events.contains(&Event::SteppedOn));
     assert_eq!(g.skater.possession.hold, Hold::Underfoot);
     let at = (g.skater.pos - board).horizontal().length();
@@ -217,7 +217,7 @@ fn walked_away_from_and_come_back_to_he_steps_onto_it_where_it_lies() {
         );
         fastest = fastest.max(g.skater.speed);
     }
-    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(g.skater.rolling());
     assert!(fastest > 1.0, "pushes off: {fastest}");
 }
 
@@ -287,7 +287,7 @@ fn y_far_from_it_picks_it_up_on_the_way_on() {
     let mut on = None;
     for i in 0..30 {
         idle(&mut g, 1);
-        if g.skater.mode == Mode::Rolling {
+        if g.skater.rolling() {
             on = Some(i);
             break;
         }
@@ -354,13 +354,13 @@ fn caveman_running_with_it_dropped_a_jump_lands_on_it_riding() {
     for i in 0..90 {
         run(&mut g, 1, ahead);
         caveman |= g.skater.landing_on_free_board();
-        if g.skater.mode == Mode::Rolling {
+        if g.skater.rolling() {
             riding = Some(i);
             break;
         }
     }
     assert!(caveman, "comes down onto the board (landing on deck)");
-    assert!(riding.is_some(), "riding it: {:?}", g.skater.mode);
+    assert!(riding.is_some(), "riding it: {:?}", g.skater.state());
     assert_eq!(g.skater.possession.hold, Hold::Underfoot);
     let at = (g.skater.pos - g.skater.possession.board.pos)
         .horizontal()
@@ -393,9 +393,9 @@ fn y_in_the_air_with_the_board_in_hand_still_gets_on_there() {
     run(&mut g, 8, In::default());
     assert!(g.skater.biped.air.is_some());
     run(&mut g, 1, Y);
-    assert!(g.skater.landing_on_deck(), "{:?}", g.skater.mode);
+    assert!(g.skater.landing_on_deck(), "{:?}", g.skater.state());
     idle(&mut g, 60);
-    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(g.skater.rolling());
     assert_eq!(g.skater.possession.hold, Hold::Underfoot);
 }
 
@@ -437,7 +437,7 @@ fn imported_on_foot() -> Option<Game> {
     idle(&mut g, 30);
     run(&mut g, 1, Y);
     idle(&mut g, 120);
-    if g.skater.mode != Mode::Walk {
+    if !g.skater.walking() {
         return None;
     }
     Some(g)
@@ -537,7 +537,7 @@ fn imported_y_next_to_the_dropped_board_gets_on() {
     for _ in 0..120 {
         idle(&mut g, 1);
         mounting |= path(&g).starts_with("Mount/");
-        on |= g.skater.mode == Mode::Rolling;
+        on |= g.skater.rolling();
     }
     assert!(mounting, "the mount plays: {}", path(&g));
     assert!(on && path(&g).starts_with("OnBoard/"), "{}", path(&g));
@@ -582,12 +582,12 @@ fn imported_caveman_lands_on_the_board() {
         assert!(!p.starts_with("WipeOut"), "{p}");
         into |= p.starts_with("Mount/Air/IntoLandingOnBoard");
         landing |= p.starts_with("OnBoard/LandingOnBoard");
-        riding |= g.skater.mode == Mode::Rolling && p.starts_with("OnBoard/");
+        riding |= g.skater.rolling() && p.starts_with("OnBoard/");
     }
     assert!(
         into && landing,
         "Skate 3's landing on the board plays: {}",
         path(&g)
     );
-    assert!(riding, "riding: {:?} {}", g.skater.mode, path(&g));
+    assert!(riding, "riding: {:?} {}", g.skater.state(), path(&g));
 }

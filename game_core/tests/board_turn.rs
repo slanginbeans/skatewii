@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::{PI, Vec3, atan2f, v3, wrap_angle};
-use game_core::skater::{Event, Mode};
+use game_core::skater::Event;
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -138,7 +138,7 @@ fn watch(g: &mut Game, script: impl Fn(u32) -> PadRaw) -> Seen {
             .extend(g.log.drain(..).filter(|l| l.starts_with("board: ")));
         let now = drawn_board_yaw(g);
         if let Some(n) = &mut since {
-            assert_eq!(g.skater.mode, Mode::Rolling, "rode away from the landing");
+            assert!(g.skater.rolling(), "rode away from the landing");
             seen.step = seen.step.max(wrap_angle(now - last).abs().to_degrees());
             seen.off_deck = seen.off_deck.max(axis_apart(now, yaw(g.skater.fwd)));
             if *n == 0 {

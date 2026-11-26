@@ -33,6 +33,23 @@ activation, controller) and crates/skate-game graph_host (what each behaviour an
 | `game_core/src/graph/input.rs` | the pad as action-graph intents, gesture recognizers |
 | `game_core/src/physics/` | the rigid-body physics (SK8 physics/): bodies and their integration, contact, joint and drive rows, the shared solve ("The rigid board") |
 | `game_core/src/graph/drive.rs` | the game's side: building the runner, the physics state it reads, timing |
+| `game_core/src/player/` | Skate 3's physical player states and state selector (SK8 skate-core player/state.rs, player/selector) |
+| `game_core/src/skater/states.rs` | the skater's state: the selector's input from the physics each tick, entering and leaving states |
+
+## The physical states
+
+The skater is always in one of Skate 3's physical states (`PhysicsGround`, `SlideGround`, `RevertGround`,
+`GroundAnimation`, `PhysicsAir`, `KnownAir`, `WipeoutGround`, the six grind states, `BipedGround`, `BipedAir`
+...; SK8 player/state.rs), and Skate 3's selector (TU3 `CalcSuggestedState`, SK8 player/selector) moves it
+between them once a tick, as SK8's physics/player_state/selection.rs does. The movement never sets the state:
+it publishes what SK8's physics publishes (the wheels touching, the wheel lines' gap and the time with no
+wheel down, a jump, a wipeout request, a grind contact and its family, a revert or powerslide under way, getting
+off or on the board, the known landing's time), and the selector decides (`skater/states.rs` maps each to the
+processed-input bit SK8 reads). Where the movement must know first (touching down, locking onto a rail, stepping
+off, rolling off an edge) it asks the selector on a copy of its counters. So a touchdown lands only once the air
+state has settled (0.08 s in `PhysicsAir`, 0.04 s in `KnownAir`), a pop goes into the air through the state
+frames (`field_2572 == 1`), a grind exit through its air flag, and a revert or powerslide is its own state.
+Kick turns, reverts, powerslides, grinds and wipeouts still move by flatground's code inside their states.
 
 ## Selection
 
@@ -645,7 +662,7 @@ without) are in `OffBoard.abin`, which the importer merges into the motion libra
   `NewToggleOffBoardState`; the action graph goes to `TransToOffBoard` and the motion graph to
   `Dismount/Ground/UserDismount` (into a stand under 1 m/s, a run under 8, a fast run under 15, else a
   runout: `ComVelCompare`). The board keeps rolling until the dismount clip's `OB_TRAJ` window starts
-  (SK8: `OB_Traj` sets the physics' go-to-biped flag), then the walker (`Mode::Walk`) takes over, facing the
+  (SK8: `OB_Traj` sets the physics' go-to-biped flag), then the walker (the selector's `BipedGround`) takes over, facing the
   board's travel at its speed. The motion graph then goes to `OffBoard/OBGround/Locomotion`.
 - **Walking** (Skate 3's biped, as SK8 ports it: `ground_input.rs`, `movement_intent.rs`,
   `movement_velocity.rs`, `cadence.rs`; the curves are `physics_biped` and `physics_state_offboard`, with
@@ -1003,7 +1020,7 @@ riding behaviours become forces at the deck, each as SK8 queues it:
 - the speed model, rolling resistance and the slope cap: the force that makes the board's travel speed
   what Skate 3's model asks, gravity being the solver's;
 - a push: the board's mass times the gap to its target (at most the tick's change), and the foot brake
-  its force (`FootBrakeForce` x the surface, through `brake_scale`): the wheels take their share, so the
+  its force (`FootBrakeForce` x the surface): the wheels take their share, so the
   0.96 "push transfer" flatground measured is now the board's own;
 - the feet (SK8 ground_force.rs): `MinForce` x speed / 8 against the rider's up at each foot
   (`FootForceOffset`), `MaxLandingForce` for `LandingForceTime` after touching down;
@@ -1262,7 +1279,7 @@ Fixed (each pinned by a test to SK8's number; skater unit tests and `tests/feel_
 
 - **Brake contact**: `BRAKE_CONTACT` is a value (0 in the brake's `INTO` clip, 1 in `CYC`); its presence
   was read as contact, so the foot dragged from the first tick. Now 0.23 s after the press, as SK8, at
-  SK8's 4.08 m/s^2 (`brake_scale` calibrated; it was 3.0).
+  SK8's 4.08 m/s^2 (the force on the board's mass).
 - **Speed model**: Skate 3 holds the speed to a target only the slope and rolling resistance move
   (`UpdateSpeedModel`); carving cost 1 to 2 m/s at 6 to 8 m/s here. Now the target pulls the speed back
   (`GeneralAmount` of the gap a tick, within `Friction_MaxSpeedChange`), off while a foot pushes or

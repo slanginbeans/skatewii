@@ -6,7 +6,7 @@ use super::*;
 use crate::math::{PI, v3, yaw_dir};
 use crate::math::{sinf, wrap_angle};
 use crate::park::{Surface, Terrain};
-use crate::skater::{AirContact, Flight, Manual, Mode, Plan};
+use crate::skater::{AirContact, Flight, Manual, Plan};
 use rig::{Placement, Positioner};
 use shot::ShotDef;
 
@@ -166,7 +166,9 @@ fn fly(s: &mut Skater, c: &mut CameraMan, vy: f32) -> (Vec<String>, f32, f32) {
     let mut t = 0.0;
     while t < duration {
         t += DT;
-        s.mode = Mode::Air { time: t };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = t;
+        s.states.time = t;
         s.pos = p.flight.at(t);
         s.vel = p.flight.vel_at(t);
         c.update(s, &FLAT, DT);
@@ -177,7 +179,7 @@ fn fly(s: &mut Skater, c: &mut CameraMan, vy: f32) -> (Vec<String>, f32, f32) {
         lo = lo.min(y);
         hi = hi.max(y);
     }
-    s.mode = Mode::Rolling;
+    s.force_state(crate::skater::State::PhysicsGround);
     s.plan = None;
     s.pos.y = 0.0;
     (shots, lo, hi)
@@ -433,7 +435,8 @@ fn the_drop_predictor_raises_before_a_ledge() {
 fn wiping_out_cuts_to_the_high_shot() {
     let (mut s, mut c) = setup(&FLAT);
     ride(&mut s, &mut c, &FLAT, 60, 5.0, |_| 0.0);
-    s.mode = Mode::Bailed { time: 0.0 };
+    s.force_state(crate::skater::State::WipeoutGround);
+    s.states.time = 0.0;
     ride(&mut s, &mut c, &FLAT, 120, 2.0, |_| 0.0);
     assert_eq!(c.shot_name, "wipeout");
     let eye = c.camera().eye;

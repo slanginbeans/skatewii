@@ -17,7 +17,7 @@ use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
 use game_core::park::Shape;
-use game_core::skater::{Event, Mode};
+use game_core::skater::Event;
 
 const TICK: f32 = 1.0 / 60.0;
 /// A clear lane across the built-in park (nothing in the way along +z for 38 m).
@@ -49,12 +49,12 @@ fn on_foot(mut g: Game, pos: Vec3, heading: f32) -> Game {
     run(&mut g, 30, [0, 0], 0);
     run(&mut g, 1, [0, 0], btn::Y);
     for _ in 0..120 {
-        if g.skater.mode == Mode::Walk {
+        if g.skater.walking() {
             break;
         }
         run(&mut g, 1, [0, 0], 0);
     }
-    assert_eq!(g.skater.mode, Mode::Walk, "Y gets off the board standing");
+    assert!(g.skater.walking(), "Y gets off the board standing");
     run(&mut g, 60, [0, 0], 0);
     g.skater.pos = pos;
     g.skater.biped.heading = heading;
@@ -263,7 +263,7 @@ fn jumping_at_a_ledge_catches_it_and_b_climbs_onto_it() {
     let yaw = game_core::math::atan2f(into.x, into.z);
     assert!(game_core::math::wrap_angle(g.skater.heading - yaw).abs() < 1e-3);
     assert!(yaw.abs() < 0.2, "{yaw}");
-    assert_eq!(g.skater.mode, Mode::Walk);
+    assert!(g.skater.walking());
     // B pulls him up onto the top.
     run(&mut g, 1, [0, 0], btn::B);
     assert_eq!(

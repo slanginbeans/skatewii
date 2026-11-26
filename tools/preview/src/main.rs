@@ -34,7 +34,7 @@ mod gxtex;
 
 use game_core::gfx::{Camera, Gfx, SCREEN_H, SCREEN_W, TexVertex, Texture, Vertex};
 use game_core::math::{Mat34, Vec3, v3, yaw_dir};
-use game_core::skater::{Event, Mode};
+use game_core::skater::Event;
 
 struct Raster {
     w: usize,
@@ -838,7 +838,9 @@ fn main() {
             s.pos = p + d * -0.6 + v3(0.0, 0.25, 0.0);
             s.heading = d.x.atan2(d.z);
             s.vel = d * 5.0 + v3(0.0, -0.5, 0.0);
-            s.mode = Mode::Air { time: 0.5 };
+            s.force_state(game_core::skater::State::PhysicsAir);
+            s.air_time = 0.5;
+            s.states.time = 0.5;
             println!(
                 "grind test: rail of {:.1} m starting at {:.1?}",
                 r.length(),
@@ -899,7 +901,7 @@ fn main() {
             println!(
                 "carve {frame} {} {:?} pos {:.1} {:.1} yaw {:.0} speed {:.2} off {:.1} shot {}",
                 co.phase(),
-                s.mode,
+                s.state(),
                 s.pos.x,
                 s.pos.z,
                 s.travel_yaw().to_degrees(),
@@ -1006,7 +1008,7 @@ fn main() {
                 took_land = true;
             }
         }
-        if let (Mode::Air { .. }, Some(t)) = (game.skater.mode, &game.skater.trick)
+        if let (true, Some(t)) = (game.skater.is_airborne(), &game.skater.trick)
             && !took_air
             && t.progress() > 0.3
         {
@@ -1039,7 +1041,7 @@ fn main() {
                 println!(
                     "        wrote {} ({label}{clip}, {:?}, camera {})",
                     path.display(),
-                    game.skater.mode,
+                    game.skater.state(),
                     game.camera().shot_name
                 );
             }

@@ -14,7 +14,7 @@ use crate::flick::FlickOut;
 use crate::gesture;
 use crate::input::PadRaw;
 use crate::math::PI;
-use crate::skater::{Event, Mode, Skater, Stance};
+use crate::skater::{Event, Skater, Stance, State};
 
 fn deg(rad: f32) -> f32 {
     rad * 180.0 / PI
@@ -37,7 +37,7 @@ impl Range {
 
 #[derive(Clone, Debug)]
 pub struct DevLog {
-    mode: Mode,
+    state: State,
     switch: bool,
     fakie: bool,
     manual: bool,
@@ -63,7 +63,7 @@ impl Default for DevLog {
 impl DevLog {
     pub fn new() -> DevLog {
         DevLog {
-            mode: Mode::Rolling,
+            state: State::PhysicsGround,
             switch: false,
             fakie: false,
             manual: false,
@@ -132,8 +132,8 @@ impl DevLog {
                     s.vel.y
                 )),
                 Event::Landed { name, points, .. } => {
-                    let detail = match (&s.landing, s.mode) {
-                        (Some(l), Mode::Rolling) if l.time == 0.0 => format!(
+                    let detail = match (&s.landing, s.rolling()) {
+                        (Some(l), true) if l.time == 0.0 => format!(
                             " ({:?}, {:.0} deg off, {:.1} m/s down)",
                             l.kind,
                             deg(l.crooked),
@@ -314,23 +314,18 @@ impl DevLog {
             }
             self.sliding = sliding;
         }
-        if core::mem::discriminant(&s.mode) != core::mem::discriminant(&self.mode) {
-            self.mode = s.mode;
-        }
+        self.state = s.state();
     }
 
     /// The status line (call about once a second): the skater's state and what the sticks did since the
     /// last one. Resets the ranges.
     pub fn status(&mut self, s: &Skater, cam: f32) -> String {
         let r = &self.ranges;
-        let mode = match s.mode {
-            Mode::Rolling => "rolling",
-            Mode::Air { .. } => "air",
-            Mode::Bailed { .. } => "bailed",
-            Mode::Runout { .. } => "runout",
-            Mode::Grind => "grind",
-            Mode::Walk if s.biped.air.is_some() => "walk (air)",
-            Mode::Walk => "walk",
+        // Skate 3's physical state (a runout is its wipeout state too).
+        let mode = if s.running_out() {
+            format!("{:?} (runout)", s.state())
+        } else {
+            format!("{:?}", s.state())
         };
         let line = format!(
             "status: {mode} at ({:.1}, {:.1}, {:.1}) heading {:.0} deg, {:.1} m/s, {:?}{}{} | cam {:.1} m, {} pull-ins | \

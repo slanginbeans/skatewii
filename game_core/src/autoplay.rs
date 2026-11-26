@@ -5,7 +5,6 @@ use crate::game::Game;
 use crate::input::{PadRaw, btn, flag};
 use crate::math::{PI, Vec3, atan2f, cosf, sinf, v3, wrap_angle};
 use crate::rails::RailClass;
-use crate::skater::Mode;
 
 /// Push up to speed down the spawn lane, load the flick stick on the kicker and kickflip off the lip.
 #[derive(Default)]
@@ -50,10 +49,10 @@ impl KickerRun {
         // rigid board loses some speed meeting the kicker; a flick while a push is under way would be
         // a no-comply).
         let winding = game.on_demo_park() && s.pos.z > -5.0;
-        if s.mode == Mode::Rolling && s.speed < 6.0 && !self.flicked && !winding {
+        if s.rolling() && s.speed < 6.0 && !self.flicked && !winding {
             pad.buttons |= btn::A;
         }
-        if !self.flicked && s.mode == Mode::Rolling {
+        if !self.flicked && s.rolling() {
             self.pushed += 1;
             let (load, flick) = if !game.on_demo_park() {
                 (self.pushed > 150, self.pushed > 175)
@@ -127,7 +126,7 @@ impl CarveOllie {
             ..Default::default()
         };
         self.t += 1;
-        let rolling = s.mode == Mode::Rolling;
+        let rolling = s.rolling();
         match self.phase() {
             "push" => {
                 if rolling && s.speed < 4.5 && self.t % 30 < 10 {
@@ -707,7 +706,7 @@ impl TrickTour {
 
     pub fn next(&mut self, game: &Game) -> PadRaw {
         let s = &game.skater;
-        let rolling = s.mode == Mode::Rolling;
+        let rolling = s.rolling();
         let graph = Self::graph_state(game);
         let in_state = |part: &str| graph.as_ref().is_some_and(|g| g.contains(part));
         let mut pad = PadRaw {
@@ -1150,7 +1149,7 @@ impl TrickTour {
                 }
             }
             Tour::LedgeAir => {
-                if s.mode == Mode::Grind {
+                if s.grinding() {
                     self.seen.ledge = true;
                     next(self, Tour::LedgeGrind, sw);
                 } else if rolling || self.t > 120 {
@@ -1168,7 +1167,7 @@ impl TrickTour {
                 {
                     self.seen.five_o = true;
                 }
-                if s.mode != Mode::Grind && self.held == 0 {
+                if !s.grinding() && self.held == 0 {
                     self.held = self.t;
                 }
                 if (self.held > 0 && rolling && self.t > self.held + 30) || self.t > 600 {
@@ -1198,10 +1197,10 @@ impl TrickTour {
                 }
             }
             Tour::CopingRide => {
-                if s.mode == Mode::Grind {
+                if s.grinding() {
                     self.seen.coping = true;
                 }
-                if s.mode != Mode::Grind && self.seen.coping && self.held == 0 {
+                if !s.grinding() && self.seen.coping && self.held == 0 {
                     self.held = self.t;
                 }
                 if (self.held > 0 && rolling && self.t > self.held + 30) || self.t > 360 {
@@ -1245,7 +1244,7 @@ impl TrickTour {
             Tour::SlideAir => {
                 // A quarter turn in the air (the main stick for a moment): across the ledge's edge.
                 let turn = if game.graph.is_some() { 9 } else { 15 };
-                if self.t < turn && s.mode != Mode::Grind {
+                if self.t < turn && !s.grinding() {
                     pad.stick_x = 100;
                 }
                 if let Some(g) = &s.grind
@@ -1254,7 +1253,7 @@ impl TrickTour {
                 {
                     self.seen.slide = true;
                 }
-                if s.mode == Mode::Rolling && self.t > 2 && self.held == 0 {
+                if s.rolling() && self.t > 2 && self.held == 0 {
                     self.held = self.t;
                 }
                 if (self.held > 0 && self.t > self.held + 30) || self.t > 600 {
@@ -1277,6 +1276,14 @@ impl TrickTour {
                     self.seen.gesture = true;
                 }
                 if self.t > 180 {
+                    // Off the board facing clear, flat ground (the walk ahead and its jump need room).
+                    let yaw = clear_heading(game, s.travel_yaw(), 8.0).unwrap_or(s.travel_yaw());
+                    self.place = Some(Placement {
+                        pos: s.pos + Vec3::UP * 0.1,
+                        heading: yaw,
+                        speed: 0.0,
+                        lift: 0.0,
+                    });
                     next(self, Tour::Walk, sw);
                 }
             }
@@ -1291,13 +1298,13 @@ impl TrickTour {
                 if (150..153).contains(&self.t) {
                     pad.buttons |= btn::B;
                 }
-                if s.mode == Mode::Walk {
+                if s.walking() {
                     self.held += 1;
                     if s.biped.jumped {
                         self.walk_jumped = true;
                     }
                 }
-                if self.t > 263 && s.mode == Mode::Rolling {
+                if self.t > 263 && s.rolling() {
                     self.seen.walked = self.held > 60 && self.walk_jumped;
                     next(self, Tour::RailFind, sw);
                 } else if self.t > 420 {
@@ -1326,11 +1333,11 @@ impl TrickTour {
                 None => next(self, Tour::FlipFind, sw),
             },
             Tour::RailGrind => {
-                if s.mode == Mode::Grind {
+                if s.grinding() {
                     self.held = self.t;
                 }
                 // Off the rail: it went to the end (the log says why: `grind: off (off the end)`).
-                if self.held > 0 && s.mode != Mode::Grind {
+                if self.held > 0 && !s.grinding() {
                     if let Some(r) = self.rail {
                         let rail = &game.terrain().rails()[r.rail];
                         let end = rail.points.iter().any(|p| (*p - s.pos).length() < 1.0);
@@ -1408,11 +1415,11 @@ impl TrickTour {
                 if turned > 0.0 {
                     self.wind = self.wind.max((turned * 10.0) as u32);
                 }
-                if !matches!(s.mode, Mode::Air { .. }) {
+                if !s.is_airborne() {
                     if rolling && self.wind as f32 / 10.0 > crate::math::PI {
                         self.seen.backflip = true;
                     }
-                    if !matches!(s.mode, Mode::Air { .. }) && self.t > 2 {
+                    if !s.is_airborne() && self.t > 2 {
                         next(self, Tour::BailOllie, sw);
                     }
                 }
@@ -1440,7 +1447,7 @@ impl TrickTour {
                 if self.t > 8 {
                     (pad.cstick_x, pad.cstick_y) = TWEAK;
                 }
-                if matches!(s.mode, Mode::Bailed { .. }) {
+                if s.bailed() {
                     next(self, Tour::Done, sw);
                 }
             }
@@ -1511,7 +1518,7 @@ impl Autoplay {
             self.rest -= 1;
             // Wait until the rider is up again before starting over.
             if self.rest == 0 {
-                if matches!(game.skater.mode, Mode::Rolling) {
+                if game.skater.rolling() {
                     self.restart = true;
                 } else {
                     self.rest = 30;
