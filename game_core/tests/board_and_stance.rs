@@ -134,12 +134,13 @@ fn wheel_gap(g: &Game) -> f32 {
         .fold(f32::MAX, f32::min)
 }
 
-/// The lowest wheel touches the ground (within 3 mm; a wheel's rim rolling over a ramp's kink dips a
-/// few millimetres into the slope ahead, as a round wheel does).
+/// The lowest wheel touches the ground: Skate 3 draws the physical deck, and the imported wheels are 6 mm
+/// smaller than its physical 31 mm ones, so they ride up to that over it (a wheel's rim rolling over a
+/// ramp's kink, the deck rigid over the trucks, dips up to a centimetre into the slope ahead).
 fn assert_on_ground(g: &Game, what: &str) {
     let gap = wheel_gap(g);
     assert!(
-        (-0.004..0.003).contains(&gap),
+        (-0.010..0.008).contains(&gap),
         "{what}: wheels {:.1} mm over the ground",
         gap * 1000.0
     );
@@ -156,10 +157,12 @@ fn imported_wheels_rest_on_the_ground_and_trucks_on_the_rail() {
         g.update(&pad(0, 0), TICK);
     }
     assert_on_ground(&g, "flat ground");
-    // The clips' board (the character's origin) is the deck's centre, about Skate 3's deck height over
-    // the contact point (the imported wheels are a little smaller than Skate 3's physical ones).
-    let deck = (g.imported_xform().pos - g.skater.pos).dot(g.skater.normal);
-    assert!((deck - DECK_HEIGHT).abs() < 0.006, "deck {deck}");
+    // The drawn board is the physical deck: Skate 3's deck height over the contact point.
+    let c = &g.rider().unwrap().character;
+    let m = c.world()[c.bone("SKATEBOARD_ROOT").unwrap()];
+    let board = g.imported_xform().point(v3(m[3][0], m[3][1], m[3][2]));
+    let deck = (board - g.skater.pos).dot(g.skater.normal);
+    assert!((deck - DECK_HEIGHT).abs() < 0.003, "deck {deck}");
     // Up the bank (16 degrees) and on the funbox's ramp, its kink onto the deck.
     g.place_rider(v3(14.8, 0.0, 0.0), core::f32::consts::FRAC_PI_2, 2.5);
     for _ in 0..12 {

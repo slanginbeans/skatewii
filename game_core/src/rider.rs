@@ -9,11 +9,6 @@ use crate::gfx::SUN;
 use crate::math::{Mat3, Vec3, Xform, v3};
 use crate::skater::ragdoll::{PARTS, POINTS};
 
-/// The ragdoll takes the bones over this fast at a bail, and gives them back to the clips this fast
-/// (s, ours: the drives start from the animated pose, so the take-over only covers the tick the pose
-/// lags the body).
-const DOLL_IN: f32 = 0.1;
-const DOLL_OUT: f32 = 0.25;
 /// The bones that place each ragdoll point (`skater::ragdoll`'s order) and that each body part poses
 /// (its first bone; the bones under it follow as the clips have them).
 const DOLL_POINTS: [&[&str]; POINTS] = [
@@ -113,12 +108,9 @@ pub struct Rider {
     board_bone: Option<usize>,
     mirror: bool,
     graph_posed: bool,
-    /// Draw the board this high (metres, along the world's up) over the character's origin, whatever
-    /// the clips do with it: during a hippie jump it rolls on along the ground under the rider.
-    board_floor: Option<f32>,
-    /// Draw the board here instead (character space: the board off the feet, `skater::possession`), by
-    /// this much over where the clips put it (1: all the way).
-    board_place: Option<(crate::character::Rows, f32)>,
+    /// Skate 3's physical pose job's mapping from the physical skeleton to this one (`render_pose`),
+    /// when the rig has every bone for it.
+    drawn: Option<crate::render_pose::Mapping>,
     a: Vec<Local>,
     b: Vec<Local>,
     /// The state graphs' pose stack: poses and their bones' channel weights (see
@@ -134,7 +126,6 @@ pub struct Rider {
     /// The rig's bones for the physical skeleton's bodies (`physics::skeleton::BONE_NAMES`).
     physical: Option<[usize; crate::physics::skeleton::ANIMATED_PARTS]>,
     doll: Option<[Rows; PARTS]>,
-    doll_dt: f32,
     doll_on: bool,
     doll_weight: f32,
     doll_offset: [Rows; PARTS],
@@ -188,6 +179,21 @@ impl Rider {
             .all(Option::is_some)
             .then(|| found.map(|b| b.unwrap_or(0)));
         let legs = crate::foot_ik::Legs::find(&character);
+        let board_bones = (|| {
+            Some(crate::render_pose::BoardBones {
+                front_truck: character.bone("Truck_Front")?,
+                back_truck: character.bone("Truck_Back")?,
+                wheels: [
+                    character.bone("Left_WheelFront")?,
+                    character.bone("Right_WheelFront")?,
+                    character.bone("Left_WheelBack")?,
+                    character.bone("Right_WheelBack")?,
+                ],
+            })
+        })();
+        let bone_parents: Vec<i16> = (0..n).map(|b| character.parent(b)).collect();
+        let drawn = physical
+            .map(|bones| crate::render_pose::Mapping::new(bones, &bone_parents, board_bones));
         let mut r = Rider {
             legs,
             feet_ik: crate::foot_ik::FeetIk::default(),
@@ -196,7 +202,6 @@ impl Rider {
             doll_parts,
             physical,
             doll: None,
-            doll_dt: 0.0,
             doll_on: false,
             doll_weight: 0.0,
             doll_offset: [crate::character::IDENTITY; PARTS],
@@ -209,8 +214,7 @@ impl Rider {
             character,
             mirror: false,
             graph_posed: false,
-            board_floor: None,
-            board_place: None,
+            drawn,
             a: vec![Local::IDENTITY; n],
             b: vec![Local::IDENTITY; n],
             stack: Vec::new(),
@@ -228,7 +232,7 @@ impl Rider {
     /// PushFootFrame `out_distance`; the imported character's space is the board's).
     pub fn feet(&self) -> Option<[[f32; 2]; 2]> {
         let c = &self.character;
-        let w = c.world();
+        let w = &self.anim_world[..];
         let b = w.get(c.bone("SKATEBOARD_ROOT")?)?[3];
         let foot = |name: &str| -> Option<[f32; 2]> {
             let t = w.get(c.bone(name)?)?[3];
@@ -240,13 +244,13 @@ impl Rider {
     /// The posed board's up and nose axes (`SKATEBOARD_ROOT`'s y and z) in the character's space, from the
     /// last pose: up `(0, 1, 0)` and nose along the character's +-z when it rides flat under him.
     pub fn board_axes(&self) -> Option<(Vec3, Vec3)> {
-        let m = self.character.world().get(self.board_bone?)?;
+        let m = self.anim_world.get(self.board_bone?)?;
         Some((v3(m[1][0], m[1][1], m[1][2]), v3(m[2][0], m[2][1], m[2][2])))
     }
 
     /// The posed board's centre (`SKATEBOARD_ROOT`) in the character's space, from the last pose.
     pub fn board_in_character(&self) -> Option<Vec3> {
-        let b = self.character.world().get(self.board_bone?)?[3];
+        let b = self.anim_world.get(self.board_bone?)?[3];
         Some(v3(b[0], b[1], b[2]))
     }
 
@@ -257,7 +261,7 @@ impl Rider {
         if self.com_parts.len() < COM_PARTS.len() {
             return None;
         }
-        let w = self.character.world();
+        let w = &self.anim_world;
         let board = w.get(self.board_bone?)?;
         let mut com = [0.0f32; 3];
         for &(bone, weight, along) in &self.com_parts {
@@ -285,7 +289,6 @@ impl Rider {
         &mut self,
         lib: &crate::motion::Library,
         prog: &crate::graph::playback::PoseProgram,
-        rot: Mat3,
         turned: bool,
     ) -> bool {
         use crate::graph::playback::PoseOp;
@@ -371,25 +374,54 @@ impl Rider {
         }
         self.a.copy_from_slice(&self.stack[0].0);
         self.graph_posed = true;
-        let ch = &mut self.character;
-        ch.pose(&self.a);
-        let c = &rot.cols;
-        if let (Some(b), Some(h)) = (self.board_bone, self.board_floor) {
-            // The world's up in the character's space, and the board's height along it now.
-            let up = v3(c[0].y, c[1].y, c[2].y);
-            let at = ch.world()[b][3];
-            let now = v3(at[0], at[1], at[2]).dot(up);
-            ch.shift_subtree(b, up * (h - now));
-        }
+        self.character.pose(&self.a);
         self.apply_doll();
-        self.place_board(false);
         if let Some(legs) = self.legs {
             self.feet_ik
                 .update(&mut self.character, &legs, self.feet_frame.as_ref());
         }
-        let ch = &mut self.character;
-        ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), false);
         true
+    }
+
+    /// Skins the pose drawn this frame; `rot` is the character's world rotation (for lighting).
+    pub fn skin(&mut self, rot: Mat3) {
+        let c = &rot.cols;
+        self.character
+            .skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), false);
+    }
+
+    /// The posed board's frame (`SKATEBOARD_ROOT`) in the character's space, from the last pose.
+    pub fn board_frame(&self) -> Option<Xform> {
+        Some(rows_to_xform(self.character.world().get(self.board_bone?)?))
+    }
+
+    /// Draws what the physics solved (Skate 3's physical pose job, `render_pose`): the physical parts
+    /// (world; part 0 the board) and the physical board's bodies with the deck's wobble tilt, placed in
+    /// the character's space by `to_world`. False when this rig can't be mapped.
+    pub fn draw_physical(
+        &mut self,
+        parts: &[Xform; crate::physics::skeleton::ANIMATED_PARTS],
+        to_world: &Xform,
+        board: Option<(&crate::render_pose::PhysicalBoard, f32)>,
+    ) -> bool {
+        let Some(map) = &mut self.drawn else {
+            return false;
+        };
+        let ch = &mut self.character;
+        let n = ch.bones();
+        let parents: Vec<i16> = (0..n).map(|b| ch.parent(b)).collect();
+        let anim: Vec<Xform> = ch.world().iter().map(rows_to_xform).collect();
+        let out = map.publish(&anim, &parents, parts, to_world, board);
+        let rows: Vec<Rows> = out.iter().map(xform_to_rows).collect();
+        ch.set_world(&rows);
+        true
+    }
+
+    /// Puts the board's bones at `frame` (character space): the board off the feet, where its own
+    /// body is.
+    pub fn place_board(&mut self, frame: &Xform) {
+        let Some(b) = self.board_bone else { return };
+        self.character.place_subtree(b, &xform_to_rows(frame));
     }
 
     /// Off the board: the ground under the toes this tick for the next graph pose's foot placement
@@ -410,68 +442,10 @@ impl Rider {
         self.feet_ik.support()
     }
 
-    /// Draws the board at this height over the character's origin (world metres) from the next pose on,
-    /// or where the clips put it (`None`).
-    pub fn set_board_floor(&mut self, h: Option<f32>) {
-        self.board_floor = h;
-    }
-
-    /// Draws the board at this frame (character space) from the next pose on, blended over where the
-    /// clips put it by `weight` (the board off the feet), or where the clips put it (`None`).
-    pub fn set_board_place(&mut self, place: Option<(crate::character::Rows, f32)>) {
-        self.board_place = place;
-    }
-
-    /// The board's subtree moved to [`Rider::set_board_place`]'s frame. `mirror`: the skin mirrors the
-    /// pose after this (the frame is mirrored first, so it ends where it was asked for).
-    fn place_board(&mut self, mirror: bool) {
-        let (Some(b), Some((mut to, w))) = (self.board_bone, self.board_place) else {
-            return;
-        };
-        if mirror {
-            for row in &mut to {
-                row[0] = -row[0];
-            }
-        }
-        let ch = &mut self.character;
-        let Some(&from) = ch.world().get(b) else {
-            return;
-        };
-        let w = w.clamp(0.0, 1.0);
-        let lerp = |a: [f32; 3], b: [f32; 3]| -> Vec3 {
-            v3(
-                a[0] + (b[0] - a[0]) * w,
-                a[1] + (b[1] - a[1]) * w,
-                a[2] + (b[2] - a[2]) * w,
-            )
-        };
-        let up = lerp(from[1], to[1]).normalize_or(v3(0.0, 1.0, 0.0));
-        let nose = lerp(from[2], to[2]);
-        let nose = (nose - up * nose.dot(up)).normalize_or(v3(0.0, 0.0, 1.0));
-        let x = v3(from[0][0], from[0][1], from[0][2]);
-        let handed = x.dot(
-            v3(from[1][0], from[1][1], from[1][2]).cross(v3(from[2][0], from[2][1], from[2][2])),
-        );
-        let side = if handed < 0.0 {
-            nose.cross(up)
-        } else {
-            up.cross(nose)
-        };
-        let at = lerp(from[3], to[3]);
-        let rows = [
-            [side.x, side.y, side.z],
-            [up.x, up.y, up.z],
-            [nose.x, nose.y, nose.z],
-            [at.x, at.y, at.z],
-        ];
-        ch.place_subtree(b, &rows);
-    }
-
     /// The ragdoll's body parts this frame (character space; `None` outside a bail) and the frame's
     /// time: the next pose puts the bones on them, blending in at a bail and back out after.
-    pub fn set_ragdoll(&mut self, parts: Option<[Rows; PARTS]>, dt: f32) {
+    pub fn set_ragdoll(&mut self, parts: Option<[Rows; PARTS]>) {
         self.doll = parts;
-        self.doll_dt = dt;
     }
 
     /// How much of the pose the ragdoll holds (0..1; blending in or out between).
@@ -523,7 +497,6 @@ impl Rider {
         self.anim_world.extend_from_slice(ch.world());
         let doll = self.doll.is_some() || self.doll_weight > 0.0;
         self.anim_mirrored = self.mirror && !doll && !self.graph_posed;
-        let dt = self.doll_dt;
         match self.doll {
             Some(parts) => {
                 if !self.doll_on {
@@ -536,7 +509,7 @@ impl Rider {
                     }
                     self.doll_on = true;
                 }
-                self.doll_weight = (self.doll_weight + dt / DOLL_IN).min(1.0);
+                self.doll_weight = 1.0;
                 for b in 0..n {
                     let part = self.doll_parts.iter().position(|x| *x == Some(b));
                     let p = ch.parent(b);
@@ -557,7 +530,7 @@ impl Rider {
                 if self.doll_weight <= 0.0 {
                     return;
                 }
-                self.doll_weight = (self.doll_weight - dt / DOLL_OUT).max(0.0);
+                self.doll_weight = 0.0;
             }
         }
         let k = self.doll_weight;
@@ -581,7 +554,25 @@ impl Rider {
         if ch.sample("idle", 0.0, &mut self.a) {
             ch.pose(&self.a);
         }
+        self.anim_world.clear();
+        self.anim_world.extend_from_slice(self.character.world());
+        let ch = &mut self.character;
         let c = &rot.cols;
         ch.skin(v3(c[0].dot(SUN), c[1].dot(SUN), c[2].dot(SUN)), false);
     }
+}
+
+fn rows_to_xform(r: &Rows) -> Xform {
+    let v = |a: [f32; 3]| v3(a[0], a[1], a[2]);
+    Xform::new(Mat3::from_cols(v(r[0]), v(r[1]), v(r[2])), v(r[3]))
+}
+
+fn xform_to_rows(x: &Xform) -> Rows {
+    let c = &x.rot.cols;
+    [
+        [c[0].x, c[0].y, c[0].z],
+        [c[1].x, c[1].y, c[1].z],
+        [c[2].x, c[2].y, c[2].z],
+        [x.pos.x, x.pos.y, x.pos.z],
+    ]
 }
