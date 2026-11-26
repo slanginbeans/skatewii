@@ -21,6 +21,7 @@
 //! | Processed2468 bit8 (grinds flag_322) | [`Facts::left_grind`]: popped or come off the rail |
 //! | Processed2468 bit10 (known trajectory) | the landing prediction is known (`Skater::plan`) |
 //! | Processed2468 bit18 | [`Facts::wipeout`]: a bail or a runout |
+//! | Processed2468 bits 16, 17 | [`Facts::deck`], [`Facts::trucks`]: the rigid board's deck or a truck against the world |
 //! | `grind_candidate_1488`, `grind_type_1248` | the grind contact (`Skater::grind`) and its family |
 //! | Processed2472 bit21, `field_2744` | a revert under way, and its direction |
 //! | `field_2732` | a powerslide's side |
@@ -58,6 +59,10 @@ pub struct Facts {
     pub mount: Option<bool>,
     /// A grind contact found this tick, before it is taken (its family, `Family as u32`).
     pub grind: Option<u32>,
+    /// The rigid board's deck, and either truck, against the world in this tick's step (SK8
+    /// Processed2468 bits 16 and 17, which make the selector's `colliding` with the wheels).
+    pub deck: bool,
+    pub trucks: bool,
 }
 
 /// The selector's counters and the skater's state, kept together.
@@ -98,6 +103,8 @@ mod bit {
     pub const LEFT_GRIND_2468: u32 = 1 << 8;
     pub const KNOWN_AIR_2468: u32 = 1 << 10;
     pub const WIPEOUT_2468: u32 = 1 << 18;
+    pub const DECK_CONTACT_2468: u32 = 1 << 16;
+    pub const TRUCK_CONTACT_2468: u32 = 1 << 17;
     pub const REVERT_2472: u32 = 1 << 21;
     pub const ON_FOOT_2476: u32 = 1 << 15;
     pub const BOARD_ON_GROUND_2484: u32 = 1;
@@ -178,6 +185,12 @@ impl Skater {
         }
         if f.wipeout {
             f2468 |= bit::WIPEOUT_2468;
+        }
+        if f.deck {
+            f2468 |= bit::DECK_CONTACT_2468;
+        }
+        if f.trucks {
+            f2468 |= bit::TRUCK_CONTACT_2468;
         }
         if self.revert.is_some() {
             f2472 |= bit::REVERT_2472;

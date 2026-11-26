@@ -790,6 +790,17 @@ impl Skater {
             z: 1.0,
         });
         let animated = right * posed.x + up * posed.y + heading * posed.z;
+        // The physical deck (SK8's toolkit deck), its nose the skater's way; the kinematic board's
+        // nose lies along the ground and never pitches over a lip.
+        if let Some(rig) = self.rig.as_ref().filter(|_| self.rolling()) {
+            let deck = rig.board.deck().axes.cols[2] * self.rig_sign();
+            if deck.dot(up).abs() <= animated.dot(up).abs() {
+                return 0.0;
+            }
+            let physical = super::reckoning::wrapped_angle(deck, up, axis);
+            let posed = super::reckoning::wrapped_angle(animated, up, axis);
+            return (physical - posed).abs();
+        }
         let frame = self.board_frame();
         let mut deck = frame.cols[2];
         if let Some(m) = &self.manual {

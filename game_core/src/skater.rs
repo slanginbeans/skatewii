@@ -97,8 +97,6 @@ const AIR_LEGS_FOLLOW: f32 = 0.15;
 const JUMP_CORRECTION_TICKS: u32 = 12;
 /// The wheels' friction on a landing's impact: sideways speed taken off per m/s into the ground.
 const LAND_SIDE_FRICTION: f32 = 0.41;
-/// The posed board lifted this far (m) means the pop's tail strike has started.
-const POP_LIFT_MIN: f32 = 0.002;
 /// Powerslides: the board angle eases at this rate (rad/s, ours); a held slide relaxes after this long
 /// (s).
 const SLIDE_TURN_RATE: f32 = 8.0;
@@ -1569,13 +1567,14 @@ impl Skater {
             self.air_com = None;
             self.air_lift = 0.0;
         }
-        // The rider's body over the board: the animation's while riding; following it only so fast
-        // from the pop's tail strike (SK8's GroundAnimation) until the jump's top (measured: SK8's
-        // COM over the deck lags its animation there, and follows it again coming down).
+        // The rider's body over the board: the animation's while riding (a crouch over a lip comes
+        // down with the clips, as SK8's does before it leaves the ground); following it only so fast
+        // through the pop (SK8's GroundAnimation) until the jump's top (measured: SK8's COM over the
+        // deck lags its animation there, and follows it again coming down).
         self.body_com = match (self.graph.pose_com, self.body_com) {
             (Some(c), Some(d))
                 if (self.is_airborne() && self.vel.y > 0.0)
-                    || self.graph.pose_lift > POP_LIFT_MIN =>
+                    || self.state() == State::GroundAnimation =>
             {
                 Some(d + (c - d) * (AIR_LEGS_FOLLOW * dt * 60.0).min(1.0))
             }
@@ -2756,6 +2755,13 @@ impl Skater {
         // smoothed, not the deck's: a board tipped over a lip leaves with the rider upright).
         self.normal = self.reckoning.up.normalize_or(self.normal);
         self.fwd = tangent(self.fwd, self.normal);
+        // Rolled off: the flight starts where the physical deck is, under that up (a board tipped
+        // over a lip would otherwise be put back over its wheels and jump up and back).
+        if f.is_none()
+            && let Some(r) = &self.rig
+        {
+            self.pos = r.board.deck().position - self.normal * DECK_HEIGHT;
+        }
     }
 
     /// The rider's centre of mass over the board's point (m, along the board's up).
@@ -3114,12 +3120,20 @@ impl Skater {
                 None => return,
             }
         }
-        // Touchdown: the board's wheels on a surface it lands on. Skate 3's state selector takes the
-        // board onto the ground from its wheel contacts once the air state has settled; until then it
-        // stays in the air, the board on its own contacts.
+        // Touchdown: the board's wheels on a surface it lands on, or its deck or a truck against the
+        // world (a tail on the coping). Skate 3's state selector takes the board onto the ground from
+        // any of those contacts (its `colliding`) once the air state has settled; until then it stays
+        // in the air, the board on its own contacts.
         let (wheels, n, point) = self.air_wheels();
-        if wheels > 0 {
-            self.publish_wheels(wheels);
+        let (n, point) = match &self.rig {
+            Some(r) if wheels == 0 => (r.board.body_normal, r.board.deck().position),
+            _ => (n, point),
+        };
+        let body = self.states.facts.deck || self.states.facts.trucks;
+        if wheels > 0 || body {
+            if wheels > 0 {
+                self.publish_wheels(wheels);
+            }
             if self.selects(|_| {}).category() == 100 {
                 let surface = park
                     .raycast(point + n * 0.05, -n, 0.1)
