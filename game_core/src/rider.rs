@@ -396,13 +396,16 @@ impl Rider {
     }
 
     /// Draws what the physics solved (Skate 3's physical pose job, `render_pose`): the physical parts
-    /// (world; part 0 the board) and the physical board's bodies with the deck's wobble tilt, placed in
+    /// (world; part 0 the board) and the physical board's bodies with the deck's wobble, placed in
     /// the character's space by `to_world`. False when this rig can't be mapped.
     pub fn draw_physical(
         &mut self,
         parts: &[Xform; crate::physics::skeleton::ANIMATED_PARTS],
         to_world: &Xform,
-        board: Option<(&crate::render_pose::PhysicalBoard, f32)>,
+        board: Option<(
+            &crate::render_pose::PhysicalBoard,
+            &crate::render_pose::Wobble,
+        )>,
     ) -> bool {
         let Some(map) = &mut self.drawn else {
             return false;

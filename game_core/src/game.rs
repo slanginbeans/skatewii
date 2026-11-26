@@ -1381,8 +1381,8 @@ impl Game {
             }),
             deck: *deck,
         });
-        let tilt = self.board_state.wobble.tilt;
-        let board_bodies = pb.as_ref().filter(|_| physical).map(|pb| (pb, tilt));
+        let wobble = self.board_state.wobble;
+        let board_bodies = pb.as_ref().filter(|_| physical).map(|pb| (pb, &wobble));
         if let Some(r) = &mut self.rider {
             r.draw_physical(&parts, &to_world, board_bodies);
         }

@@ -24,6 +24,9 @@ const FOOT_LANDING_FORCE: f32 = 100.0;
 const FOOT_LANDING_TIME: f32 = 0.1;
 /// Skate 3's manual corrective drag (N per m/s, SK8 manual/controller.rs `apply_correction`).
 const MANUAL_CORRECTIVE_DRAG: f32 = 400.0;
+/// A board further than this (m) from the skater's frame was left behind by a move from outside:
+/// put where the skater is rather than adopted or flown to.
+const LANDING_REACH: f32 = 0.5;
 
 /// Sideways friction (SK8 riding/slide_friction.rs): against the ground's angle (quarter turns),
 /// `physics_friction/SlideVsNormal`; against the speed / 10, `SlideVsSpeed`; building over the
@@ -134,7 +137,7 @@ impl Skater {
             && r.airborne
         {
             r.airborne = false;
-            if (r.board.deck().position - deck).length() < 0.5 {
+            if (r.board.deck().position - deck).length() < LANDING_REACH {
                 self.adopt_rig();
                 self.mark_rig();
                 return;
@@ -222,14 +225,26 @@ impl Skater {
     /// skateboard root, which carries the board adjust: the target is the adjusted deck
     /// ([`Skater::frame`]), so the board flies adjusted and the landing adopts it as lined up. The
     /// target is the physical deck's way round (end for end while the skater's frame is turned).
-    pub(super) fn fly_rig(&mut self, park: &dyn Terrain) {
+    pub(super) fn fly_rig(&mut self, park: &dyn Terrain, landing: bool) {
         let f = self.frame();
         let sign = self.rig_sign();
         let target = (f.deck, Mat3::from_cols(f.right * sign, f.up, f.fwd * sign));
+        let vel = self.vel;
         let Some(r) = &mut self.rig else { return };
         r.airborne = true;
+        // Moved far from the flight (a respawn, a scripted drop): put there, as `sync_rig` does.
+        if (r.board.deck().position - target.0).length() > LANDING_REACH {
+            r.board.place(target.0, &target.1, vel, Vec3::ZERO);
+        }
+        // SK8 flies the board on its own physics (the hook only turns it) and places the rider on
+        // it; flatground's flight is the skater's, so the hook moves with it: its damping holds the
+        // deck to the flight's velocity instead of dragging it behind (it would land late).
+        // The tick the flight lands, the board comes down on its own physics as it flew (the landed
+        // frame is the ground's, not where the flight put the board).
         let input = BoardInput {
-            hook: Some(target),
+            hook: (!landing).then_some((target.0 - vel * crate::physics::STEP, target.1)),
+            hook_velocity: vel,
+            hook_gravity: pb::GRAVITY,
             wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
             ..BoardInput::default()
         };

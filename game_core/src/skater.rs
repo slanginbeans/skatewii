@@ -1595,6 +1595,7 @@ impl Skater {
         if early {
             self.select_state();
         }
+        let flying = self.is_airborne();
         self.step_mode(park, pad, flick, dt, events);
         self.update_possession(park, dt, events);
         // Skate 3's state selector picks the state from what the tick's movement published.
@@ -1626,6 +1627,12 @@ impl Skater {
                 .observe(&self.tuning, park, at, self.riding_ticks, since);
             let pose = self.approach_pose();
             self.approach.ride(pose);
+            // The tick the flight lands, the board flies its last step onto the ground under the
+            // landed skater (the ground ride adopts it from the next tick), as Skate 3's board lands
+            // on its own physics the tick the rider does.
+            if flying {
+                self.fly_rig(park, true);
+            }
         } else {
             self.riding_ticks = 0;
             // Off the ground: Skate 3 resets the wobble on entering it again. Its air, grind and
@@ -1633,7 +1640,7 @@ impl Skater {
             self.wobble.reset();
             self.reckoning.lean = 0.0;
             if self.is_airborne() {
-                self.fly_rig(park);
+                self.fly_rig(park, false);
             } else {
                 self.rig = None;
             }

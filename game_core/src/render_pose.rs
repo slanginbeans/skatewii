@@ -426,7 +426,7 @@ impl Mapping {
         bone_parents: &[i16],
         parts: &[Xform; ANIMATED_PARTS],
         to_world: &Xform,
-        board: Option<(&PhysicalBoard, f32)>,
+        board: Option<(&PhysicalBoard, &Wobble)>,
     ) -> &[Xform] {
         let n = anim.len();
         let to_animation = inverse(to_world);
@@ -457,8 +457,8 @@ impl Mapping {
                 None => self.globals[b],
             };
         }
-        if let (Some(bones), Some((pb, wobble_tilt))) = (self.board, board) {
-            board_locals(&mut self.locals, bones, pb, &parts[0], wobble_tilt);
+        if let (Some(bones), Some((pb, wobble))) = (self.board, board) {
+            board_locals(&mut self.locals, bones, pb, &parts[0], wobble);
         }
         // The whole hierarchy again from the locals (render_pose.rs `compose_hierarchy_in_place`).
         for b in 0..n {
@@ -475,13 +475,13 @@ impl Mapping {
 
 /// The board's bones (`0x82DB993C..A55C`, SK8 skeleton_output/board.rs): the wheels turned as their
 /// bodies are on their trucks, the trucks tilted with their axles (and the wobble) and sunk by the
-/// wheels' compression.
+/// wheels' compression (less the deck's wobble squish).
 fn board_locals(
     locals: &mut [Xform],
     bones: BoardBones,
     pb: &PhysicalBoard,
     skeleton_board: &Xform,
-    wobble_tilt: f32,
+    deck_wobble: &Wobble,
 ) {
     let n = locals.len();
     let y = v3(0.0, 1.0, 0.0);
@@ -491,29 +491,42 @@ fn board_locals(
         let up = transpose_apply(&truck.rot, pb.bodies[w].rot.cols[1]);
         Mat3::rot_x(signed_angle(up, y, z))
     });
-    let along = |a: usize, b: usize| {
+    // In the drawn board's frame (which is the deck's, or the deck's turned end for end when the clips'
+    // board lies the other way on it: `turn`), the bone's front truck is the physical truck ahead.
+    let to_board = |v: Vec3| transpose_apply(&skeleton_board.rot, v);
+    let ahead = to_board(pb.bodies[4].pos - skeleton_board.pos).z >= 0.0;
+    // Each truck bone's physical truck and wheel pair (SK8: front 0 less 1, back 3 less 2, both
+    // about -x at rest; turned round, the other pair and the other order).
+    let (front_pair, back_pair, front_truck, back_truck) = if ahead {
+        ((0, 1), (3, 2), 4, 5)
+    } else {
+        ((2, 3), (1, 0), 5, 4)
+    };
+    let along = |(a, b): (usize, usize)| {
         let d = pb.bodies[a].pos - pb.bodies[b].pos;
         if d.length() > 1e-6 {
-            transpose_apply(&skeleton_board.rot, d * (1.0 / d.length()))
+            to_board(d * (1.0 / d.length()))
         } else {
             Vec3::ZERO
         }
     };
-    // The trucks' frames on the deck.
-    let truck = |i: usize| pb.deck.rot.transpose_mul(&pb.bodies[4 + i].rot);
-    let trucks = [truck(0), truck(1)];
-    let mut front = along(0, 1);
-    let mut back = along(3, 2);
+    // The trucks' tilt axes in the drawn board's frame. flatground's truck bodies' x points out from
+    // the board's middle, the imported truck bones' (SK8's truck frames') in: the bones' is the
+    // reverse of the bodies'. With it the hangers turn against the deck's roll over the axles
+    // (a carve, the wobble), keeping the wheels on the ground.
+    let axis = |t: usize| -to_board(pb.bodies[t].rot.cols[0]);
+    let mut front = along(front_pair);
+    let mut back = along(back_pair);
     if front.dot(front) < 0.5 {
-        front = trucks[0].cols[2];
+        front = to_board(pb.bodies[front_truck].rot.cols[2]);
     }
     if back.dot(back) < 0.5 {
-        back = -trucks[1].cols[2];
+        back = -to_board(pb.bodies[back_truck].rot.cols[2]);
     }
     let neg_x = v3(-1.0, 0.0, 0.0);
-    let back_angle = crate::math::wrap_angle(signed_angle(back, neg_x, trucks[1].cols[0]));
-    let front_angle = crate::math::wrap_angle(signed_angle(front, neg_x, trucks[0].cols[0]));
-    let wobble = wobble_tilt * TRUCK_TILT_WOBBLE;
+    let back_angle = crate::math::wrap_angle(signed_angle(back, neg_x, axis(back_truck)));
+    let front_angle = crate::math::wrap_angle(signed_angle(front, neg_x, axis(front_truck)));
+    let wobble = deck_wobble.tilt * TRUCK_TILT_WOBBLE;
     let back_tilt =
         (-TRUCK_TILT_SCALAR * back_angle - wobble).clamp(-TRUCK_TILT_MAX, TRUCK_TILT_MAX);
     let front_tilt =
@@ -531,7 +544,8 @@ fn board_locals(
         } else {
             compression[side]
         };
-        let displacement = c.clamp(0.0, TRUCK_DISPLACEMENT_MAX);
+        // The deck squished down by the wobble leaves the trucks where they were (`0x82DBA0F0`).
+        let displacement = (c - deck_wobble.squish).clamp(0.0, TRUCK_DISPLACEMENT_MAX);
         let rotated = locals[bone].then(&Xform::new(Mat3::rot_x(tilt), Vec3::ZERO));
         locals[bone] = Xform::new(Mat3::IDENTITY, v3(0.0, displacement, 0.0)).then(&rotated);
     }
