@@ -100,8 +100,10 @@ fn imported_the_drawn_pose_never_snaps() {
     assert!(g.skater.walking(), "off the board");
     run(&mut g, 60, pad([0, 100], 0), 0.12, "walking", w);
     run(&mut g, 1, pad([0, 100], btn::Y), 0.12, "Y", w);
-    // Known: the mount from a run still jumps up to 16 cm where the rig takes over (ROADMAP).
-    run(&mut g, 120, pad([0, 0], 0), 0.2, "getting on", w);
+    // The mount from a run's clip slams the board down from the hands at up to 12 cm a tick (as
+    // walking, before the rig); where the rig takes over the root hands over from the feet's to the
+    // board's over 0.2 s, taken where the feet's root is that tick.
+    run(&mut g, 120, pad([0, 0], 0), 0.14, "getting on", w);
     assert!(g.skater.rolling(), "back on: {:?}", g.skater.state());
     eprintln!("the drawn pose's largest jump: {:.0} mm", worst * 1000.0);
 }

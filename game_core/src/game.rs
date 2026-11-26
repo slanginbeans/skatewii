@@ -1233,8 +1233,12 @@ impl Game {
         // handover from here).
         let riding_root = riding && anim_board.is_some() && deck.is_some();
         if riding_root != self.root_riding && ran > 0 {
+            // Taken against the old root where it is this tick (getting on, the feet's root as the
+            // rider moved on), not where it was drawn last: else the rider is held back a tick's
+            // travel at the handover.
+            let old = if riding_root { foot } else { self.drawn_root };
             let inv = crate::physics::rider_body::inverse(&drawn);
-            self.root_handover = (inv.then(&self.drawn_root), 1.0);
+            self.root_handover = (inv.then(&old), 1.0);
             self.root_riding = riding_root;
         }
         let drawn = if self.root_handover.1 > 0.0 {
