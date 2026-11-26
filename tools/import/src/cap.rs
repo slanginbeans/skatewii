@@ -221,13 +221,9 @@ mod tests {
         for _ in 0..240 {
             g.update(&pad, 1.0 / 60.0);
             let sk = &g.skater;
-            assert!(
-                !matches!(sk.mode, game_core::skater::Mode::Bailed { .. }),
-                "bailed at {:?}",
-                sk.pos
-            );
+            assert!(!sk.bailed(), "bailed at {:?}", sk.pos);
             let x = sk.pos.x;
-            if (3.0..9.0).contains(&x) && matches!(sk.mode, game_core::skater::Mode::Rolling) {
+            if (3.0..9.0).contains(&x) && sk.rolling() {
                 bottom = bottom.max(sk.ground_velocity().length());
             }
             if x > 9.0 {

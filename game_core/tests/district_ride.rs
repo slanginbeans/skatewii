@@ -16,7 +16,6 @@ use game_core::math::Mat34;
 use game_core::math::v3;
 use game_core::pack::{self, Kind};
 use game_core::reader::MemReader;
-use game_core::skater::Mode;
 
 /// A cell pack: its 100 m square as a flat floor at y 0 (packed collision), and a quad drawn on it.
 fn cell_pack(x: i32, z: i32) -> Vec<u8> {
@@ -193,7 +192,7 @@ fn a_district_streams_in_while_the_rider_rolls_across_it() {
     let s = &g.skater;
     assert!(s.pos.x > 900.0, "rode across the district: {:?}", s.pos);
     assert!(low > -0.1, "stayed on the ground (lowest {low})");
-    assert_eq!(s.mode, Mode::Rolling);
+    assert!(s.rolling());
     let d = g.district().unwrap();
     assert!(
         d.loaded() <= 21,

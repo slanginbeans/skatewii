@@ -447,7 +447,7 @@ impl Skater {
                 && let Some(v) = self.hit_wall(h.normal, vel, false, events)
             {
                 vel = v;
-                if self.mode != Mode::Rolling {
+                if !self.stays_rolling() {
                     return;
                 }
                 // This tick only moves away from the wall.
@@ -477,7 +477,7 @@ impl Skater {
             if jump > CLIMB && h.normal.dot(n) > 0.97 && self.speed.abs() > 0.05 {
                 let wall = (-(f * ahead)).normalize_or(Vec3::UP);
                 if let Some(v) = self.hit_wall(wall, vel, false, events) {
-                    if self.mode == Mode::Rolling {
+                    if self.stays_rolling() {
                         self.set_ground_velocity(v);
                     }
                     return;
@@ -504,7 +504,8 @@ impl Skater {
         let Some((c, nn, chord)) = contact else {
             // Rolled off an edge: a lip, a ledge, the coping.
             self.pos = p + n * 0.02;
-            self.leave_ground(vel + n * self.vn, events);
+            self.publish_off_ground(super::rig::WHEEL_LINE_LENGTH, self.gap_time);
+            self.leave_ground(vel + n * self.vn, false, events);
             return;
         };
         let gap = (p - c).dot(nn);
@@ -525,6 +526,7 @@ impl Skater {
             }
             self.vn = 0.0;
             self.gap_time = 0.0;
+            self.publish_wheels(if chord.is_some() { 4 } else { 2 });
             let f2 = tangent(self.fwd, nn);
             let along = v3d - nn * v3d.dot(nn);
             let v3d = if pressed {
@@ -540,13 +542,15 @@ impl Skater {
             self.pos = p;
             self.vn -= g * n.y * dt;
             if gap > t.natural_air_max_dist {
-                self.leave_ground(vel + n * self.vn, events);
+                self.publish_off_ground(gap, self.gap_time);
+                self.leave_ground(vel + n * self.vn, false, events);
                 return;
             }
             if gap > t.natural_air_min_dist {
                 self.gap_time += dt;
                 if self.gap_time > t.natural_air_time {
-                    self.leave_ground(vel + n * self.vn, events);
+                    self.publish_off_ground(gap, self.gap_time);
+                    self.leave_ground(vel + n * self.vn, false, events);
                     return;
                 }
             } else {
@@ -558,7 +562,7 @@ impl Skater {
         if self.contact_n.y < -0.2 {
             let v = self.ground_velocity() + self.contact_n * 0.5;
             self.pos += self.contact_n * 0.02;
-            self.leave_ground(v, events);
+            self.leave_ground(v, true, events);
             return;
         }
         self.update_wallride(park, dt, events);
@@ -578,8 +582,19 @@ impl Skater {
     }
 
     /// The board leaves the ground with velocity `v` (a world vector). Rolling off vert without a pop
-    /// keeps only part of the speed away from the face.
-    pub(super) fn leave_ground(&mut self, mut v: Vec3, events: &mut Vec<Event>) {
+    /// keeps only part of the speed away from the face. `jump`: a jump off the surface (a wallride's
+    /// jump off, falling off an overhang), which starts Skate 3's state frames over; else the board
+    /// has rolled off the ground (the off-ground facts are published), and leaves it only if Skate 3's
+    /// state selector takes it into the air (false: it stays on the ground).
+    pub(super) fn leave_ground(
+        &mut self,
+        mut v: Vec3,
+        jump: bool,
+        events: &mut Vec<Event>,
+    ) -> bool {
+        if !jump && !matches!(self.selects(|_| {}), State::PhysicsAir | State::KnownAir) {
+            return false;
+        }
         let t = self.tuning;
         let n = self.contact_n;
         if n.y < t.vert_align_max_ny {
@@ -593,7 +608,12 @@ impl Skater {
         }
         self.vel = v;
         self.take_off(None);
+        if !jump {
+            // Rolled off: the selector's off-ground test takes it into the air, not a jump.
+            self.states.facts.jumped = false;
+        }
         events.push(Event::Launched);
+        true
     }
 
     /// Running into a wall (unit `normal` facing the board) with ground velocity `vel`: too fast is a
@@ -834,7 +854,7 @@ impl Skater {
             }
             let v = along + n * t.wallride_jump_force;
             self.pos += n * 0.05;
-            self.leave_ground(v, events);
+            self.leave_ground(v, true, events);
         }
     }
 

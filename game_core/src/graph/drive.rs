@@ -14,7 +14,7 @@ use crate::input::Pad;
 use crate::math::Vec3;
 use crate::motion::MotionDb;
 use crate::motion::NameId;
-use crate::skater::{AirTrick, Family, GRAPH_NAMES, GraphControl, Mode, Skater, Stance};
+use crate::skater::{AirTrick, Family, GRAPH_NAMES, GraphControl, Skater, Stance, State};
 use crate::tuning::Tuning;
 
 /// Motion-library names the driver reads from the playing clips.
@@ -130,18 +130,20 @@ impl Driver {
 
     /// What the graphs read of the skater.
     pub fn world(&self, s: &Skater, time_to_land: Option<f32>, idle: f32) -> World {
-        let phys = match s.mode {
-            Mode::Rolling => phys::GROUND,
+        // The graphs' filtered physics state: Skate 3's physical state's category.
+        let phys = match s.state() {
+            st if st.category() == 100 => phys::GROUND,
             // A hippie jump is Skate 3's LandingOnDeck: the rider off the board above it (an off-board
             // physics state), the board rolling on underneath. Getting on in the air stays its BipedAir
             // (off-board air) until he is down on the board.
-            Mode::Air { .. } if s.hippie_air() => phys::OFFBOARD,
-            Mode::Air { .. } if s.landing_on_deck() => phys::OFFBOARD_AIR,
-            Mode::Air { .. } => phys::AIR,
-            Mode::Grind => phys::GRIND,
-            Mode::Bailed { .. } | Mode::Runout { .. } => phys::WIPEOUT,
-            Mode::Walk if s.biped.air.is_some() => phys::OFFBOARD_AIR,
-            Mode::Walk => phys::OFFBOARD,
+            _ if s.is_airborne() && s.hippie_air() => phys::OFFBOARD,
+            _ if s.is_airborne() && s.landing_on_deck() => phys::OFFBOARD_AIR,
+            st if st.is_grind() => phys::GRIND,
+            State::WipeoutGround => phys::WIPEOUT,
+            State::BipedAir => phys::OFFBOARD_AIR,
+            st if st.category() == 500 => phys::OFFBOARD,
+            State::Teleporting => phys::TELEPORT,
+            _ => phys::AIR,
         };
         // Dropping in on foot: the board's tail held on the coping is Skate 3's tip slide with its
         // drop-in flag (a grind to the graphs).
@@ -165,13 +167,13 @@ impl Driver {
             switch: s.switch,
             time_since_input: idle,
             time_to_land,
-            apex: matches!(s.mode, Mode::Air { .. }) && s.vel.y <= 0.0,
+            apex: s.is_airborne() && s.vel.y <= 0.0,
             surface_slope: surface,
             skate_slope: if s.speed < 0.0 { -along } else { along },
             push_brake_disabled: surface > 45.0,
             com_vel: [s.slip, s.vel.y, s.speed],
-            wants_runout: matches!(s.mode, Mode::Runout { .. }),
-            wants_wipeout: matches!(s.mode, Mode::Bailed { .. }),
+            wants_runout: s.running_out(),
+            wants_wipeout: s.bailed(),
             wants_manual_exit: s.manual_exit,
             // The speed wobble's amplitude, what Skate 3's animation turn conditioner reads.
             wobble: s.wobble.amplitude,
@@ -210,7 +212,7 @@ impl Driver {
             slide_ending: s.slide.as_ref().is_some_and(|p| p.releasing),
             // Only the trucks or the deck (a grind), not the wheels: SK8 TrucksOrDeckInContact reads the
             // truck and deck contacts. Counting the wheels (or nothing) wiped grabs out in the air.
-            trucks_or_deck: s.mode == Mode::Grind,
+            trucks_or_deck: s.grinding(),
             // Skate 3's processed turn: the graph's last `Turn` packet, negated (SK8
             // scalar_attributes.rs; ProcessedPhysIn+2676, what SK8's animation feedback hands the
             // turn conditioner), 0 without one.
@@ -250,12 +252,12 @@ impl Driver {
                 let side = s.contact_n.cross(s.fwd).normalize_or(Vec3::ZERO);
                 [a.dot(side), a.dot(s.fwd)]
             },
-            hips: match s.mode {
+            hips: match s.off_board() {
                 // The ragdoll's hips against the surface (SK8 wipeout `output`).
-                Mode::Bailed { .. } if s.wipeout.active => s.wipeout.hips(),
+                Some(_) if s.bailed() && s.wipeout.active => s.wipeout.hips(),
                 // A runout tips the body over sideways (as drawn) and keeps its heading against the
                 // travel.
-                Mode::Bailed { time } | Mode::Runout { time } => {
+                Some(time) => {
                     let lean = -(time * 5.0).min(1.0) * crate::math::PI * 0.48;
                     let v = s.vel.horizontal();
                     let twist = if v.length() > 0.3 {
@@ -303,7 +305,7 @@ impl Driver {
         }
         // A hippie jump over a moving obstacle (`skater::hurdle`).
         w.hippy_hurdling = s.hippie_air() && s.hurdle.hurdling();
-        if s.mode == Mode::Walk {
+        if s.walking() {
             walking(&mut w, s);
         }
         w
@@ -714,7 +716,7 @@ fn walking(w: &mut World, s: &Skater) {
     w.holding_board = s.possession.held();
     w.biped_air = b.air.is_some();
     // In the air with ground to come down on (flatground has no jumps into walls). Onto the board only
-    // once the landing assist has taken the flight down onto the free board (`Mode::Air`, the caveman).
+    // once the landing assist has taken the flight down onto the free board (an air state, the caveman).
     w.can_biped_land = b.air.is_some();
     w.can_land = s.deck_assist && s.free_board_landing(b.air_remaining).0;
     w.biped_slope = super::ops::slope::biped(b.slope_kind);

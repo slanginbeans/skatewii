@@ -17,7 +17,7 @@ use crate::gesture::{Flick, Trick};
 use crate::gfx::SUN;
 use crate::math::{Mat3, PI, Vec3, Xform, sqrtf, v3};
 use crate::skater::ragdoll::{PARTS, POINTS};
-use crate::skater::{GrabKind, GrindKind, LandKind, Landing, Mode, Skater};
+use crate::skater::{GrabKind, GrindKind, LandKind, Landing, Skater};
 
 /// The ragdoll takes the bones over this fast at a bail, and gives them back to the clips this fast
 /// (s, ours: the drives start from the animated pose, so the take-over only covers the tick the pose
@@ -186,11 +186,12 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
         time: clock,
     };
     let has = |r: &str| duration(r) > 0.0;
-    match s.mode {
+    match () {
         // The skater pack has no walking clips: standing.
-        Mode::Walk => idle,
+        _ if s.walking() => idle,
         // A runout reuses the bail clips for now.
-        Mode::Bailed { time } | Mode::Runout { time } => {
+        _ if s.off_board().is_some() => {
+            let time = s.state_time();
             // The fall, then getting up (holding its last frame until the respawn).
             let fall = duration("bail/fall");
             if time < fall {
@@ -212,7 +213,7 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                 idle
             }
         }
-        Mode::Grind => {
+        _ if s.grinding() => {
             let Some(g) = &s.grind else {
                 return idle;
             };
@@ -224,7 +225,8 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
                 None => idle,
             }
         }
-        Mode::Air { time } => {
+        _ if s.is_airborne() => {
+            let time = s.air_time;
             if let Some(g) = &s.grab {
                 let role = grab_role(g.kind);
                 if has(role) {
@@ -300,7 +302,7 @@ pub fn pick(s: &Skater, clock: f32, land_in: f32, duration: &dyn Fn(&str) -> f32
             }
             last.unwrap_or(idle)
         }
-        Mode::Rolling => {
+        _ => {
             if let Some(r) = &s.revert {
                 let role = side_role(s, r.side, "slide/fs", "slide/bs");
                 if has(role) {
@@ -460,7 +462,7 @@ pub fn lean(s: &Skater, base: &str, has: &dyn Fn(&str) -> bool) -> Option<(&'sta
         || base == "crouch_nollie"
         || base.starts_with("push/")
         || base.starts_with("mongo/");
-    if s.mode != Mode::Rolling || s.manual.is_some() || !riding {
+    if !s.rolling() || s.manual.is_some() || !riding {
         return None;
     }
     let crouched = base.starts_with("crouch");
@@ -692,7 +694,7 @@ impl Rider {
         }
         self.cur = next;
         self.fade = (self.fade + dt).min(FADE);
-        let fakie_on = s.speed < 0.0 && matches!(s.mode, Mode::Rolling | Mode::Grind);
+        let fakie_on = s.speed < 0.0 && (s.rolling() || s.grinding());
         let step = dt / FAKIE_FADE;
         self.fakie = (self.fakie + if fakie_on { step } else { -step }).clamp(0.0, 1.0);
         let torso = if s.manual.is_some() {
@@ -1246,28 +1248,40 @@ mod tests {
     fn picks_trick_stages_fitted_into_the_flight() {
         let park = Park::demo();
         let mut s = Skater::spawn(&park);
-        s.mode = Mode::Air { time: 0.1 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.1;
+        s.states.time = 0.1;
         s.trick = trick(Trick::Kickflip, 1);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/pop");
-        s.mode = Mode::Air { time: 0.3 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.3;
+        s.states.time = 0.3;
         let p = pick(&s, 3.0, f32::INFINITY, &dur);
         assert_eq!(p.role, "kickflip/air");
         assert!((p.time - 0.1).abs() < 1e-6);
         // Past the end: the catch holds.
-        s.mode = Mode::Air { time: 2.0 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 2.0;
+        s.states.time = 2.0;
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/out");
         // A double kickflip plays the flip stage twice: still flipping where a single would catch.
-        s.mode = Mode::Air { time: 0.65 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.65;
+        s.states.time = 0.65;
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/out");
         s.trick = trick(Trick::Kickflip, 2);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "kickflip/flip");
         // No hardflip clips in this pack: the ollie stands in.
-        s.mode = Mode::Air { time: 0.3 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.3;
+        s.states.time = 0.3;
         s.trick = trick(Trick::Hardflip, 1);
         assert_eq!(pick(&s, 3.0, f32::INFINITY, &dur).role, "ollie/air");
         // Fitted: 0.6 s of flight for 0.7 s of kickflip after the pop plays a little fast.
         s.trick = trick(Trick::Kickflip, 1);
-        s.mode = Mode::Air { time: 0.3 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.3;
+        s.states.time = 0.3;
         let p = pick(&s, 0.0, 0.3, &dur);
         assert_eq!(p.role, "kickflip/air");
         assert!((p.time - 0.1 * 0.7 / 0.4).abs() < 1e-4, "{p:?}");
@@ -1307,7 +1321,9 @@ mod tests {
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "idle");
         s.landing = None;
 
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         s.grab = Some(Grab {
             kind: GrabKind::Indy,
             time: 0.3,
@@ -1318,9 +1334,11 @@ mod tests {
         assert_eq!(pick(&s, 0.0, 0.2, &dur).role, "grab/fs");
         s.grab = None;
 
-        s.mode = Mode::Bailed { time: 0.2 };
+        s.force_state(crate::skater::State::WipeoutGround);
+        s.states.time = 0.2;
         assert_eq!(pick(&s, 0.0, 0.0, &dur).role, "bail/fall");
-        s.mode = Mode::Bailed { time: 1.0 };
+        s.force_state(crate::skater::State::WipeoutGround);
+        s.states.time = 1.0;
         let p = pick(&s, 0.0, 0.0, &dur);
         assert_eq!(p.role, "bail/getup");
         assert!((p.time - 0.4).abs() < 1e-5);
@@ -1344,7 +1362,9 @@ mod tests {
         s.speed = -2.0;
         assert_eq!(lean(&s, "idle", &has).map(|l| l.0), Some("lean/right"));
         assert_eq!(lean(&s, "land/clean", &has), None);
-        s.mode = Mode::Air { time: 0.1 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.1;
+        s.states.time = 0.1;
         assert_eq!(lean(&s, "idle", &has), None);
     }
 

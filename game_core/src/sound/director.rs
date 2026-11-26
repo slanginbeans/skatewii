@@ -30,7 +30,7 @@ use crate::park::Terrain;
 use crate::rails::RailClass;
 use crate::skater::biped::Loco;
 use crate::skater::possession::Hold;
-use crate::skater::{Event, Mode, Skater};
+use crate::skater::{Event, Skater};
 
 /// What the director listens from: the camera's eye and its screen-right.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -296,9 +296,9 @@ impl Director {
         self.frames = self.frames.wrapping_add(1);
         let s = scene.skater;
         let now = Prev {
-            air: matches!(s.mode, Mode::Air { .. }),
-            grind: s.mode == Mode::Grind,
-            walk: s.mode == Mode::Walk,
+            air: s.is_airborne(),
+            grind: s.grinding(),
+            walk: s.walking(),
             trick_caught: s.trick.as_ref().is_some_and(|t| t.progress() >= 1.0),
             push_contact: match &s.graph {
                 Some(g) => g.push_contact,
@@ -361,7 +361,7 @@ impl Director {
             if let Some(v) = self.spin.take() {
                 self.stop(v, 0.05);
             }
-            if s.mode == Mode::Rolling {
+            if s.rolling() {
                 let (impact, sketchy) = s
                     .landing
                     .map_or((2.0, false), |l| (l.impact, l.quality.kind != 0));
@@ -405,7 +405,7 @@ impl Director {
         self.grind_loop(scene, bank, prev);
 
         // Powerslide and foot brake pieces.
-        let rolling = s.mode == Mode::Rolling;
+        let rolling = s.rolling();
         match s.slide {
             Some(p) if rolling && !p.releasing && speed > 1.0 => {
                 self.skid_in -= dt;
@@ -470,7 +470,7 @@ impl Director {
     fn rolling_loop(&mut self, scene: &Scene, bank: &Bank, dt: f32) {
         let s = scene.skater;
         let k = (dt / ROLL_SMOOTH).min(1.0);
-        let on_wheels = s.mode == Mode::Rolling;
+        let on_wheels = s.rolling();
         // Off the wheels the speed is kept: a landing comes back in the band it left (a fresh start, at
         // the speed it starts at).
         if on_wheels {
@@ -575,7 +575,7 @@ impl Director {
 
     fn grind_loop(&mut self, scene: &Scene, bank: &Bank, prev: Prev) {
         let s = scene.skater;
-        let Some(gr) = s.grind.as_ref().filter(|_| s.mode == Mode::Grind) else {
+        let Some(gr) = s.grind.as_ref().filter(|_| s.grinding()) else {
             if let Some((v, _)) = self.grind.take() {
                 self.stop(v, 0.08);
             }
@@ -667,7 +667,7 @@ mod tests {
     fn rolling(speed: f32) -> (Park, Skater) {
         let park = Park::demo();
         let mut s = Skater::spawn(&park);
-        s.mode = Mode::Rolling;
+        s.force_state(crate::skater::State::PhysicsGround);
         s.speed = speed;
         s.vel = s.fwd * speed;
         (park, s)
@@ -772,9 +772,11 @@ mod tests {
         let (park, mut s) = rolling(5.0);
         let mut land = |impact: f32, kind: u8| {
             let mut d = Director::new();
-            s.mode = Mode::Air { time: 0.5 };
+            s.force_state(crate::skater::State::PhysicsAir);
+            s.air_time = 0.5;
+            s.states.time = 0.5;
             d.frame(&scene(&s, &[], &park, false), &bank);
-            s.mode = Mode::Rolling;
+            s.force_state(crate::skater::State::PhysicsGround);
             s.landing = Some(crate::skater::Landing {
                 kind: crate::skater::LandKind::Clean,
                 time: 0.0,

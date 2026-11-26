@@ -212,7 +212,7 @@ impl super::Skater {
     /// hand (Skate 3's `LocoState` Stand and `IsHoldingSkateboard`), the edge within
     /// [`ENTER_DISTANCE`].
     pub(super) fn drop_in_edge(&self) -> Option<Edge> {
-        if self.mode != super::Mode::Walk
+        if !self.walking()
             || self.biped.air.is_some()
             || !self.possession.held()
             || self.biped.loco != super::biped::Loco::Stand
@@ -232,7 +232,7 @@ impl super::Skater {
         dt: f32,
         events: &mut alloc::vec::Vec<super::Event>,
     ) {
-        use super::{Event, Mode};
+        use super::Event;
         let Some(mut d) = self.drop_in else {
             return;
         };
@@ -302,7 +302,7 @@ impl super::Skater {
                 self.slip = 0.0;
                 self.vn = 0.0;
                 self.vel = self.ground_velocity();
-                self.mode = Mode::Rolling;
+                self.states.facts.mount = Some(true);
                 self.drop_in = None;
                 self.sync_heading();
                 events.push(Event::DroppedIn);
@@ -325,7 +325,7 @@ impl super::Skater {
         self.fakie_timer = 0.0;
         self.spin = 0.0;
         self.spin_rate = 0.0;
-        self.mode = super::Mode::Rolling;
+        self.states.facts.mount = Some(true);
         self.possession.under_feet();
         self.sync_heading();
     }

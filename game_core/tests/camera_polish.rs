@@ -17,7 +17,7 @@ use game_core::input::{PadRaw, btn, flag};
 use game_core::math::{Vec3, atan2f, v3};
 use game_core::menu::CameraAngle;
 use game_core::park::Park;
-use game_core::skater::{Event, Mode};
+use game_core::skater::Event;
 
 const TICK: f32 = 1.0 / 60.0;
 const LANE: Vec3 = Vec3 {
@@ -84,7 +84,7 @@ fn on_foot(mut g: Game) -> Option<Game> {
     run(&mut g, 30, 0, (0, 0));
     run(&mut g, 1, btn::Y, (0, 0));
     run(&mut g, 150, 0, (0, 0));
-    (g.skater.mode == Mode::Walk).then_some(g)
+    (g.skater.walking()).then_some(g)
 }
 
 /// Z + C-stick up on foot: the camera rises to look down on the rider by Skate 3's 30 degrees, the rider
@@ -105,7 +105,7 @@ fn free_look(mut g: Game, what: &str) {
     assert!(look > 23.0 && look < 30.0, "{what}: look {look}");
     let up = elevation(&g);
     assert!(up > before + 12.0, "{what}: {before} -> {up} degrees");
-    assert_eq!(g.skater.mode, Mode::Walk, "{what}: {seen:?}");
+    assert!(g.skater.walking(), "{what}: {seen:?}");
     assert!(
         (g.skater.pos - pos).length() < 0.05,
         "{what}: the rider stays"
@@ -170,7 +170,7 @@ fn z_and_the_c_stick_on_the_board_do_nothing() {
         "{seen:?}"
     );
     assert_eq!(chord.skater.pos, idle.skater.pos);
-    assert_eq!(chord.skater.mode, Mode::Rolling);
+    assert!(chord.skater.rolling());
     assert_eq!(chord.camera().camera().eye, idle.camera().camera().eye);
     assert_eq!(chord.camera().look.elevation, 0.0);
     // The C-stick alone pops an ollie.
@@ -269,7 +269,9 @@ fn flat_game() -> Game {
 /// Lifts the rolling rider `height` m into the air (as off a drop).
 fn launch(g: &mut Game, height: f32) {
     g.skater.pos.y += height;
-    g.skater.mode = Mode::Air { time: 0.0 };
+    g.skater.force_state(game_core::skater::State::PhysicsAir);
+    g.skater.air_time = 0.0;
+    g.skater.states.time = 0.0;
 }
 
 /// The view's shake this tick: its rotation's size (radians).
@@ -342,7 +344,7 @@ fn a_hard_landing_shakes_the_camera_and_a_bail_fades_it_out() {
         return;
     }
     run(&mut g, 13, 0, (0, 0));
-    if matches!(g.skater.mode, Mode::Bailed { .. }) {
+    if g.skater.bailed() {
         assert_eq!(g.camera().shake.weight, 0.0);
         assert_eq!(shaking(&g), 0.0);
     }
@@ -363,7 +365,12 @@ fn ticks_of(g: &mut Game, ticks: u64, rates: &mut Vec<f32>) -> (Vec<String>, u64
             let c = g.camera().camera();
             out.push(format!(
                 "{} {:?} {:?} {:?} {:?} {:?}",
-                g.ticks, s.pos, s.vel, s.mode, c.eye, c.target
+                g.ticks,
+                s.pos,
+                s.vel,
+                s.state(),
+                c.eye,
+                c.target
             ));
         }
     }

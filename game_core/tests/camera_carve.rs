@@ -5,7 +5,6 @@
 use game_core::Game;
 use game_core::autoplay::CarveOllie;
 use game_core::math::{atan2f, wrap_angle};
-use game_core::skater::Mode;
 
 /// Degrees the camera is off straight behind the travel (signed).
 fn off_behind(game: &Game) -> f32 {
@@ -33,7 +32,7 @@ fn run(straight: u32) {
         if script.carved_at > 0 && behind_at.is_none() && off.abs() < 15.0 {
             behind_at = Some(script.t - script.carved_at);
         }
-        popped |= matches!(game.skater.mode, Mode::Air { .. }) && script.flick_at > 0;
+        popped |= game.skater.is_airborne() && script.flick_at > 0;
     }
     eprintln!("straight {straight}: most {most:.1}, behind after {behind_at:?} ticks");
     assert!(

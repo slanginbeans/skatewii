@@ -16,7 +16,7 @@ use game_core::input::{Pad, PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
 use game_core::park::Park;
 use game_core::skater::wobble::SpeedWobble;
-use game_core::skater::{Event, Mode, Skater};
+use game_core::skater::{Event, Skater};
 use game_core::tuning::Difficulty;
 
 const TICK: f32 = 1.0 / 60.0;
@@ -45,7 +45,7 @@ fn a_fast_straight_ride_wobbles_above_the_onset_and_settles_below_it() {
     let mut tilt = (f32::MAX, f32::MIN);
     for _ in 0..120 {
         s.step(&park, &coast, &FlickOut::default(), TICK, &mut ev);
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         if s.wobble.amplitude > 0.0 {
             wobbled += 1;
             tilt = (tilt.0.min(s.deck_tilt), tilt.1.max(s.deck_tilt));
@@ -74,7 +74,7 @@ fn a_fast_straight_ride_wobbles_above_the_onset_and_settles_below_it() {
         s.step(&park, &coast, &FlickOut::default(), TICK, &mut ev);
         assert!(!s.wobble.active && s.wobble.amplitude == 0.0);
     }
-    assert!(s.speed > 5.0 && s.mode == Mode::Rolling);
+    assert!(s.speed > 5.0 && s.rolling());
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn without_the_graphs_a_manual_held_past_its_sweet_spot_tips_back_onto_four_whee
     }
     assert!(manualled > 10, "it was a manual");
     assert!(ev.contains(&Event::ManualLost), "{ev:?}");
-    assert!(s.manual.is_none() && s.mode == Mode::Rolling);
+    assert!(s.manual.is_none() && s.rolling());
 }
 
 fn data_dir() -> Option<PathBuf> {

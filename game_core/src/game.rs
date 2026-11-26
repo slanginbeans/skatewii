@@ -23,7 +23,7 @@ use crate::park::{Park, Terrain};
 use crate::replay::{Figure, Header, Player, Recording, View as ReplayView};
 use crate::rider::Rider;
 use crate::scoring::{Frame as ScoreFrame, Scoring};
-use crate::skater::{ClipTiming, Event, Mode, Skater, Stance};
+use crate::skater::{ClipTiming, Event, Skater, Stance};
 use crate::tuning::{Difficulty, Tuning};
 use crate::world::ImportedPark;
 use alloc::boxed::Box;
@@ -641,9 +641,7 @@ impl Game {
         // end: pushing out of fakie turns the board's frame end for end (`frame_turned`), not the board.
         let deck = self.skater.fwd.horizontal();
         let axes = self.board_axes_in_character();
-        let Some((_, nose)) =
-            axes.filter(|_| deck.length() >= 0.5 && self.skater.mode == Mode::Rolling)
-        else {
+        let Some((_, nose)) = axes.filter(|_| deck.length() >= 0.5 && self.skater.rolling()) else {
             self.board_watch = Some(w);
             return;
         };
@@ -842,7 +840,9 @@ impl Game {
         let s = &mut self.skater;
         s.pos = p.pos;
         s.vel = crate::math::yaw_dir(p.heading) * p.speed + crate::math::Vec3::UP * p.lift;
-        s.mode = Mode::Air { time: 0.0 };
+        s.force_state(crate::skater::State::PhysicsAir);
+        s.air_time = 0.0;
+        s.states.time = 0.0;
     }
 
     pub fn place_rider(&mut self, pos: crate::math::Vec3, heading: f32, speed: f32) {
@@ -1030,30 +1030,29 @@ impl Game {
             }
             // Off the board, the ground under the toes for the foot placement (SK8's skeleton line
             // tests from the last pose: 0.33 m over each toe to 1.5 m under it).
-            let feet = (self.skater.mode == Mode::Walk
-                && !self.skater.climbing()
-                && self.foot_origin >= 1.0)
-                .then(|| {
-                    let toes = self.rider.as_ref()?.toes()?;
-                    let at = self.imported_xform_on(self.skater_base());
-                    let ground: &dyn Terrain = terrain(&self.world, &self.park);
-                    let hit = |p: crate::math::Vec3| {
-                        let w = at.point(p);
-                        let top = w.y + crate::foot_ik::LINE_UP;
-                        let g = ground.ground(w.x, w.z, top);
-                        (g.height > f32::MIN / 2.0
-                            && g.height
-                                >= top - crate::foot_ik::LINE_UP - crate::foot_ik::LINE_DOWN)
-                            .then_some((v3(w.x, g.height, w.z), g.normal))
-                    };
-                    Some(crate::foot_ik::Frame {
-                        to_world: at,
-                        ground: toes.map(hit),
-                        air: self.skater.biped.air.is_some(),
-                        vel_y: self.skater.biped.vel.y,
+            let feet =
+                (self.skater.walking() && !self.skater.climbing() && self.foot_origin >= 1.0)
+                    .then(|| {
+                        let toes = self.rider.as_ref()?.toes()?;
+                        let at = self.imported_xform_on(self.skater_base());
+                        let ground: &dyn Terrain = terrain(&self.world, &self.park);
+                        let hit = |p: crate::math::Vec3| {
+                            let w = at.point(p);
+                            let top = w.y + crate::foot_ik::LINE_UP;
+                            let g = ground.ground(w.x, w.z, top);
+                            (g.height > f32::MIN / 2.0
+                                && g.height
+                                    >= top - crate::foot_ik::LINE_UP - crate::foot_ik::LINE_DOWN)
+                                .then_some((v3(w.x, g.height, w.z), g.normal))
+                        };
+                        Some(crate::foot_ik::Frame {
+                            to_world: at,
+                            ground: toes.map(hit),
+                            air: self.skater.biped.air.is_some(),
+                            vel_y: self.skater.biped.vel.y,
+                        })
                     })
-                })
-                .flatten();
+                    .flatten();
             if let Some(r) = &mut self.rider {
                 r.set_feet(feet);
             }
@@ -1216,8 +1215,8 @@ impl Game {
             events.push(Event::MarkerReturned);
         }
         let mut flick = self.flick.update(pad.flick, self.tuning.flick_misses);
-        let rolling = self.skater.mode == Mode::Rolling;
-        let grinding = self.skater.mode == Mode::Grind;
+        let rolling = self.skater.rolling();
+        let grinding = self.skater.grinding();
         if !(rolling || grinding) {
             flick.flick = None;
         }
@@ -1239,7 +1238,7 @@ impl Game {
             && let (Some(g), Some(lib)) = (&mut self.graph, &self.motion)
         {
             let s = &self.skater;
-            let walking = s.mode == Mode::Walk;
+            let walking = s.walking();
             let ob_world = crate::skater::biped::world_stick(pad.stick, s.cam_yaw);
             let (toggle_board, toggle_board_new) = s.board_toggle_intent(&pad);
             let (mut ob_mag, ob_steer) =
@@ -1253,7 +1252,7 @@ impl Game {
                 }
             }
             // The known landing's time (the trajectory selector), else straight down.
-            let land_in = matches!(s.mode, Mode::Air { .. }).then(|| s.time_to_land(ground));
+            let land_in = s.is_airborne().then(|| s.time_to_land(ground));
             let mut world = g.world(s, land_in, g.input.idle());
             if let Some(f) = self.rider.as_ref().and_then(|r| r.feet()) {
                 world.feet = f;
@@ -1262,14 +1261,14 @@ impl Game {
             if let Some(nose) = posed_deck(self.rider.as_ref(), s.mirrored()) {
                 world.deck_yaw_pitch = crate::graph::host::deck_angles(nose);
             }
-            if matches!(s.mode, Mode::Bailed { .. }) {
+            if s.bailed() {
                 world.wipe_stick = Some(pad.flick);
             }
             let gates = crate::graph::input::Gates {
                 late_flips_blocked: s.trick.is_some_and(|t| t.progress() < 1.0),
                 finger_flips_blocked: s.grab.is_none(),
                 reverts_blocked: false,
-                grinding: s.mode == Mode::Grind,
+                grinding: s.grinding(),
                 grabbing: pad.trig_l > 0.0 || pad.trig_r > 0.0,
                 pushing: pad.held & (crate::input::btn::A | crate::input::btn::B) != 0,
                 off_board: walking,
@@ -1348,7 +1347,7 @@ impl Game {
             .advance(&frame, dt, events.contains(&Event::Respawned));
         self.score = libm::roundf(self.scoring.total()) as u32;
         let off_clips = self.graph.is_some()
-            && (self.skater.mode == Mode::Walk
+            && (self.skater.walking()
                 || self
                     .skater
                     .graph
@@ -1597,17 +1596,19 @@ impl Game {
             .rider
             .as_ref()
             .is_some_and(|r| r.character.has_clip("bail/fall"));
-        let tip = match self.skater.mode {
+        let tip = match self.skater.off_board() {
             _ if self.skater.ragdoll_active() => Mat3::IDENTITY,
-            Mode::Bailed { time } | Mode::Runout { time } if !animated => {
-                Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48)
-            }
+            Some(time) if !animated => Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
             _ => Mat3::IDENTITY,
         };
         // Riding, the board's lowest wheel on the ground (a manual's pitch lifts the deck).
-        let height = match (&self.rider, self.skater.mode) {
-            (Some(r), Mode::Rolling) => r.board_rest_height() + self.wheel_lift(&base),
-            (_, Mode::Air { .. }) => crate::skater::DECK_HEIGHT + self.skater.air_lift,
+        let height = match (
+            &self.rider,
+            self.skater.rolling(),
+            self.skater.is_airborne(),
+        ) {
+            (Some(r), true, _) => r.board_rest_height() + self.wheel_lift(&base),
+            (_, _, true) => crate::skater::DECK_HEIGHT + self.skater.air_lift,
             // On foot the off-board clips' origin is on the ground under the feet.
             _ => crate::skater::DECK_HEIGHT,
         };
@@ -1644,10 +1645,11 @@ impl Game {
         if !posed || s.ragdoll_active() {
             return 0.0;
         }
-        match s.mode {
-            Mode::Rolling if !s.graph.is_some_and(|g| g.board_animated) => {}
-            Mode::Rolling | Mode::Air { .. } | Mode::Grind => return self.board_align,
-            Mode::Bailed { .. } | Mode::Runout { .. } | Mode::Walk => return 0.0,
+        // The clips move the board (what Skate 3's GroundAnimation state follows).
+        match s.state() {
+            _ if s.rolling() && !s.graph.is_some_and(|g| g.board_animated) => {}
+            _ if s.rolling() || s.is_airborne() || s.grinding() => return self.board_align,
+            _ => return 0.0,
         }
         let Some((_, nose)) = self.board_axes_in_character() else {
             return 0.0;
@@ -1744,12 +1746,12 @@ impl Game {
                 pos - up * crate::skater::DECK_HEIGHT,
             ))
         } else {
-            (s.mode != Mode::Walk).then_some(board)
+            (!s.walking()).then_some(board)
         };
 
         // Rider: tucks with the board, falls over on a bail.
-        let (rider_pos, rider_rot) = match s.mode {
-            Mode::Bailed { time } | Mode::Runout { time } => (
+        let (rider_pos, rider_rot) = match s.off_board() {
+            Some(time) => (
                 v3(0.0, 0.0, 0.0),
                 Mat3::rot_z(-(time * 5.0).min(1.0) * PI * 0.48),
             ),

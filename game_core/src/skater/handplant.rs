@@ -828,7 +828,7 @@ impl super::Skater {
     /// `ShouldPlayHandPlantAnim`).
     pub fn handplant_world(&self) -> crate::graph::host::HandPlantWorld {
         let m = &self.handplant;
-        let found = m.found && self.mode == super::Mode::Rolling;
+        let found = m.found && self.rolling();
         crate::graph::host::HandPlantWorld {
             found,
             air: self.hand_plant.is_some(),
@@ -979,7 +979,7 @@ impl super::Skater {
         } else {
             self.hand_plant = Some(p);
         }
-        self.mode = super::Mode::Air { time };
+        self.air_time = time;
     }
 }
 

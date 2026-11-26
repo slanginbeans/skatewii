@@ -16,8 +16,8 @@ use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
 use game_core::park::{Park, Shape, Terrain};
+use game_core::skater::Event;
 use game_core::skater::ragdoll::{PELVIS, RADIUS};
-use game_core::skater::{Event, Mode};
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -100,15 +100,11 @@ fn bail_off_the_ledge(held: In) -> (Game, Vec<Event>) {
     let mut g = riding_on_the_ledge(6.0);
     for _ in 0..200 {
         run(&mut g, 1, In::default());
-        if matches!(g.skater.mode, Mode::Air { .. }) {
+        if g.skater.is_airborne() {
             break;
         }
     }
-    assert!(
-        matches!(g.skater.mode, Mode::Air { .. }),
-        "{:?}",
-        g.skater.mode
-    );
+    assert!(g.skater.is_airborne(), "{:?}", g.skater.state());
     let mut ev = run(
         &mut g,
         1,
@@ -170,7 +166,7 @@ fn l_and_r_fully_in_with_z_bails_on_purpose() {
         assert!(!g.events.contains(&Event::Bailed));
     }
     run(&mut g, 2, In::default());
-    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(g.skater.rolling());
     let ev = run(&mut g, 1, CHORD);
     assert!(ev.contains(&Event::Bailed), "{ev:?}");
     assert!(g.skater.ragdoll_active());
@@ -180,7 +176,7 @@ fn l_and_r_fully_in_with_z_bails_on_purpose() {
     run(&mut g, 30, CHORD);
     let ev = run(&mut g, 60 * 25, In::default());
     assert!(ev.contains(&Event::Respawned), "put back after the bail");
-    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(g.skater.rolling());
 
     // On foot too.
     let mut g = Game::new();
@@ -196,7 +192,7 @@ fn l_and_r_fully_in_with_z_bails_on_purpose() {
         },
     );
     run(&mut g, 30, In::default());
-    assert_eq!(g.skater.mode, Mode::Walk);
+    assert!(g.skater.walking());
     let ev = run(&mut g, 1, CHORD);
     assert!(ev.contains(&Event::Bailed), "{ev:?}");
     assert!(g.skater.ragdoll_active());
@@ -306,7 +302,7 @@ fn a_big_fall_hurts_and_shows_in_the_hall_of_meat() {
     g.place_rider(v3(0.0, 8.0, 4.0), 0.0, 8.0);
     for _ in 0..200 {
         run(&mut g, 1, In::default());
-        if matches!(g.skater.mode, Mode::Air { .. }) {
+        if g.skater.is_airborne() {
             break;
         }
     }
@@ -442,7 +438,7 @@ fn imported_the_graphs_play_their_wipeout_over_the_ragdoll() {
         run(&mut g, 10, In::default());
         for _ in 0..200 {
             run(&mut g, 1, In::default());
-            if matches!(g.skater.mode, Mode::Air { .. }) {
+            if g.skater.is_airborne() {
                 break;
             }
         }

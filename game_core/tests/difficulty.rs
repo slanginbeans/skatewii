@@ -17,7 +17,7 @@ use game_core::flick::FlickOut;
 use game_core::input::{Pad, PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
 use game_core::park::Park;
-use game_core::skater::{Mode, Skater};
+use game_core::skater::Skater;
 use game_core::tuning::{Difficulty, ModeTuning, Tuning};
 
 const TICK: f32 = 1.0 / 60.0;
@@ -43,7 +43,7 @@ fn wobble_ticks(tuning: Tuning, speed: f32) -> u32 {
     let mut wobbled = 0;
     for _ in 0..120 {
         s.step(&park, &Pad::default(), &FlickOut::default(), TICK, &mut ev);
-        assert_eq!(s.mode, Mode::Rolling);
+        assert!(s.rolling());
         wobbled += (s.wobble.amplitude > 0.0) as u32;
     }
     wobbled

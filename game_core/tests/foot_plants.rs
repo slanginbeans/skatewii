@@ -22,7 +22,7 @@ use game_core::input::{Pad, PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
 use game_core::park::{Park, Shape};
 use game_core::skater::plant::PlantKind;
-use game_core::skater::{DECK_HEIGHT, Event, Mode, Skater};
+use game_core::skater::{DECK_HEIGHT, Event, Skater};
 use game_core::tuning::plant::PlantTuning;
 
 const TICK: f32 = 1.0 / 60.0;
@@ -97,7 +97,7 @@ fn ride_out(s: &mut Skater, p: &Park, pad: &Pad, ticks: usize, ev: &mut Vec<Even
     for _ in 0..ticks {
         s.step(p, pad, &FlickOut::default(), TICK, ev);
         top = top.max(s.pos.y);
-        if s.mode == Mode::Rolling && ev.iter().any(|e| matches!(e, Event::Landed { .. })) {
+        if s.rolling() && ev.iter().any(|e| matches!(e, Event::Landed { .. })) {
             break;
         }
     }
@@ -123,7 +123,7 @@ fn a_ground_grab_and_a_push_is_a_boneless_that_jumps_off_the_planted_foot() {
         step(&mut s, &p, &hold, &FlickOut::default(), 1, &mut ev);
         ticks += 1;
         assert!(ticks < 60, "{ev:?}");
-        if s.mode == Mode::Rolling {
+        if s.rolling() {
             assert!(s.speed > 4.5, "rolls on while planted: {}", s.speed);
         }
     }
@@ -133,14 +133,14 @@ fn a_ground_grab_and_a_push_is_a_boneless_that_jumps_off_the_planted_foot() {
         ev.contains(&Event::FootJump(PlantKind::FsBoneless)),
         "{ev:?}"
     );
-    assert!(matches!(s.mode, Mode::Air { .. }));
+    assert!(s.is_airborne());
     // Skate 3's FootJump on flat: 3 m/s up the normal, the speed along the ground scaled.
     assert!((s.vel.y - 3.0).abs() < 0.05, "{:?}", s.vel);
     assert!(s.vel.z > 3.5 && s.vel.z < 5.0, "{:?}", s.vel);
     let top = ride_out(&mut s, &p, &Pad::default(), 120, &mut ev);
     // 3 m/s up climbs about 0.46 m: the plant, not the board's pop.
     assert!(top > 0.4 && top < 0.55, "{top}");
-    assert_eq!(s.mode, Mode::Rolling, "{ev:?}");
+    assert!(s.rolling(), "{ev:?}");
     assert!(!ev.contains(&Event::Bailed), "{ev:?}");
     let names = landed(&ev);
     assert!(names.iter().any(|n| n == "FS BONELESS"), "{names:?}");
@@ -203,7 +203,7 @@ fn b_with_the_ground_grab_is_a_fastplant_and_without_it_a_push() {
         !ev.iter().any(|e| matches!(e, Event::FootJump(_))),
         "{ev:?}"
     );
-    assert_eq!(s.mode, Mode::Rolling);
+    assert!(s.rolling());
 }
 
 #[test]
@@ -255,7 +255,9 @@ fn in_air(p: &Park, deck: Vec3, vel: Vec3) -> Skater {
     s.fwd = v3(0.0, 0.0, 1.0);
     s.heading = 0.0;
     s.vel = vel;
-    s.mode = Mode::Air { time: 0.3 };
+    s.force_state(game_core::skater::State::PhysicsAir);
+    s.air_time = 0.3;
+    s.states.time = 0.3;
     s
 }
 
@@ -387,7 +389,7 @@ fn imported_graphs_play_the_boneless_and_jump_off_the_planted_foot() {
         }
         lifted |= g.skater.ground_plant.is_some_and(|p| p.lifted);
         jumped |= g.events.iter().any(|e| matches!(e, Event::FootJump(_)));
-        if jumped && g.skater.mode == Mode::Rolling {
+        if jumped && g.skater.rolling() {
             break;
         }
     }
@@ -462,7 +464,9 @@ fn imported_graphs_play_the_foot_plant_against_a_wall() {
     let s = &mut g.skater;
     s.pos = v3(0.0, 0.3, 0.6);
     s.vel = v3(0.0, 5.0, 5.0);
-    s.mode = Mode::Air { time: 0.3 };
+    s.force_state(game_core::skater::State::PhysicsAir);
+    s.air_time = 0.3;
+    s.states.time = 0.3;
     let path = |g: &Game| g.graph.as_ref().unwrap().runner.motion_state();
     let mut states = Vec::new();
     let mut planted = false;
@@ -479,7 +483,7 @@ fn imported_graphs_play_the_foot_plant_against_a_wall() {
         planted |= g.events.contains(&Event::FootPlanted);
         released |= g.events.contains(&Event::FootReleased);
         names.extend(landed(&g.events));
-        if released && g.skater.mode == Mode::Rolling {
+        if released && g.skater.rolling() {
             break;
         }
     }

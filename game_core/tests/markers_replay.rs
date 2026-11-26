@@ -17,7 +17,7 @@ use game_core::input::{PadRaw, btn, flag};
 use game_core::math::v3;
 use game_core::park::Park;
 use game_core::replay::FRAMES;
-use game_core::skater::{Event, Mode};
+use game_core::skater::Event;
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -80,7 +80,7 @@ fn kickflip(g: &mut Game) {
     run(g, 1, flick);
     for _ in 0..200 {
         run(g, 1, pad(0));
-        if !g.skater.is_airborne() && g.skater.mode == Mode::Rolling {
+        if !g.skater.is_airborne() && g.skater.rolling() {
             break;
         }
     }
@@ -116,7 +116,7 @@ fn z_and_d_pad_up_puts_a_marker_down_and_z_and_down_takes_the_rider_back() {
     assert!(ev.contains(&Event::MarkerReturned), "{ev:?}");
     assert_eq!(held, 13, "Skate 3's 0.2 s hold");
     assert!((g.skater.pos - m.pos).length() < 0.2, "{:?}", g.skater.pos);
-    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(g.skater.rolling());
     assert!(g.skater.speed.abs() < 0.1, "at rest: {}", g.skater.speed);
     assert!((g.skater.heading - heading).abs() < 1e-3);
     assert!(!g.scoring.in_line(), "going back ends the line");
@@ -135,7 +135,7 @@ fn a_marker_on_foot_takes_the_rider_back_on_foot() {
     run(&mut g, 30, pad(0));
     run(&mut g, 1, pad(btn::Y));
     run(&mut g, 60, pad(0));
-    assert_eq!(g.skater.mode, Mode::Walk);
+    assert!(g.skater.walking());
     let ev = chord(&mut g, btn::DPAD_UP, 1);
     assert!(ev.contains(&Event::MarkerSet), "{ev:?}");
     let m = g.markers.marker.unwrap();
@@ -149,14 +149,16 @@ fn a_marker_on_foot_takes_the_rider_back_on_foot() {
     assert!((g.skater.pos - m.pos).length() > 2.0);
     let ev = chord(&mut g, btn::DPAD_DOWN, 20);
     assert!(ev.contains(&Event::MarkerReturned), "{ev:?}");
-    assert_eq!(g.skater.mode, Mode::Walk, "on foot, as when it went down");
+    assert!(g.skater.walking(), "on foot, as when it went down");
     assert!((g.skater.pos - m.pos).length() < 0.2);
 }
 
 #[test]
 fn no_marker_mid_bail_and_no_chord_in_the_air() {
     let mut g = game();
-    g.skater.mode = Mode::Bailed { time: 0.0 };
+    g.skater
+        .force_state(game_core::skater::State::WipeoutGround);
+    g.skater.states.time = 0.0;
     let ev = chord(&mut g, btn::DPAD_UP, 1);
     assert!(ev.contains(&Event::MarkerRefused), "{ev:?}");
     assert!(g.markers.marker.is_none());
@@ -181,7 +183,7 @@ fn ride(g: &mut Game, frames: usize, mut each: impl FnMut(&mut Game)) {
     for f in 0..frames {
         let mut p = pad(0);
         p.stick_x = 45;
-        if g.skater.speed < 5.0 && g.skater.mode == Mode::Rolling && f % 90 < 45 {
+        if g.skater.speed < 5.0 && g.skater.rolling() && f % 90 < 45 {
             p.buttons |= btn::A;
         }
         match f % 240 {
@@ -389,12 +391,12 @@ fn imported_the_graphs_follow_the_marker_back_on_the_board_and_on_foot() {
     let ev = chord(&mut g, btn::DPAD_DOWN, 20);
     assert!(ev.contains(&Event::MarkerReturned), "{ev:?}");
     run(&mut g, 30, pad(0));
-    assert_eq!(g.skater.mode, Mode::Rolling);
+    assert!(g.skater.rolling());
     assert!(path(&g).starts_with("OnBoard/"), "{}", path(&g));
     // On foot.
     run(&mut g, 1, pad(btn::Y));
     run(&mut g, 120, pad(0));
-    if g.skater.mode != Mode::Walk {
+    if !g.skater.walking() {
         eprintln!("markers_replay: the motion pack has no off-board clips: skipped");
         return;
     }
@@ -409,6 +411,6 @@ fn imported_the_graphs_follow_the_marker_back_on_the_board_and_on_foot() {
     let ev = chord(&mut g, btn::DPAD_DOWN, 20);
     assert!(ev.contains(&Event::MarkerReturned), "{ev:?}");
     run(&mut g, 30, pad(0));
-    assert_eq!(g.skater.mode, Mode::Walk);
+    assert!(g.skater.walking());
     assert!(path(&g).starts_with("OffBoard/"), "{}", path(&g));
 }

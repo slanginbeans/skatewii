@@ -20,7 +20,7 @@ use game_core::math::{PI, atan2f, v3};
 use game_core::park::Park;
 use game_core::rails::Rail;
 use game_core::skater::adjust::DeckAdjust;
-use game_core::skater::{Event, Family, Mode, Skater, Stance};
+use game_core::skater::{Event, Family, Skater, Stance};
 
 const TICK: f32 = 1.0 / 60.0;
 
@@ -80,7 +80,7 @@ fn adjusting_the_board_across_a_rail_turns_a_truck_grind_into_a_boardslide() {
     // The C-stick held left (or right): the deck swings across the rail and slides on it.
     for x in [-1.0, 1.0] {
         let (s, ev) = ollie(&p, [x, 0.0]);
-        assert_eq!(s.mode, Mode::Grind, "{ev:?}");
+        assert!(s.grinding(), "{ev:?}");
         let g = s.grind.as_ref().unwrap();
         assert_eq!(
             g.family,
@@ -103,7 +103,9 @@ fn a_board_lined_up_with_the_travel_lands_clean_where_the_body_would_not() {
         let mut s = Skater::spawn(&p);
         s.since_spawn = 10.0;
         s.put_at(&p, v3(0.0, 0.25, 0.0), 40.0 * PI / 180.0, 0.0);
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(game_core::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         s.vel = v3(0.0, -2.5, 5.0);
         // The C-stick right swings the nose back towards the travel by 40 degrees (of Skate 3's 80 at a
         // full stick), already there.
@@ -122,7 +124,7 @@ fn a_board_lined_up_with_the_travel_lands_clean_where_the_body_would_not() {
                 break;
             }
         }
-        assert_eq!(s.mode, Mode::Rolling, "{ev:?}");
+        assert!(s.rolling(), "{ev:?}");
         let name = ev
             .iter()
             .find_map(|e| match e {

@@ -318,7 +318,7 @@ impl Skater {
 
     /// Puts the rigid board where the kinematic ground model left the skater.
     pub(super) fn follow_rig(&mut self, park: &dyn Terrain) {
-        if self.mode == Mode::Rolling {
+        if self.stays_rolling() {
             self.sync_rig(park);
             self.mark_rig();
         }
@@ -584,7 +584,7 @@ impl Skater {
                 && h.normal.dot(dir) < -0.2
                 && let Some(vv) = self.hit_wall(h.normal, vel, false, events)
             {
-                if self.mode != Mode::Rolling {
+                if !self.stays_rolling() {
                     return;
                 }
                 self.set_ground_velocity(vv);
@@ -614,7 +614,7 @@ impl Skater {
         // already stopped the board going into it.
         if let Some((wall, _)) = self.rig.as_ref().and_then(|r| r.board.wall) {
             let before = self.ground_velocity();
-            if self.hit_wall(wall, before, false, events).is_none() || self.mode != Mode::Rolling {
+            if self.hit_wall(wall, before, false, events).is_none() || !self.stays_rolling() {
                 return;
             }
         }
@@ -687,7 +687,15 @@ impl Skater {
         self.yaw_rate = libm::asinf(turned.clamp(-1.0, 1.0)) / dt;
         self.wall_clock += dt;
         // SK8 board_ground.rs `advance_contact_time`: the time with no wheel touching.
-        if board.wheels.iter().flatten().any(|w| w.load > 0.0) {
+        let loaded = board
+            .wheels
+            .iter()
+            .flatten()
+            .filter(|w| w.load > 0.0)
+            .count();
+        // The wheels touching, for Skate 3's state selector (SkateboardBody+869).
+        self.states.facts.wheels = loaded as u8;
+        if loaded > 0 {
             self.gap_time = 0.0;
         } else {
             self.gap_time += dt;
@@ -709,7 +717,8 @@ impl Skater {
                 self.normal = up;
                 self.contact_n = up;
                 self.fwd = deck.axes.cols[2] * self.rig_sign();
-                self.leave_ground(v, events);
+                self.publish_off_ground(gap, self.gap_time);
+                self.leave_ground(v, false, events);
                 return;
             }
         } else {
@@ -736,7 +745,7 @@ impl Skater {
         if self.contact_n.y < -0.2 {
             let v = self.ground_velocity() + self.contact_n * 0.5;
             self.pos += self.contact_n * 0.02;
-            self.leave_ground(v, events);
+            self.leave_ground(v, true, events);
             return;
         }
         self.update_wallride(park, dt, events);
@@ -854,7 +863,7 @@ mod tests {
                 "{over} m over: {flips} flips between ground and air"
             );
             assert!(last < 60, "{over} m over: still flipping at tick {last}");
-            assert_eq!(s.mode, Mode::Rolling, "{over} m over");
+            assert!(s.rolling(), "{over} m over");
         }
     }
 

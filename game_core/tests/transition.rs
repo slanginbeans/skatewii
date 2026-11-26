@@ -25,7 +25,7 @@ use game_core::park::{Axis, Park, Shape};
 use game_core::rails::Rail;
 use game_core::skater::dropin::Phase;
 use game_core::skater::stall::Stall;
-use game_core::skater::{DECK_HEIGHT, Event, Mode, Skater};
+use game_core::skater::{DECK_HEIGHT, Event, Skater};
 
 const TICK: f32 = 1.0 / 60.0;
 /// The quarter pipe: a 3 m radius transition from the flat at z = 0 up to 75 degrees in 30 strips, its
@@ -137,7 +137,7 @@ fn at_the_edge(g: &mut Game, back: f32) {
     run(g, 30, NONE, &mut ev);
     run(g, 1, Y, &mut ev);
     run(g, 120, NONE, &mut ev);
-    assert_eq!(g.skater.mode, Mode::Walk, "off the board: {ev:?}");
+    assert!(g.skater.walking(), "off the board: {ev:?}");
     assert!(g.skater.possession.held(), "the board in hand");
 }
 
@@ -162,16 +162,16 @@ fn y_at_the_edge_sets_the_board_on_the_coping_and_letting_go_drops_in() {
         "at the edge: {:?}",
         g.skater.pos
     );
-    assert_eq!(g.skater.mode, Mode::Walk);
+    assert!(g.skater.walking());
     // Let go: on the board with its tail on the coping, then down the transition.
     let (mut on_coping, mut riding) = (false, false);
     for _ in 0..240 {
         run(&mut g, 1, NONE, &mut ev);
         assert!(!ev.contains(&Event::Bailed), "{ev:?}");
         on_coping |= g.skater.drop_in.is_some_and(|d| d.dropping())
-            && g.skater.mode == Mode::Rolling
+            && g.skater.rolling()
             && g.skater.speed == 0.0;
-        riding |= g.skater.mode == Mode::Rolling && g.skater.drop_in.is_none();
+        riding |= g.skater.rolling() && g.skater.drop_in.is_none();
     }
     assert!(on_coping, "held on the coping first");
     assert!(ev.contains(&Event::DroppedIn), "{ev:?}");
@@ -200,7 +200,7 @@ fn the_stick_pulled_back_at_the_edge_steps_away() {
     assert!(ev.contains(&Event::DropInCancelled), "{ev:?}");
     assert!(g.skater.drop_in.is_none());
     run(&mut g, 60, back, &mut ev);
-    assert_eq!(g.skater.mode, Mode::Walk, "still on foot");
+    assert!(g.skater.walking(), "still on foot");
     assert!(
         g.skater.pos.z > coping().z + 0.5,
         "walked back from the edge: {:?}",
@@ -218,7 +218,7 @@ fn y_away_from_an_edge_still_gets_on_the_board() {
     run(&mut g, 1, Y, &mut ev);
     run(&mut g, 30, NONE, &mut ev);
     assert!(g.skater.drop_in.is_none());
-    assert_eq!(g.skater.mode, Mode::Rolling, "{ev:?}");
+    assert!(g.skater.rolling(), "{ev:?}");
     assert!(ev.contains(&Event::SteppedOn));
 }
 
@@ -232,7 +232,9 @@ fn in_air(p: &Park, deck: Vec3, fwd: Vec3, vel: Vec3) -> Skater {
     s.fwd = fwd;
     s.heading = game_core::math::atan2f(fwd.x, fwd.z);
     s.vel = vel;
-    s.mode = Mode::Air { time: 0.5 };
+    s.force_state(game_core::skater::State::PhysicsAir);
+    s.air_time = 0.5;
+    s.states.time = 0.5;
     s
 }
 
@@ -241,15 +243,11 @@ fn ride_out(s: &mut Skater, p: &Park, stick: [f32; 2], ticks: usize) -> Vec<Even
     let mut ev = Vec::new();
     for _ in 0..ticks {
         let pad = Pad {
-            stick: if s.mode == Mode::Grind {
-                stick
-            } else {
-                [0.0; 2]
-            },
+            stick: if s.grinding() { stick } else { [0.0; 2] },
             ..Pad::default()
         };
         s.step(p, &pad, &FlickOut::default(), TICK, &mut ev);
-        if s.mode == Mode::Rolling && s.pos.y < 0.3 {
+        if s.rolling() && s.pos.y < 0.3 {
             break;
         }
     }
@@ -279,9 +277,9 @@ fn the_boards_middle_held_on_the_coping_rocks_back_in_fakie() {
     assert_eq!(landed(&ev), ["ROCK TO FAKIE"], "{ev:?}");
     assert!(!ev.contains(&Event::Bailed), "{ev:?}");
     assert!(
-        s.mode == Mode::Rolling && s.pos.y < 0.3 && s.speed < -3.0,
+        s.rolling() && s.pos.y < 0.3 && s.speed < -3.0,
         "back down the ramp tail first: {:?} {:?} {}",
-        s.mode,
+        s.state(),
         s.pos,
         s.speed
     );
@@ -318,9 +316,9 @@ fn both_trucks_held_on_the_coping_are_an_axle_stall_back_down_the_ramp() {
     );
     assert!(!ev.contains(&Event::Bailed), "{ev:?}");
     assert!(
-        s.mode == Mode::Rolling && s.pos.y < 0.3 && s.speed > 3.0 && !s.fakie,
+        s.rolling() && s.pos.y < 0.3 && s.speed > 3.0 && !s.fakie,
         "turned back down and riding forwards: {:?} {:?} {}",
-        s.mode,
+        s.state(),
         s.pos,
         s.speed
     );
@@ -350,10 +348,7 @@ fn handplant(g: &mut Game, speed: f32, cstick: [i8; 2], buttons: u32) -> Vec<Eve
             buttons: btn::Z | if plant { buttons } else { 0 },
         };
         run(g, 1, i, &mut ev);
-        if ev.contains(&Event::HandReleased)
-            && g.skater.mode == Mode::Rolling
-            && g.skater.pos.y < 0.3
-        {
+        if ev.contains(&Event::HandReleased) && g.skater.rolling() && g.skater.pos.y < 0.3 {
             break;
         }
     }
@@ -377,10 +372,7 @@ fn z_riding_up_the_ramp_plants_a_hand_on_the_coping_and_comes_back_down() {
             // The free look and the markers leave Z to it.
             assert!(g.skater.handplanting());
         }
-        if ev.contains(&Event::HandReleased)
-            && g.skater.mode == Mode::Rolling
-            && g.skater.pos.y < 0.3
-        {
+        if ev.contains(&Event::HandReleased) && g.skater.rolling() && g.skater.pos.y < 0.3 {
             break;
         }
     }
@@ -405,9 +397,9 @@ fn z_riding_up_the_ramp_plants_a_hand_on_the_coping_and_comes_back_down() {
     });
     assert_eq!(points, Some(100), "{ev:?}");
     assert!(
-        g.skater.mode == Mode::Rolling && g.skater.speed > 3.0 && !g.skater.fakie,
+        g.skater.rolling() && g.skater.speed > 3.0 && !g.skater.fakie,
         "riding back down forwards: {:?} {}",
-        g.skater.mode,
+        g.skater.state(),
         g.skater.speed
     );
 }
@@ -528,9 +520,9 @@ fn imported_graphs_drop_in_through_their_drop_in_states() {
         "{ev:?}"
     );
     assert!(
-        g.skater.mode == Mode::Rolling && g.skater.pos.y < 0.3,
+        g.skater.rolling() && g.skater.pos.y < 0.3,
         "{:?} {:?}",
-        g.skater.mode,
+        g.skater.state(),
         g.skater.pos
     );
 }
@@ -568,13 +560,15 @@ fn imported_graphs_play_their_grind_states_for_the_stalls() {
         s.fwd = fwd;
         s.heading = game_core::math::atan2f(fwd.x, fwd.z);
         s.vel = vel;
-        s.mode = Mode::Air { time: 0.5 };
+        s.force_state(game_core::skater::State::PhysicsAir);
+        s.air_time = 0.5;
+        s.states.time = 0.5;
         let mut grinding = Vec::new();
         for _ in 0..150 {
             run(&mut g, 1, NONE, &mut ev);
             let p = path(&g);
             assert!(!p.starts_with("WipeOut"), "{p}");
-            if g.skater.mode == Mode::Grind {
+            if g.skater.grinding() {
                 grinding.push(p);
             }
         }
