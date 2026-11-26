@@ -1310,8 +1310,8 @@ impl Game {
 
     /// On the board: Skate 3's physical pose job (`render_pose`). The physical skeleton's parts (the
     /// rider's body, or the clips' pose where it has none yet) and the board: the physical deck while
-    /// the physics owns it, the clips' board while they move it (in the air, a take-off, the hippie
-    /// jump), the rotation between them blended out on Skate 3's `PhysToAnim` curves when one takes over
+    /// the physics owns it (and a hippie jump's, rolling on alone), the clips' board while they move
+    /// it (in the air, where the air hook turns the deck to it, a take-off), the rotation between them blended out on Skate 3's `PhysToAnim` curves when one takes over
     /// from the other. Returns the character's frame drawn.
     fn draw_physical(&mut self, ran: u32, anim_board: &Xform, deck: &Xform) -> Xform {
         use crate::physics::skeleton::ANIMATED_PARTS;
