@@ -10,8 +10,9 @@
 //! - [`auto_spin`]: with no stick, the body turns towards the predicted landing direction (or the other
 //!   way round, landing fakie or switch, when that is nearer).
 //!
-//! Flights are followed with chord rays a few ticks long, a bounded number per tick (Skate 3 queries
-//! them asynchronously too), so a long drop takes some ticks to resolve while short airs resolve at once.
+//! Flights are followed with chord rays a few ticks long, all of a launch's at once: SK8's
+//! `AirTrajectoryRuntime` submits every query of a launch together and completes the batch on the
+//! selector's next update, the same tick, so a known landing is there from the launch's tick.
 //!
 //! Grind targeting (SK8 `air/trajectory/grind{,/admission,/candidate}.rs`, `scoring.rs`): the launch's
 //! own flight looks for a rail it comes down onto within the lock distance (a ledge's by where the flight
@@ -53,10 +54,8 @@ pub const COM_TO_DECK: f32 = 0.8;
 pub const CANDIDATES: usize = 7;
 /// Ticks between flight queries while no landing is known.
 pub const QUERY_EVERY: u32 = 7;
-/// How long one chord of a followed flight is (ticks), and how many chords all candidates together
-/// may follow per tick (flatground's budget for the Wii).
+/// How long one chord of a followed flight is (ticks).
 const CHORD_TICKS: f32 = 4.0;
-pub const RAYS_PER_TICK: usize = 28;
 /// Wallride candidates: the floor probe's length (m) and the score offsets for a wall that isn't one.
 const WALL_PROBE: f32 = 10.0;
 const NOT_A_WALLRIDE: f32 = -1000.0;
@@ -394,25 +393,21 @@ impl Selector {
         self.pending = true;
     }
 
-    /// Follows the pending candidates a bounded number of chords; when all are done, scores them.
-    /// Returns a known landing when this pass found one (the second, narrower pass may follow).
+    /// Follows the pending candidates to their ends and scores them (SK8 completes a launch's batch
+    /// in one update). Returns a known landing when this pass found one (the second, narrower pass
+    /// follows on the next update, as SK8 submits it after completing the first).
     pub fn update(&mut self, t: &Tuning, park: &dyn Terrain) -> Option<Plan> {
         self.rays = 0;
         if !self.pending {
             return None;
         }
         let chord = CHORD_TICKS * STEP;
-        let mut budget = RAYS_PER_TICK;
-        'outer: loop {
+        loop {
             let mut any = false;
             for c in self.cands.iter_mut().take(self.count).flatten() {
                 if c.done {
                     continue;
                 }
-                if budget == 0 {
-                    break 'outer;
-                }
-                budget -= 1;
                 self.rays += 1;
                 any = true;
                 let t0 = c.followed;
@@ -438,15 +433,6 @@ impl Selector {
             if !any {
                 break;
             }
-        }
-        if self
-            .cands
-            .iter()
-            .take(self.count)
-            .flatten()
-            .any(|c| !c.done)
-        {
-            return None;
         }
         self.pending = false;
         self.score(t, park);

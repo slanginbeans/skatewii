@@ -84,18 +84,30 @@ const SIDE_FRICTION_TIME: f32 = 0.5;
 const SOFTEST_WHEEL_SIDE_FRICTION: f32 = 2.0;
 const WHEEL_HARDNESS: f32 = 0.7;
 
+/// How the board moves through an air tick.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum AirMotion {
+    /// On its own (PhysicsAir without a trajectory to follow).
+    Free,
+    /// Every part given this velocity first (PhysicsAir's jump velocity, SK8 `set_animated_velocity`).
+    Velocity(Vec3),
+    /// Following the trajectory: the deck taken to [`Skater::air_board_target`] this tick (KnownAir,
+    /// and PhysicsAir on its centre of mass's trajectory).
+    Follow,
+}
+
 /// The rigid board and what the skater's state was when it was last read off it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rig {
     pub board: Board,
     /// Seconds on the ground since the board was put down (SK8 Processed+2752).
     pub ground_time: f32,
-    pos: Vec3,
+    pub(super) pos: Vec3,
     fwd: Vec3,
-    velocity: Vec3,
+    pub(super) velocity: Vec3,
     /// The velocity change last brought in from outside the ride (diagnostics).
     pub last_sync: Vec3,
-    /// Flying: the board follows the flight on SK8's hook drive and lands on its own physics.
+    /// Flying: the board carries the flight (SK8 PhysicsAir/KnownAir) and lands on its own wheels.
     pub airborne: bool,
     /// The skater's frame is turned end for end against the deck (a switch or a revert's turn).
     pub flip: bool,
@@ -224,17 +236,15 @@ impl Skater {
         self.vn = 0.0;
     }
 
-    /// One air tick of the rigid board: no ground behaviours, the deck hooked to where the flight
-    /// draws it (SK8's hook drive while the animation holds the board). SK8's hook targets the animated
-    /// skateboard root, which carries the board adjust: the target is the adjusted deck
-    /// ([`Skater::frame`]), so the board flies adjusted and the landing adopts it as lined up. The
-    /// target is the physical deck's way round (end for end while the skater's frame is turned).
-    pub(super) fn fly_rig(&mut self, park: &dyn Terrain, landing: bool) {
+    /// Where the air puts the animated board (SK8 skeleton_air_frames.rs `update_known_air_roots` /
+    /// `prepare_known_air`): the deck over the flight's point, lifted by the legs' tuck (the animated
+    /// centre of mass placed on the trajectory), turned about the centre of mass by a body flip; and
+    /// its axes, the clips' board ([`Skater::anim_board`]: the board adjust and flips) or, without an
+    /// imported rider, flatground's adjusted deck. Either way round, the physical deck's.
+    pub(super) fn air_board_target(&self) -> (Vec3, Mat3) {
         let f = self.frame();
         let sign = self.rig_sign();
         let mut target = (f.deck, Mat3::from_cols(f.right * sign, f.up, f.fwd * sign));
-        // A body flip turns board and rider about the centre of mass (as the drawn frame,
-        // `Game::skater_base`).
         if let Some(flip) = &self.body_flip {
             let pivot = self.pos + f.up * flip::PIVOT;
             let m = &target.1;
@@ -247,9 +257,6 @@ impl Skater {
                 ),
             );
         }
-        // SK8's hook turns the deck to the animated board (the clips' board adjust and flips
-        // included); without an imported rider, flatground's adjusted deck. Either way round, the
-        // physical deck's.
         if let Some(a) = self.anim_board {
             let turned = a.cols[2].dot(target.1.cols[2]) < 0.0;
             target.1 = if turned {
@@ -258,12 +265,49 @@ impl Skater {
                 a
             };
         }
+        target
+    }
+
+    /// One air tick of the physical board (SK8 air_phase.rs / known_air.rs): no ground behaviours, the
+    /// trucks straight, the deck turned to the animated board by the hook drive's angular half (both
+    /// air states enter with `enable_angular_only`), and its motion `motion`'s. It meets the world on
+    /// its own wheels and bodies: that is the touchdown. Returns the deck's velocity going into the
+    /// step (what it met the world with).
+    pub(super) fn fly_board(&mut self, park: &dyn Terrain, motion: AirMotion) -> Vec3 {
+        let target = self.air_board_target();
         let vel = self.vel;
-        let Some(r) = &mut self.rig else { return };
+        let r = self.rig.get_or_insert_with(|| {
+            let mut board = Board::new(target.0, &target.1);
+            board.place(target.0, &target.1, vel, Vec3::ZERO);
+            Rig {
+                board,
+                ground_time: 0.0,
+                pos: Vec3::ZERO,
+                fwd: Vec3::ZERO,
+                velocity: vel,
+                last_sync: Vec3::ZERO,
+                airborne: true,
+                flip: false,
+                hook_turn: None,
+            }
+        });
+        // Moved from outside since the board was last read (a respawn, a scripted placing), or far from
+        // the flight: put there, as `sync_rig` does on the ground; its velocity changed from outside
+        // (a wall's push): given the change.
+        let follow = motion == AirMotion::Follow;
+        let moved = r.airborne && !follow && r.pos != self.pos;
+        if moved || (r.board.deck().position - target.0).length() > LANDING_REACH {
+            r.board.place(target.0, &target.1, vel, Vec3::ZERO);
+        } else if r.airborne && !follow && r.velocity != vel {
+            let dv = vel - r.velocity;
+            for p in &mut r.board.parts {
+                p.velocity += dv;
+            }
+        }
         r.airborne = true;
         // How fast the animated board turns (rad/s, world), from its last turn.
         let spin = match r.hook_turn {
-            Some(last) if !landing => {
+            Some(last) => {
                 let q = Quat::from_mat3(&target.1).compose(Quat::from_mat3(&last).conjugate());
                 let q = if q.w < 0.0 {
                     Quat {
@@ -283,27 +327,58 @@ impl Skater {
                     Vec3::ZERO
                 }
             }
-            _ => Vec3::ZERO,
+            None => Vec3::ZERO,
         };
-        r.hook_turn = (!landing).then_some(target.1);
-        // Moved far from the flight (a respawn, a scripted drop): put there, as `sync_rig` does.
-        if (r.board.deck().position - target.0).length() > LANDING_REACH {
-            r.board.place(target.0, &target.1, vel, Vec3::ZERO);
+        r.hook_turn = Some(target.1);
+        let set = match motion {
+            AirMotion::Free => None,
+            AirMotion::Velocity(v) => Some(v),
+            // SK8 skeleton_air.rs `update_known_air` (82C04270): every body's velocity is the one
+            // that takes the deck's centre of mass to the target this tick.
+            AirMotion::Follow => {
+                Some((target.0 - r.board.deck().position) * (1.0 / crate::physics::STEP))
+            }
+        };
+        if let Some(v) = set {
+            for p in &mut r.board.parts {
+                p.velocity = v;
+            }
         }
-        // SK8 flies the board on its own physics (the hook only turns it) and places the rider on
-        // it; flatground's flight is the skater's, so the hook moves with it: its damping holds the
-        // deck to the flight's velocity instead of dragging it behind (it would land late).
-        // The tick the flight lands, the board comes down on its own physics as it flew (the landed
-        // frame is the ground's, not where the flight put the board).
+        let incoming = r.board.deck().velocity;
         let input = BoardInput {
-            hook: (!landing).then_some((target.0 - vel * crate::physics::STEP, target.1)),
-            hook_velocity: vel,
+            hook: Some(target.1),
             hook_spin: spin,
-            hook_gravity: pb::GRAVITY,
             wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
             ..BoardInput::default()
         };
         self.step_board(park, &input, true);
+        incoming
+    }
+
+    /// The board's wheels on a surface it can land on after the last step (loaded, the surface's
+    /// normal within 60 degrees of the rider.s up or facing up): how many, and their load-weighted
+    /// normal and point.
+    pub(super) fn air_wheels(&self) -> (u8, Vec3, Vec3) {
+        let Some(r) = &self.rig else {
+            return (0, Vec3::UP, Vec3::ZERO);
+        };
+        let up = self.normal;
+        let mut n = 0u8;
+        let mut normal = Vec3::ZERO;
+        let mut point = Vec3::ZERO;
+        let mut load = 0.0;
+        for w in r.board.wheels.iter().flatten() {
+            if w.load > 0.0 && (w.normal.dot(up) > 0.5 || w.normal.y > 0.6) {
+                n += 1;
+                normal += w.normal * w.load;
+                point += w.point * w.load;
+                load += w.load;
+            }
+        }
+        if n == 0 {
+            return (0, Vec3::UP, Vec3::ZERO);
+        }
+        (n, normal.normalize_or(Vec3::UP), point * (1.0 / load))
     }
 
     /// One tick of the board left rolling on its own under a hippie jump (Skate 3's LandingOnDeck):
@@ -320,6 +395,7 @@ impl Skater {
         };
         let t0 = self.clock.now();
         r.board.step_with(park, &input, None);
+        self.board_stepped = true;
         self.body_us = 0;
         self.board_us = self.clock.now().wrapping_sub(t0);
     }
@@ -368,6 +444,7 @@ impl Skater {
             None => None,
         };
         rig.board.step_with(park, input, body);
+        self.board_stepped = true;
         self.body_us = self.rider_body.as_ref().map_or(0, |b| b.cost_us);
         self.board_us = self
             .clock

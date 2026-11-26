@@ -1224,10 +1224,15 @@ impl Game {
                 drawn = self.draw_physical(ran, &anim_board, &deck);
             }
         }
-        // The clips' board in the world for the next tick's air hook (on the tick's frame).
-        self.skater.anim_board = anim_board
-            .filter(|_| deck.is_some())
-            .map(|b| self.roots.animation_to_world.then(&b).rot);
+        // The board the next tick's air hook turns the deck to (on the tick's frame): SK8's effective
+        // board, the clips' with the physics' error at the take-off blended out (skeleton_air.rs
+        // `apply_board`), which is the board drawn in the air.
+        let air = self.skater.is_airborne() && !self.skater.hippie_air();
+        self.skater.anim_board = match (anim_board, deck, self.board_drawn) {
+            (Some(_), Some(_), Some(b)) if air && riding => Some(b.rot),
+            (Some(b), Some(_), _) => Some(self.roots.animation_to_world.then(&b).rot),
+            _ => None,
+        };
         // Getting off or on, the drawn root goes from the board's to the feet's (or back) over
         // `FOOT_ORIGIN_BLEND` instead of jumping between them (flatground's: SK8 doesn't draw this
         // handover from here).
@@ -1354,7 +1359,12 @@ impl Game {
             }
             st.physical = physical;
         }
-        let fast = s.graph.board_animated;
+        // SK8: PhysicsAir blends the board in slowly, KnownAir and GroundAnimation fast.
+        let fast = if air {
+            s.state() == crate::skater::State::KnownAir
+        } else {
+            s.graph.board_animated
+        };
         let board = if physical {
             // A powerslide still turns the board in flatground's older ground model, which the rigid
             // board doesn't carry: the deck drawn turned by its angle.
