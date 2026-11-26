@@ -10,6 +10,7 @@ mod attrib;
 mod big;
 mod cac;
 mod camera;
+mod cap;
 mod city;
 mod district;
 mod gx;
@@ -50,6 +51,8 @@ const USAGE: &str = "usage:
   fg_import big      <disc.iso> <file.big>        list the entries of a BIG archive on the disc
   fg_import rx2      <disc.iso> <asset>           list the sections and textures of an RW4 arena
   fg_import cat      <disc.iso> <asset> <out>     copy one asset off the disc (for format research)
+  fg_import cap      <disc.iso> [name]            list the Create-a-Park objects, or show one's collision
+                                                  and grind splines (for format research)
   fg_import values   <disc.iso> <path>...         print tuning values (`class/collection/field`, a field
                                                   may be `Hash_XXXXXXXXXXXXXXXX`; for format research)
   fg_import textures <disc.iso> [options]         convert textures into a Wii pack
@@ -226,6 +229,7 @@ fn run(args: &[String]) -> Res<()> {
         "textures" => textures(&mut disc, &rest[1..])?,
         "anims" => anims(&mut disc, &rest[1..])?,
         "skater" => skater::run(&mut disc, &rest[1..])?,
+        "cap" => cap::run(&mut disc, &rest[1..])?,
         "motion" => motion::run(&mut disc, &rest[1..])?,
         "park" => park::run(&mut disc, &rest[1..])?,
         "city" => city::run(&mut disc, &rest[1..])?,
