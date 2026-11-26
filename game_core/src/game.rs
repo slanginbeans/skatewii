@@ -1184,9 +1184,14 @@ impl Game {
         }
         // The rider's axes: the reckoning's up, the board's heading (SK8's reckoning frame), which
         // doesn't turn round when flatground's board frame does (`frame_turned`: its clips turn with it).
+        // In a body flip they turn over with it (board and rider about the centre of mass).
         let base = self.skater_base();
-        let up = self.skater.reckoning.up.normalize_or(v3(0.0, 1.0, 0.0));
-        let nose = crate::skater::tangent(base.rot.cols[2], up);
+        let (up, nose) = if self.skater.body_flip.is_some() {
+            (base.rot.cols[1], base.rot.cols[2])
+        } else {
+            let up = self.skater.reckoning.up.normalize_or(v3(0.0, 1.0, 0.0));
+            (up, crate::skater::tangent(base.rot.cols[2], up))
+        };
         let nose = if self.skater.frame_turned {
             -nose
         } else {
@@ -1207,7 +1212,14 @@ impl Game {
             if s.rolling() && !s.graph.board_animated {
                 self.roots.initialize_heading = true;
             }
-            self.roots.update(deck.pos, s.rider_axes, &anim_board);
+            // In a hippie jump the board rolls on alone under the rider, whose clips carry their
+            // board with him: the animation is placed at the flight's deck, not the physical one.
+            let at = if s.hippie_air() {
+                s.frame().deck
+            } else {
+                deck.pos
+            };
+            self.roots.update(at, s.rider_axes, &anim_board);
             if riding {
                 drawn = self.draw_physical(ran, &anim_board, &deck);
             }
@@ -1302,10 +1314,12 @@ impl Game {
         let to_world = self.roots.animation_to_world;
         let s = &self.skater;
         let animated = to_world.then(anim_board);
-        let physical = (s.rolling() || s.grinding())
-            && !s.graph.board_animated
-            && s.possession.hold == crate::skater::possession::Hold::Underfoot;
-        let air = s.is_airborne();
+        // A hippie jump's board rolls on the ground on its own physics (Skate 3's LandingOnDeck).
+        let physical = s.hippie_air()
+            || ((s.rolling() || s.grinding())
+                && !s.graph.board_animated
+                && s.possession.hold == crate::skater::possession::Hold::Underfoot);
+        let air = s.is_airborne() && !s.hippie_air();
         let st = &mut self.board_state;
         // The deck's wobble: on a landing and a take-off.
         if ran > 0 && air != st.air {
@@ -1355,14 +1369,6 @@ impl Game {
             );
             let at = Xform::new(deck.rot.mul(&slide).mul(&st.turn), deck.pos);
             st.wobble.apply(&st.blend.apply(&at, fast))
-        } else if s.hippie_air() {
-            // A hippie jump (Skate 3's LandingOnDeck): the board rolls on along the ground under the
-            // rider (flatground's board flies with him: drawn on the ground under him).
-            let ground: &dyn Terrain = terrain(&self.world, &self.park);
-            let h = ground.ground(s.pos.x, s.pos.z, s.pos.y + 0.5).height;
-            let mut at = animated;
-            at.pos.y = h + crate::skater::DECK_HEIGHT;
-            st.blend.apply(&at, fast)
         } else {
             st.blend.apply(&animated, fast)
         };
@@ -1620,14 +1626,14 @@ impl Game {
         self.rider.as_ref().and_then(|r| r.board_in_character())
     }
 
-    /// Where the drawn board's centre is (the posed `SKATEBOARD_ROOT` placed in the world), with the
-    /// imported rider; else the physics board's deck.
+    /// Where the drawn board's centre is (the drawn `SKATEBOARD_ROOT` placed in the world: the
+    /// physical deck where Skate 3 draws it), with the imported rider; else the physics board's deck.
     pub fn drawn_board(&self) -> crate::math::Vec3 {
         let x = self.imported_xform();
         self.rider
             .as_ref()
-            .and_then(|r| r.board_in_character())
-            .map_or(x.pos, |b| x.point(b))
+            .and_then(|r| r.board_frame())
+            .map_or(x.pos, |b| x.point(b.pos))
     }
 
     /// The board off the feet in the world: its centre, up and nose (a thrown board pitched as it

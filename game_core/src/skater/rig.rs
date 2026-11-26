@@ -233,6 +233,20 @@ impl Skater {
         let f = self.frame();
         let sign = self.rig_sign();
         let mut target = (f.deck, Mat3::from_cols(f.right * sign, f.up, f.fwd * sign));
+        // A body flip turns board and rider about the centre of mass (as the drawn frame,
+        // `Game::skater_base`).
+        if let Some(flip) = &self.body_flip {
+            let pivot = self.pos + f.up * flip::PIVOT;
+            let m = &target.1;
+            target = (
+                pivot + flip.apply(target.0 - pivot),
+                Mat3::from_cols(
+                    flip.apply(m.cols[0]),
+                    flip.apply(m.cols[1]),
+                    flip.apply(m.cols[2]),
+                ),
+            );
+        }
         // SK8's hook turns the deck to the animated board (the clips' board adjust and flips
         // included); without an imported rider, flatground's adjusted deck. Either way round, the
         // physical deck's.
@@ -290,6 +304,24 @@ impl Skater {
             ..BoardInput::default()
         };
         self.step_board(park, &input, true);
+    }
+
+    /// One tick of the board left rolling on its own under a hippie jump (Skate 3's LandingOnDeck):
+    /// the rigid board on the ground with nothing on it, no hook and no rider's body, until he lands on
+    /// it again.
+    pub(super) fn roll_rig_alone(&mut self, park: &dyn Terrain) {
+        let Some(r) = &mut self.rig else { return };
+        r.airborne = true;
+        r.hook_turn = None;
+        self.rider_body = None;
+        let input = BoardInput {
+            wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
+            ..BoardInput::default()
+        };
+        let t0 = self.clock.now();
+        r.board.step_with(park, &input, None);
+        self.body_us = 0;
+        self.board_us = self.clock.now().wrapping_sub(t0);
     }
 
     /// The rider's body's input this tick: the animated pose at the deck where it will be at the end

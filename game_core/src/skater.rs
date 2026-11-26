@@ -1643,7 +1643,9 @@ impl Skater {
             // off-board reckonings clear the lean.
             self.wobble.reset();
             self.reckoning.lean = 0.0;
-            if self.is_airborne() {
+            if self.hippie_air() {
+                self.roll_rig_alone(park);
+            } else if self.is_airborne() {
                 self.fly_rig(park, false);
             } else {
                 self.rig = None;
