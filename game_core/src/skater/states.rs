@@ -374,8 +374,10 @@ mod tests {
         };
         step(&mut s, &park, 1);
         // SK8: the jump starts the state frames over, and `field_2572 == 1` is the ground states' way
-        // into the air.
-        assert_eq!(s.state(), State::PhysicsAir);
+        // into the air; the jump launched the landing prediction, which is known that tick (on flat
+        // ground), so the air is KnownAir from the take-off as SK8's ollie (GroundAnimation, KnownAir).
+        assert_eq!(s.state(), State::KnownAir);
+        assert!(s.plan.is_some());
         assert_eq!(s.states.time, 0.0);
     }
 

@@ -71,6 +71,7 @@ use crate::park::Terrain;
 use crate::tuning::Tuning;
 use biped::{Biped, BipedInput};
 use plant::{AirPlant, GroundPlant, PlantKind};
+use rig::AirMotion;
 
 /// Highest ledge a bailed rider walks up (m).
 pub const STEP: f32 = 0.12;
@@ -91,9 +92,9 @@ const FAKIE_GRACE: f32 = 1.0;
 /// How fast the board follows the animated centre of mass in the air: the share of the gap closed a
 /// tick (SK8's rider body is physical and follows its animation; fit to its ollies' COM over the deck).
 const AIR_LEGS_FOLLOW: f32 = 0.15;
-/// Rolled off an edge without a pop, the board meets rails as if still riding for this long (s, ours:
-/// SK8's board pivots on its back wheels over a coping for about half a second at walking pace).
-const ROLL_OFF_TIME: f32 = 0.3;
+/// How many air ticks after a jump a free board is given the jump's velocity (SK8 air_phase/board.rs:
+/// `frames_since_jump_correction_2576 < 12`).
+const JUMP_CORRECTION_TICKS: u32 = 12;
 /// The wheels' friction on a landing's impact: sideways speed taken off per m/s into the ground.
 const LAND_SIDE_FRICTION: f32 = 0.41;
 /// The posed board lifted this far (m) means the pop's tail strike has started.
@@ -794,6 +795,11 @@ pub struct Skater {
     /// an imported rider): what the air's hook drive pulls the physical deck's turn to.
     pub anim_board: Option<crate::math::Mat3>,
     pub body_us: u32,
+    /// The board was stepped this tick.
+    board_stepped: bool,
+    /// The last jump's velocity and the air ticks since it (SK8 `jump_velocity_848`,
+    /// `frames_since_jump_correction_2576`): a free board is given it for its first ticks.
+    jump: Option<(Vec3, u32)>,
     air_com: Option<f32>,
     /// How far the legs have lifted the board over the flight's path (m, world up), and how fast it
     /// moved last tick (m/s).
@@ -1183,6 +1189,8 @@ impl Skater {
             rider_axes: crate::math::Mat3::IDENTITY,
             anim_board: None,
             body_us: 0,
+            board_stepped: false,
+            jump: None,
             air_com: None,
             air_lift: 0.0,
             air_lift_rate: 0.0,
@@ -1500,6 +1508,7 @@ impl Skater {
         events: &mut Vec<Event>,
     ) {
         self.body_us = 0;
+        self.board_stepped = false;
         // SK8 state_timer_2664: the time in the state, this tick included.
         self.states.time += dt;
         if let Some(b) = &mut self.rider_body {
@@ -1601,6 +1610,12 @@ impl Skater {
         }
         let flying = self.is_airborne();
         self.step_mode(park, pad, flick, dt, events);
+        // A jump off the ground launches the landing prediction on its tick (SK8's ground jump launches
+        // the trajectory selector and its batch completes the same tick: an ollie goes from
+        // GroundAnimation straight into KnownAir).
+        if !flying && self.states.facts.jumped && self.plan.is_none() {
+            self.update_prediction(park, self.air_time);
+        }
         self.update_possession(park, dt, events);
         // Skate 3's state selector picks the state from what the tick's movement published.
         if !early {
@@ -1624,12 +1639,6 @@ impl Skater {
                 .observe(&self.tuning, park, at, self.riding_ticks, since);
             let pose = self.approach_pose();
             self.approach.ride(pose);
-            // The tick the flight lands, the board flies its last step onto the ground under the
-            // landed skater (the ground ride adopts it from the next tick), as Skate 3's board lands
-            // on its own physics the tick the rider does.
-            if flying {
-                self.fly_rig(park, true);
-            }
         } else {
             self.riding_ticks = 0;
             // Off the ground: Skate 3 resets the wobble on entering it again. Its air, grind and
@@ -1639,7 +1648,11 @@ impl Skater {
             if self.hippie_air() {
                 self.roll_rig_alone(park);
             } else if self.is_airborne() {
-                self.fly_rig(park, false);
+                // The take-off's tick (a jump leaves the ground before the board's ground step) and air
+                // ticks the flight didn't move (plants): the board goes where the flight is.
+                if !self.board_stepped {
+                    self.fly_board(park, AirMotion::Follow);
+                }
             } else {
                 self.rig = None;
             }
@@ -2245,6 +2258,7 @@ impl Skater {
                 self.pos += n * 0.05;
                 self.take_off(Some(f));
                 self.vel.y += self.pop_speed(self.tuning.jump_height(strength, 0.0)) * 0.6;
+                self.jump = Some((self.vel, 0));
                 events.push(Event::Popped(f));
                 return;
             }
@@ -2675,6 +2689,7 @@ impl Skater {
         let lift = posed.map_or(0.0, |p| p.1);
         self.pos += self.contact_n * (0.02 + lift);
         self.take_off(Some(f));
+        self.jump = Some((self.vel, 0));
         self.takeoff.on_vert = on_vert;
         self.takeoff.lean = stick[1];
         events.push(Event::Popped(f));
@@ -2736,6 +2751,11 @@ impl Skater {
         self.air_com = self.body_com;
         self.air_lift = 0.0;
         self.air_lift_rate = 0.0;
+        self.jump = None;
+        // The air's up starts from the reckoning's (SK8's air reckoning goes on from the ground's up,
+        // smoothed, not the deck's: a board tipped over a lip leaves with the rider upright).
+        self.normal = self.reckoning.up.normalize_or(self.normal);
+        self.fwd = tangent(self.fwd, self.normal);
     }
 
     /// The rider's centre of mass over the board's point (m, along the board's up).
@@ -2986,6 +3006,9 @@ impl Skater {
         let up = air::tilt_towards(self.normal, to, share, max);
         self.fwd = tangent(self.fwd, up);
         self.normal = up;
+        // Skate 3's air reckoning turns the one reckoning's up (the rider's axes, which place the
+        // animated board the hook turns the deck to).
+        self.reckoning.up = up;
         // The spin turns the body about its own up.
         let turn = spin * dt;
         self.spin_rate = spin;
@@ -2995,7 +3018,6 @@ impl Skater {
         self.update_deck_adjust(pad);
         // The legs: the board follows the animated centre of mass's height over it, as fast as the
         // rider's body follows its animation (SK8's physical rider; measured, 0.15 of the gap a tick).
-        let lift_before = self.air_lift;
         if self.takeoff.hippy || self.takeoff.mount {
             // A hippie jump or getting on in the air: the rider is off the board above it while it rolls
             // on along the ground (Skate 3's LandingOnDeck). He lands when he comes back down onto it,
@@ -3019,88 +3041,209 @@ impl Skater {
         if let Some(target) = self.plan.as_ref().and_then(|p| p.grind) {
             self.grind_air_assist(park, target, dt);
         }
-        // Rolled off an edge without a pop, the board is still tipping over it on its back wheels for a
-        // moment (SK8's rigid board stays on the ground pivoting): a rail it meets is ridden onto, not
-        // landed on from the air (a slow roll off a deck drops in rather than stopping on the coping).
-        let category = if self.trick.is_none()
-            && !(self.takeoff.hippy || self.takeoff.mount)
-            && now < ROLL_OFF_TIME
-        {
-            Category::Ground
-        } else {
-            Category::Air
-        };
-        // Fly: the known landing's flight (its start error blended away), else ballistically.
-        match &self.plan {
+        let category = Category::Air;
+        if self.takeoff.hippy || self.takeoff.mount {
+            self.fly_off_board(park, time, dt, category, events);
+            return;
+        }
+        // The flight (SK8 PhysicsAir / KnownAir): the physical board carries it. With a known landing
+        // the board follows the selected trajectory (its start error blended away; the legs' tuck and
+        // a body flip place the deck off it, `air_board_target`); without one it flies on its own,
+        // given the jump's velocity for its first ticks (SK8 `calculate_velocity_from_jump`).
+        let motion = match &self.plan {
             Some(p) => {
                 let assist = self.air_assist.map_or(Vec3::ZERO, |a| a.offset);
-                let next = p.target(time, t.traj_error_blend) + assist;
+                self.pos = p.target(time, t.traj_error_blend) + assist;
+                AirMotion::Follow
+            }
+            None => match self.jump_velocity(dt) {
+                Some(v) => AirMotion::Velocity(v),
+                None => AirMotion::Free,
+            },
+        };
+        let incoming = self.fly_board(park, motion);
+        self.read_air_board();
+        // A wall: before Skate 3's selector would take the board out of the air on it, the board meets
+        // it on its own contacts, off the predicted flight (asked again); after, a wallride if there is
+        // a floor well below, else off it (or off the board).
+        let wall = self.air_wall(park, incoming);
+        if wall.is_some() && !self.touchdown_lands() {
+            self.plan = None;
+            self.selector = air::Selector::default();
+        } else if let Some(wn) = wall {
+            let hit = crate::park::Hit {
+                t: 0.0,
+                point: self.deck(),
+                normal: wn,
+                surface: 0,
+            };
+            if self.try_air_wallride(park, &hit, events) {
+                return;
+            }
+            // Off the predicted flight: ask again.
+            self.plan = None;
+            self.selector = air::Selector::default();
+            match self.hit_wall(wn, incoming, true, events) {
+                Some(v) => {
+                    self.vel = v;
+                    if let Some(r) = &mut self.rig {
+                        for p in &mut r.board.parts {
+                            p.velocity = v;
+                        }
+                    }
+                }
+                None => return,
+            }
+        }
+        if self.try_grind(park, category, events) {
+            return;
+        }
+        // Touchdown: the board's wheels on a surface it lands on. Skate 3's state selector takes the
+        // board onto the ground from its wheel contacts once the air state has settled; until then it
+        // stays in the air, the board on its own contacts.
+        let (wheels, n, point) = self.air_wheels();
+        if wheels > 0 {
+            self.publish_wheels(wheels);
+            if self.selects(|_| {}).category() == 100 {
+                let surface = park
+                    .raycast(point + n * 0.05, -n, 0.1)
+                    .map_or(0, |h| h.surface);
+                if let Some(r) = &self.rig {
+                    let d = r.board.deck();
+                    self.pos = d.position - d.axes.cols[1] * DECK_HEIGHT;
+                }
+                self.vel = incoming;
+                self.land(n, surface, time, events);
+                return;
+            }
+        }
+        if self.pos.y < park.kill_height() {
+            // Fell out of the world: start over.
+            self.respawn(park);
+            events.push(Event::Respawned);
+        } else {
+            self.air_time = time;
+        }
+    }
+
+    /// The skater's flight read off the physical board after its air step: the point the deck is held
+    /// over (the target's offset from it taken off the deck), and the deck's velocity.
+    fn read_air_board(&mut self) {
+        let offset = self.air_board_target().0 - self.pos;
+        if let Some(r) = &mut self.rig {
+            let d = r.board.deck();
+            self.pos = d.position - offset;
+            self.vel = d.velocity;
+            r.pos = self.pos;
+            r.velocity = self.vel;
+        }
+    }
+
+    /// A wall the board ran into this step (its trucks' or deck's contact across its up, or a wheel on
+    /// a face it can't land on), its normal facing the board (the side the wall isn't on), while the
+    /// board's incoming velocity `v` moves into it.
+    fn air_wall(&self, park: &dyn Terrain, v: Vec3) -> Option<Vec3> {
+        let r = self.rig.as_ref()?;
+        let up = self.normal;
+        let wheel = r
+            .board
+            .wheels
+            .iter()
+            .flatten()
+            .filter(|w| w.load > 0.0 && !(w.normal.dot(up) > 0.5 || w.normal.y > 0.6))
+            .max_by(|a, b| a.load.total_cmp(&b.load))
+            .map(|w| w.normal);
+        let n = r.board.wall.map(|w| w.0).or(wheel)?;
+        let at = r.board.deck().position;
+        let behind = |n: Vec3| park.raycast(at, -n, 0.5).is_some_and(|h| h.normal.dot(n) > 0.5);
+        let n = if behind(n) {
+            n
+        } else if behind(-n) {
+            -n
+        } else {
+            return None;
+        };
+        (n.y.abs() < 0.5 && v.dot(n) < 0.0).then_some(n)
+    }
+
+    /// SK8 `calculate_velocity_from_jump` (TU3 0x82D34BC0): for 12 ticks after a jump the free board
+    /// is given the jump's velocity under gravity, unless the board's own has fallen 3 m/s below it
+    /// (then its own vertical), its horizontal clamped to the jump's speed when 3 m/s or more off it.
+    fn jump_velocity(&mut self, dt: f32) -> Option<Vec3> {
+        let (jump, frames) = self.jump.as_mut()?;
+        if *frames >= JUMP_CORRECTION_TICKS {
+            return None;
+        }
+        let predicted = *jump - Vec3::UP * (self.tuning.gravity * dt * *frames as f32);
+        *frames += 1;
+        let current = self.rig.as_ref().map_or(self.vel, |r| r.board.deck().velocity);
+        let error = current - predicted;
+        let mut out = predicted;
+        if error.y <= -3.0 {
+            out.y = current.y;
+        }
+        let eh = error.horizontal();
+        if eh.dot(eh) >= 9.0 {
+            let max = out.horizontal().length();
+            let h = current.horizontal();
+            let len = h.length();
+            let h = if len > max && len > 1e-5 {
+                h * (max / len)
+            } else {
+                h
+            };
+            out.x = h.x;
+            out.z = h.z;
+        }
+        Some(out)
+    }
+
+    /// The rider's flight off the board (a hippie jump, getting on in the air: Skate 3's
+    /// LandingOnDeck, whose skeleton flies its centre of mass's trajectory): with a known landing along
+    /// it, else under gravity; he lands when he comes back down onto something.
+    fn fly_off_board(
+        &mut self,
+        park: &dyn Terrain,
+        time: f32,
+        dt: f32,
+        category: Category,
+        events: &mut Vec<Event>,
+    ) {
+        let t = self.tuning;
+        match &self.plan {
+            Some(p) => {
+                let next = p.target(time, t.traj_error_blend);
                 self.vel = (next - self.pos) * (1.0 / dt.max(1e-4));
             }
             None => self.vel.y -= t.gravity * dt,
         }
         let from = self.pos;
         let delta = self.vel * dt;
-        let mut moved = false;
-        // The board is where the legs hold it off the flight's path (tucked over it, reaching under
-        // it for the landing): it meets the ground where it is (SK8: the deck under the flying centre
-        // of mass). It is tested along its own path this tick, from where the legs held it to where
-        // they hold it now: reaching down for a landing moves it a few centimetres a tick on top of
-        // the flight, and a test along the flight alone started under the ground and fell through it.
-        let start = from + Vec3::UP * lift_before;
-        let path = delta + Vec3::UP * (self.air_lift - lift_before);
-        let len = path.length();
-        if len > 1e-6 {
-            let dir = path * (1.0 / len);
-            if let Some(h) = park.raycast(start, dir, len + 0.01)
-                && path.dot(h.normal) < 0.0
-            {
-                let landable = self.normal.dot(h.normal) > 0.5 || h.normal.y > 0.6;
-                if landable {
+        let len = delta.length();
+        if len > 1e-6
+            && let Some(h) = park.raycast(from, delta * (1.0 / len), len + 0.01)
+            && delta.dot(h.normal) < 0.0
+        {
+            self.pos = h.point + h.normal * 1e-3;
+            if self.normal.dot(h.normal) > 0.5 || h.normal.y > 0.6 {
+                if self.try_grind(park, category, events) {
+                    return;
+                }
+                if self.selects(|f| f.wheels = 4).category() == 100 {
                     self.pos = h.point;
-                    if self.try_grind(park, category, events) {
-                        return;
-                    }
-                    if !self.touchdown_lands() {
-                        // Down on the surface before Skate 3's state selector takes the board out of the air (its
-                        // air states settle first): held on it, its speed into it gone, touching.
-                        // (A millimetre over it, so the next tick's test along the path meets it again.)
-                        self.pos = h.point + h.normal * 1e-3;
-                        let into = self.vel.dot(h.normal);
-                        if into < 0.0 {
-                            self.vel -= h.normal * into;
-                        }
-                        self.publish_wheels(4);
-                        self.air_time = time;
-                        return;
-                    }
                     self.land(h.normal, h.surface, time, events);
                     return;
                 }
-                // A wall: a wallride if there is a floor well below, else off it (or off the board).
-                if h.normal.y.abs() < 0.5 && self.try_air_wallride(park, &h, events) {
-                    return;
-                }
-                self.pos = h.point + h.normal * 0.02;
-                // Off the predicted flight: ask again.
-                self.plan = None;
-                self.selector = air::Selector::default();
-                match self.hit_wall(h.normal, self.vel, true, events) {
-                    Some(v) => self.vel = v,
-                    None => return,
-                }
-                moved = true;
+                self.publish_wheels(4);
             }
-        }
-        if !moved {
+            let into = self.vel.dot(h.normal);
+            if into < 0.0 {
+                self.vel -= h.normal * into;
+            }
+        } else {
             self.pos = from + delta;
         }
-
-        if self.try_grind(park, category, events) {
-            return;
-        }
         if self.pos.y < park.kill_height() {
-            // Fell out of the world: start over.
             self.respawn(park);
             events.push(Event::Respawned);
         } else {
@@ -5663,7 +5806,7 @@ mod tests {
         );
         // Flying into the free-standing wall a metre over the flat: it rides it and jumps off.
         let mut s = spawn(&park);
-        s.pos = v3(-3.2, 1.3, -5.8);
+        s.pos = v3(-3.2, 1.3, -5.5);
         s.take_off(None);
         s.select_state();
         s.vel = v3(-3.0, 1.0, -1.0);

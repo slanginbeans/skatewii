@@ -108,16 +108,11 @@ const WHEELS: [(usize, f32); 4] = [
     (BACK_TRUCK, -WHEEL_X),
 ];
 
-/// SK8's hook drive when the animation holds the board (hook_drive/mod.rs
-/// `enable_animation_soft`): a soft linear drive, spring 5000 with critical damping 2 sqrt(5000) and
-/// strength 1800, and a soft angular drive, spring 20000, damping 2 sqrt(20000), strength 36000.
+/// SK8's hook drive in the air (hook_drive/mod.rs `enable_animation_soft`'s angular half, which
+/// PhysicsAir and KnownAir keep with `enable_angular_only`): no linear drive, and a soft angular
+/// drive, spring 20000, damping 2 sqrt(20000), strength 36000.
 pub const HOOK_DRIVE: DriveDynamics = DriveDynamics {
-    linear: DriveParams {
-        spring_or_max_velocity: 5000.0,
-        damping: 141.421_36,
-        max_strength: 1_799.999_8,
-        kind: DriveKind::Soft,
-    },
+    linear: DriveParams::OFF,
     angular: DriveParams {
         spring_or_max_velocity: 20000.0,
         damping: 282.842_7,
@@ -733,16 +728,12 @@ pub struct BoardInput {
     /// The ground's linear drag on every part this tick (per second; SK8 grounded/drag.rs: 60 while
     /// a brake holds a slow board, which stops it dead).
     pub linear_drag: f32,
-    /// The animated board the deck is hooked to (deck centre, axes): SK8's hook drive, on while the
-    /// rider's animation holds the board (the air).
-    pub hook: Option<(Vec3, Mat3)>,
-    /// How fast the animated board moves (m/s, world): the hook's own velocity, so its damping pulls
-    /// the deck towards the animated board's motion, not to a stop (SK8's hook target is the animated
-    /// board placed at the predicted physical one, moving with it).
-    pub hook_velocity: Vec3,
-    /// And how it accelerates (m/s/s): a flight falls with the deck.
-    pub hook_gravity: Vec3,
-    /// And how fast it turns (rad/s, world).
+    /// The animated board's axes the deck is turned to: SK8's hook drive in the air, angular only
+    /// (PhysicsAir and KnownAir enter with `enable_angular_only`; the board's motion is its own, or
+    /// KnownAir's trajectory follow setting its velocity).
+    pub hook: Option<Mat3>,
+    /// How fast the animated board turns (rad/s, world): the hook's own spin, so its damping pulls
+    /// the deck towards the animated board's turning, not to a stop.
     pub hook_spin: Vec3,
 }
 
@@ -960,16 +951,17 @@ impl Board {
             DriveRow::build(&self.parts, truck, DECK, &here, &target, &TRUCK_DRIVE)
         });
         let mut reactions = [Reaction::default(); PARTS + 1];
-        // The hook drive (SK8 hook_drive/mod.rs, CreateHookDrive): the deck pulled to the animated
-        // board, an immovable body put there, with soft linear and angular drives.
+        // The hook drive (SK8 hook_drive/mod.rs, CreateHookDrive): the deck turned to the animated
+        // board, an immovable body put there, with the soft angular drive only.
         let mut all = [Body::new(deck_mass(), Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO); PARTS + 1];
         all[..PARTS].copy_from_slice(&self.parts);
         let mut rows: [DriveRow; 3] = [drives[0], drives[1], drives[0]];
         let mut n_drives = 2;
-        if let Some((at, axes)) = input.hook {
-            let mut hook = Body::new(deck_mass(), at, Quat::from_mat3(&axes), input.hook_gravity);
+        if let Some(axes) = input.hook {
+            let d = &self.parts[DECK];
+            let mut hook = Body::new(deck_mass(), d.position, Quat::from_mat3(&axes), Vec3::ZERO);
             hook.active = false;
-            hook.velocity = input.hook_velocity;
+            hook.velocity = d.velocity;
             hook.spin = input.hook_spin;
             all[PARTS] = hook;
             rows[2] = DriveRow::build(&all, PARTS, DECK, &here, &here, &HOOK_DRIVE);
