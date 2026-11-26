@@ -238,6 +238,9 @@ pub struct Game {
     pub frame_cost: Option<FrameCost>,
     /// A status line shown under the controls hint (for example whether the imported skater loaded).
     pub notice: Option<String>,
+    /// The player's disc data the game can't run without and didn't find (see
+    /// [`Game::require_disc_data`]): the game shows how to import it instead of playing.
+    pub missing: Option<String>,
     /// Development log lines from the last updates; the platform takes them (`log.drain(..)`) and writes
     /// them out. Capped while nobody takes them.
     pub log: Vec<String>,
@@ -365,6 +368,7 @@ impl Game {
             events: Vec::new(),
             frame_cost: None,
             notice: None,
+            missing: None,
             rider: None,
             motion: None,
             graph: None,
@@ -788,13 +792,9 @@ impl Game {
             .and_then(|s| s.1.iter().find(|x| x.name == name))
     }
 
-    /// The gesture files for the graph's input: the disc's, else flatground's own flick shapes.
+    /// The gesture files for the graph's input (the disc's).
     fn gesture_sets(&self) -> Vec<(&'static str, Vec<gesture::Shape>)> {
-        if self.gesture_sets.is_empty() {
-            alloc::vec![("skater", gesture::built_in())]
-        } else {
-            self.gesture_sets.clone()
-        }
+        self.gesture_sets.clone()
     }
 
     /// Sets the rider's natural stance (Skate 3's default is goofy).
@@ -877,6 +877,14 @@ impl Game {
     /// rider once. A PAL50 frame is drawn between the last two ticks.
     pub fn update(&mut self, raw: &PadRaw, dt: f32) {
         self.frame_dt = dt;
+        if self.missing.is_some() {
+            // START goes back to the loader.
+            if raw.buttons & !self.menu_prev & crate::input::btn::START != 0 {
+                self.request = Some(Request::Quit);
+            }
+            self.menu_prev = raw.buttons;
+            return;
+        }
         self.connected = raw.flags & flag::CONNECTED != 0;
         self.events.clear();
         let pressed = raw.buttons & !self.menu_prev;
@@ -1058,7 +1066,6 @@ impl Game {
             }
             let s = &self.skater;
             let ground: &dyn Terrain = terrain(&self.world, &self.park);
-            let land_in = s.time_to_land(ground);
             let mut posed = false;
             if let (Some(r), Some(g), Some(lib)) = (&mut self.rider, &mut self.graph, &self.motion)
             {
@@ -1074,10 +1081,7 @@ impl Game {
                 g.runner.pose(&mut self.pose);
                 posed = r.update_graph(lib, &self.pose, rot, self.skater.frame_turned);
             }
-            if !posed && let Some(r) = &mut self.rider {
-                r.set_board_place(place);
-                r.update(&self.skater, self.clock, land_in, pose_dt, rot);
-            }
+
             self.board_align = self.ground_alignment(posed);
             // The clips' pose as ragdoll points: where a bail starts the body, and in a bail where
             // the drives pull it.
@@ -1297,7 +1301,7 @@ impl Game {
                 control.pose_deck = posed_deck(Some(r), self.skater.mirrored());
                 control.pose_lift = (r.board_rest_height() - crate::skater::DECK_HEIGHT).max(0.0);
             }
-            self.skater.graph = Some(control);
+            self.skater.graph = control;
             self.times.graph_us = g.cost_us;
             if self.log.len() < LOG_CAP {
                 if let Some(state) = g.state_change() {
@@ -1348,10 +1352,8 @@ impl Game {
         self.score = libm::roundf(self.scoring.total()) as u32;
         let off_clips = self.graph.is_some()
             && (self.skater.walking()
-                || self
-                    .skater
-                    .graph
-                    .is_some_and(|c| c.mounting || c.dismounting));
+                || self.skater.graph.mounting
+                || self.skater.graph.dismounting);
         let step = dt / FOOT_ORIGIN_BLEND;
         self.foot_origin =
             (self.foot_origin + if off_clips { step } else { -step }).clamp(0.0, 1.0);
@@ -1494,7 +1496,59 @@ impl Game {
         self.drawn_base().pos
     }
 
+    /// Checks the player's disc data is all there: the skater (`skater.fgpak`), Skate 3's state graphs
+    /// (`motion.fgpak`) and its rules (`rules.fgpak`: tuning, gestures, camera). The platforms call it
+    /// once their packs are loaded; without any of them the game has nothing to play and only shows how
+    /// to run the importer ([`Game::missing`]). Returns whether everything is there.
+    pub fn require_disc_data(&mut self) -> bool {
+        let mut missing = Vec::new();
+        if self.rider.is_none() {
+            missing.push("SKATER");
+        }
+        if self.graph.is_none() {
+            missing.push("MOTION");
+        }
+        if self.gesture_sets.is_empty() || self.cam.data.graph.is_none() {
+            missing.push("RULES");
+        }
+        self.missing = (!missing.is_empty()).then(|| missing.join(" "));
+        self.missing.is_none()
+    }
+
+    /// The screen without the disc data: what to run, and what is missing.
+    fn render_missing(&self, gfx: &mut dyn Gfx, missing: &str) {
+        let cam = self.cam.camera();
+        gfx.begin_frame(&cam, rgb(0, 0, 0));
+        let mut m = MeshBuilder::new();
+        m.rect_2d(0.0, 0.0, SCREEN_W, SCREEN_H, rgb(0, 0, 0));
+        let cx = SCREEN_W / 2.0;
+        let white = rgb(255, 255, 255);
+        hud::text_centered(&mut m, cx, 120.0, 4.0, "NO SKATE 3 DATA", rgb(255, 230, 90));
+        let lines = [
+            "FLATGROUND PLAYS WITH DATA FROM",
+            "YOUR OWN SKATE 3 DISC.",
+            "",
+            "PUT AN ISO OF YOUR DISC NEXT TO BUILD.BAT",
+            "AND RUN IT, OR RUN THE IMPORTER: TOOLS/IMPORT.",
+            "THEN COPY DIST/APPS/FLATGROUND TO THE SD CARD.",
+            "SEE DOCS/IMPORTING.MD.",
+            "",
+            "START: BACK TO THE LOADER",
+        ];
+        for (i, l) in lines.iter().enumerate() {
+            hud::text_centered(&mut m, cx, 190.0 + i as f32 * 24.0, 2.0, l, white);
+        }
+        let what = format!("MISSING: {missing}");
+        hud::text_centered(&mut m, cx, 360.0, 2.0, &what, rgb(255, 120, 100));
+        gfx.draw_2d(&m.verts);
+        gfx.end_frame();
+    }
+
     pub fn render(&self, gfx: &mut dyn Gfx) {
+        if let Some(missing) = &self.missing {
+            self.render_missing(gfx, missing);
+            return;
+        }
         let now = || self.timer.map_or(0, |f| f());
         let t0 = now();
         let cam = self.shown_camera();
@@ -1559,12 +1613,7 @@ impl Game {
     /// the board unless the rider's clip does it).
     fn skater_base(&self) -> Xform {
         let s = &self.skater;
-        let clip_turns = self.rider.as_ref().is_some_and(|r| r.turns_board());
-        let extra = if clip_turns {
-            0.0
-        } else {
-            s.board_yaw_offset()
-        };
+        let extra = s.board_yaw_offset();
         // The board's own frame (its nose and the surface, or its up in the air), turned about its up by
         // a powerslide or revert.
         let frame = s.board_frame();
@@ -1647,7 +1696,7 @@ impl Game {
         }
         // The clips move the board (what Skate 3's GroundAnimation state follows).
         match s.state() {
-            _ if s.rolling() && !s.graph.is_some_and(|g| g.board_animated) => {}
+            _ if s.rolling() && !s.graph.board_animated => {}
             _ if s.rolling() || s.is_airborne() || s.grinding() => return self.board_align,
             _ => return 0.0,
         }
@@ -2350,11 +2399,12 @@ mod tests {
         }
         let mut g = Game::new();
         g.timer = Some(fake_clock);
-        let mut run = crate::autoplay::KickerRun::new();
+        g.skater.speed = 4.0;
         let mut gfx = Null;
-        for _ in 0..300 {
-            let pad = run.next(&g);
-            g.update(&pad, 1.0 / 60.0);
+        for i in 0..300 {
+            // A synthetic state graph pops an ollie a second in.
+            g.skater.graph.pop = (i == 60).then_some((crate::gesture::Flick::OLLIE, 1.0));
+            g.update(&PadRaw::default(), 1.0 / 60.0);
             g.render(&mut gfx);
         }
         assert!(g.log.iter().any(|l| l.starts_with("pop: ")), "{:?}", g.log);
@@ -2430,6 +2480,7 @@ mod tests {
     #[test]
     fn pal50_draws_between_the_last_two_ticks() {
         let mut g = Game::new();
+        g.skater.speed = 3.0;
         let mut seen_between = false;
         for _ in 0..50 {
             let before = g.skater.pos;
@@ -2446,16 +2497,6 @@ mod tests {
             }
         }
         assert!(seen_between);
-        // A press seen on a two-tick frame is one press, not two.
-        let mut g = Game::new();
-        g.update(&held(0), 1.0 / 50.0);
-        let mut pushes = 0;
-        for i in 0..5 {
-            let b = if i == 0 { crate::input::btn::A } else { 0 };
-            g.update(&held(b), 1.0 / 50.0);
-            pushes += g.skater.push.is_some() as u32;
-        }
-        assert!(pushes >= 1);
     }
 
     /// Keeps the 2D vertices drawn.

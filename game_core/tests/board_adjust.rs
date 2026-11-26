@@ -255,7 +255,7 @@ fn imported_the_c_stick_in_the_air_plays_skate_3s_board_adjust() {
             }
             let state = g.graph.as_ref().unwrap().runner.motion_state();
             entered |= state.starts_with(&format!("OnBoard/InAir/BoardAdjusts/{way}"));
-            adjusting |= g.skater.graph.is_some_and(|c| c.board_adjust);
+            adjusting |= g.skater.graph.board_adjust;
             let a = g.skater.deck_adjust;
             if a.yaw.abs() + a.pitch.abs() > most.yaw.abs() + most.pitch.abs() {
                 most = a;

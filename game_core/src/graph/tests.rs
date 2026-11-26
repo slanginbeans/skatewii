@@ -515,7 +515,7 @@ mod runner {
         use crate::input::{Pad, btn};
         let bytes = graphs();
         let pack = Pack::parse(&bytes).unwrap();
-        let mut input = Intentions::new(&pack, vec![("skater", crate::gesture::built_in())]);
+        let mut input = Intentions::new(&pack, vec![("skater", crate::gesture::tests::built_in())]);
         let mut r = Runner::new(Pack::parse(&bytes).unwrap(), None).unwrap();
         let mut rec = Vec::new();
         let pad = Pad {

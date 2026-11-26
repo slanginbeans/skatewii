@@ -5,7 +5,7 @@
 //! components zeroed as in Skate 3) and runs the [`Recognizer`]. What the gesture *does* (which trick,
 //! mirrored for the stance, fitted to a manual) is up to the skater.
 
-use crate::gesture::{self, Flick, Recognizer, Shape};
+use crate::gesture::{Flick, Recognizer, Shape};
 use crate::math::sqrtf;
 
 /// Components smaller than this are zeroed before matching.
@@ -46,10 +46,10 @@ impl Default for FlickInput {
 }
 
 impl FlickInput {
-    /// With flatground's built-in shapes.
+    /// With no shapes yet (the rules pack's come with [`FlickInput::with_shapes`]).
     pub fn new() -> FlickInput {
         FlickInput {
-            rec: Recognizer::new(gesture::built_in()),
+            rec: Recognizer::new(alloc::vec::Vec::new()),
             hold_candidate: false,
             from_disc: false,
         }
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn pull_back_then_flick_forward_is_an_ollie_and_crouches_first() {
-        let mut f = FlickInput::new();
+        let mut f = FlickInput::with_shapes(crate::gesture::tests::built_in());
         let mut crouched = false;
         let mut got = None;
         for s in [at(180.0); 8].into_iter().chain([[0.0, 0.0], at(0.0)]) {
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn a_held_kickflip_reports_holding() {
-        let mut f = FlickInput::new();
+        let mut f = FlickInput::with_shapes(crate::gesture::tests::built_in());
         let mut got = None;
         let mut held = false;
         for (i, s) in [at(180.0); 6].into_iter().chain([at(50.0); 6]).enumerate() {

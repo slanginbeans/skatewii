@@ -610,14 +610,11 @@ pub extern "C" fn fg_rust_init() {
                 "DISC".into()
             }
             Err(e) => {
-                log(
-                    true,
-                    &format!("rules: unreadable ({e:?}), built-in values used"),
-                );
+                log(true, &format!("rules: unreadable ({e:?})"));
                 "UNREADABLE".into()
             }
         },
-        None => "BUILT-IN".into(),
+        None => "NONE".into(),
     };
     let t = &game.tuning;
     log(
@@ -633,17 +630,17 @@ pub extern "C" fn fg_rust_init() {
             if game.camera().data.shots.imported {
                 "disc"
             } else {
-                "built-in"
+                "none"
             },
             if game.camera().data.graph.is_some() {
                 "Skate 3's camera graph"
             } else {
-                "built-in shot choice"
+                "no camera graph"
             },
             game.camera().aspect
         ),
     );
-    // Without a pack (or with one that doesn't parse) the placeholder stays; say which.
+    // Without a pack (or with one that doesn't parse) there is no skater; say which.
     let skater: String = match load_first("skater", SKATER_PACKS) {
         Some(pack) => match game.load_skater(pack) {
             Ok(()) => {
@@ -666,7 +663,7 @@ pub extern "C" fn fg_rust_init() {
                 format!("UNREADABLE: {}", error_text(e))
             }
         },
-        None => "PLACEHOLDER".into(),
+        None => "NONE".into(),
     };
     // The locations, and the one to start in: the last one chosen, else the build's default (autoplay: the
     // default always).
@@ -813,7 +810,19 @@ pub extern "C" fn fg_rust_init() {
     log(true, &format!("ready: {notice}, stance {:?}", game.stance));
     game.notice = Some(notice);
     game.frame_cost = Some(FrameCost::default());
-    if let Some(a) = autoplay {
+    // Without the player's disc data there is nothing to play: the game shows how to import it.
+    if !game.require_disc_data() {
+        log(
+            true,
+            &format!(
+                "no disc data (missing: {}): showing the import screen",
+                game.missing.as_deref().unwrap_or("")
+            ),
+        );
+        if let Some(a) = autoplay {
+            unsafe { unload(a) };
+        }
+    } else if let Some(a) = autoplay {
         let every = places.tour.as_ref().map_or(String::new(), |_| {
             format!(
                 ", every location in turn ({})",

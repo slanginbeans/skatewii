@@ -847,13 +847,9 @@ impl super::Skater {
     pub(super) fn update_handplant(
         &mut self,
         park: &dyn Terrain,
-        pad: &crate::input::Pad,
         events: &mut alloc::vec::Vec<super::Event>,
     ) -> bool {
-        let grab = match self.graph {
-            Some(g) => g.grab_world,
-            None => pad.is_held(crate::input::btn::Z),
-        };
+        let grab = self.graph.grab_world;
         if !grab || self.manual.is_some() || self.slide.is_some() || self.ground_plant.is_some() {
             if self.handplant.found {
                 self.handplant = Manager::default();
@@ -870,13 +866,11 @@ impl super::Skater {
             heading: self.fwd,
             side: up.cross(self.fwd).normalize_or(Vec3::ZERO),
             gravity: t.gravity,
-            anim_committed: self
-                .graph
-                .map_or(self.handplant.found, |g| g.handplant_committed),
+            anim_committed: self.graph.handplant_committed,
         };
         self.handplant.query(&t.handplant, park.rails(), &g);
         let m = self.handplant;
-        if !(m.found && m.committed && self.graph.is_none_or(|g| g.handplant_committed)) {
+        if !(m.found && m.committed && self.graph.handplant_committed) {
             return false;
         }
         let Some(p) = Plant::start(
@@ -892,8 +886,6 @@ impl super::Skater {
         };
         self.take_off(None);
         self.hand_plant = Some(p);
-        self.hand_plant_tweak = [0.0; 2];
-        self.hand_plant_feet = Feet::Both;
         self.hand_plant_name = None;
         events.push(super::Event::HandPlanted);
         true
@@ -903,48 +895,17 @@ impl super::Skater {
     /// over the hand; once the hand lets go, scored and on into the fall back into the ramp.
     pub(super) fn in_hand_plant(
         &mut self,
-        pad: &crate::input::Pad,
         time: f32,
         dt: f32,
         events: &mut alloc::vec::Vec<super::Event>,
     ) {
-        use crate::input::btn;
         let Some(mut p) = self.hand_plant else {
             return;
         };
         let t = self.tuning.handplant;
         let (com, frame, released) = p.step(&t);
-        match self.graph {
-            Some(g) => {
-                if g.handplant_name.is_some() {
-                    self.hand_plant_name = g.handplant_name;
-                }
-            }
-            None => {
-                // The C-stick tweaks it; a push button held is a one-foot plant (Skate 3's
-                // `HandPlantOneFootRight` on A and `Left` on X, here B: the front foot is the left
-                // one's for a regular rider), X (Skate 3's B) the no-foot plant. The first held stays.
-                if pad.flick != [0.0, 0.0] {
-                    self.hand_plant_tweak = pad.flick;
-                }
-                if self.hand_plant_feet == Feet::Both {
-                    let goofy = (self.stance == super::Stance::Goofy) != self.switch;
-                    let (front, back) = if goofy {
-                        (btn::A, btn::B)
-                    } else {
-                        (btn::B, btn::A)
-                    };
-                    self.hand_plant_feet = if pad.is_held(btn::X) {
-                        Feet::None
-                    } else if pad.is_held(front) {
-                        Feet::OneFront
-                    } else if pad.is_held(back) {
-                        Feet::OneBack
-                    } else {
-                        Feet::Both
-                    };
-                }
-            }
+        if self.graph.handplant_name.is_some() {
+            self.hand_plant_name = self.graph.handplant_name;
         }
         self.normal = frame.up;
         self.fwd = frame.fwd;
@@ -955,7 +916,7 @@ impl super::Skater {
         if released {
             let name = self
                 .hand_plant_name
-                .unwrap_or_else(|| name(p.frontside, self.hand_plant_tweak, self.hand_plant_feet));
+                .unwrap_or_else(|| name(p.frontside, [0.0; 2], Feet::Both));
             events.push(super::Event::Landed {
                 name: display(name),
                 points: 0,

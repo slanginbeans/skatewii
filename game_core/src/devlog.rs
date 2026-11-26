@@ -265,8 +265,11 @@ impl DevLog {
             && self.frames.is_multiple_of(15)
         {
             out.push(format!(
-                "manual: balance {:+.2}, C-stick y {:+.2} (hold {:.2}..{:.2}, balanced near {:.2}), brake {:.2}",
-                m.balance, flick.stick[1], 0.1, 0.9, crate::skater::MANUAL_BALANCED_AT, m.brake
+                "manual: balance {:+.2}, C-stick y {:+.2}, pitch {:.1} deg, brake {:.2}",
+                m.balance,
+                flick.stick[1],
+                m.pitch.to_degrees(),
+                m.brake
             ));
         }
         let manual = s.manual.is_some();

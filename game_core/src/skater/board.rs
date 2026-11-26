@@ -784,7 +784,7 @@ impl Skater {
         // The rider's frame: his heading square to his up.
         let right = up.cross(r.heading() * turn).normalize_or(axis);
         let heading = right.cross(up).normalize_or(r.heading() * turn);
-        let posed = self.graph.and_then(|g| g.pose_deck).unwrap_or(Vec3 {
+        let posed = self.graph.pose_deck.unwrap_or(Vec3 {
             x: 0.0,
             y: 0.0,
             z: 1.0,
@@ -866,7 +866,6 @@ impl Skater {
             from_air,
         });
         self.manual = None;
-        self.push = None;
         self.brake = None;
         self.slide = None;
     }

@@ -258,7 +258,7 @@ impl SubjectHistory {
             wipe_tweak: s.wipeout.profile as u32,
             off_board: s.running_out() || s.walking() || s.hippie_air(),
             air_off_board: s.walking() && s.biped.air.is_some(),
-            pushing: s.push.is_some(),
+            pushing: s.graph.pushing,
             at_pushable_speed: s.speed.abs() < s.tuning.push_max_speed,
             pumping: if s.pump.time > 0.0 && s.pump.turn_rate > 0.0 {
                 s.pump.effect * 60.0
@@ -272,7 +272,7 @@ impl SubjectHistory {
             manual: s.manual.is_some(),
             // Skate 3: the playing clips' `Anticipating` attribute (the ollie wind-up); without the
             // graphs, a crouch.
-            preparing: s.rolling() && s.graph.map_or(s.crouch > 0.35, |g| g.anticipating),
+            preparing: s.rolling() && s.graph.anticipating,
             onboard_air: airborne && !s.hippie_air(),
             hippy: s.hippie_air(),
             ledge_left,

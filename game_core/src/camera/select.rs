@@ -1,6 +1,6 @@
 //! Which shot: Skate 3's own camera graph (`Default_cameragraph`, its low camera) run on the state-graph
-//! runner (`crate::graph`) when the player's disc supplied it (`fg_import rules`: `rules/camera/graph`),
-//! else flatground's own choice ([`built_in`]).
+//! runner (`crate::graph`), from the player's disc (`fg_import rules`: `rules/camera/graph`). The unit
+//! tests stand in for it with a simple choice (`built_in`, test builds only).
 //!
 //! The graph's conditions are the camera's own (SK8-ENGINE/skate-3-rust-engine, GPL-3.0,
 //! crates/skate-game/src/camera/graph_conditions.rs): what the skater does (wiping out, off the board,
@@ -18,7 +18,9 @@ use alloc::vec::Vec;
 use crate::graph::ops::{Cmp, Num};
 use crate::graph::{Controller, Frame, Graph, Host, OP_BEHAVIOUR, OP_CONDITION, OpId, Pack};
 
-use super::shot::{ShotSet, name_hash};
+#[cfg(any(test, feature = "fixtures"))]
+use super::shot::ShotSet;
+use super::shot::name_hash;
 use super::slow_motion::{self, SlowMotion};
 use crate::tuning::CamTuning;
 
@@ -462,9 +464,10 @@ impl Host for CamHost<'_> {
     fn hook(&mut self, _op: OpId, _frame: &Frame) {}
 }
 
-/// flatground's stand-in for the graph's slow-motion state (without Skate 3's graph): the low camera's
+/// The unit tests' stand-in for the graph's slow-motion state (without Skate 3's graph): the low camera's
 /// `OnBoard/Air/MegaParkAirBugFix`, on the board in the air, not off a grind or re-entering a
 /// transition, with over 2 s of predicted air time (Skate 3's condition and threshold).
+#[cfg(any(test, feature = "fixtures"))]
 pub fn built_in_slow(c: &Conditions) -> bool {
     c.camera_type == LOW
         && !c.wiping_out
@@ -477,10 +480,11 @@ pub fn built_in_slow(c: &Conditions) -> bool {
         && c.air_time > 2.0
 }
 
-/// flatground's own shot choice (without Skate 3's graph): wipeouts and run-outs from high up, grinds
+/// The unit tests' shot choice (without Skate 3's graph): wipeouts and run-outs from high up, grinds
 /// beside the rail, small airs keep the shot, long airs pull back, manuals low, hard turns swing, else
 /// the riding shot; the high camera rides, grinds, manuals and flies on Skate 3's high shots' names.
 /// Thresholds are ours.
+#[cfg(any(test, feature = "fixtures"))]
 pub fn built_in(c: &Conditions, set: &ShotSet) -> Choice {
     let pick = |name: &str, tin: f32, tout: f32| Choice {
         name: String::from(if set.find(name).is_some() {

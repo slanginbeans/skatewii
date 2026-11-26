@@ -143,7 +143,6 @@ struct Prev {
     walk: bool,
     trick_caught: bool,
     push_contact: bool,
-    push_count: u32,
     phase: f32,
     biped_air: bool,
     board_ground: bool,
@@ -300,11 +299,7 @@ impl Director {
             grind: s.grinding(),
             walk: s.walking(),
             trick_caught: s.trick.as_ref().is_some_and(|t| t.progress() >= 1.0),
-            push_contact: match &s.graph {
-                Some(g) => g.push_contact,
-                None => s.push.is_some_and(|p| p.turning <= 0.0),
-            },
-            push_count: s.push.map_or(0, |p| p.count),
+            push_contact: s.graph.push_contact,
             phase: s.biped.phase,
             biped_air: s.biped.air.is_some(),
             board_ground: s.possession.board.on_ground,
@@ -432,8 +427,7 @@ impl Director {
         }
 
         // The pushing foot touching down.
-        if rolling && now.push_contact && (!prev.push_contact || now.push_count != prev.push_count)
-        {
+        if rolling && now.push_contact && !prev.push_contact {
             self.shot(bank, &ear, Cue::Step, at, level::PUSH, 0.0, 1.0);
         }
 

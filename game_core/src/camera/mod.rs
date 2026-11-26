@@ -21,9 +21,10 @@
 //! [`CameraMan::rate`]).
 //!
 //! Skate 3's shots, graph and shake samples come from the player's disc (`rules/camera/shots`,
-//! `rules/camera/graph`, `rules/camera/shake`); without them the camera uses flatground's own shots
-//! ([`ShotSet::built_in`]), choice and shake loop.
+//! `rules/camera/graph`, `rules/camera/shake`). The tests stand in for them (the `fixtures` feature, off
+//! in what ships) with synthetic shots, a simple choice and a sine shake loop (`builtin`).
 
+#[cfg(any(test, feature = "fixtures"))]
 pub mod builtin;
 pub mod frame;
 pub mod look;
@@ -64,11 +65,22 @@ pub struct CamData {
 }
 
 impl Default for CamData {
+    /// Nothing loaded yet (the rules pack brings the disc's; the unit tests their synthetic stand-ins).
     fn default() -> Self {
-        CamData {
+        #[cfg(any(test, feature = "fixtures"))]
+        return CamData {
             shots: ShotSet::built_in(),
             graph: None,
             shake: Samples::built_in(),
+        };
+        #[cfg(not(any(test, feature = "fixtures")))]
+        CamData {
+            shots: ShotSet {
+                defs: Vec::new(),
+                imported: false,
+            },
+            graph: None,
+            shake: Samples::still(),
         }
     }
 }
@@ -283,22 +295,20 @@ impl CameraMan {
                 self.rate = g.rate;
                 c
             }
+            // The unit tests' stand-in for the disc's graph.
+            #[cfg(any(test, feature = "fixtures"))]
             None => {
                 self.built_in_slow(dt);
                 alloc::vec![select::built_in(&self.conditions, &self.data.shots)]
             }
+            #[cfg(not(any(test, feature = "fixtures")))]
+            None => Vec::new(),
         };
         if reset {
             self.shots.instant = true;
         }
         for c in &choices {
             self.choose(c, &inputs);
-        }
-        if self.shots.current.is_none() {
-            self.choose(
-                &select::built_in(&self.conditions, &self.data.shots),
-                &inputs,
-            );
         }
 
         // The shot onto the rig.
@@ -443,7 +453,9 @@ impl CameraMan {
         }
     }
 
-    /// Without Skate 3's graph: its slow-motion state's condition, run as the graph would.
+    /// The unit tests' stand-in for Skate 3's graph: its slow-motion state's condition, run as the
+    /// graph would.
+    #[cfg(any(test, feature = "fixtures"))]
     fn built_in_slow(&mut self, dt: f32) {
         let on = select::built_in_slow(&self.conditions);
         match (&mut self.slow, on) {

@@ -7,3 +7,10 @@ publish.workspace = true
 
 [dependencies]
 libm = "0.2"
+
+[features]
+# Synthetic stand-ins the tests use for the player's disc data (the camera's shots and shot choice).
+# On for the workspace's own builds and tests; the Wii game and the tools turn it off, so nothing
+# built-in stands in for the disc in what ships.
+default = ["fixtures"]
+fixtures = []

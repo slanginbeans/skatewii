@@ -132,7 +132,7 @@ impl CarveOllie {
                 if rolling && s.speed < 4.5 && self.t % 30 < 10 {
                     pad.buttons |= btn::A;
                 }
-                if self.t > 100 && s.push.is_none() {
+                if self.t > 100 && !s.graph.pushing {
                     self.carve_at = self.t;
                     self.start_yaw = Some(s.travel_yaw());
                 }
@@ -921,30 +921,22 @@ impl TrickTour {
                 }
             }
             Tour::Revert => {
-                // Skate 3's revert gesture on the main stick (`SlideFs180`, with the state graphs) once
-                // riding again; without them a powerslide flick just after landing.
-                if game.graph.is_some() {
-                    // Fast enough that a stick to the side isn't a kick turn.
-                    if self.held == 0 && s.speed < 4.3 {
-                        pad.buttons |= btn::A;
-                    }
-                    let from = if self.held == 0
-                        && in_state("Turning/Idle")
-                        && s.speed > 4.1
-                        && self.t > 10
-                    {
+                // Skate 3's revert gesture on the main stick (`SlideFs180`) once riding again, fast
+                // enough that a stick to the side isn't a kick turn.
+                if self.held == 0 && s.speed < 4.3 {
+                    pad.buttons |= btn::A;
+                }
+                let from =
+                    if self.held == 0 && in_state("Turning/Idle") && s.speed > 4.1 && self.t > 10 {
                         self.held = self.t;
                         self.t
                     } else {
                         self.held
                     };
-                    if self.held > 0
-                        && let Some((x, y)) = self.replay(game, "skaterls", "SlideFs180", from)
-                    {
-                        (pad.stick_x, pad.stick_y) = (x, y);
-                    }
-                } else if self.t < 12 {
-                    (pad.stick_x, pad.stick_y) = (50, -87);
+                if self.held > 0
+                    && let Some((x, y)) = self.replay(game, "skaterls", "SlideFs180", from)
+                {
+                    (pad.stick_x, pad.stick_y) = (x, y);
                 }
                 if s.revert.is_some() || in_state("/Revert/") {
                     self.seen.revert = true;
@@ -1000,13 +992,12 @@ impl TrickTour {
                 }
             }
             Tour::FakieRide => {
-                // Rolling tail first: with the state graphs the rider turns round to switch on their own
-                // after a moment; without them a push does it.
-                let graphs = game.graph.is_some();
-                if (!graphs && self.t == 20) || (self.t > 120 && s.speed < 3.5 && self.t < 160) {
+                // Rolling tail first: the state graphs turn the rider round to switch on their own after
+                // a moment.
+                if self.t > 120 && s.speed < 3.5 && self.t < 160 {
                     pad.buttons |= btn::A;
                 }
-                if s.switch != self.switch_at_start && self.t <= 120 && graphs {
+                if s.switch != self.switch_at_start && self.t <= 120 {
                     self.seen.auto_switch = true;
                 }
                 if self.t > 180 {
@@ -1031,8 +1022,7 @@ impl TrickTour {
                 if let Some(t) = &s.trick {
                     self.seen.flips = self.seen.flips.max(t.flips);
                 }
-                // (flatground's own rules need more air than a flat-ground ollie for two flips.)
-                if self.seen.flips < 2 && game.graph.is_some() {
+                if self.seen.flips < 2 {
                     (pad.cstick_x, pad.cstick_y) =
                         flick_end(game, "Kickflip", s.mirrored(), UP_RIGHT);
                 }
@@ -1042,10 +1032,6 @@ impl TrickTour {
             }
             Tour::LateOllie => {
                 // Late flips are the state graphs' (InAir/Lateflip).
-                if game.graph.is_none() {
-                    next(self, Tour::Powerslide, sw);
-                    return pad;
-                }
                 if s.speed < 3.5 && self.t < 40 {
                     pad.buttons |= btn::A;
                 }
@@ -1137,8 +1123,7 @@ impl TrickTour {
                 // Load and pop once riding along it (the state graphs' wind-up takes a while longer):
                 // the landing prediction steers onto the ledge.
                 let along = (s.pos - r.start).dot(r.dir);
-                let from = if game.graph.is_some() { -2.0 } else { 0.5 };
-                if along > from || self.wind > 0 {
+                if along > -2.0 || self.wind > 0 {
                     (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, 10, &[UP]);
                 }
                 if !rolling {
@@ -1243,8 +1228,7 @@ impl TrickTour {
             }
             Tour::SlideAir => {
                 // A quarter turn in the air (the main stick for a moment): across the ledge's edge.
-                let turn = if game.graph.is_some() { 9 } else { 15 };
-                if self.t < turn && !s.grinding() {
+                if self.t < 9 && !s.grinding() {
                     pad.stick_x = 100;
                 }
                 if let Some(g) = &s.grind

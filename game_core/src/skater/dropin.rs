@@ -241,10 +241,7 @@ impl super::Skater {
         match d.phase {
             Phase::Into | Phase::Stand => {
                 if d.phase == Phase::Into {
-                    let stepped = match self.graph {
-                        Some(g) => g.drop_in_stand || d.time > d.into + 1.0,
-                        None => d.time >= d.into,
-                    };
+                    let stepped = self.graph.drop_in_stand || d.time > d.into + 1.0;
                     if stepped {
                         d.phase = Phase::Stand;
                         d.time = 0.0;
@@ -278,15 +275,10 @@ impl super::Skater {
                 self.drop_in = Some(d);
             }
             Phase::Out => {
-                let held = match self.graph {
-                    Some(g) => {
-                        if g.drop_in_grinding {
-                            d.locked += dt;
-                        }
-                        d.locked < LOCK_TIME && d.time < LOCK_LIMIT
-                    }
-                    None => d.time < OUT_TIME + LOCK_TIME,
-                };
+                if self.graph.drop_in_grinding {
+                    d.locked += dt;
+                }
+                let held = d.locked < LOCK_TIME && d.time < LOCK_LIMIT;
                 if held {
                     self.board_on_coping(&d);
                     self.drop_in = Some(d);

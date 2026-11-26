@@ -384,9 +384,7 @@ fn imported_a_trigger_in_on_a_rail_plays_skate_3s_grind_grab() {
         if let Some(gr) = g.skater.grind.as_ref().and_then(|x| x.grab) {
             grabs.push(gr.0);
         }
-        if let Some(c) = g.skater.graph {
-            min_height = min_height.max(c.grind_grab_min_height);
-        }
+        min_height = min_height.max(g.skater.graph.grind_grab_min_height);
         names.extend(g.events.iter().filter_map(|e| match e {
             Event::Landed { name, .. } => Some(name.clone()),
             _ => None,

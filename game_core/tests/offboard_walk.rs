@@ -13,6 +13,8 @@
 //!   catches its edge and hangs; B again pulls him up onto the top, where he walks on with the board
 //!   still in hand. A wall too high is not caught; the stock graphs wait while he holds the edge.
 
+mod common;
+
 use game_core::Game;
 use game_core::input::{PadRaw, btn, flag};
 use game_core::math::{Vec3, v3};
@@ -47,12 +49,16 @@ fn run(g: &mut Game, ticks: usize, stick: [i8; 2], buttons: u32) {
 fn on_foot(mut g: Game, pos: Vec3, heading: f32) -> Game {
     g.place_rider(pos, heading, 0.0);
     run(&mut g, 30, [0, 0], 0);
-    run(&mut g, 1, [0, 0], btn::Y);
-    for _ in 0..120 {
-        if g.skater.walking() {
-            break;
+    if g.graph.is_some() {
+        run(&mut g, 1, [0, 0], btn::Y);
+        for _ in 0..120 {
+            if g.skater.walking() {
+                break;
+            }
+            run(&mut g, 1, [0, 0], 0);
         }
-        run(&mut g, 1, [0, 0], 0);
+    } else {
+        common::get_off(&mut g);
     }
     assert!(g.skater.walking(), "Y gets off the board standing");
     run(&mut g, 60, [0, 0], 0);

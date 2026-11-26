@@ -103,33 +103,23 @@ impl DeckAdjust {
 }
 
 impl Skater {
-    /// The rider may line the deck up: no trick still turning the board, no grab or body flip (their
-    /// C-stick is a tweak), on the board (not a hippie jump or getting on in the air).
-    fn free_to_adjust(&self) -> bool {
-        self.trick.is_none_or(|t| t.progress() >= 1.0)
-            && self.grab.is_none()
-            && self.body_flip.is_none()
-            && !(self.takeoff.hippy || self.takeoff.mount)
-    }
-
-    /// One tick of board adjust in the air. With the state graphs the action graph decides (its
-    /// BoardAdjust behaviour publishing the C-stick, `GraphControl::board_adjust`) and the deck goes
-    /// where the clips pose it (`GraphControl::pose_deck`, the imported rider's last pose); without
-    /// them, where the C-stick asks at Skate 3's measured angles.
+    /// One tick of board adjust in the air. The action graph decides (its BoardAdjust behaviour
+    /// publishing the C-stick, `GraphControl::board_adjust`) and the deck goes where the clips pose it
+    /// (`GraphControl::pose_deck`, the imported rider's last pose).
     pub(super) fn update_deck_adjust(&mut self, pad: &Pad) {
         let t = self.tuning.adjust;
         let stick = DeckAdjust::target(&t, pad.flick, self.mirrored());
-        let target = match self.graph {
-            Some(g) if g.board_adjust => g
-                .pose_deck
-                .map_or(stick, |nose| DeckAdjust::from_pose(nose).towards(stick)),
+        let g = self.graph;
+        let target = if g.board_adjust {
+            g.pose_deck
+                .map_or(stick, |nose| DeckAdjust::from_pose(nose).towards(stick))
+        } else if g.adjust_posed {
             // Let go: the deck follows the clips back as they blend out, only ever back towards square.
-            Some(g) if g.adjust_posed => g.pose_deck.map_or(DeckAdjust::NONE, |nose| {
+            g.pose_deck.map_or(DeckAdjust::NONE, |nose| {
                 DeckAdjust::from_pose(nose).towards(self.deck_adjust)
-            }),
-            Some(_) => DeckAdjust::NONE,
-            None if self.free_to_adjust() => stick,
-            None => DeckAdjust::NONE,
+            })
+        } else {
+            DeckAdjust::NONE
         };
         self.deck_adjust.step(&t, target);
     }
