@@ -453,6 +453,10 @@ pub enum Beh {
     /// seeks to where the flight is (so it ends on landing) and its selection reads the flight's
     /// time and travel (`AnimTime`, `AnimTransX/Y/Z`, `CadenceStartPercent`).
     MatchAirTime,
+    /// MatchCadence (SK8 motion_offboard/cadence.rs, TU3 82BBA938/82BBAA00): its begin captures the
+    /// walker's step cadence and every update publishes it as `CadenceStartPercent` (the run and sprint
+    /// mount clips start in step from it).
+    MatchCadence,
     /// BodySpin (SK8 motion_spin.rs): the body spin channels (`IA_BODYSPIN_OLLIE_FS/BS`) over the air
     /// animation, their influence from the `BodySpin` intent.
     BodySpin,
@@ -870,7 +874,6 @@ const NOTHING: &[&str] = &[
     "EndGesture",
     "SetScoreAugmentation",
     "BipedCadence",
-    "MatchCadence",
     "ForcePhysics",
     "UpdateTimeSinceTeleport",
     "AirDismounting",
@@ -1134,6 +1137,7 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
         "ToggleBoard" => Beh::ToggleBoard,
         "LandOnBoard" => Beh::LandOnBoard,
         "MatchAirTime" => Beh::MatchAirTime,
+        "MatchCadence" => Beh::MatchCadence,
         // SK8 body_tweak.rs `Settings::parse`: the stock clips when an attribute is absent.
         "OffboardBodyTweakBlend" => Beh::OffboardBodyTweak(
             [

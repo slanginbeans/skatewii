@@ -571,3 +571,37 @@ fn imported_hippie_jump_winds_up_and_leaves_the_board_rolling() {
     assert_eq!(g.skater.mode, Mode::Rolling);
     assert!(path(&g).starts_with("OnBoard/"), "{}", path(&g));
 }
+
+/// With the player's imported data: Y gets on the board promptly standing, running and sprinting (the
+/// run and sprint mounts stalled until `TOGGLE_WAIT`: nothing set their `CadenceStartPercent`, Skate 3's
+/// MatchCadence, so they never exposed `OB_TRAJ`).
+#[test]
+fn imported_mounts_from_stand_run_and_sprint_get_on_promptly() {
+    let Some(dir) = data_dir() else {
+        eprintln!("offboard: no imported data (FG_DATA): skipped");
+        return;
+    };
+    for (what, stick, buttons) in [
+        ("stand", [0, 0], 0),
+        ("run", [0, 100], 0),
+        ("sprint", [0, 100], btn::A),
+    ] {
+        let mut g = imported(&dir);
+        g.place_rider(LANE, 0.0, 3.0);
+        run(&mut g, 30, [0, 0], 0);
+        run(&mut g, 1, [0, 0], btn::Y);
+        run(&mut g, 150, [0, 0], 0);
+        if g.skater.mode != Mode::Walk {
+            eprintln!("offboard: the motion pack has no off-board clips: skipped");
+            return;
+        }
+        g.skater.pos = LANE;
+        run(&mut g, 60, stick, buttons);
+        run(&mut g, 1, stick, buttons | btn::Y);
+        let on = (0..40).position(|_| {
+            run(&mut g, 1, stick, buttons);
+            g.skater.mode == Mode::Rolling
+        });
+        assert!(on.is_some(), "{what}: never got on");
+    }
+}

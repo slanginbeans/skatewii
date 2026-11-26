@@ -15,8 +15,13 @@
 //! - bones that change nothing are merged ([`MERGED`]: the hands into the forearms, the toes into the
 //!   feet, the neck into the head) or follow their targets ([`KINEMATIC`]: the skateboard root and the
 //!   two extra capsules, which no joint, drive or contact ties to another body);
-//! - the skeleton is solved only when its result can differ from the animated pose: in the air, or when
-//!   a bone can touch a wall or the board. Otherwise it follows the animated pose.
+//! - the skeleton is solved only when its result can differ from the animated pose: when a bone can
+//!   touch a wall or the board. Otherwise it follows the animated pose.
+//!
+//! In the air it follows the animated pose too, for now ([`RiderBody::solve_in_air`], off): Skate 3
+//! solves it there, but nothing in flatground reads the solved body yet (it isn't drawn and isn't coupled
+//! to the board), and the solve cost 2.8 to 6.2 ms a tick on the Wii, stuttering the air's frame pacing.
+//! The step that makes the game read it turns `solve_in_air` (and [`SOLVE_IN_AIR`]) back on.
 
 mod tables;
 pub use tables::{INITIAL_BONES, PHYS_BONES, STOCK_JOINTS};
@@ -690,9 +695,16 @@ const MATERIAL: [f32; 3] = [0.0, 0.0, 0.0];
 /// Contacts are looked for this far past touching (m), as the board's are.
 const MARGIN: f32 = 0.02;
 
+/// Whether a new body solves its skeleton in the air (Skate 3 does). Off until the game reads the
+/// solved body: it changes nothing visible and was the Wii's air stutter (see the module docs).
+pub const SOLVE_IN_AIR: bool = false;
+
 /// The rider's physical body.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RiderBody {
+    /// Solve the skeleton every tick in the air ([`SOLVE_IN_AIR`]); else it follows the animated pose
+    /// there unless a bone can touch a wall or the board.
+    pub solve_in_air: bool,
     /// The 26 bodies (merged and kinematic ones are placed from their hosts and targets).
     pub parts: [Body; PARTS],
     pub joints: [JointRecord; JOINTS],
@@ -770,6 +782,7 @@ impl RiderBody {
             feedback: Feedback::new(FeedbackSettings::STOCK),
             target: *pose,
             physical_board: Xform::IDENTITY,
+            solve_in_air: SOLVE_IN_AIR,
             solved: false,
             cost_us: 0,
             live: false,
@@ -1112,8 +1125,8 @@ impl RiderBody {
         found.clear();
         pairs.clear();
         self.candidates(park, board, input.board_contacts, &mut found, &mut pairs);
-        let solve =
-            input.airborne || Self::needs_solve(&found, input.ground, &self.feedback.settings);
+        let solve = (input.airborne && self.solve_in_air)
+            || Self::needs_solve(&found, input.ground, &self.feedback.settings);
         self.solved = solve;
         if !solve {
             for p in 0..PARTS {

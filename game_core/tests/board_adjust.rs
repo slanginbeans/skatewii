@@ -291,3 +291,57 @@ fn imported_the_c_stick_in_the_air_plays_skate_3s_board_adjust() {
         }
     }
 }
+
+/// An adjusted landing keeps its adjusted heading through the hand-back to the physical board: Skate
+/// 3's physical board flies hooked to the posed (adjusted) deck, so the board the ground state adopts
+/// on touching down is the adjusted one (it flew square to the body, and the tick after the landing
+/// the rider snapped back to it, undoing the adjust).
+#[test]
+fn an_adjusted_landing_keeps_its_heading_after_touching_down() {
+    let p = park(false);
+    for x in [0.5, -0.5] {
+        let mut s = Skater::spawn(&p);
+        s.since_spawn = 10.0;
+        s.speed = 5.0;
+        let mut ev = Vec::new();
+        // Rolling first: the rigid board is under the rider.
+        for _ in 0..10 {
+            s.step(&p, &Pad::default(), &FlickOut::default(), TICK, &mut ev);
+        }
+        let pop = FlickOut {
+            flick: Some(Flick::OLLIE),
+            strength: 1.0,
+            ..FlickOut::default()
+        };
+        s.step(&p, &Pad::default(), &pop, TICK, &mut ev);
+        assert!(s.is_airborne(), "popped");
+        let pad = Pad {
+            flick: [x, 0.0],
+            ..Pad::default()
+        };
+        for _ in 0..90 {
+            s.step(&p, &pad, &FlickOut::default(), TICK, &mut ev);
+            if !s.is_airborne() {
+                break;
+            }
+        }
+        assert!(!s.is_airborne(), "landed: {ev:?}");
+        let landed = atan2f(s.fwd.x, s.fwd.z);
+        assert!(
+            landed.abs() > 20.0 * PI / 180.0,
+            "stick {x}: adjusted {landed}"
+        );
+        // The wheels' grip straightens it a little a tick; no snap back to the body's heading.
+        let mut last = landed;
+        for i in 0..10 {
+            s.step(&p, &pad, &FlickOut::default(), TICK, &mut ev);
+            let yaw = atan2f(s.fwd.x, s.fwd.z);
+            assert!(
+                (yaw - last).abs() < 3.0 * PI / 180.0,
+                "stick {x}, tick {i}: {last} -> {yaw}"
+            );
+            last = yaw;
+        }
+        assert!(last.abs() > 20.0 * PI / 180.0, "stick {x}: {last}");
+    }
+}

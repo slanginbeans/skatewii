@@ -145,6 +145,7 @@ fn the_drives_hold_the_body_to_the_animated_pose() {
     let mut board = parked();
     let mut pose = standing(Vec3::ZERO);
     let mut body = RiderBody::new(&pose);
+    body.solve_in_air = true;
     let idle = BoardInput {
         wheel_friction: [pb::WHEEL_FRICTION[0], pb::WHEEL_FRICTION[1]],
         ..BoardInput::default()
@@ -249,6 +250,7 @@ fn rider_body_step_cost() {
     let mut board = Board::new(v3(0.0, DECK_HEIGHT, 0.0), &Mat3::IDENTITY);
     let pose = standing(v3(0.0, 0.0, -2.0));
     let mut body = RiderBody::new(&pose);
+    body.solve_in_air = true;
     let idle = BoardInput::default();
     let solved = input(pose, true);
     for _ in 0..60 {
@@ -276,4 +278,25 @@ fn rider_body_step_cost() {
         with - alone
     );
     assert!(with - alone < 150.0, "skeleton solve {} us", with - alone);
+}
+
+#[test]
+fn in_the_air_the_body_follows_the_pose_until_solving_there_is_turned_on() {
+    // Off for now (nothing reads the solved body; it was the Wii's air stutter): in the air on open
+    // ground the body is the animated pose.
+    let yard = Yard { wall: None };
+    let mut board = parked();
+    let pose = standing(Vec3::ZERO);
+    let mut body = RiderBody::new(&pose);
+    assert!(!body.solve_in_air);
+    let idle = BoardInput::default();
+    for _ in 0..5 {
+        board.step_with(&yard, &idle, Some((&mut body, &input(pose, true))));
+        assert!(!body.solved);
+    }
+    assert!(body.feedback.max_error < 1e-5);
+    // Turned back on, the air solves every tick as Skate 3 does.
+    body.solve_in_air = true;
+    board.step_with(&yard, &idle, Some((&mut body, &input(pose, true))));
+    assert!(body.solved);
 }

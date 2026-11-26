@@ -261,7 +261,8 @@ impl District {
             }
         }
 
-        // Parse one finished read, the nearest.
+        // Parse one finished read, the nearest (never dropped again in this call).
+        let mut parsed = None;
         if let Some(n) = (0..self.ready.len()).min_by(|&a, &b| {
             let d = |i: usize| {
                 let (x, z, _) = self.ready[i];
@@ -272,6 +273,7 @@ impl District {
         }) {
             let (x, z, data) = self.ready.swap_remove(n);
             self.add_cell(x, z, data);
+            parsed = Some((x, z));
         }
 
         // Start reads, nearest first.
@@ -289,29 +291,41 @@ impl District {
                 continue;
             }
             let must = d <= RIDE_RADIUS;
-            // Make room by dropping loaded cells that are farther than this one, farthest first.
-            while self.held() + bytes > self.budget {
-                let far = self
+            // Make room by dropping loaded cells farther than this one, farthest first, but only when
+            // that frees enough for it: dropping and then skipping it re-read the dropped cells next
+            // frame, over and over. Over the budget it is skipped, unless the rider is on it.
+            let held = self.held();
+            if held + bytes > self.budget {
+                let wd = {
+                    let (dx, dz) = (x as f32 - at.x, z as f32 - at.z);
+                    dx * dx + dz * dz
+                };
+                let mut far: Vec<(i32, i32, f32, u32)> = self
                     .cells
                     .iter()
-                    .enumerate()
-                    .map(|(i, c)| {
+                    .filter(|c| parsed != Some((c.x, c.z)))
+                    .map(|c| {
                         let (dx, dz) = (c.x as f32 - at.x, c.z as f32 - at.z);
-                        (i, dx * dx + dz * dz)
+                        (c.x, c.z, dx * dx + dz * dz, c.pack.len() as u32)
                     })
-                    .filter(|&(_, dd)| {
-                        let (dx, dz) = (x as f32 - at.x, z as f32 - at.z);
-                        dd > dx * dx + dz * dz
-                    })
-                    .max_by(|a, b| a.1.total_cmp(&b.1));
-                match far {
-                    Some((i, _)) => self.drop_cell(i),
-                    None => break,
+                    .filter(|&(_, _, dd, _)| dd > wd)
+                    .collect();
+                far.sort_by(|a, b| b.2.total_cmp(&a.2));
+                let mut freed = 0u32;
+                let mut n = 0;
+                while n < far.len() && held - freed + bytes > self.budget {
+                    freed += far[n].3;
+                    n += 1;
                 }
-            }
-            if self.held() + bytes > self.budget && !must {
-                // Nearest first: nothing farther fits either if this doesn't... unless it's smaller.
-                continue;
+                if held - freed + bytes <= self.budget {
+                    for &(cx, cz, _, _) in &far[..n] {
+                        if let Some(i) = self.cells.iter().position(|c| (c.x, c.z) == (cx, cz)) {
+                            self.drop_cell(i);
+                        }
+                    }
+                } else if !must {
+                    continue;
+                }
             }
             let path = format!("{}c_{x}_{z}.fgpak", self.dir);
             match self.reader.start(&path) {
@@ -693,6 +707,28 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("cell 350 50 could not be read"))
         );
+    }
+
+    /// At the budget, a nearer cell too big to fit even with the farther ones gone is skipped without
+    /// dropping them (they were dropped, the big one skipped anyway, and the dropped ones read back in
+    /// the next frame, over and over).
+    #[test]
+    fn a_district_at_its_budget_does_not_churn() {
+        let (mut d, r) = row(10);
+        let one = d.index.cells[0].bytes;
+        d.budget = one * 3;
+        // The cell at 650 (nearer than 350's, farther than the two the rider is between) is too big.
+        let big = d.index.cells.iter_mut().find(|c| c.x == 650).unwrap();
+        big.bytes = one * 2;
+        let at = v3(505.0, 4.0, 50.0);
+        for _ in 0..200 {
+            d.stream(at);
+            r.borrow_mut().service();
+        }
+        assert_eq!(loaded(&d), [350, 450, 550]);
+        assert!(d.held() <= d.budget);
+        let out = d.log.iter().filter(|l| l.contains(" out ")).count();
+        assert_eq!(out, 0, "{:?}", d.log);
     }
 
     #[test]

@@ -357,6 +357,11 @@ enum RidingInst {
     Spin(SpinChannels),
     Fade(GrindFade),
     AirLeg(AirLeg),
+    /// MatchAirTime: the cadence its begin captured and whether the next update is its first.
+    AirMatch {
+        cadence: f32,
+        first: bool,
+    },
 }
 
 /// ControlAirLegExtension's state (SK8 air_leg_extension.rs): its mode (0 to begin, 1 going up, 2
@@ -2174,12 +2179,21 @@ impl Host<'_, '_> {
                 }
             }
             Beh::MatchAirTime => match phase {
-                // Begin: the first update only publishes (SK8 skips its seek).
-                0 => self.set_riding(op, RidingInst::Value(1.0)),
+                // Begin (SK8 match_air_time.rs, 82BB9F48): captures the walker's cadence; the first
+                // update only publishes (SK8 skips its seek).
+                0 => self.set_riding(
+                    op,
+                    RidingInst::AirMatch {
+                        cadence: self.s.world.cadence,
+                        first: true,
+                    },
+                ),
                 1 => {
                     let w = self.s.world;
-                    let first =
-                        matches!(self.get_riding(op), Some(RidingInst::Value(v)) if v > 0.0);
+                    let (cadence, first) = match self.get_riding(op) {
+                        Some(RidingInst::AirMatch { cadence, first }) => (cadence, first),
+                        _ => (w.cadence, true),
+                    };
                     let (remaining, duration) = (w.air_remaining, w.air_duration);
                     if !first && duration > 0.0 {
                         let progress = (1.0 - remaining / duration).clamp(0.0, 1.0);
@@ -2199,13 +2213,33 @@ impl Host<'_, '_> {
                         .n
                         .air_match
                         .into_iter()
-                        .zip([0.0, duration, t[0], t[1], t[2]])
+                        .zip([cadence, duration, t[0], t[1], t[2]])
                     {
                         if let Some(n) = n {
                             self.s.player.set_param(n, v, false);
                         }
                     }
-                    self.set_riding(op, RidingInst::Value(0.0));
+                    self.set_riding(
+                        op,
+                        RidingInst::AirMatch {
+                            cadence,
+                            first: false,
+                        },
+                    );
+                }
+                _ => {}
+            },
+            // SK8 motion_offboard/cadence.rs (TU3 82BBA938 / 82BBAA00): begin captures the walker's
+            // step cadence; every update publishes it as `CadenceStartPercent` (the run and sprint
+            // mounts expose `OB_TRAJ` from it). End keeps the capture.
+            Beh::MatchCadence => match phase {
+                0 => self.set_riding(op, RidingInst::Value(self.s.world.cadence)),
+                1 => {
+                    if let (Some(RidingInst::Value(c)), Some(n)) =
+                        (self.get_riding(op), self.n.air_match[0])
+                    {
+                        self.s.player.set_param(n, c, false);
+                    }
                 }
                 _ => {}
             },
