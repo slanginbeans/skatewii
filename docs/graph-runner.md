@@ -1107,10 +1107,14 @@ they follow their targets. 18 bodies, 17 joints and 34 drives (with the hips' ta
 and 48.
 
 **Reduction 2: solve only when the result is read.** Riding on the ground with nothing but the ground near
-the bones, the body is the animated pose (followed, its velocities from the motion); it is solved in the
-air, and on the ground when a bone can touch something other than the ground under the riding (beyond
-`ground_plane_max_distance` 0.3 m or steeper than `ground_plane_max_angle` 0.8, the feedback's own ground
-filter). The contacts are still found every tick, so the flags stay SK8's.
+the bones, the body is the animated pose (followed, its velocities from the motion); it is solved when a
+bone can touch something other than the ground under the riding (beyond `ground_plane_max_distance` 0.3 m
+or steeper than `ground_plane_max_angle` 0.8, the feedback's own ground filter). The contacts are still
+found every tick, so the flags stay SK8's. Skate 3 also solves it every tick in the air; flatground
+follows the pose there too for now (`RiderBody::solve_in_air`, default `SOLVE_IN_AIR` = false): nothing
+reads the solved body yet (it isn't drawn or coupled to the board) and the air solve cost 2.8 to 6.2 ms a
+tick on the Wii, stuttering the air's frame pacing. The step that makes the game read the body turns it
+back on.
 
 SK8's traces: the probe with each reduction switched in (merge: the merged bones' joints locked and their
 drives removed; kinematic: the bodies snapped to their targets), against its own baseline. Largest
