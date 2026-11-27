@@ -3158,8 +3158,14 @@ impl Skater {
             _ => (n, point),
         };
         // (A wall the deck or a truck meets is the air's wall handling's, above, as the wheels' are.)
-        let body = (self.states.facts.deck || self.states.facts.trucks)
-            && (n.dot(self.normal) > 0.5 || n.y > 0.6);
+        let (deck, trucks) = self.rig.as_ref().map_or((false, false), |r| {
+            (r.board.deck_contact, r.board.truck_contact)
+        });
+        let body = (deck || trucks) && (n.dot(self.normal) > 0.5 || n.y > 0.6);
+        if body {
+            self.states.facts.deck = deck;
+            self.states.facts.trucks = trucks;
+        }
         if wheels > 0 || body {
             if wheels > 0 {
                 self.publish_wheels(wheels);

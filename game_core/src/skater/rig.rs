@@ -444,9 +444,12 @@ impl Skater {
             None => None,
         };
         rig.board.step_with(park, input, body);
-        // The deck's and trucks' contacts, for Skate 3's selector (its `colliding`).
-        self.states.facts.deck = rig.board.deck_contact;
-        self.states.facts.trucks = rig.board.truck_contact;
+        // The deck's and trucks' contacts on the ground, for Skate 3's selector (its `colliding`);
+        // in the air the touchdown publishes those it lands on.
+        if !airborne {
+            self.states.facts.deck = rig.board.deck_contact;
+            self.states.facts.trucks = rig.board.truck_contact;
+        }
         self.board_stepped = true;
         self.body_us = self.rider_body.as_ref().map_or(0, |b| b.cost_us);
         self.board_us = self
