@@ -905,14 +905,10 @@ impl Skater {
         // A foot on the ground or the pump's force resets the speed model: it starts again from the
         // speed the board comes out of this tick with (SK8 ordinary.rs `update_speed_model_reset`:
         // any push, brake or pump force sets `flags_1360`).
-        self.model_speed = if d.push_target.is_some()
-            || d.brake > 0.0
-            || d.manual_correction
-            || {
-                let force = pb::total_mass() * self.pump.dv / dt.max(1e-4);
-                force * force > SPEED_MODEL_RESET_FORCE_SQUARED
-            }
-        {
+        self.model_speed = if d.push_target.is_some() || d.brake > 0.0 || d.manual_correction || {
+            let force = pb::total_mass() * self.pump.dv / dt.max(1e-4);
+            force * force > SPEED_MODEL_RESET_FORCE_SQUARED
+        } {
             -1.0
         } else {
             self.ground_velocity().length()

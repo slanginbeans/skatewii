@@ -922,16 +922,23 @@ fn sweep(
     }
     // Only faces the sphere moves into, and not those it already overlaps where the chord starts
     // (a launch from the ground the sphere starts in).
-    let into = |tri: &[Vec3; 3], n: &Vec3| {
-        d.dot(*n) < 0.0 && (a - crate::physics::board::closest_on_triangle(a, tri).0).length() > r
+    // (Faces either way round: each one's normal turned to the side the sphere comes from.)
+    let facing = |tri: &[Vec3; 3], n: Vec3| {
+        let from = a - crate::physics::board::closest_on_triangle(a, tri).0;
+        let n = if from.dot(n) < 0.0 { -n } else { n };
+        (n, from.length() > r && d.dot(n) < 0.0)
     };
     let touch = |p: Vec3| {
         let mut best: Option<(f32, Vec3, Vec3)> = None;
-        for (tri, n) in near.iter().filter(|(tri, n)| into(tri, n)) {
+        for (tri, n) in near.iter() {
+            let (n, into) = facing(tri, *n);
+            if !into {
+                continue;
+            }
             let (q, _) = crate::physics::board::closest_on_triangle(p, tri);
             let dist = (p - q).length();
             if dist <= r && best.is_none_or(|b| dist < b.0) {
-                best = Some((dist, q, *n));
+                best = Some((dist, q, n));
             }
         }
         best.map(|b| (b.1, b.2))
@@ -971,9 +978,10 @@ fn averaged_normal(
     if !park.triangles_near(at, r, near) {
         return None;
     }
+    // (A face wound either way round faces back up the travel.)
     let accepted = || {
         near.iter()
-            .map(|(_, n)| *n)
+            .map(move |(_, n)| if n.dot(vel) > 0.0 { -*n } else { *n })
             .filter(move |n| n.y > 0.7 || n.dot(vel) <= 0.0)
     };
     let most_up = accepted().fold(None::<Vec3>, |b, n| match b {

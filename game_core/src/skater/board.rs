@@ -184,9 +184,9 @@ impl Skater {
     /// The rider's centre of mass over the board (m): the posed rider's, else Skate 3's Crouching on
     /// the stick's crouch (`anim_motion/crouching`), else the riding animation's highest at this speed.
     pub fn riding_com(&self) -> f32 {
-        self.body_com.or(self.crouch_com).unwrap_or_else(|| {
-            self.tuning.anim.crouch_max_height.eval(self.speed.abs())
-        })
+        self.body_com
+            .or(self.crouch_com)
+            .unwrap_or_else(|| self.tuning.anim.crouch_max_height.eval(self.speed.abs()))
     }
 
     /// One tick of riding on the ground, driven by `d`.
@@ -607,6 +607,11 @@ impl Skater {
         }
         self.vel = v;
         self.take_off(None);
+        if !jump && let Some(r) = &self.rig {
+            // Rolled off: the flight starts where the physical deck is, under the air's up (a board
+            // tipped over a lip would otherwise be put back over its wheels and jump up and back).
+            self.pos = r.board.deck().position - self.normal * super::DECK_HEIGHT;
+        }
         if !jump {
             // Rolled off: the selector's off-ground test takes it into the air, not a jump.
             self.states.facts.jumped = false;

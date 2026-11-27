@@ -1655,7 +1655,7 @@ impl Skater {
             self.select_state();
         }
         let flying = self.is_airborne();
-        self.step_mode(park, pad, flick, dt, events);
+        self.step_mode(park, pad, dt, events);
         // A jump off the ground launches the landing prediction on its tick (SK8's ground jump launches
         // the trajectory selector and its batch completes the same tick: an ollie goes from
         // GroundAnimation straight into KnownAir).
@@ -1764,14 +1764,7 @@ impl Skater {
         }
     }
 
-    fn step_mode(
-        &mut self,
-        park: &dyn Terrain,
-        pad: &Pad,
-        flick: &FlickOut,
-        dt: f32,
-        events: &mut Vec<Event>,
-    ) {
+    fn step_mode(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
         if self.drop_in.is_some() {
             self.step_drop_in(park, pad, dt, events);
             return;
@@ -1829,7 +1822,7 @@ impl Skater {
             }
             s if s.category() == 100 => {
                 if !self.update_handplant(park, events) {
-                    self.roll(park, pad, flick, dt, events)
+                    self.roll(park, pad, dt, events)
                 }
             }
             s if s.is_grind() => self.slide_rail(park, pad, dt, events),
@@ -2172,15 +2165,8 @@ impl Skater {
     }
 
     /// The rider's state on the ground (fakie, revert, powerslide, kick turn, steering, pushing, braking,
-    /// hippie jump, flicks), then the board's physics with what the rider does to it.
-    fn roll(
-        &mut self,
-        park: &dyn Terrain,
-        pad: &Pad,
-        flick: &FlickOut,
-        dt: f32,
-        events: &mut Vec<Event>,
-    ) {
+    /// hippie jump), then the board's physics with what the rider does to it.
+    fn roll(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
         let ticks = dt * 60.0;
         let tail_brake = self.update_manual(dt, events);
@@ -2802,13 +2788,6 @@ impl Skater {
         // smoothed, not the deck's: a board tipped over a lip leaves with the rider upright).
         self.normal = self.reckoning.up.normalize_or(self.normal);
         self.fwd = tangent(self.fwd, self.normal);
-        // Rolled off: the flight starts where the physical deck is, under that up (a board tipped
-        // over a lip would otherwise be put back over its wheels and jump up and back).
-        if f.is_none()
-            && let Some(r) = &self.rig
-        {
-            self.pos = r.board.deck().position - self.normal * DECK_HEIGHT;
-        }
     }
 
     /// The rider's centre of mass over the board's point (m, along the board's up).
@@ -3178,7 +3157,9 @@ impl Skater {
             Some(r) if wheels == 0 => (r.board.body_normal, r.board.deck().position),
             _ => (n, point),
         };
-        let body = self.states.facts.deck || self.states.facts.trucks;
+        // (A wall the deck or a truck meets is the air's wall handling's, above, as the wheels' are.)
+        let body = (self.states.facts.deck || self.states.facts.trucks)
+            && (n.dot(self.normal) > 0.5 || n.y > 0.6);
         if wheels > 0 || body {
             if wheels > 0 {
                 self.publish_wheels(wheels);
@@ -3709,10 +3690,11 @@ impl Skater {
         if self.takeoff.onto_free && !self.land_on_free_board(normal, events) {
             return;
         }
-        // The board lands as the rider lined it up (board adjust): its nose is the landing's. The
-        // physical board flew turned to the animated one (the clips' adjust, `fly_rig`): Skate 3
-        // lands that board, so its nose is the landing's.
-        self.bake_deck_adjust();
+        // Skate 3 lands the physical board as it comes down (it flew turned to the animated, adjusted
+        // or tweaked one by the hook): its nose is the landing's, and the rider's up stays his
+        // reckoning's (SK8 wipeout/air.rs reads the closing speed in the animation frame), not
+        // turned by the adjust.
+        self.deck_adjust = adjust::DeckAdjust::NONE;
         if self.body_flip.is_none()
             && let Some(r) = self.rig.as_ref().filter(|r| r.airborne)
         {
@@ -6175,9 +6157,10 @@ mod tests {
         let (flat, n, plan) = ollie_over(&drop_off(100.0));
         assert!(n.y > 0.99 && plan.is_some_and(|p| p.index == 0), "{plan:?}");
         assert!(flat.x.abs() < 0.01);
-        // A bank dropping away just beside the landing: the flight is nudged onto it.
-        let (at, n, plan) = ollie_over(&drop_off(0.3));
-        assert!(at.x > 0.3 && n.y < 0.95, "landed at {at:?} on {n:?}");
+        // A bank dropping away just beside the landing: the flight is nudged onto it (within the
+        // swept sphere's 0.2 m of where the middle flight lands, the edge itself would catch it).
+        let (at, n, plan) = ollie_over(&drop_off(0.2));
+        assert!(at.x > 0.2 && n.y < 0.95, "landed at {at:?} on {n:?}");
         assert!(plan.is_some_and(|p| p.index != 0), "{plan:?}");
         // Too far for the cone: it lands on the flat as it would have.
         let (at, n, _) = ollie_over(&drop_off(1.5));
