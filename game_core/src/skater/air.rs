@@ -322,13 +322,14 @@ pub struct Selector {
     /// How far the legs are expected to hold the deck over the flight's path (m) when it meets a rail.
     lift: f32,
     sphere: Vec3,
+    /// One flight, not the cone ([`Launch::cone`]).
+    single: bool,
     /// Ticks until the next query while no landing is known.
     pub countdown: u32,
     /// The last result's normal when it was too short to be a known landing.
     pub suggested: Option<Vec3>,
     /// Chords followed this tick (for the cost log) and in total.
     pub rays: usize,
-    pub dbg: alloc::vec::Vec<(u8, Vec3, Option<Contact>, f32)>,
 }
 
 /// What a launch needs to know.
@@ -350,6 +351,9 @@ pub struct Launch {
     /// From the flight's point to the swept sphere's centre (SK8 launch.rs `batch`: the query's
     /// origin, `TrajectoryDisplacement` under the rider's centre of mass).
     pub sphere: Vec3,
+    /// The cone of candidates round the launch velocity; else that flight alone (SK8 launch info's
+    /// `trajectory_count`: 7 after more than six ticks on the ground, else 1).
+    pub cone: bool,
 }
 
 impl Selector {
@@ -360,7 +364,6 @@ impl Selector {
     /// Starts a query: the cone of candidates round the launch velocity (first pass).
     pub fn launch(&mut self, t: &Tuning, l: Launch) {
         self.start = l.time;
-        self.dbg.clear();
         self.origin = l.pos;
         self.velocity = l.vel;
         self.ground = l.ground;
@@ -369,6 +372,7 @@ impl Selector {
         self.grind = l.grind;
         self.lift = l.lift;
         self.sphere = l.sphere;
+        self.single = !l.cone;
         let h = l.vel.horizontal();
         self.heading = h.normalize_or(Vec3::ZERO);
         self.max_time = max_time(l.vel, t);
@@ -377,7 +381,10 @@ impl Selector {
     }
 
     fn fill(&mut self, t: &Tuning, v: Vec3, cone_x: f32, cone_z: f32) {
-        let velocities = cone(v, cone_x, cone_z, t);
+        let mut velocities = cone(v, cone_x, cone_z, t);
+        if self.single {
+            velocities.truncate(1);
+        }
         self.count = velocities.len();
         for (i, slot) in self.cands.iter_mut().enumerate() {
             *slot = velocities.get(i).map(|&vel| Candidate {
@@ -475,9 +482,6 @@ impl Selector {
         }
         self.pending = false;
         self.score(t, park);
-        for c in self.cands.iter().take(self.count).flatten() {
-            self.dbg.push((self.pass, c.flight.vel, c.contact, c.score));
-        }
         let (index, best) = self
             .cands
             .iter()
@@ -1120,6 +1124,74 @@ pub fn wrap(a: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::math::v3;
+
+    /// A 10 m square of flat ground at y = 0.
+    fn floor() -> crate::collision::TriMesh {
+        let tris = [
+            ([[-5.0, 0.0, -5.0], [5.0, 0.0, -5.0], [5.0, 0.0, 5.0]], 0, 0),
+            ([[-5.0, 0.0, -5.0], [5.0, 0.0, 5.0], [-5.0, 0.0, 5.0]], 0, 0),
+        ];
+        crate::collision::TriMesh::parse(
+            &crate::collision::encode(&tris),
+            (v3(0.0, 0.0, -10.0), 0.0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_swept_sphere_touches_a_radius_off_and_skips_what_it_starts_in() {
+        // SK8 query.rs: a sphere of `TrajectoryRadius` swept along each chord of the flight.
+        let park = floor();
+        let mut near = alloc::vec::Vec::new();
+        let r = 0.2;
+        let (a, b) = (v3(0.0, 1.0, 0.0), v3(0.0, -1.0, 0.0));
+        let Sweep::Hit(f, point, n) = sweep(&park, a, b, r, &mut near) else {
+            panic!("the floor is met");
+        };
+        let centre = a + (b - a) * f;
+        assert!((centre.y - r).abs() < 0.02, "centre {centre:?}");
+        assert!(point.y.abs() < 1e-4 && n.y > 0.999, "{point:?} {n:?}");
+        // Starting within its radius of the floor (a launch off it), moving along or off it: no
+        // touch.
+        let low = v3(0.0, 0.1, 0.0);
+        assert!(matches!(
+            sweep(&park, low, low + v3(1.0, 0.0, 0.0), r, &mut near),
+            Sweep::Miss
+        ));
+        assert!(matches!(
+            sweep(&park, low, low + v3(0.0, 1.0, 0.0), r, &mut near),
+            Sweep::Miss
+        ));
+        // The landing normal averages the faces round the touch (both of the floor's: up).
+        let n = averaged_normal(&park, point, r, v3(0.0, -3.0, 1.0), &mut near).unwrap();
+        assert!(n.y > 0.999, "{n:?}");
+    }
+
+    #[test]
+    fn a_launch_soon_after_landing_follows_one_flight_not_the_cone() {
+        // SK8 launch info's `trajectory_count`: 7 candidates once more than six ticks have been
+        // spent on the ground (Processed2468 bit 13), else the launch velocity alone.
+        let t = Tuning::BUILT_IN;
+        let launch = |cone| Launch {
+            time: 0.0,
+            pos: v3(0.0, 0.0, 0.0),
+            vel: v3(0.0, 3.0, 5.0),
+            ground: Vec3::UP,
+            on_vert: false,
+            lean: 0.0,
+            grind: false,
+            lift: 0.0,
+            sphere: Vec3::ZERO,
+            cone,
+        };
+        let mut s = Selector::default();
+        s.launch(&t, launch(true));
+        assert_eq!(s.count, CANDIDATES);
+        let mut s = Selector::default();
+        s.launch(&t, launch(false));
+        assert_eq!(s.count, 1);
+        assert_eq!(s.cands[0].unwrap().flight.vel, v3(0.0, 3.0, 5.0));
+    }
 
     #[test]
     fn a_let_go_stick_keeps_spinning_and_decays() {
