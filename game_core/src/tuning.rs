@@ -397,6 +397,10 @@ pub struct Tuning {
     pub traj_radius: f32,
     /// How far under the rider's centre of mass the swept sphere's centre starts (m).
     pub traj_displacement: f32,
+    /// How much of `traj_displacement` is taken whatever the rider's height, against the board's
+    /// vertical speed / 10 m/s and against the ground normal's height (the larger counts).
+    pub traj_disp_vs_speed: Curve,
+    pub traj_disp_vs_ground: Curve,
     pub traj_error_start: f32,
     pub traj_error_end: f32,
     pub traj_cone_z: f32,
@@ -975,6 +979,8 @@ pub const PATHS: &[&str] = &[
     "physics_trajectory/default/TrajectoryMaxErrorEnd",
     "physics_reckoning/default/TrajectoryRadius",
     "physics_reckoning/default/TrajectoryDisplacement",
+    "physics_reckoning/default/TrajectoryDispVsSpeed",
+    "physics_reckoning/default/TrajectoryDispVsGroundNorm",
     "physics_trajectory/default/ScoreTransition",
     "physics_trajectory/default/ScoreSurface_Unrideable",
     "physics_trajectory/default/ScoreSurface_DontAlign",
@@ -1427,6 +1433,26 @@ impl Tuning {
         traj_cone_x: 12.0,
         traj_radius: 0.2,
         traj_displacement: 0.85,
+        traj_disp_vs_speed: Curve::new(&[
+            (0.0, 0.0),
+            (0.0489, 0.2973),
+            (0.2101, 0.4122),
+            (0.4463, 0.5304),
+            (0.5863, 0.6081),
+            (0.7264, 0.6959),
+            (0.8518, 0.7568),
+            (1.0, 0.7872),
+        ]),
+        traj_disp_vs_ground: Curve::new(&[
+            (0.0, 0.0),
+            (0.0489, 0.0),
+            (0.1091, 0.6689),
+            (0.1629, 0.8716),
+            (0.2280, 0.9662),
+            (0.3420, 1.0),
+            (0.4479, 1.0),
+            (1.0, 1.0),
+        ]),
         traj_error_start: 0.25,
         traj_error_end: 1.2,
         traj_cone_z: 35.0,
@@ -1781,6 +1807,10 @@ impl Tuning {
             "physics_reckoning/default/TrajectoryRadius" => scalar!(self.traj_radius),
             "physics_reckoning/default/TrajectoryDisplacement" => {
                 scalar!(self.traj_displacement)
+            }
+            "physics_reckoning/default/TrajectoryDispVsSpeed" => curve!(self.traj_disp_vs_speed),
+            "physics_reckoning/default/TrajectoryDispVsGroundNorm" => {
+                curve!(self.traj_disp_vs_ground)
             }
             "physics_trajectory/default/ScoreTransition" => scalar!(self.traj_score_transition),
             "physics_trajectory/default/ScoreSurface_Unrideable" => {

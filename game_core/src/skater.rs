@@ -648,6 +648,8 @@ pub struct Skater {
     ground_frames: u32,
     settled_on_ground: bool,
     pub plan: Option<Plan>,
+    /// A roll-off's launch, from the deck as its tick started (the flight's start and velocity).
+    launch_from: Option<(Vec3, Vec3)>,
     pub trick: Option<ActiveTrick>,
     /// Riding with the other foot forward (the drawn rider is mirrored).
     pub switch: bool,
@@ -907,6 +909,11 @@ pub struct GraphControl {
     /// `com_to_deck`): what a jump pops from and, in the air, how far the legs have tucked the board
     /// up. `None` without the imported rider.
     pub pose_com: Option<f32>,
+    /// The animated centre of mass from the posed board's centre in the rider's frame (x right, y up,
+    /// z ahead; m, the last pose): where SK8's animated skeleton has it from the physical deck
+    /// (`board_frames.centre_of_mass`, the trajectory query's `animation_com_position`). `None`
+    /// without the imported rider.
+    pub pose_com_at: Option<Vec3>,
     /// How far the posed board's centre is lifted off its riding height (m): the pop's tail strike
     /// pitches it up about its back wheels before the jump.
     pub pose_lift: f32,
@@ -1131,6 +1138,7 @@ impl Skater {
             ground_frames: 0,
             settled_on_ground: true,
             plan: None,
+            launch_from: None,
             trick: None,
             switch: false,
             frame_turned: false,
@@ -1670,6 +1678,11 @@ impl Skater {
         } else {
             self.ground_frames = 0;
         }
+        // The physical deck as the tick starts (what Skate 3's selector reads: the last tick's).
+        let deck_before = self
+            .rig
+            .as_ref()
+            .map(|r| (r.board.deck().position, r.board.deck().velocity));
         self.step_mode(park, pad, dt, events);
         // A jump off the ground launches the landing prediction on its tick (SK8's ground jump launches
         // the trajectory selector and its batch completes the same tick: an ollie goes from
@@ -1681,6 +1694,19 @@ impl Skater {
         // Skate 3's state selector picks the state from what the tick's movement published.
         if !early {
             self.select_state();
+        }
+        if !flying
+            && matches!(self.state(), State::PhysicsAir | State::KnownAir)
+            && self.plan.is_none()
+            && !self.selector.pending()
+            && let Some((deck, v)) = deck_before
+        {
+            // Rolled off: PhysicsAir launches the selector on its first tick (SK8 air_phase.rs),
+            // from what the last tick published (the board's velocity, +400, and the animated
+            // centre of mass), its flights one step on from there (launch.rs `batch`).
+            self.launch_from = Some((deck - self.normal * DECK_HEIGHT + v * dt, v));
+            self.update_prediction(park, self.air_time);
+            self.launch_from = None;
         }
         if self.rolling() {
             // The board's up is the ground's under it (what is drawn is the physical deck; Skate 3
@@ -2810,6 +2836,23 @@ impl Skater {
         DECK_HEIGHT + self.body_com.unwrap_or(air::COM_TO_DECK)
     }
 
+    /// The animated centre of mass from `pos` (SK8's animated skeleton's, `animation_com_position`):
+    /// the posed rider's from the deck in the rider's frame (the reckoning's up and heading, turned
+    /// end for end with the board's frame), else `com_height` up.
+    fn animated_com(&self) -> Vec3 {
+        let r = &self.reckoning;
+        let up = r.up.normalize_or(Vec3::UP);
+        let Some(c) = self.graph.pose_com_at else {
+            return up * self.com_height();
+        };
+        let turn = if self.frame_turned { -1.0 } else { 1.0 };
+        let right = up
+            .cross(r.heading() * turn)
+            .normalize_or(r.ground_right() * turn);
+        let heading = right.cross(up).normalize_or(r.heading() * turn);
+        up * DECK_HEIGHT + right * c.x + up * c.y + heading * c.z
+    }
+
     /// Skate 3's foot plants on the ground (`skater::plant`), timed by the graphs' clips: the board in
     /// hand while they carry `ANIMSKATEBOARD` (SK8's physical state 602), the jump off the planted foot
     /// on their `FOOTJUMP`. True: jumped off.
@@ -2942,15 +2985,22 @@ impl Skater {
                     &t,
                     air::Launch {
                         time: now,
-                        pos: self.pos,
-                        vel: self.vel,
+                        pos: self.launch_from.map_or(self.pos, |l| l.0),
+                        vel: self.launch_from.map_or(self.vel, |l| l.1),
                         ground: self.takeoff.ground.unwrap_or(Vec3::UP),
                         on_vert: self.takeoff.on_vert,
                         lean: self.takeoff.lean,
                         grind: self.jumper.cooldown == 0,
                         lift: self.air_com.map_or(0.0, |c0| (c0 - t.air_com_min).max(0.0)),
-                        sphere: self.reckoning.up.normalize_or(Vec3::UP)
-                            * (self.com_height() - t.traj_displacement),
+                        // SK8 launch.rs `batch`: from the animated centre of mass (its skeleton's,
+                        // over the physical deck).
+                        sphere: air::sphere_offset(
+                            &t,
+                            self.reckoning.up.normalize_or(Vec3::UP),
+                            self.animated_com(),
+                            self.takeoff.ground.unwrap_or(Vec3::UP),
+                            self.launch_from.map_or(self.vel, |l| l.1).y,
+                        ),
                         cone: self.settled_on_ground,
                     },
                 );
@@ -6287,9 +6337,9 @@ mod tests {
         let (flat, n, plan) = ollie_over(&drop_off(100.0));
         assert!(n.y > 0.99 && plan.is_some_and(|p| p.index == 0), "{plan:?}");
         assert!(flat.x.abs() < 0.01);
-        // A bank dropping away just beside the landing: the flight is nudged onto it (within the
-        // swept sphere's 0.2 m of where the middle flight lands, the edge itself would catch it).
-        let (at, n, plan) = ollie_over(&drop_off(0.2));
+        // A bank dropping away just beside the landing: the flight is nudged onto it (SK8's query
+        // finds the middle flight's touch on the flat's edge, a few centimetres from the bank).
+        let (at, n, plan) = ollie_over(&drop_off(0.05));
         assert!(at.x > 0.2 && n.y < 0.95, "landed at {at:?} on {n:?}");
         assert!(plan.is_some_and(|p| p.index != 0), "{plan:?}");
         // Too far for the cone: it lands on the flat as it would have.
@@ -6770,6 +6820,52 @@ mod tests {
             s.pump.deck_absorption
         );
         assert!((s.pump.ground_absorption - t.compression_deck_scale * want).abs() < 0.2);
+    }
+
+    #[test]
+    fn a_board_tipping_over_a_lip_compresses_the_rider_before_it_leaves() {
+        // SK8 ground_runtime/pumping.rs `deck_angle` on the toolkit's (physical) deck: rolling slowly
+        // off a ledge the deck tips nose down over its back wheels while the rider's up lags, and
+        // that compresses the crouch before the take-off (the drop-in's lip crouch).
+        let park = mesh(&[
+            [
+                [-5.0, 1.0, -20.0],
+                [5.0, 1.0, -20.0],
+                [5.0, 1.0, 0.0],
+                [-5.0, 1.0, 0.0],
+            ],
+            [
+                [-5.0, 1.0, 0.0],
+                [5.0, 1.0, 0.0],
+                [5.0, -2.0, 0.0],
+                [-5.0, -2.0, 0.0],
+            ],
+            [
+                [-5.0, -2.0, 0.0],
+                [5.0, -2.0, 0.0],
+                [5.0, -2.0, 20.0],
+                [-5.0, -2.0, 20.0],
+            ],
+        ]);
+        let mut s = spawn(&park);
+        place(&mut s, v3(0.0, 1.0, -1.5), Vec3::UP, v3(0.0, 0.0, 1.0));
+        s.speed = 1.3;
+        let mut ev = Vec::new();
+        let (mut flat, mut lip) = (0.0f32, 0.0f32);
+        for _ in 0..120 {
+            s.step(&park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
+            if ev.contains(&Event::Launched) || !s.rolling() {
+                break;
+            }
+            if s.pos.z < -0.6 {
+                flat = flat.max(s.pump.deck_absorption);
+            } else {
+                lip = lip.max(s.pump.deck_absorption);
+            }
+        }
+        assert!(flat < 1e-3, "on the flat: {flat}");
+        assert!(lip > 0.05, "over the lip: {lip}");
+        assert!(!s.rolling(), "it rolled off");
     }
 
     #[test]

@@ -169,23 +169,30 @@ pub(crate) const DECK_MATERIAL: [f32; 3] = [0.1, 0.1, 0.0];
 /// between the wheels.
 const TRUCK_RADIUS: f32 = 0.5375 * WHEEL_RADIUS;
 const TRUCK_SPHERE_SPACING: f32 = 0.06;
-/// The deck's volumes as spheres (centre in the deck's axes, radius), after SK8
-/// construction/deck_geometry.rs: its rounded box and side capsules (`DeckThickness` 0.015 thick,
-/// `DeckWidth` 0.24, `DeckMidLength` 0.59) along its middle and edges, the two 0.035 m spheres under
-/// it at 0.235 m (over the trucks' baseplates), and the kicked ends (`DeckBackEndSize` 0.165 at 12.5
-/// and 13 degrees).
-const DECK_SPHERES: [(Vec3, f32); 11] = [
-    (v3(0.0, 0.0, 0.0), 0.0075),
-    (v3(0.0, 0.0, 0.15), 0.0075),
-    (v3(0.0, 0.0, -0.15), 0.0075),
-    (v3(0.1125, 0.0, 0.0), 0.0075),
-    (v3(-0.1125, 0.0, 0.0), 0.0075),
-    (v3(0.0, 0.0, 0.295), 0.0075),
-    (v3(0.0, 0.0, -0.295), 0.0075),
-    (v3(0.0, -0.02, 0.235), 0.035),
-    (v3(0.0, -0.02, -0.235), 0.035),
-    (v3(0.0, 0.0335, 0.4447), 0.0075),
-    (v3(0.0, 0.0322, -0.4447), 0.0075),
+/// The deck's volumes (from, to in the deck's axes, radius: a sphere where they are one point, else
+/// a capsule), after SK8 construction/deck_geometry.rs: its rounded box and side capsules
+/// (`DeckThickness` 0.015 thick, `DeckWidth` 0.24, `DeckMidLength` 0.59) as spheres along its middle
+/// and edges, the two 0.035 m spheres under it at 0.235 m (over the trucks' baseplates), and the
+/// kicked ends (`DeckBackEndSize` 0.165 at 12.5 and 13 degrees) as capsules along them from just past
+/// the middle's end spheres to the tips: SK8's end fans are one surface, so a coping under a kicktail
+/// meets it wherever it is along it (as spheres, an edge between them went through).
+const DECK_SPHERES: [(Vec3, Vec3, f32); 11] = [
+    (v3(0.0, 0.0, 0.0), v3(0.0, 0.0, 0.0), 0.0075),
+    (v3(0.0, 0.0, 0.15), v3(0.0, 0.0, 0.15), 0.0075),
+    (v3(0.0, 0.0, -0.15), v3(0.0, 0.0, -0.15), 0.0075),
+    (v3(0.1125, 0.0, 0.0), v3(0.1125, 0.0, 0.0), 0.0075),
+    (v3(-0.1125, 0.0, 0.0), v3(-0.1125, 0.0, 0.0), 0.0075),
+    (v3(0.0, 0.0, 0.295), v3(0.0, 0.0, 0.295), 0.0075),
+    (v3(0.0, 0.0, -0.295), v3(0.0, 0.0, -0.295), 0.0075),
+    (v3(0.0, -0.02, 0.235), v3(0.0, -0.02, 0.235), 0.035),
+    (v3(0.0, -0.02, -0.235), v3(0.0, -0.02, -0.235), 0.035),
+    (KICK_START[0], v3(0.0, 0.0335, 0.4447), 0.0075),
+    (KICK_START[1], v3(0.0, 0.0322, -0.4447), 0.0075),
+];
+/// Where the kicktail capsules start: one deck radius past the middle's end spheres, on the kick.
+const KICK_START: [Vec3; 2] = [
+    v3(0.0, 0.0335 * 0.015 / 0.1497, 0.31),
+    v3(0.0, 0.0322 * 0.015 / 0.1497, -0.31),
 ];
 const BODY_SPHERES: usize = 6 + DECK_SPHERES.len();
 
@@ -198,7 +205,8 @@ pub(crate) fn board_spheres(parts: &[Body]) -> impl Iterator<Item = (usize, Vec3
             let z = [-TRUCK_SPHERE_SPACING, 0.0, TRUCK_SPHERE_SPACING][i % 3];
             (t, v3(0.0, 0.0, z), TRUCK_RADIUS)
         } else {
-            (DECK, DECK_SPHERES[i - 6].0, DECK_SPHERES[i - 6].1)
+            // (A kicktail as its tip.)
+            (DECK, DECK_SPHERES[i - 6].1, DECK_SPHERES[i - 6].2)
         };
         let b = &parts[part];
         (part, b.position + b.axes.apply(local), radius)
@@ -516,11 +524,34 @@ pub(crate) fn sphere_triangles(
     m: [f32; 3],
     min_up: f32,
 ) -> [Option<ContactInput>; 2] {
+    let swept = swept_box(c, radius, (c - was) * 60.0);
+    sphere_against(
+        tris, tris, swept, false, c, was, radius, reach, up, m, min_up,
+    )
+}
+
+/// [`sphere_triangles`] against `test` only, the fixup's neighbours from `tris`, triangles meeting
+/// the volume's swept box `swept`. `lead`: an edge or corner is met also as far off as the sphere
+/// closes on it this tick (a kicktail coming down onto a coping, which its tick's motion would
+/// otherwise take through).
+#[allow(clippy::too_many_arguments)]
+fn sphere_against(
+    tris: &[([Vec3; 3], Vec3)],
+    test: &[([Vec3; 3], Vec3)],
+    swept: (Vec3, Vec3),
+    lead: bool,
+    c: Vec3,
+    was: Vec3,
+    radius: f32,
+    reach: f32,
+    up: Vec3,
+    m: [f32; 3],
+    min_up: f32,
+) -> [Option<ContactInput>; 2] {
     const MAX: usize = 24;
     let mut cand: [Candidate; MAX] = [(0.0, Vec3::ZERO, [Vec3::ZERO; 3]); MAX];
     let mut count = 0;
-    let swept = swept_box(c, radius, (c - was) * 60.0);
-    for (t, n) in tris {
+    for (t, n) in test {
         // The box first: the same rejection, without the closest point.
         if !box_meets(swept, t) {
             continue;
@@ -547,7 +578,12 @@ pub(crate) fn sphere_triangles(
         let gap = if face || crossed { d.dot(side) } else { dist };
         // An edge or corner touches only within the sphere's own reach (no fall-speed lead: a fast
         // sphere's far edges are not what it meets).
-        if normal.dot(up) < min_up || (!face && !crossed && gap > radius + 0.02) {
+        let closing = if lead {
+            (was - c).dot(normal).max(0.0)
+        } else {
+            0.0
+        };
+        if normal.dot(up) < min_up || (!face && !crossed && gap > radius + 0.02 + closing) {
             continue;
         }
         let (gap, normal) = match fix_up(tris, t, *n, normal) {
@@ -603,6 +639,122 @@ pub(crate) fn sphere_triangles(
             dynamic_friction: m[1],
         })
     })
+}
+
+/// A capsule's contacts with the terrain's triangles (`a` to `b`, each with its velocity): each
+/// triangle meets the sphere at the capsule's point nearest it ([`sphere_triangles`] for that
+/// triangle), the two nearest distinct contacts kept.
+fn capsule_contacts(
+    world: &World,
+    a: (Vec3, Vec3),
+    b: (Vec3, Vec3),
+    radius: f32,
+    deck: &Body,
+    m: [f32; 3],
+) -> [Option<ContactInput>; 2] {
+    let Some(tris) = &world.tris else {
+        return [None; 2];
+    };
+    let up = deck.axes.cols[1];
+    let mut found: [Option<ContactInput>; 2] = [None; 2];
+    let gap = |c: &ContactInput| (c.point_a - c.point_b).dot(c.normal);
+    // The whole capsule's swept box (SK8's broadphase bounds its volume, `volume_query_bounds`).
+    let (ba, bb) = (swept_box(a.0, radius, a.1), swept_box(b.0, radius, b.1));
+    let swept = (
+        v3(ba.0.x.min(bb.0.x), ba.0.y.min(bb.0.y), ba.0.z.min(bb.0.z)),
+        v3(ba.1.x.max(bb.1.x), ba.1.y.max(bb.1.y), ba.1.z.max(bb.1.z)),
+    );
+    for tri in tris {
+        let s = segment_nearest_triangle(a.0, b.0, &tri.0);
+        let c = a.0 + (b.0 - a.0) * s;
+        let v = a.1 + (b.1 - a.1) * s;
+        let reach = radius + 0.02 + v.length() * super::STEP;
+        let one = core::slice::from_ref(tri);
+        let was = c - v * super::STEP;
+        for hit in sphere_against(tris, one, swept, true, c, was, radius, reach, up, m, -1.0)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(same) = found
+                .iter_mut()
+                .flatten()
+                .find(|f| f.normal.dot(hit.normal) > 0.999)
+            {
+                if gap(&hit) < gap(same) {
+                    *same = hit;
+                }
+                continue;
+            }
+            match found.iter_mut().find(|f| f.is_none()) {
+                Some(slot) => *slot = Some(hit),
+                None => {
+                    let worst = usize::from(gap(&found[0].unwrap()) <= gap(&found[1].unwrap()));
+                    if gap(&hit) < gap(&found[worst].unwrap()) {
+                        found[worst] = Some(hit);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Where along the segment `p`..`q` (0..1) it comes nearest triangle `t`: where it passes through
+/// it, else at an end or nearest one of its edges (Ericson, Real-Time Collision Detection 5.1.9).
+fn segment_nearest_triangle(p: Vec3, q: Vec3, t: &[Vec3; 3]) -> f32 {
+    let d = q - p;
+    if segment_crosses(t, p, q) {
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        let k = n.dot(d);
+        return if k.abs() > 1e-12 {
+            (n.dot(t[0] - p) / k).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+    let dist = |s: f32| {
+        let c = p + d * s;
+        (c - closest_on_triangle(c, t).0).length()
+    };
+    let mut best = (0.0, dist(0.0));
+    let mut consider = |s: f32| {
+        let l = dist(s);
+        if l < best.1 {
+            best = (s, l);
+        }
+    };
+    consider(1.0);
+    for e in 0..3 {
+        consider(segments_nearest(p, d, t[e], t[(e + 1) % 3] - t[e]));
+    }
+    best.0
+}
+
+/// Where along the first segment (`p` + s `d`, s in 0..1) it comes nearest the second (`q` + t `e`).
+fn segments_nearest(p: Vec3, d: Vec3, q: Vec3, e: Vec3) -> f32 {
+    let r = p - q;
+    let (a, ee, f) = (d.dot(d), e.dot(e), e.dot(r));
+    if a <= 1e-12 {
+        return 0.0;
+    }
+    let c = d.dot(r);
+    if ee <= 1e-12 {
+        return (-c / a).clamp(0.0, 1.0);
+    }
+    let b = d.dot(e);
+    let denom = a * ee - b * b;
+    let mut s = if denom > 1e-12 {
+        ((b * f - c * ee) / denom).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let t = (b * s + f) / ee;
+    if t < 0.0 {
+        s = (-c / a).clamp(0.0, 1.0);
+    } else if t > 1.0 {
+        s = ((b - c) / a).clamp(0.0, 1.0);
+    }
+    s
 }
 
 /// A sphere's contacts with the terrain (at most two): SK8 queries the triangles a sphere touches.
@@ -845,17 +997,28 @@ impl Board {
         let truck = combine(TRUCK_MATERIAL, FLOOR);
         let board = combine(DECK_MATERIAL, FLOOR);
         core::array::from_fn(|i| {
-            let (part, local, radius, m) = if i < 6 {
+            let (part, local, to, radius, m) = if i < 6 {
                 let t = if i < 3 { FRONT_TRUCK } else { BACK_TRUCK };
                 let z = [-TRUCK_SPHERE_SPACING, 0.0, TRUCK_SPHERE_SPACING][i % 3];
-                (t, v3(0.0, 0.0, z), TRUCK_RADIUS, truck)
+                (t, v3(0.0, 0.0, z), v3(0.0, 0.0, z), TRUCK_RADIUS, truck)
             } else {
-                (DECK, DECK_SPHERES[i - 6].0, DECK_SPHERES[i - 6].1, board)
+                let (a, b, r) = DECK_SPHERES[i - 6];
+                (DECK, a, b, r, board)
             };
             let body = &self.parts[part];
             let at = body.position + body.axes.apply(local);
             let v = body.point_velocity(at - body.position);
-            (part, sphere_contacts(world, at, radius, v, deck, m, -1.0))
+            let contacts = if to == local || world.tris.is_none() {
+                // (Without the terrain's triangles a kicktail is its tip.)
+                let at = body.position + body.axes.apply(to);
+                let v = body.point_velocity(at - body.position);
+                sphere_contacts(world, at, radius, v, deck, m, -1.0)
+            } else {
+                let end = body.position + body.axes.apply(to);
+                let v_end = body.point_velocity(end - body.position);
+                capsule_contacts(world, (at, v), (end, v_end), radius, deck, m)
+            };
+            (part, contacts)
         })
     }
 
@@ -1127,6 +1290,56 @@ pub(crate) mod tests {
     /// A triangle and its winding's unit normal.
     fn tri(a: Vec3, b: Vec3, c: Vec3) -> ([Vec3; 3], Vec3) {
         ([a, b, c], (b - a).cross(c - a).normalize_or(Vec3::ZERO))
+    }
+
+    /// A platform at y = 0 for x <= 0 with a vertical face down from its edge (a coping), along z.
+    fn coping() -> crate::collision::TriMesh {
+        let q = |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]| {
+            [([a, b, c], 0u16, 0u16), ([a, c, d], 0, 0)]
+        };
+        let mut tris = alloc::vec::Vec::new();
+        tris.extend(q(
+            [-2.0, 0.0, -2.0],
+            [-2.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, -2.0],
+        ));
+        tris.extend(q(
+            [0.0, 0.0, -2.0],
+            [0.0, 0.0, 2.0],
+            [0.0, -1.0, 2.0],
+            [0.0, -1.0, -2.0],
+        ));
+        crate::collision::TriMesh::parse(&crate::collision::encode(&tris), (Vec3::ZERO, 0.0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_kicktail_over_a_coping_meets_its_edge_between_the_ends() {
+        // SK8's kicked ends are one surface (deck_geometry.rs end fans): a coping edge under the
+        // tail, between its root and its tip, is met there, its normal out over the face.
+        let park = coping();
+        // Nose along +x, level: the tail's point 0.38 m back from the centre over the edge.
+        let axes = Mat3::from_cols(v3(0.0, 0.0, -1.0), Vec3::UP, v3(1.0, 0.0, 0.0));
+        let along = 0.38;
+        let lift = 0.0322 * (along - 0.295) / 0.1497;
+        // Its underside 4 mm into the edge.
+        let deck = v3(along, -lift + 0.0075 - 0.004, 0.0);
+        let mut b = Board::new(deck, &axes);
+        b.place(deck, &axes, Vec3::ZERO, Vec3::ZERO);
+        let world = World::near(&park, deck, 0.6);
+        let found: alloc::vec::Vec<ContactInput> = b
+            .body_contacts(&world)
+            .iter()
+            .filter(|(part, _)| *part == DECK)
+            .flat_map(|(_, cs)| cs.iter().flatten().copied())
+            .collect();
+        assert!(
+            found
+                .iter()
+                .any(|c| c.normal.x > 0.2 && c.normal.y > 0.2 && c.point_b.x.abs() < 0.01),
+            "{found:?}"
+        );
     }
 
     #[test]

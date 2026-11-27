@@ -251,8 +251,7 @@ pub struct GrindTarget {
 struct Candidate {
     flight: Flight,
     grind: Option<GrindTarget>,
-    /// How far it has been followed (s), and whether it is done.
-    followed: f32,
+    /// It has been followed.
     done: bool,
     contact: Option<Contact>,
     /// What the board aligns to there (the contact's normal, or up for walls and surfaces the board
@@ -394,7 +393,6 @@ impl Selector {
                     gravity: t.gravity,
                 },
                 grind: None,
-                followed: 0.0,
                 done: false,
                 contact: None,
                 normal: Vec3::UP,
@@ -413,72 +411,20 @@ impl Selector {
         if !self.pending {
             return None;
         }
-        // SK8 query.rs: each flight is followed in chords that lengthen from its start to its end
-        // (their error against the parabola `TrajectoryMaxErrorStart`/`End` radii), a sphere of
-        // `TrajectoryRadius` swept along them from under the rider's centre of mass.
+        // SK8 query.rs `query_trajectory`: each flight is followed in chords that lengthen from its
+        // start to its end (their error against the parabola `TrajectoryMaxErrorStart`/`End` radii),
+        // a sphere of `TrajectoryRadius` swept along them from the batch's origin.
         let r = t.traj_radius.max(0.01);
-        let g = t.gravity.max(0.1);
-        let first = sqrtf(8.0 * t.traj_error_start * r / g).max(STEP);
-        let last = sqrtf(8.0 * t.traj_error_end * r / g).max(STEP);
+        let (lift, max_time) = (self.sphere, self.max_time);
         let mut near = alloc::vec::Vec::new();
-        loop {
-            let mut any = false;
-            for c in self.cands.iter_mut().take(self.count).flatten() {
-                if c.done {
-                    continue;
-                }
-                self.rays += 1;
-                any = true;
-                let t0 = c.followed;
-                let f = (t0 / self.max_time.max(1e-3)).clamp(0.0, 1.0);
-                let t1 = (t0 + last * f + first * (1.0 - f)).min(self.max_time);
-                let (a, b) = (c.flight.at(t0), c.flight.at(t1));
-                let lift = self.sphere;
-                let hit = match sweep(park, a + lift, b + lift, r, &mut near) {
-                    Sweep::Hit(frac, point, normal) => {
-                        let time = t0 + (t1 - t0) * frac;
-                        let centre = c.flight.at(time) + lift;
-                        let surface = park
-                            .raycast(centre, (point - centre).normalize_or(-Vec3::UP), 2.0 * r)
-                            .map_or(0, |h| h.surface);
-                        let vel = c.flight.vel_at(time);
-                        let landing =
-                            averaged_normal(park, point, r, vel, &mut near).unwrap_or(normal);
-                        Some(Contact {
-                            time,
-                            point,
-                            normal: landing,
-                            surface,
-                        })
-                    }
-                    Sweep::Miss => None,
-                    // Not a world of triangles: the board's point followed along the chord.
-                    Sweep::NoTriangles => {
-                        let d = b - a;
-                        let len = d.length();
-                        if len > 1e-5 {
-                            park.raycast(a, d * (1.0 / len), len).map(|h| Contact {
-                                time: t0 + (t1 - t0) * (h.t / len).clamp(0.0, 1.0),
-                                point: h.point,
-                                normal: h.normal,
-                                surface: h.surface,
-                            })
-                        } else {
-                            None
-                        }
-                    }
-                };
-                if let Some(h) = hit {
-                    c.contact = Some(h);
-                    c.done = true;
-                } else if t1 >= self.max_time {
-                    c.done = true;
-                }
-                c.followed = t1;
+        for c in self.cands.iter_mut().take(self.count).flatten() {
+            if c.done {
+                continue;
             }
-            if !any {
-                break;
-            }
+            let (contact, chords) = follow(t, park, &c.flight, lift, r, max_time, &mut near);
+            self.rays += chords;
+            c.contact = contact;
+            c.done = true;
         }
         self.pending = false;
         self.score(t, park);
@@ -572,7 +518,9 @@ impl Selector {
                 0.0
             };
             c.normal = hit.normal;
-            let v = c.flight.vel_at(hit.time);
+            // SK8 prediction.rs `collision_velocity`: at the contact's frame (its time rounded up to
+            // a tick).
+            let v = c.flight.vel_at(contact_frame(hit.time) as f32 * STEP);
             let force_dot = hit.normal.dot(v);
             let sideways = hit.normal.cross(v.normalize_or(Vec3::ZERO)).length();
             let k = t.traj_force_scalar.eval(force_dot.abs());
@@ -898,10 +846,128 @@ fn max_time(v: Vec3, t: &Tuning) -> f32 {
     fall.min(t.traj_max_time)
 }
 
+/// SK8 launch.rs `batch`: from the flight's point to the swept sphere's centre, given the animated
+/// centre of mass from it (`com`) and the reckoning's `up`: the centre of mass less the displacement
+/// along `up`, `TrajectoryDisplacement` when popping fast or off ground facing up
+/// (`TrajectoryDispVsSpeed` on the board's vertical speed / 10 m/s, `TrajectoryDispVsGroundNorm` on
+/// the ground normal's height), else no more than keeps the sphere on the ground left.
+pub fn sphere_offset(t: &Tuning, up: Vec3, com: Vec3, ground: Vec3, vel_y: f32) -> Vec3 {
+    let blend = t
+        .traj_disp_vs_speed
+        .eval(vel_y * 0.1)
+        .max(t.traj_disp_vs_ground.eval(ground.y.abs()));
+    let height = com.dot(up) - t.traj_radius;
+    let d = t.traj_displacement;
+    let displacement = height.min(d) * (1.0 - blend) + d * blend;
+    com - up * displacement
+}
+
+/// SK8 query.rs `query_trajectory`: `flight` followed from `lift` off it (the swept sphere's centre)
+/// in chords of SK8's lengths until `max_time`; where the sphere first touches, the contact
+/// (`time_at_contact`'s time, the averaged landing normal) and how many chords were swept.
+fn follow(
+    t: &Tuning,
+    park: &dyn Terrain,
+    flight: &Flight,
+    lift: Vec3,
+    r: f32,
+    max_time: f32,
+    near: &mut alloc::vec::Vec<([Vec3; 3], Vec3)>,
+) -> (Option<Contact>, usize) {
+    let centre = |time: f32| flight.at(time) + lift;
+    let g = t.gravity.max(0.1);
+    // `step_size`: the chord whose sag under the parabola is the error (radii) at either end.
+    let start_step = sqrtf(8.0 * t.traj_error_start * r / g).max(STEP);
+    let end_step = sqrtf(8.0 * t.traj_error_end * r / g).max(STEP);
+    let minimum = (t.traj_error_start * r) * (t.traj_error_start * r);
+    let mut chords = 0;
+    let mut time = 0.0f32;
+    let (mut a, mut b) = (centre(0.0), centre(start_step));
+    while max_time > time {
+        let d = b - a;
+        if d.dot(d) > minimum {
+            chords += 1;
+            match sweep(park, a, b, r, near) {
+                Sweep::Hit(point, face) => {
+                    let time = time_at_contact(flight, lift, point, time, max_time);
+                    let surface = park
+                        .raycast(
+                            centre(time),
+                            (point - centre(time)).normalize_or(-Vec3::UP),
+                            2.0 * r,
+                        )
+                        .map_or(0, |h| h.surface);
+                    let vel = flight.vel_at(time);
+                    let normal = averaged_normal(park, point, r, vel, near).unwrap_or(face);
+                    return (
+                        Some(Contact {
+                            time,
+                            point,
+                            normal,
+                            surface,
+                        }),
+                        chords,
+                    );
+                }
+                Sweep::Miss => {}
+                // Not a world of triangles: the board's point followed along the chord.
+                Sweep::NoTriangles => {
+                    let (a, b) = (a - lift, b - lift);
+                    let d = b - a;
+                    let len = d.length();
+                    if let Some(h) = park.raycast(a, d * (1.0 / len), len) {
+                        let along = (h.t / len).clamp(0.0, 1.0);
+                        let contact = Contact {
+                            time: time + (time_span(start_step, end_step, time, max_time)) * along,
+                            point: h.point,
+                            normal: h.normal,
+                            surface: h.surface,
+                        };
+                        return (Some(contact), chords);
+                    }
+                }
+            }
+            a = b;
+        }
+        let step = time_span(start_step, end_step, time, max_time);
+        time += step;
+        // (As SK8's walk: the next chord's end is a step past the new time, not clamped.)
+        b = centre(time + step);
+    }
+    (None, chords)
+}
+
+/// SK8 query.rs `time_at_contact`'s frame: the contact's time rounded up to a tick.
+fn contact_frame(time: f32) -> i32 {
+    libm::ceilf(time * 60.0) as i32
+}
+
+/// SK8 query.rs: the chord's length at `time`, from the start's to the end's over the flight.
+fn time_span(start_step: f32, end_step: f32, time: f32, max_time: f32) -> f32 {
+    let f = time / max_time.max(1e-3);
+    end_step * f + (1.0 - f) * start_step
+}
+
+/// SK8 query.rs `time_at_contact`: from the chord's time, a tick at a time along the sphere's path
+/// while it comes nearer the touched point; the nearest tick's time.
+fn time_at_contact(flight: &Flight, lift: Vec3, point: Vec3, mut time: f32, max_time: f32) -> f32 {
+    let mut closest = f32::MAX;
+    while max_time >= time {
+        let d = point - (flight.at(time) + lift);
+        let square = d.dot(d);
+        if closest >= square {
+            closest = square;
+        } else {
+            return time - STEP;
+        }
+        time += STEP;
+    }
+    max_time
+}
+
 enum Sweep {
-    /// The chord's fraction where the sphere first touches, the point it touches and that face's
-    /// normal.
-    Hit(f32, Vec3, Vec3),
+    /// The point the sphere first touches and that face's normal.
+    Hit(Vec3, Vec3),
     Miss,
     NoTriangles,
 }
@@ -962,7 +1028,7 @@ fn sweep(
                 }
             }
             let (q, n) = touch(a + d * hi).expect("touching at the upper end");
-            return Sweep::Hit(hi, q, n);
+            return Sweep::Hit(q, n);
         }
         prev = f;
     }
@@ -1145,11 +1211,9 @@ mod tests {
         let mut near = alloc::vec::Vec::new();
         let r = 0.2;
         let (a, b) = (v3(0.0, 1.0, 0.0), v3(0.0, -1.0, 0.0));
-        let Sweep::Hit(f, point, n) = sweep(&park, a, b, r, &mut near) else {
+        let Sweep::Hit(point, n) = sweep(&park, a, b, r, &mut near) else {
             panic!("the floor is met");
         };
-        let centre = a + (b - a) * f;
-        assert!((centre.y - r).abs() < 0.02, "centre {centre:?}");
         assert!(point.y.abs() < 1e-4 && n.y > 0.999, "{point:?} {n:?}");
         // Starting within its radius of the floor (a launch off it), moving along or off it: no
         // touch.

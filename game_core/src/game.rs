@@ -1517,6 +1517,14 @@ impl Game {
             }
             if let Some(r) = &self.rider {
                 control.pose_com = r.com_above_board();
+                control.pose_com_at = r.com_from_board_centre().map(|c| {
+                    // (Turned end for end as `pose_deck` is.)
+                    if self.skater.mirrored() {
+                        crate::math::v3(-c.x, c.y, -c.z)
+                    } else {
+                        c
+                    }
+                });
                 control.pose_deck = posed_deck(Some(r), self.skater.mirrored());
                 control.pose_lift = (r.board_rest_height() - crate::skater::DECK_HEIGHT).max(0.0);
             }
