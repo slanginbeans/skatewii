@@ -444,6 +444,12 @@ impl Skater {
             None => None,
         };
         rig.board.step_with(park, input, body);
+        // The deck's and trucks' contacts on the ground, for Skate 3's selector (its `colliding`);
+        // in the air the touchdown publishes those it lands on.
+        if !airborne {
+            self.states.facts.deck = rig.board.deck_contact;
+            self.states.facts.trucks = rig.board.truck_contact;
+        }
         self.board_stepped = true;
         self.body_us = self.rider_body.as_ref().map_or(0, |b| b.cost_us);
         self.board_us = self
@@ -481,6 +487,26 @@ impl Skater {
         !lead.iter().any(|&i| down(i)) && nose.dot(self.contact_n) < -0.05
     }
 
+    /// The speed model's axis and speed (SK8 speed_model.rs): its speed is the deck's along its own
+    /// pitched nose (`signed_speed`, the board's `+2612`), so a board tipping over a lip keeps its
+    /// speed along the deck rather than across the ground; it pushes along the deck's travel (the
+    /// sideways slip in it, as the carves measure on SK8). Without the rigid board, the ground
+    /// velocity.
+    pub(super) fn speed_model_axis(&self) -> (Vec3, f32) {
+        let Some(r) = &self.rig else {
+            let v = self.ground_velocity();
+            let len = v.length();
+            return (v.normalize_or(self.fwd), len);
+        };
+        let d = r.board.deck();
+        let nose = d.axes.cols[2] * self.rig_sign();
+        let speed = libm::fabsf(d.velocity.dot(nose));
+        let dir = d
+            .velocity
+            .normalize_or(if self.speed < 0.0 { -nose } else { nose });
+        (dir, speed)
+    }
+
     /// Puts the rigid board where the kinematic ground model left the skater.
     pub(super) fn follow_rig(&mut self, park: &dyn Terrain) {
         if self.stays_rolling() {
@@ -504,15 +530,16 @@ impl Skater {
 
         // The speed model's target (SK8 speed_model.rs), as `ride`.
         let bound = t.friction_max_change.max(0.0);
-        // The speed model and rolling resistance read the board's travel speed (sideways slip
-        // included), signed as the speed along it.
+        // Rolling resistance reads the board's travel speed (sideways slip included), signed as the
+        // speed along it; the speed model the deck's speed along its own (pitched) nose (SK8
+        // speed_model.rs `signed_speed`, the board's `+2612`).
         let travel = self.ground_velocity().length();
         let travel_speed = if travel > 1e-3 {
             travel * self.speed.signum()
         } else {
             self.speed
         };
-        let start = travel_speed.abs();
+        let (model_axis, start) = self.speed_model_axis();
         if (start - self.model_speed).abs() > 1e-4 {
             self.target_speed = start;
         }
@@ -626,6 +653,7 @@ impl Skater {
             // the surface's rolling resistance, whichever wins uphill; the no-input and manual
             // frictions take theirs. The physical gravity acts in full on the board meanwhile.
             let sp = travel_speed.abs();
+            let model_sp = start;
             let travel_dir = if v > 0.1 {
                 vel * (1.0 / v)
             } else {
@@ -673,15 +701,18 @@ impl Skater {
                 }
             }
             input.forces.push((f * feet, Vec3::ZERO));
-            // Its force: the board's mass times the gain of the error, along the travel, with two
-            // wheels down and no foot on the ground (the feet restart the model from the speed).
+            // Its force: the board's mass times the gain of the error, along the deck's nose the
+            // way it moves, with two wheels down, the deck off the world (SK8's `flags_2468 &
+            // 0x6201_0000`: bit 16 is the deck's contact) and no foot on the ground (the feet
+            // restart the model from the speed).
             let wheels = self.rig.as_ref().map_or(4, |r| r.board.wheels_down());
+            let deck_down = self.rig.as_ref().is_some_and(|r| r.board.deck_contact);
             if foot_down {
-                self.target_speed = sp;
-            } else if wheels >= 2 && sp > 0.01 {
-                let error = clamp(self.target_speed - sp, -bound, bound);
+                self.target_speed = model_sp;
+            } else if wheels >= 2 && !deck_down && model_sp > 0.01 {
+                let error = clamp(self.target_speed - model_sp, -bound, bound);
                 let push = mass * t.speed_general_amount * error / dt;
-                input.forces.push((travel_dir * push, Vec3::ZERO));
+                input.forces.push((model_axis * push, Vec3::ZERO));
             }
             // The feet (SK8 ground_force.rs): against the rider's up, square to the travel, at each
             // foot; the landing's force first.
@@ -719,6 +750,16 @@ impl Skater {
             input
                 .forces
                 .push((side * (along_surface.dot(side) * scalar), Vec3::ZERO));
+        }
+
+        // Skate 3's pumping (SK8 ground_runtime/pumping.rs `update`, before the board's update): its
+        // acceleration is a force along the travel, the board's mass times it a tick (SK8
+        // pumping.rs `calculate`, CalcPumpForce, queued as tag 8).
+        self.update_pumping(d, dt);
+        if self.pump.dv != 0.0 && v > 0.01 {
+            input
+                .forces
+                .push((vel * (mass * self.pump.dv / (v * dt)), Vec3::ZERO));
         }
 
         // The manual's deck turn (SK8 manual/controller.rs, `apply_angular_displacement`): the nose
@@ -882,29 +923,24 @@ impl Skater {
                 self.contact_n = up;
                 self.fwd = deck.axes.cols[2] * self.rig_sign();
                 self.publish_off_ground(gap, self.gap_time);
-                self.leave_ground(v, false, events);
+                // With the deck's velocity (SK8's launch reads the board body's, Processed+400).
+                self.leave_ground(deck.velocity, false, events);
                 return;
             }
         } else {
             self.vn = 0.0;
         }
-        let before = self.speed;
-        self.update_pumping(d, dt);
-        let pumped = self.speed - before;
-        if pumped != 0.0
-            && let Some(r) = &mut self.rig
-        {
-            for p in &mut r.board.parts {
-                p.velocity += f * pumped;
-            }
-        }
         self.mark_rig();
-        // A foot on the ground resets the speed model: it starts again from the speed the board
-        // comes out of this tick with (SK8's `flags_1360` reset).
-        self.model_speed = if d.push_target.is_some() || d.brake > 0.0 || d.manual_correction {
+        // A foot on the ground or the pump's force resets the speed model: it starts again from the
+        // speed the board comes out of this tick with (SK8 ordinary.rs `update_speed_model_reset`:
+        // any push, brake or pump force sets `flags_1360`).
+        self.model_speed = if d.push_target.is_some() || d.brake > 0.0 || d.manual_correction || {
+            let force = pb::total_mass() * self.pump.dv / dt.max(1e-4);
+            force * force > SPEED_MODEL_RESET_FORCE_SQUARED
+        } {
             -1.0
         } else {
-            self.ground_velocity().length()
+            self.speed_model_axis().1
         };
         if self.contact_n.y < -0.2 {
             let v = self.ground_velocity() + self.contact_n * 0.5;
@@ -915,6 +951,10 @@ impl Skater {
         self.update_wallride(park, dt, events);
     }
 }
+
+/// SK8 ground_runtime/settings.rs `speed_model_reset_force_squared` (0x37800000): a push, brake or
+/// pump force whose square is over this restarts the speed model from the board's speed.
+const SPEED_MODEL_RESET_FORCE_SQUARED: f32 = 1.525_878_9e-5;
 
 /// SK8 board_ground.rs `WHEEL_LINE_LENGTH`: each wheel's line down the reckoning's up (m).
 pub const WHEEL_LINE_LENGTH: f32 = 0.2;

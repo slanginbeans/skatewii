@@ -226,7 +226,7 @@ impl<'a> World<'a> {
 
 /// The point of triangle `t` closest to `p`, and whether it is inside the face (not on an edge or a
 /// corner): Ericson, Real-Time Collision Detection 5.1.5.
-fn closest_on_triangle(p: Vec3, t: &[Vec3; 3]) -> (Vec3, bool) {
+pub(crate) fn closest_on_triangle(p: Vec3, t: &[Vec3; 3]) -> (Vec3, bool) {
     let [a, b, c] = *t;
     let (ab, ac, ap) = (b - a, c - a, p - a);
     let (d1, d2) = (ab.dot(ap), ac.dot(ap));
@@ -744,6 +744,12 @@ pub struct Board {
     pub wheels: [Option<WheelContact>; 4],
     /// The load the trucks and deck carried against the world in the last step (N).
     pub body_load: f32,
+    /// The deck, and either truck, met the world in the last step (SK8 board_input_output.rs
+    /// `flag_3475`, `flag_3472`: the selector's Processed2468 bits 16 and 17).
+    pub deck_contact: bool,
+    pub truck_contact: bool,
+    /// Their contacts' load-weighted normal (up when none).
+    pub body_normal: Vec3,
     /// The trucks' or deck's hardest contact with something across the board's up (a wall) in the
     /// last step: its normal and load (N).
     pub wall: Option<(Vec3, f32)>,
@@ -762,6 +768,9 @@ impl Board {
             parts,
             wheels: [None; 4],
             body_load: 0.0,
+            deck_contact: false,
+            truck_contact: false,
+            body_normal: Vec3::UP,
             wall: None,
         };
         b.place(deck, axes, Vec3::ZERO, Vec3::ZERO);
@@ -890,9 +899,11 @@ impl Board {
             }
         }
         let wheel_rows = count;
+        let mut row_part = [0usize; 8 + 2 * BODY_SPHERES];
         for (part, cs) in self.body_contacts(&world) {
             for c in cs.iter().flatten() {
                 contacts[count] = ContactRow::build(&self.parts, Some(part), None, c);
+                row_part[count] = part;
                 count += 1;
             }
         }
@@ -996,6 +1007,15 @@ impl Board {
             .iter()
             .map(|c| c.normal_force())
             .sum();
+        let touching = |p: usize| {
+            (wheel_rows..count).any(|i| row_part[i] == p && contacts[i].normal_force() > 0.0)
+        };
+        self.deck_contact = touching(DECK);
+        self.truck_contact = touching(FRONT_TRUCK) || touching(BACK_TRUCK);
+        self.body_normal = contacts[wheel_rows..count]
+            .iter()
+            .fold(Vec3::ZERO, |a, c| a + c.axes[0] * c.normal_force().max(0.0))
+            .normalize_or(Vec3::UP);
         let up = self.parts[DECK].axes.cols[1];
         self.wall = contacts[wheel_rows..count]
             .iter()

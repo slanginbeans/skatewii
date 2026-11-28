@@ -97,8 +97,6 @@ const AIR_LEGS_FOLLOW: f32 = 0.15;
 const JUMP_CORRECTION_TICKS: u32 = 12;
 /// The wheels' friction on a landing's impact: sideways speed taken off per m/s into the ground.
 const LAND_SIDE_FRICTION: f32 = 0.41;
-/// The posed board lifted this far (m) means the pop's tail strike has started.
-const POP_LIFT_MIN: f32 = 0.002;
 /// Powerslides: the board angle eases at this rate (rad/s, ours); a held slide relaxes after this long
 /// (s).
 const SLIDE_TURN_RATE: f32 = 8.0;
@@ -645,6 +643,10 @@ pub struct Skater {
     pub body: BodySpin,
     /// The landing prediction: the query in progress, and the landing the board flies to once known.
     pub selector: air::Selector,
+    /// Ticks in a ground state, and whether more than six of them led to the last take-off (SK8
+    /// `grounded_frames_1300`, `flags_1296` bit 31).
+    ground_frames: u32,
+    settled_on_ground: bool,
     pub plan: Option<Plan>,
     pub trick: Option<ActiveTrick>,
     /// Riding with the other foot forward (the drawn rider is mirrored).
@@ -704,8 +706,13 @@ pub struct Skater {
     target_speed: f32,
     /// The speed the last ride ended with (a different one at the next is a change from outside).
     model_speed: f32,
-    /// 0..1, how far the skater is crouched (drawn).
+    /// 0..1, how far the stick asks the skater to crouch (Skate 3's `Crouch` intent).
     pub crouch: f32,
+    /// Without the imported rider: Skate 3's Crouching (SK8 crouching.rs, the graph's
+    /// `disttocog`) run on the stick's crouch, and the centre of mass over the board it gives (m).
+    stick_crouch: Option<crate::graph::riding::Crouch>,
+    crouch_com: Option<f32>,
+    crouch_pump: bool,
     /// The crouch is for a nollie (stick held forward).
     pub crouch_nose: bool,
     pub landing: Option<Landing>,
@@ -971,6 +978,9 @@ pub struct GraphControl {
     /// The motion graph's `DoLandOnBoard` (its `IntoLandingOnBoard` and `LandingOnBoard` states): the
     /// physics comes down onto the board (SK8: biped air into LandingOnDeck).
     pub land_on_board: bool,
+    /// Crouching's `PlayerControlledPump` (the rider crouched or pumped within half a second): Skate
+    /// 3's intentional pumping (SK8 Processed2476 bit 1), which pays in full.
+    pub player_pump: bool,
     /// The posed board's nose in the rider's frame (x `up x nose`, y up, z ahead) from the imported
     /// rider's last pose: where the clips have put the deck. `None` without the imported rider.
     pub pose_deck: Option<Vec3>,
@@ -1118,6 +1128,8 @@ impl Skater {
             spin_rate: 0.0,
             body: BodySpin::default(),
             selector: air::Selector::default(),
+            ground_frames: 0,
+            settled_on_ground: true,
             plan: None,
             trick: None,
             switch: false,
@@ -1148,6 +1160,9 @@ impl Skater {
             target_speed: 0.0,
             model_speed: 0.0,
             crouch: 0.0,
+            stick_crouch: None,
+            crouch_com: None,
+            crouch_pump: false,
             crouch_nose: false,
             landing: None,
             manual: None,
@@ -1341,6 +1356,41 @@ impl Skater {
         self.heading = yaw;
     }
 
+    /// Without the imported rider's pose, Skate 3's Crouching (the graph's `disttocog`, SK8
+    /// crouching.rs) on the stick's crouch and the pumping's feedback gives the centre of mass over
+    /// the board, which the pump reads (riding only).
+    fn update_stick_crouch(&mut self, dt: f32) {
+        use crate::graph::riding::{Crouch, CrouchIntents, CrouchPhysical};
+        if self.graph.pose_com.is_some() || !self.rolling() {
+            self.stick_crouch = None;
+            self.crouch_com = None;
+            self.crouch_pump = false;
+            return;
+        }
+        let a = &self.tuning.anim;
+        let speed = self.ground_velocity().length();
+        let p = CrouchPhysical {
+            vel_y: self.vel.y,
+            ground_speed: speed,
+            pump_potential: self.pump.pumping,
+            force: self.pump.absorption,
+            ground_force: self.pump.ground_absorption,
+            min_crouch: self.pump.min_crouch,
+            deck_angle: self.pump.deck_absorption,
+            height: self
+                .crouch_com
+                .unwrap_or_else(|| a.crouch_max_height.eval(speed)),
+        };
+        let c = self.stick_crouch.get_or_insert_with(|| Crouch::begin(p, a));
+        let i = CrouchIntents {
+            crouch: Some(self.crouch),
+            ..CrouchIntents::default()
+        };
+        let out = c.update(p, i, dt, a);
+        self.crouch_com = Some(out.height);
+        self.crouch_pump = out.player_pump;
+    }
+
     /// Sets the air spin to `spin` (rad), turning the board and rider about the board's up to match.
     pub fn set_spin(&mut self, spin: f32) {
         let d = spin - self.spin;
@@ -1530,7 +1580,8 @@ impl Skater {
         } else {
             0.0
         };
-        self.crouch += (crouch - self.crouch) * smooth(18.0, dt);
+        self.crouch = crouch;
+        self.update_stick_crouch(dt);
         self.grind_pitch_input = pad.flick[1];
         // The deck is posed apart from the body only in the air (touching down bakes it in).
         if !self.is_airborne() {
@@ -1569,13 +1620,14 @@ impl Skater {
             self.air_com = None;
             self.air_lift = 0.0;
         }
-        // The rider's body over the board: the animation's while riding; following it only so fast
-        // from the pop's tail strike (SK8's GroundAnimation) until the jump's top (measured: SK8's
-        // COM over the deck lags its animation there, and follows it again coming down).
+        // The rider's body over the board: the animation's while riding (a crouch over a lip comes
+        // down with the clips, as SK8's does before it leaves the ground); following it only so fast
+        // through the pop (SK8's GroundAnimation) until the jump's top (measured: SK8's COM over the
+        // deck lags its animation there, and follows it again coming down).
         self.body_com = match (self.graph.pose_com, self.body_com) {
             (Some(c), Some(d))
                 if (self.is_airborne() && self.vel.y > 0.0)
-                    || self.graph.pose_lift > POP_LIFT_MIN =>
+                    || self.state() == State::GroundAnimation =>
             {
                 Some(d + (c - d) * (AIR_LEGS_FOLLOW * dt * 60.0).min(1.0))
             }
@@ -1609,7 +1661,16 @@ impl Skater {
             self.select_state();
         }
         let flying = self.is_airborne();
-        self.step_mode(park, pad, flick, dt, events);
+        // SK8 input_phase/runtime.rs `update_time_on_ground`: the ticks in a ground state, and
+        // whether there have been more than six (`flags_1296` bit 31, published as Processed2468
+        // bit 13: a launch with it clear asks for one flight, not the cone).
+        if self.state().category() == 100 {
+            self.ground_frames = self.ground_frames.saturating_add(1);
+            self.settled_on_ground = self.ground_frames > 6;
+        } else {
+            self.ground_frames = 0;
+        }
+        self.step_mode(park, pad, dt, events);
         // A jump off the ground launches the landing prediction on its tick (SK8's ground jump launches
         // the trajectory selector and its batch completes the same tick: an ollie goes from
         // GroundAnimation straight into KnownAir).
@@ -1718,14 +1779,7 @@ impl Skater {
         }
     }
 
-    fn step_mode(
-        &mut self,
-        park: &dyn Terrain,
-        pad: &Pad,
-        flick: &FlickOut,
-        dt: f32,
-        events: &mut Vec<Event>,
-    ) {
+    fn step_mode(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
         if self.drop_in.is_some() {
             self.step_drop_in(park, pad, dt, events);
             return;
@@ -1783,7 +1837,7 @@ impl Skater {
             }
             s if s.category() == 100 => {
                 if !self.update_handplant(park, events) {
-                    self.roll(park, pad, flick, dt, events)
+                    self.roll(park, pad, dt, events)
                 }
             }
             s if s.is_grind() => self.slide_rail(park, pad, dt, events),
@@ -2126,15 +2180,8 @@ impl Skater {
     }
 
     /// The rider's state on the ground (fakie, revert, powerslide, kick turn, steering, pushing, braking,
-    /// hippie jump, flicks), then the board's physics with what the rider does to it.
-    fn roll(
-        &mut self,
-        park: &dyn Terrain,
-        pad: &Pad,
-        flick: &FlickOut,
-        dt: f32,
-        events: &mut Vec<Event>,
-    ) {
+    /// hippie jump), then the board's physics with what the rider does to it.
+    fn roll(&mut self, park: &dyn Terrain, pad: &Pad, dt: f32, events: &mut Vec<Event>) {
         let t = self.tuning;
         let ticks = dt * 60.0;
         let tail_brake = self.update_manual(dt, events);
@@ -2290,7 +2337,7 @@ impl Skater {
             slide_time: self.slide.as_ref().map_or(0.0, |s| s.time),
             pivot: kick || self.revert.is_some(),
             keep_velocity: self.revert.is_some(),
-            intentional_pump: flick.crouch > 0.0 || self.crouch > 0.05,
+            intentional_pump: self.graph.player_pump || self.crouch_pump,
         };
         self.ride(park, &drive, dt, events);
         // Riding onto a rail: into coping, off a ledge's top, up a bank into a ledge; not while the
@@ -2902,6 +2949,9 @@ impl Skater {
                         lean: self.takeoff.lean,
                         grind: self.jumper.cooldown == 0,
                         lift: self.air_com.map_or(0.0, |c0| (c0 - t.air_com_min).max(0.0)),
+                        sphere: self.reckoning.up.normalize_or(Vec3::UP)
+                            * (self.com_height() - t.traj_displacement),
+                        cone: self.settled_on_ground,
                     },
                 );
                 self.selector.countdown = air::QUERY_EVERY;
@@ -3114,12 +3164,28 @@ impl Skater {
                 None => return,
             }
         }
-        // Touchdown: the board's wheels on a surface it lands on. Skate 3's state selector takes the
-        // board onto the ground from its wheel contacts once the air state has settled; until then it
-        // stays in the air, the board on its own contacts.
+        // Touchdown: the board's wheels on a surface it lands on, or its deck or a truck against the
+        // world (a tail on the coping). Skate 3's state selector takes the board onto the ground from
+        // any of those contacts (its `colliding`) once the air state has settled; until then it stays
+        // in the air, the board on its own contacts.
         let (wheels, n, point) = self.air_wheels();
-        if wheels > 0 {
-            self.publish_wheels(wheels);
+        let (n, point) = match &self.rig {
+            Some(r) if wheels == 0 => (r.board.body_normal, r.board.deck().position),
+            _ => (n, point),
+        };
+        // (A wall the deck or a truck meets is the air's wall handling's, above, as the wheels' are.)
+        let (deck, trucks) = self.rig.as_ref().map_or((false, false), |r| {
+            (r.board.deck_contact, r.board.truck_contact)
+        });
+        let body = (deck || trucks) && landable(n, self.normal);
+        if body {
+            self.states.facts.deck = deck;
+            self.states.facts.trucks = trucks;
+        }
+        if wheels > 0 || body {
+            if wheels > 0 {
+                self.publish_wheels(wheels);
+            }
             if self.selects(|_| {}).category() == 100 {
                 let surface = park
                     .raycast(point + n * 0.05, -n, 0.1)
@@ -3646,10 +3712,11 @@ impl Skater {
         if self.takeoff.onto_free && !self.land_on_free_board(normal, events) {
             return;
         }
-        // The board lands as the rider lined it up (board adjust): its nose is the landing's. The
-        // physical board flew turned to the animated one (the clips' adjust, `fly_rig`): Skate 3
-        // lands that board, so its nose is the landing's.
-        self.bake_deck_adjust();
+        // Skate 3 lands the physical board as it comes down (it flew turned to the animated, adjusted
+        // or tweaked one by the hook): its nose is the landing's, and the rider's up stays his
+        // reckoning's (SK8 wipeout/air.rs reads the closing speed in the animation frame), not
+        // turned by the adjust.
+        self.deck_adjust = adjust::DeckAdjust::NONE;
         if self.body_flip.is_none()
             && let Some(r) = self.rig.as_ref().filter(|r| r.airborne)
         {
@@ -3759,14 +3826,19 @@ impl Skater {
         // KnownAir's exit onto the ground (SK8 known/trajectory.rs `restore_velocity`): the speed along
         // the surface scaled by `LandingSpeedScalarVsGroundNormalY`, as far as the travel goes downhill;
         // PhysicsAir's exit keeps the board's.
-        let scale = if self.plan.is_some() {
+        // KnownAir restores the followed flight's velocity there (its `trajectory_index` ticks
+        // in), not the board's: the board's own velocity keeps only its speed into the surface.
+        let (scale, source) = if let Some(p) = &self.plan {
+            let sample = (air_time - p.start).max(1.0 / 60.0);
+            let v = p.flight.vel_at(sample);
+            let v = v - n * v.dot(n);
             let downhill = n.cross(n.cross(Vec3::UP)).normalize_or(Vec3::ZERO);
-            let w = downhill.dot(vt.normalize_or(Vec3::ZERO)).clamp(0.0, 1.0);
-            (t.landing_speed_vs_ny.eval(n.y) - 1.0) * w + 1.0
+            let w = downhill.dot(v.normalize_or(Vec3::ZERO)).clamp(0.0, 1.0);
+            ((t.landing_speed_vs_ny.eval(n.y) - 1.0) * w + 1.0, v)
         } else {
-            1.0
+            (1.0, vt)
         };
-        let along = vt * scale;
+        let along = source * scale;
         self.contact_n = n;
         self.fwd = axis;
         self.set_ground_velocity(along);
@@ -3954,6 +4026,12 @@ fn shout(name: &str) -> String {
 
 /// "FAKIE FS 360 KICKFLIP INDY" style names. `None` for nothing worth naming (rolled off a lip, no spin,
 /// no grab).
+/// A face the board's deck or trucks touch down on (Skate 3's selector takes the board onto it): within
+/// 60 degrees of the rider's up, or facing up more than a wall (the same test the wheels' faces pass).
+fn landable(n: Vec3, up: Vec3) -> bool {
+    n.dot(up) > 0.5 || n.y > 0.6
+}
+
 fn landed_name(
     stance: &str,
     trick: Option<&str>,
@@ -4408,6 +4486,88 @@ mod tests {
     }
 
     #[test]
+    fn a_deck_or_truck_lands_only_on_a_face_it_could_ride() {
+        // Skate 3's `colliding` takes the board onto the ground from its deck or trucks as well as
+        // its wheels, but only on a surface it lands on: the floor, a bank, a ramp the rider is
+        // lined up with; not a wall or a ceiling.
+        assert!(landable(Vec3::UP, Vec3::UP));
+        assert!(landable(v3(0.0, 0.7, 0.71), Vec3::UP), "a 45-degree bank");
+        assert!(!landable(v3(1.0, 0.0, 0.0), Vec3::UP), "a wall");
+        assert!(!landable(v3(0.0, -1.0, 0.0), Vec3::UP), "a ceiling");
+        // A vert face the rider is lined up with (coming down a quarter pipe).
+        let face = v3(0.97, 0.26, 0.0);
+        assert!(landable(face, v3(0.9, 0.44, 0.0)));
+        assert!(!landable(face, Vec3::UP));
+    }
+
+    #[test]
+    fn a_tweaked_board_lands_as_the_physical_board_came_down() {
+        // Skate 3 lands the physical board, which flew turned to the clips' adjusted or tweaked
+        // board: its nose is the landing's, and flatground's own deck adjust is cleared.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 4.0;
+        steps(&mut s, &park, &Pad::default(), None, 5);
+        let a = 0.35f32;
+        let nose = v3(sinf(a), 0.0, cosf(a));
+        {
+            let r = s.rig.as_mut().unwrap();
+            r.airborne = true;
+            let axes = crate::math::Mat3::from_cols(Vec3::UP.cross(nose), Vec3::UP, nose);
+            r.board.place(
+                v3(0.0, DECK_HEIGHT, 0.0),
+                &axes,
+                v3(0.0, -1.0, 4.0),
+                Vec3::ZERO,
+            );
+        }
+        s.vel = v3(0.0, -1.0, 4.0);
+        let mut ev = Vec::new();
+        s.land(Vec3::UP, 0, 0.5, &mut ev);
+        let sign = s.rig_sign();
+        let deck = s.rig.as_ref().unwrap().board.deck().axes.cols[2] * sign;
+        assert!(
+            tangent(deck, Vec3::UP).dot(s.fwd) > 0.999,
+            "{:?} vs {deck:?}",
+            s.fwd
+        );
+        assert!(s.deck_adjust == adjust::DeckAdjust::NONE);
+        // Landed 20 degrees off its travel: judged on the board's nose.
+        assert!(
+            s.last_landing.is_some_and(|l| (l.crooked - a).abs() < 0.02),
+            "{:?}",
+            s.last_landing
+        );
+    }
+
+    #[test]
+    fn the_speed_model_reads_the_decks_speed_along_its_pitched_nose() {
+        // SK8 speed_model.rs `signed_speed` (the board's +2612): the deck's velocity along its own
+        // forward axis, so a board tipping over a lip (its nose dipping, its travel turning down)
+        // keeps its speed along the deck instead of the model pushing its speed across the ground
+        // back up.
+        let park = flat();
+        let mut s = spawn(&park);
+        s.speed = 1.4;
+        steps(&mut s, &park, &Pad::default(), None, 5);
+        let pitch = -0.45f32;
+        let f = v3(0.0, sinf(pitch), cosf(pitch));
+        let up = v3(0.0, cosf(pitch), -sinf(pitch));
+        let v = f * 1.4;
+        {
+            let r = s.rig.as_mut().unwrap();
+            let axes = crate::math::Mat3::from_cols(up.cross(f), up, f);
+            let at = r.board.deck().position;
+            r.board.place(at, &axes, v, Vec3::ZERO);
+        }
+        let (dir, speed) = s.speed_model_axis();
+        assert!((speed - 1.4).abs() < 1e-3, "{speed}");
+        assert!(dir.dot(f) > 0.999, "{dir:?}");
+        // Its speed across the ground has dropped, which the model must not read as a loss.
+        assert!(v.horizontal().length() < 1.3);
+    }
+
+    #[test]
     fn a_board_rolled_off_a_ledge_flies_free_and_lands_on_its_own_physics() {
         // PhysicsAir without a pop: no jump velocity, the board falls on its own and its wheels meet the
         // ground below; the selector takes it down once the air state has settled.
@@ -4565,6 +4725,11 @@ mod tests {
             s.fwd = tangent(v3(0.0, 0.0, dir), n);
             s.normal = n;
             s.vel = s.fwd * 5.0 - n * 2.0;
+            // The followed flight comes down so at 0.6 s (the speed along the surface restored is
+            // the flight's, not the board's).
+            if let Some(p) = &mut s.plan {
+                p.flight.vel = s.vel + Vec3::UP * (p.flight.gravity * (0.6 - p.start));
+            }
             let mut ev = Vec::new();
             s.states.time = 0.6;
             s.land(n, 0, 0.6, &mut ev);
@@ -5949,6 +6114,13 @@ mod tests {
                 };
                 s.step(park, &Pad::default(), &fl, DT, &mut ev);
             }
+            // The pump is a force on the physical board (SK8 CalcPumpForce): the speed it gains is
+            // the board's.
+            let board = s.rig.as_ref().unwrap().board.velocity().length();
+            assert!(
+                (board - s.ground_velocity().length()).abs() < 0.05,
+                "{board}"
+            );
             (s.speed, s.pos.y)
         };
         let qp = quarter_pipe();
@@ -6092,6 +6264,9 @@ mod tests {
         place(&mut s, Vec3::ZERO, Vec3::UP, v3(0.0, 0.0, 1.0));
         s.speed = 4.0;
         s.vel = v3(0.0, 0.0, 4.0);
+        // Rolling for a while (more than six ticks on the ground: the launch asks for the cone).
+        s.ground_frames = 30;
+        s.settled_on_ground = true;
         let mut ev = Vec::new();
         s.pop(Flick::OLLIE, 1.0, [0.0, 0.0], &mut ev);
         let mut plan = None;
@@ -6112,9 +6287,10 @@ mod tests {
         let (flat, n, plan) = ollie_over(&drop_off(100.0));
         assert!(n.y > 0.99 && plan.is_some_and(|p| p.index == 0), "{plan:?}");
         assert!(flat.x.abs() < 0.01);
-        // A bank dropping away just beside the landing: the flight is nudged onto it.
-        let (at, n, plan) = ollie_over(&drop_off(0.3));
-        assert!(at.x > 0.3 && n.y < 0.95, "landed at {at:?} on {n:?}");
+        // A bank dropping away just beside the landing: the flight is nudged onto it (within the
+        // swept sphere's 0.2 m of where the middle flight lands, the edge itself would catch it).
+        let (at, n, plan) = ollie_over(&drop_off(0.2));
+        assert!(at.x > 0.2 && n.y < 0.95, "landed at {at:?} on {n:?}");
         assert!(plan.is_some_and(|p| p.index != 0), "{plan:?}");
         // Too far for the cone: it lands on the flat as it would have.
         let (at, n, _) = ollie_over(&drop_off(1.5));
@@ -6576,7 +6752,12 @@ mod tests {
         let mut s = spawn(&park);
         s.speed = 4.0;
         steps(&mut s, &park, &Pad::default(), None, 30);
-        assert_eq!(s.pump.deck_absorption, 0.0, "level with the rider's up");
+        // (The physical deck, which the angle is measured on, settles within a hair of level.)
+        assert!(
+            s.pump.deck_absorption < 1e-3,
+            "level with the rider's up: {}",
+            s.pump.deck_absorption
+        );
         // The rider's up leaning back 0.3 rad from the deck's (as over a transition's start).
         let right = s.reckoning.ground_right();
         s.reckoning.up = rotate(Vec3::UP, right, 0.3);
