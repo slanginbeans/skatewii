@@ -4,8 +4,8 @@
 //!
 //! The movement code doesn't change the state. It publishes what SK8's physics publishes for the
 //! selector ([`Facts`]: the wheels touching, the wheel lines' gap, a jump, a wipeout request, a grind
-//! contact, getting off or on the board), and the selector picks the state at the end of the tick, which
-//! is where SK8's next tick selects (after its input phase, before its physics). Where the movement has
+//! contact, getting off or on the board), and the selector picks the state at the start of the next
+//! tick, as SK8's does (after its animation and input phase, before its physics). Where the movement has
 //! to know before it acts (touching down, locking onto a rail, stepping off) it asks the selector what
 //! it would pick with that fact ([`Skater::selects`]), on a copy of its counters, so the selector alone
 //! still decides.
@@ -299,8 +299,8 @@ impl Skater {
         selector.calculate(self.states.current, &self.selection_input(&f))
     }
 
-    /// The end of the tick's movement: the selector picks the state from what the physics published
-    /// (SK8 selection.rs `advance`), and a new one is entered.
+    /// Skate 3's Logic phase: the selector picks the state from what the physics published (SK8
+    /// selection.rs `advance`), and a new one is entered.
     pub(super) fn select_state(&mut self) {
         let f = self.states.facts;
         let input = self.selection_input(&f);
