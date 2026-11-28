@@ -265,6 +265,26 @@ impl Rider {
     /// board's up), from the last pose: SK8's `com_to_deck` (skeleton_animation_record.rs). About 0.98 riding,
     /// 0.6 crouched to pop, 0.5 with the legs tucked in the air. `None` without the stock skeleton.
     pub fn com_above_board(&self) -> Option<f32> {
+        let (rel, up) = self.com_from_board()?;
+        // Along the posed board's up (SK8's `com_to_deck` is in the board's frame); a flip turns the
+        // posed board over under the rider, and then along the character's up (the physical board's).
+        let along_board: f32 = (0..3).map(|i| rel[i] * up[i]).sum();
+        let k = ((up[1] - 0.3) / 0.4).clamp(0.0, 1.0);
+        Some(rel[1] + (along_board - rel[1]) * k)
+    }
+
+    /// The animated centre of mass from the posed board's centre in the character's space, from the
+    /// last pose: where SK8's animated skeleton puts it from the physical deck
+    /// (`board_frames.centre_of_mass`, which the trajectory query starts from). `None` without the
+    /// stock skeleton.
+    pub fn com_from_board_centre(&self) -> Option<Vec3> {
+        self.com_from_board()
+            .map(|(rel, _)| v3(rel[0], rel[1], rel[2]))
+    }
+
+    /// The animated centre of mass from the posed board's centre, and the posed board's up, in the
+    /// character's space.
+    fn com_from_board(&self) -> Option<([f32; 3], [f32; 3])> {
         if self.com_parts.len() < COM_PARTS.len() {
             return None;
         }
@@ -277,17 +297,12 @@ impl Rider {
                 *c += (m[3][i] + m[0][i] * along) * weight;
             }
         }
-        // Along the posed board's up (SK8's `com_to_deck` is in the board's frame); a flip turns the
-        // posed board over under the rider, and then along the character's up (the physical board's).
         let rel = [
             com[0] - board[3][0],
             com[1] - board[3][1],
             com[2] - board[3][2],
         ];
-        let up = board[1];
-        let along_board: f32 = (0..3).map(|i| rel[i] * up[i]).sum();
-        let k = ((up[1] - 0.3) / 0.4).clamp(0.0, 1.0);
-        Some(rel[1] + (along_board - rel[1]) * k)
+        Some((rel, [board[1][0], board[1][1], board[1][2]]))
     }
 
     /// `turned`: the board's frame is turned end for end now (`Skater::frame_turned`); a tree started
