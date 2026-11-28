@@ -762,6 +762,24 @@ impl Skater {
                 .push((vel * (mass * self.pump.dv / (v * dt)), Vec3::ZERO));
         }
 
+        // The feet's anti-flip turn (SK8 anti_flip.rs, Toolkit_AntiFlipTorque, applied as an angular
+        // displacement): the deck turned back towards the plane square to the rider's up, its nose
+        // (not while manualing) and its side; none with the manual's brake down (Processed2468
+        // bit 29).
+        if let Some(rig) = &self.rig
+            && !(d.manual && d.brake > 0.0)
+        {
+            let axes = rig.board.deck().axes;
+            input.angular += anti_flip(
+                &t.anti_flip_x,
+                &t.anti_flip_z,
+                axes.cols[2],
+                axes.cols[0],
+                self.reckoning.up,
+                d.manual,
+            );
+        }
+
         // The manual's deck turn (SK8 manual/controller.rs, `apply_angular_displacement`): the nose
         // lifted about the deck's left-right axis.
         if let Some(m) = &self.manual {
@@ -770,7 +788,7 @@ impl Skater {
                 .rig
                 .as_ref()
                 .map_or(self.deck_axes(), |r| r.board.deck().axes);
-            input.angular = axes.cols[0] * (-lift * self.rig_sign());
+            input.angular += axes.cols[0] * (-lift * self.rig_sign());
         }
 
         // Walls at wheel height ahead, as the older ground model meets them.
@@ -976,11 +994,88 @@ fn off_ground(gap: f32, no_wheel_time: f32, t: &crate::tuning::Tuning) -> bool {
         || (gap > t.natural_air_min_dist && no_wheel_time > t.natural_air_time)
 }
 
+/// SK8 anti_flip.rs `calculate` (TU3 Toolkit_AntiFlipTorque 82D94190): the angular displacement
+/// turning the deck's `nose` and `side` back into the plane square to `up`, each by its curve against
+/// how far it is out of the plane (a fraction of a right angle); the nose's not while manualing.
+pub fn anti_flip(
+    x: &crate::tuning::Curve,
+    z: &crate::tuning::Curve,
+    nose: Vec3,
+    side: Vec3,
+    up: Vec3,
+    manual: bool,
+) -> Vec3 {
+    let project = |axis: Vec3| (axis - up * up.dot(axis)).normalize_or(Vec3::ZERO);
+    let a = project(nose);
+    let b = project(side);
+    let angle = |axis: Vec3, p: Vec3| {
+        libm::acosf(axis.dot(p).clamp(0.0, 1.0)) * (2.0 / core::f32::consts::PI)
+    };
+    let sign_a = if side.dot(nose.cross(a)) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let sign_b = if nose.dot(side.cross(b)) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let b_strength = z.eval(angle(side, b)) * sign_b;
+    let a_strength = if manual {
+        0.0
+    } else {
+        x.eval(angle(nose, a)) * sign_a
+    };
+    side * a_strength + nose * b_strength
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::park::Park;
     use crate::physics::skeleton::ANIMATED_PARTS;
+
+    /// SK8 anti_flip.rs: a deck pitched nose-down past the curve's dead zone against the rider's up
+    /// is turned back about its side (nose up), by the curve's amount; a level deck isn't; manualing
+    /// only its roll is corrected; a rolled deck is turned back about its nose.
+    #[test]
+    fn the_feet_turn_a_tipping_deck_back_to_the_riders_up() {
+        let t = crate::tuning::Tuning::BUILT_IN;
+        let up = Vec3::UP;
+        let side = v3(1.0, 0.0, 0.0);
+        assert_eq!(
+            anti_flip(
+                &t.anti_flip_x,
+                &t.anti_flip_z,
+                v3(0.0, 0.0, 1.0),
+                side,
+                up,
+                false
+            ),
+            Vec3::ZERO
+        );
+        let pitch = 0.5f32;
+        let nose = v3(0.0, -libm::sinf(pitch), libm::cosf(pitch));
+        let turn = anti_flip(&t.anti_flip_x, &t.anti_flip_z, nose, side, up, false);
+        let want = t.anti_flip_x.eval(pitch * 2.0 / crate::math::PI);
+        assert!(want > 0.005, "{want}");
+        assert!((turn.length() - want).abs() < 1e-5, "{turn:?} {want}");
+        // About the side axis, the way that lifts the nose.
+        let lifted = nose + turn.cross(nose);
+        assert!(lifted.y > nose.y, "{turn:?}");
+        assert_eq!(
+            anti_flip(&t.anti_flip_x, &t.anti_flip_z, nose, side, up, true),
+            Vec3::ZERO
+        );
+        // Rolled 0.6 rad: turned back about the nose, manualing too.
+        let roll = 0.6f32;
+        let side = v3(libm::cosf(roll), libm::sinf(roll), 0.0);
+        let nose = v3(0.0, 0.0, 1.0);
+        let turn = anti_flip(&t.anti_flip_x, &t.anti_flip_z, nose, side, up, true);
+        let righted = side + turn.cross(side);
+        assert!(turn.length() > 0.05 && righted.y < side.y, "{turn:?}");
+    }
 
     /// SK8 `condition_is_off_ground`: far beyond the max distance at once, between the two distances
     /// only after the natural-air time without a wheel touching (all strict), never within the min.

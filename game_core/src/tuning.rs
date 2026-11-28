@@ -226,6 +226,11 @@ pub struct Tuning {
     pub heading_adjust: f32,
     pub heading_adjust_max_speed: f32,
     pub heading_vs_slope: Curve,
+    /// The feet's anti-flip turn (rad a tick) against how far the deck's nose (`x`, about the deck's
+    /// side; not while manualing) and side (`z`, about its nose) leave the plane square to the rider's
+    /// up, as a fraction of a right angle (`physics_feet` `AntiFlipTorqueX`, `AntiFlipTorqueZ`).
+    pub anti_flip_x: Curve,
+    pub anti_flip_z: Curve,
     pub heading_vs_speed: Curve,
     /// Extra stick turn on steep faces: strength, against slope, against speed / 8 m/s, and against the
     /// yaw rate already opposing it (rad per tick).
@@ -397,6 +402,9 @@ pub struct Tuning {
     pub traj_radius: f32,
     /// How far under the rider's centre of mass the swept sphere's centre starts (m).
     pub traj_displacement: f32,
+    /// Following the clips' data (no ForcePhysics forcing either), the board is animated while the
+    /// posed deck's nose rises or dips more than this (its world y; SK8 `animated_board_threshold`).
+    pub max_deck_z_axis_y_for_animated_deck: f32,
     /// How much of `traj_displacement` is taken whatever the rider's height, against the board's
     /// vertical speed / 10 m/s and against the ground normal's height (the larger counts).
     pub traj_disp_vs_speed: Curve,
@@ -855,6 +863,8 @@ pub const PATHS: &[&str] = &[
     "physics_heading/default/HeadingAdjustFactor",
     "physics_heading/default/HeadingAdjustMaxSpeed",
     "physics_heading/default/HeadingAdjustVsSlope",
+    "physics_feet/default/AntiFlipTorqueX",
+    "physics_feet/default/AntiFlipTorqueZ",
     "physics_heading/default/HeadingAdjustVsSpeed",
     "physics_heading/default/TurnTorqueScalar",
     "physics_heading/default/TurnTorqueVsSlope",
@@ -978,6 +988,7 @@ pub const PATHS: &[&str] = &[
     "physics_trajectory/default/TrajectoryMaxErrorStart",
     "physics_trajectory/default/TrajectoryMaxErrorEnd",
     "physics_reckoning/default/TrajectoryRadius",
+    "physics_animation/default/MaxDeckZAxisYForAnimatedDeck",
     "physics_reckoning/default/TrajectoryDisplacement",
     "physics_reckoning/default/TrajectoryDispVsSpeed",
     "physics_reckoning/default/TrajectoryDispVsGroundNorm",
@@ -1210,6 +1221,26 @@ impl Tuning {
         heading_adjust: 0.025,
         heading_adjust_max_speed: 7.5,
         heading_vs_slope: Curve::new(&[(0.0, 0.0), (0.06, 0.0), (0.2, 0.8), (0.3, 1.0)]),
+        anti_flip_x: Curve::new(&[
+            (0.0, 0.0),
+            (0.144_951_1, 0.0),
+            (0.236_156_3, 0.005),
+            (0.309_446_2, 0.013_035_71),
+            (0.498_371_3, 0.031_785_71),
+            (0.648_208_4, 0.041_964_29),
+            (0.827_361_6, 0.05),
+            (1.0, 0.05),
+        ]),
+        anti_flip_z: Curve::new(&[
+            (0.0, 0.0),
+            (0.206_840_4, 0.0),
+            (0.273_615_6, 0.038_571_43),
+            (0.335_504_9, 0.082_857_15),
+            (0.509_772, 0.197_142_9),
+            (0.669_381_1, 0.294_285_6),
+            (0.902_280_2, 0.4),
+            (1.0, 0.4),
+        ]),
         heading_vs_speed: Curve::new(&[(0.0, 1.0), (0.4, 0.75), (0.7, 0.25), (1.0, 0.0)]),
         turn_torque: 0.06,
         turn_torque_vs_slope: Curve::new(&[
@@ -1432,6 +1463,7 @@ impl Tuning {
         phys_air_dont_align: 1.5,
         traj_cone_x: 12.0,
         traj_radius: 0.2,
+        max_deck_z_axis_y_for_animated_deck: 0.02,
         traj_displacement: 0.85,
         traj_disp_vs_speed: Curve::new(&[
             (0.0, 0.0),
@@ -1626,6 +1658,8 @@ impl Tuning {
                 scalar!(self.heading_adjust_max_speed)
             }
             "physics_heading/default/HeadingAdjustVsSlope" => curve!(self.heading_vs_slope),
+            "physics_feet/default/AntiFlipTorqueX" => curve!(self.anti_flip_x),
+            "physics_feet/default/AntiFlipTorqueZ" => curve!(self.anti_flip_z),
             "physics_heading/default/HeadingAdjustVsSpeed" => curve!(self.heading_vs_speed),
             "physics_heading/default/TurnTorqueScalar" => scalar!(self.turn_torque),
             "physics_heading/default/TurnTorqueVsSlope" => curve!(self.turn_torque_vs_slope),
@@ -1805,6 +1839,9 @@ impl Tuning {
             }
             "physics_trajectory/default/TrajectoryMaxErrorEnd" => scalar!(self.traj_error_end),
             "physics_reckoning/default/TrajectoryRadius" => scalar!(self.traj_radius),
+            "physics_animation/default/MaxDeckZAxisYForAnimatedDeck" => {
+                scalar!(self.max_deck_z_axis_y_for_animated_deck)
+            }
             "physics_reckoning/default/TrajectoryDisplacement" => {
                 scalar!(self.traj_displacement)
             }

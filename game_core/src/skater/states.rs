@@ -29,7 +29,7 @@
 //! | Processed2476 bit15 | on foot: staying off the board, or getting off it ([`Facts::dismount`]) |
 //! | Processed2484 bit16 | on foot in the air |
 //! | Processed2484 bit0 | getting on the board on the ground ([`Facts::mount`]) |
-//! | `Skeleton+16420` (force mode 2: the board animated) | the clips move the board (`GraphControl::board_animated`) |
+//! | `Skeleton+16420`, the board drive frame's nose y | the graphs' ForcePhysics mode (`Skater::force_mode`) and the posed deck's nose ([`Skater::board_animated`]) |
 
 use super::Skater;
 use crate::player::selector::conditions::{
@@ -216,7 +216,6 @@ impl Skater {
             field_856_secondary: t.natural_air_min_dist,
             field_7692: t.natural_air_time,
         };
-        let animated = self.graph.board_animated;
         StateSelectionInput {
             processed: ProcessedStateInput {
                 grind_type_1248: grind.unwrap_or(6),
@@ -246,14 +245,37 @@ impl Skater {
                 field_856: f.gap,
                 field_7692: f.no_wheel_time,
             },
-            skeleton: SkeletonAnimationState {
-                mode_16420: if animated { 2 } else { 1 },
-                back_chain_lane_12656: 0.0,
-                threshold_800: 0.0,
-            },
+            skeleton: self.skeleton_animation(),
             skitching_off_ground: off_ground,
             normal_off_ground: off_ground,
         }
+    }
+
+    /// What the selector reads of the skeleton (SK8 selection.rs): the ForcePhysics mode, the posed
+    /// board's nose height in the world (the board drive frame's z axis y: the rider's frame turns the
+    /// imported rider's posed deck; level without it) and `MaxDeckZAxisYForAnimatedDeck`.
+    pub fn skeleton_animation(&self) -> SkeletonAnimationState {
+        let nose_y = self.graph.pose_deck.map_or(0.0, |p| {
+            let r = &self.reckoning;
+            let turn = if self.frame_turned { -1.0 } else { 1.0 };
+            let up = r.up;
+            let right = up
+                .cross(r.heading() * turn)
+                .normalize_or(r.ground_right() * turn);
+            let heading = right.cross(up).normalize_or(r.heading() * turn);
+            (right * p.x + up * p.y + heading * p.z).y
+        });
+        SkeletonAnimationState {
+            mode_16420: u32::from(self.force_mode),
+            back_chain_lane_12656: nose_y,
+            threshold_800: self.tuning.max_deck_z_axis_y_for_animated_deck,
+        }
+    }
+
+    /// The clips move the board (TU3 `0x82BDC6C8`, SK8's GroundAnimation): forced so, or following
+    /// the clips' data while they pitch it.
+    pub fn board_animated(&self) -> bool {
+        crate::player::selector::conditions::is_skateboard_animated(self.skeleton_animation())
     }
 
     /// The state the selector would pick now with this tick's facts changed by `with` (on a copy of
@@ -374,6 +396,39 @@ mod tests {
             s.step(park, &Pad::default(), &FlickOut::default(), DT, &mut ev);
         }
         ev
+    }
+
+    /// SK8: the graphs' ForcePhysics sets the skeleton's board mode (`Skeleton+16420`), which the
+    /// selector reads (TU3 0x82BDC6C8): forced animated, the board is the clips'; forced physical, it
+    /// isn't; following the clips' data, only while the posed deck's nose rises or dips more than
+    /// `MaxDeckZAxisYForAnimatedDeck` (0.02).
+    #[test]
+    fn the_graphs_force_mode_and_the_posed_nose_make_the_board_animated() {
+        let (park, mut s) = rolling(4.0);
+        step(&mut s, &park, 5);
+        assert_eq!(s.tuning.max_deck_z_axis_y_for_animated_deck, 0.02);
+        let level = Some(v3(0.0, 0.0, 1.0));
+        let pitched = Some(v3(0.0, 0.07, 0.9975));
+        for (mode, nose, animated) in [
+            (2, level, true),
+            (1, pitched, false),
+            (0, level, false),
+            (0, pitched, true),
+            (0, Some(v3(0.0, -0.07, 0.9975)), true),
+            (0, Some(v3(0.0, 0.015, 0.9999)), false),
+            (0, None, false),
+        ] {
+            s.force_mode = mode;
+            s.graph.pose_deck = nose;
+            assert_eq!(s.board_animated(), animated, "mode {mode} nose {nose:?}");
+        }
+        // The physical state follows: GroundAnimation while animated, back to PhysicsGround after.
+        s.force_mode = 2;
+        step(&mut s, &park, 1);
+        assert_eq!(s.state(), State::GroundAnimation);
+        s.force_mode = 1;
+        step(&mut s, &park, 1);
+        assert_eq!(s.state(), State::PhysicsGround);
     }
 
     #[test]

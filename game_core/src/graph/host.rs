@@ -532,6 +532,9 @@ pub struct Shared {
     pub board_dropping: [bool; 2],
     pub board_retrieving: [bool; 2],
     pub retrieve_pulse: bool,
+    /// The board mode a ForcePhysics began with this update (SK8 `RidingState::force_mode`, taken by
+    /// the physics after the animation: `Skater::force_mode`).
+    pub force_mode: Option<u8>,
     /// The throw clips can't play: let go of the board this update anyway (true: thrown).
     pub release_now: Option<bool>,
     /// LandOnBoard asked for the board to be taken the other way round (FlipBoardBackwards).
@@ -993,6 +996,7 @@ impl<'a> Runner<'a> {
                 board_dropping: [false; 2],
                 board_retrieving: [false; 2],
                 retrieve_pulse: false,
+                force_mode: None,
                 release_now: None,
                 land_backwards: false,
                 body_tweak: Vec::new(),
@@ -1035,6 +1039,7 @@ impl<'a> Runner<'a> {
         self.s.board_dropping = [self.s.board_dropping[1], false];
         self.s.board_retrieving = [self.s.board_retrieving[1], false];
         self.s.retrieve_pulse = false;
+        self.s.force_mode = None;
         self.s.air_tweaking = false;
         self.s.release_now = None;
         if !self.s.world.landing_on_board {
@@ -1786,6 +1791,12 @@ impl Host<'_, '_> {
                         0.0
                     };
                     self.s.player.set_param(*a, height - correction, false);
+                }
+            }
+            // SK8 riding ForcePhysics (82BB2868): only its begin writes the mode.
+            Beh::ForcePhysics(m) => {
+                if phase == 0 {
+                    self.s.force_mode = Some(*m);
                 }
             }
             Beh::SetLandingData => match phase {

@@ -15,7 +15,7 @@ use crate::motion::Node;
 /// The pack entry.
 pub const ENTRY: &str = "motion/graph/ops";
 pub const MAGIC: [u8; 4] = *b"FGOP";
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 14;
 
 struct W(Vec<u8>);
 
@@ -878,6 +878,10 @@ fn beh(w: &mut W, b: &Beh) {
                 w.node(*c);
             }
         }
+        Beh::ForcePhysics(m) => {
+            w.u8(42);
+            w.u8(*m);
+        }
         // Every field-less behaviour was written above.
         _ => w.u8(255),
     }
@@ -1066,6 +1070,7 @@ fn read_beh(r: &mut R) -> Option<Beh> {
             late: r.f()?,
         },
         41 => Beh::OffboardBodyTweak([r.node()?, r.node()?, r.node()?, r.node()?]),
+        42 => Beh::ForcePhysics(r.u8()?),
         _ => return None,
     })
 }

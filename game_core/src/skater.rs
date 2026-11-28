@@ -779,6 +779,9 @@ pub struct Skater {
     pub last_landing: Option<LandingCheck>,
     /// What Skate 3's state graphs decided this tick (`crate::graph`; the game sets it every tick).
     pub graph: GraphControl,
+    /// The skeleton's board mode (SK8 `Skeleton+16420`): what the last ForcePhysics the graphs began
+    /// set (0 follow the clips' data, 1 the physical board, 2 the animated board); 0 again on a reset.
+    pub force_mode: u8,
     /// A body flip in the air (`skater::flip`), and the last one landed (front, whole turns) for the
     /// landing's name.
     pub body_flip: Option<flip::BodyFlip>,
@@ -999,10 +1002,8 @@ pub struct GraphControl {
     /// physical state 602) and jump off the planted foot (`FOOTJUMP`, on its first tick), as the plant the
     /// graph scores (its `PushTrick` states' `ScoringTrick`).
     pub anim_skateboard: bool,
-    /// The clips move the board (SK8's `GroundAnimation` physical state: a trick's take-off from the
-    /// ground, the board in hand): the drawn rider keeps the board's heading against his body as it was,
-    /// rather than putting the posed board on the physical one (`Game`'s ground alignment).
-    pub board_animated: bool,
+    /// The mode a ForcePhysics began with this tick (`Skater::force_mode` keeps it).
+    pub force_mode: Option<u8>,
     pub foot_jump: bool,
     pub plant: Option<plant::PlantKind>,
     /// In the air: a one-foot grab (the `OneFootAir` attribute: the foot plant manager runs) and the
@@ -1201,6 +1202,7 @@ impl Skater {
             bail_reason: None,
             last_landing: None,
             graph: GraphControl::default(),
+            force_mode: 0,
             body_flip: None,
             flipped: None,
             graph_push: None,
@@ -1258,11 +1260,14 @@ impl Skater {
     /// keeping the tuning, clip timing, stance and the checkpoints.
     pub fn respawn(&mut self, park: &dyn Terrain) {
         let clips = self.clips;
+        let force_mode = self.force_mode;
         let mut checkpoints = core::mem::take(&mut self.checkpoints);
         let pick = checkpoints.pick(&self.tuning, park, self.pos, self.switch);
         let turned = self.frame_turned;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+        // The graphs run on (their ForcePhysics already begun): the skeleton keeps its mode.
+        self.force_mode = force_mode;
         // Only a drawing parity (animation trees still playing remember it), kept across a teleport.
         self.frame_turned = turned;
         self.checkpoints = checkpoints;
@@ -1276,9 +1281,12 @@ impl Skater {
     /// Back to the park's spawn point (a fresh start), keeping the tuning, clip timing and stance.
     pub fn reset_to_spawn(&mut self, park: &dyn Terrain) {
         let clips = self.clips;
+        let force_mode = self.force_mode;
         let turned = self.frame_turned;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+        // The graphs run on (their ForcePhysics already begun): the skeleton keeps its mode.
+        self.force_mode = force_mode;
         // Only a drawing parity (animation trees still playing remember it), kept across a teleport.
         self.frame_turned = turned;
     }
@@ -1287,10 +1295,13 @@ impl Skater {
     /// (scripted runs), keeping the tuning, clip timing, stance and checkpoints.
     pub fn put_at(&mut self, park: &dyn Terrain, pos: Vec3, yaw: f32, speed: f32) {
         let clips = self.clips;
+        let force_mode = self.force_mode;
         let checkpoints = core::mem::take(&mut self.checkpoints);
         let turned = self.frame_turned;
         *self = Skater::spawn_with(park, self.tuning, self.stance);
         self.clips = clips;
+        // The graphs run on (their ForcePhysics already begun): the skeleton keeps its mode.
+        self.force_mode = force_mode;
         // Only a drawing parity (animation trees still playing remember it), kept across a teleport.
         self.frame_turned = turned;
         self.checkpoints = checkpoints;

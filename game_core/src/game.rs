@@ -1209,7 +1209,7 @@ impl Game {
         if let (Some(anim_board), Some(deck)) = (anim_board, deck) {
             // Skate 3 takes the heading alignment afresh every ground tick (Ground's
             // `prepare_ground`), not while the clips move the board or in the air.
-            if s.rolling() && !s.graph.board_animated {
+            if s.rolling() && s.state() != crate::skater::State::GroundAnimation {
                 self.roots.initialize_heading = true;
             }
             // In a hippie jump the board rolls on alone under the rider, whose clips carry their
@@ -1326,7 +1326,7 @@ impl Game {
         // A hippie jump's board rolls on the ground on its own physics (Skate 3's LandingOnDeck).
         let physical = s.hippie_air()
             || ((s.rolling() || s.grinding())
-                && !s.graph.board_animated
+                && s.state() != crate::skater::State::GroundAnimation
                 && s.possession.hold == crate::skater::possession::Hold::Underfoot);
         let air = s.is_airborne() && !s.hippie_air();
         let st = &mut self.board_state;
@@ -1363,7 +1363,7 @@ impl Game {
         let fast = if air {
             s.state() == crate::skater::State::KnownAir
         } else {
-            s.graph.board_animated
+            s.state() == crate::skater::State::GroundAnimation
         };
         let board = if physical {
             // A powerslide still turns the board in flatground's older ground model, which the rigid
@@ -1527,6 +1527,10 @@ impl Game {
                 });
                 control.pose_deck = posed_deck(Some(r), self.skater.mirrored());
                 control.pose_lift = (r.board_rest_height() - crate::skater::DECK_HEIGHT).max(0.0);
+            }
+            // SK8 frame.rs: the ForcePhysics begun this tick sets the skeleton's mode once.
+            if let Some(m) = control.force_mode {
+                self.skater.force_mode = m;
             }
             self.skater.graph = control;
             self.times.graph_us = g.cost_us;

@@ -405,6 +405,7 @@ impl Driver {
             // (until then the take-off's clip still poses the deck).
             board_adjust: r.board_adjusting() && path.contains("/BoardAdjusts/"),
             adjust_posed: path.contains("/BoardAdjusts/"),
+            force_mode: r.s.force_mode,
             ..GraphControl::default()
         };
         if path.contains("/Manual/") {
@@ -450,7 +451,8 @@ impl Driver {
                 .and_then(|n| r.s.player.params.iter().find(|p| p.name == n))
                 .map_or(gesture, |p| p.value);
             let over = r.packet(r.names.jump_override).unwrap_or(0.0);
-            c.pop = Some((flick, jump_strength(height, over, t)));
+            let min_jump = r.packet_named("MinJump").unwrap_or(0.0);
+            c.pop = Some((flick, jump_strength(height, min_jump, over, t)));
             // The clip marks a trick out of a manual (`TrickFromManual`): its jump's low end is the
             // mode's manual one.
             c.pop_from_manual = r.packet_named("TrickFromManual").is_some();
@@ -460,7 +462,6 @@ impl Driver {
         // first tick), as the plant the graph scores.
         if r.s.world.phys == phys::GROUND {
             c.anim_skateboard = has(self.clips.anim_skateboard);
-            c.board_animated = c.anim_skateboard || path.starts_with("OnBoard/Trick/");
             let foot_jump = has(self.clips.foot_jump);
             c.foot_jump = foot_jump && !self.foot_jumping;
             self.foot_jumping = foot_jump;
@@ -671,11 +672,12 @@ pub fn air_flick(name: &str) -> (Flick, u8) {
 }
 
 /// SK8's jump finalisation (animation attribute finalization): a trick height at or under the low clamp
-/// is the minimum hop, at or over the high clamp full height; a flick-strength override can only raise it,
-/// and only where the physics mode allows it (`JumpHeightOverrideEnabled`: off on Hardcore).
-pub fn jump_strength(height: f32, override_height: f32, t: &Tuning) -> f32 {
+/// is the minimum hop (the clip's `MinJump`, 0 without one), at or over the high clamp full height; a
+/// flick-strength override can only raise it, and only where the physics mode allows it
+/// (`JumpHeightOverrideEnabled`: off on Hardcore).
+pub fn jump_strength(height: f32, min_jump: f32, override_height: f32, t: &Tuning) -> f32 {
     let h = if height <= t.jump_clamp_low {
-        0.0
+        min_jump
     } else if height >= t.jump_clamp_high {
         1.0
     } else {

@@ -2018,12 +2018,27 @@ fn a_clips_jump_height_override_counts_only_where_the_physics_mode_allows_it() {
     use crate::tuning::{Difficulty, Tuning};
     let mut t = Tuning::BUILT_IN;
     let low = t.jump_clamp_low;
-    assert_eq!(super::drive::jump_strength(low, 0.6, &t), 0.6);
+    assert_eq!(super::drive::jump_strength(low, 0.0, 0.6, &t), 0.6);
     t.set_difficulty(Difficulty::Hardcore);
     assert!(!t.jump_height_override);
-    assert_eq!(super::drive::jump_strength(low, 0.6, &t), 0.0);
+    assert_eq!(super::drive::jump_strength(low, 0.0, 0.6, &t), 0.0);
     t.set_difficulty(Difficulty::Easy);
-    assert_eq!(super::drive::jump_strength(low, 0.6, &t), 0.6);
+    assert_eq!(super::drive::jump_strength(low, 0.0, 0.6, &t), 0.6);
+}
+
+#[test]
+fn a_low_trick_height_jumps_the_clips_min_jump() {
+    // SK8 attribute finalization: at or under the low clamp the jump is the clip's `MinJump`, not
+    // nothing; the override still only raises it.
+    let t = crate::tuning::Tuning::BUILT_IN;
+    let low = t.jump_clamp_low;
+    assert_eq!(super::drive::jump_strength(low, 0.2, 0.0, &t), 0.2);
+    assert_eq!(super::drive::jump_strength(low * 0.5, 0.2, 0.0, &t), 0.2);
+    assert_eq!(super::drive::jump_strength(low, 0.2, 0.6, &t), 0.6);
+    assert_eq!(
+        super::drive::jump_strength(t.jump_clamp_high, 0.2, 0.0, &t),
+        1.0
+    );
 }
 
 /// MatchCadence and MatchAirTime (SK8 motion_offboard/cadence.rs, match_air_time.rs): each captures the

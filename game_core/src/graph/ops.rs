@@ -375,6 +375,9 @@ pub enum Beh {
         manually: bool,
         adjust: bool,
     },
+    /// ForcePhysics: on begin, the skeleton's board mode (SK8 motion_riding.rs `ForceMode`, native
+    /// `Skeleton+16420`): 0 follow the animation data, 1 the physical board, 2 the animated board.
+    ForcePhysics(u8),
     /// SetLandingData: the landing trees' `Spin`, `AvgVelY` and `disttocog`.
     SetLandingData,
     /// StoreLandingData: tracks the landing speed.
@@ -874,7 +877,6 @@ const NOTHING: &[&str] = &[
     "EndGesture",
     "SetScoreAugmentation",
     "BipedCadence",
-    "ForcePhysics",
     "UpdateTimeSinceTeleport",
     "AirDismounting",
     "InitMovingObjects",
@@ -1077,6 +1079,11 @@ fn beh(a: &A, p: &Pack, g: &Graph, op: OpId, name: &str, db: Option<&MotionDb>) 
             manually: a.b("setManually", false),
             adjust: a.b("adjustForVel", false),
         },
+        "ForcePhysics" => Beh::ForcePhysics(match a.text("force") {
+            Some("FORCE_PHYSICS_SKATEBOARD") => 1,
+            Some("FORCE_ANIM_SKATEBOARD") => 2,
+            _ => 0,
+        }),
         "SetLandingData" => Beh::SetLandingData,
         "StoreLandingData" => Beh::StoreLandingData,
         "SetManualAngle" => Beh::SetManualAngle,
