@@ -126,6 +126,9 @@ fn nose_slide(p: &Park) -> Skater {
         Some(Family::Tipslide),
         "{ev:?}"
     );
+    // The contact taken, the next tick's selection takes the board onto the rail.
+    assert!(s.next_state().is_grind());
+    step(&mut s, p, &Pad::default(), 1, &mut ev);
     s
 }
 
@@ -218,12 +221,14 @@ fn a_boardslide_on_a_ledge_pushed_off_its_side_falls_off() {
             Some((Family::Boardslide, true)),
             "{ev:?}"
         );
+        // The next tick's selection takes the board onto the ledge.
+        assert!(s.next_state().is_grind());
         let pad = Pad {
             stick: [stick, 0.0],
             ..Pad::default()
         };
         let mut ticks = 0;
-        while s.grinding() && ticks < 90 {
+        while (ticks == 0 || s.grinding()) && ticks < 90 {
             s.step(&m, &pad, &FlickOut::default(), TICK, &mut ev);
             ticks += 1;
         }
@@ -256,11 +261,11 @@ fn slamming_down_onto_a_rail_with_the_board_rolled_wipes_out() {
     // 9.5 m/s down: 6.7 m/s of it across the rolled rider's ground plane, over Skate 3's 6.
     let (s, ev) = drop(9.5);
     assert!(ev.contains(&Event::Bailed), "{:?} {ev:?}", s.state());
-    assert!(s.bailed());
+    assert_eq!(s.next_state(), game_core::skater::State::WipeoutGround);
     assert_eq!(s.bail_reason, Some("slammed into the rail"));
     // 5 m/s: 3.5 m/s across, a grind.
     let (s, ev) = drop(5.0);
-    assert!(s.grinding(), "{ev:?}");
+    assert!(s.next_state().is_grind(), "{ev:?}");
     assert!(!ev.contains(&Event::Bailed), "{ev:?}");
 }
 

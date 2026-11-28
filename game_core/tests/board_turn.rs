@@ -138,7 +138,8 @@ fn watch(g: &mut Game, script: impl Fn(u32) -> PadRaw, frames: u32) -> Seen {
             .extend(g.log.drain(..).filter(|l| l.starts_with("board: ")));
         let now = drawn_board_yaw(g);
         if let Some(n) = &mut since {
-            assert!(g.skater.rolling(), "rode away from the landing");
+            // (From the tick after the touchdown's, when the selection has taken it onto the ground.)
+            assert!(*n == 0 || g.skater.rolling(), "rode away from the landing");
             seen.step = seen.step.max(wrap_angle(now - last).abs().to_degrees());
             seen.off_deck = seen.off_deck.max(axis_apart(now, yaw(g.skater.fwd)));
             if *n == 0 {

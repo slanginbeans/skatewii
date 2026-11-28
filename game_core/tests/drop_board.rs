@@ -319,6 +319,8 @@ fn y_in_the_air_with_the_board_in_hand_still_gets_on_there() {
     run(&mut g, 8, In::default());
     assert!(g.skater.biped.air.is_some());
     y(&mut g);
+    // Got on in the air: the next tick's selection takes the rider onto the deck.
+    idle(&mut g, 1);
     assert!(g.skater.landing_on_deck(), "{:?}", g.skater.state());
     idle(&mut g, 60);
     assert!(g.skater.rolling());

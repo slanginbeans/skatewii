@@ -51,7 +51,7 @@ fn ollie(p: &Park, stick: [f32; 2]) -> (Skater, Vec<Event>) {
     s.graph.pop = Some((Flick::OLLIE, 1.0));
     s.step(p, &Pad::default(), &FlickOut::default(), TICK, &mut ev);
     s.graph.pop = None;
-    assert!(s.is_airborne(), "popped");
+    assert!(ev.contains(&Event::Popped(Flick::OLLIE)), "popped");
     let pad = Pad {
         flick: stick,
         ..Pad::default()
@@ -316,7 +316,7 @@ fn an_adjusted_landing_keeps_its_heading_after_touching_down() {
         s.graph.pop = Some((Flick::OLLIE, 1.0));
         s.step(&p, &Pad::default(), &FlickOut::default(), TICK, &mut ev);
         s.graph.pop = None;
-        assert!(s.is_airborne(), "popped");
+        assert!(ev.contains(&Event::Popped(Flick::OLLIE)), "popped");
         let pad = Pad {
             flick: [x, 0.0],
             ..Pad::default()

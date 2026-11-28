@@ -1578,11 +1578,32 @@ impl Skater {
     ) {
         self.body_us = 0;
         self.board_stepped = false;
-        // SK8 state_timer_2664: the time in the state, this tick included.
-        self.states.time += dt;
         if let Some(b) = &mut self.rider_body {
             b.tick();
         }
+        // Skate 3's input phase (SK8 frame.rs: after the animation, before Logic): a wipeout asked
+        // for by the input (the graphs' wipeout, the bail buttons) is published for this tick's
+        // selection, which reads the state the last tick ended in.
+        if self.graph.wipeout && (self.rolling() || self.is_airborne()) {
+            if self.is_airborne() {
+                self.vel = self.vel * 0.5;
+            }
+            self.bail("wiped out with the grab tweaked into the landing", events);
+        }
+        self.read_wipe_buttons(pad, events);
+        // Skate 3's Logic phase: the state selector picks this tick's state from what the last tick's
+        // movement published and this tick's input (SK8 frame.rs: Logic runs before State, the
+        // physics). The movement below runs in the state picked; what it publishes waits for the next
+        // tick's selection, as Skate 3's does.
+        self.select_state();
+        // Y's clips getting off or on: stepping off is taken at once (before this tick's movement),
+        // stepping on at the next tick's selection.
+        self.toggle_board(park, pad, dt, events);
+        if self.states.facts.dismount {
+            self.select_state();
+        }
+        // SK8 state_timer_2664: the time in the state, this tick included.
+        self.states.time += dt;
         let touched = pad.held != 0
             || pad.stick != [0.0, 0.0]
             || flick.stick != [0.0, 0.0]
@@ -1652,12 +1673,6 @@ impl Skater {
             }
             (c, _) => c,
         };
-        if self.graph.wipeout && (self.rolling() || self.is_airborne()) {
-            if self.is_airborne() {
-                self.vel = self.vel * 0.5;
-            }
-            self.bail("wiped out with the grab tweaked into the landing", events);
-        }
         if let Some(l) = &mut self.landing {
             l.time += dt;
             if l.time > LANDING_SHOW {
@@ -1669,15 +1684,6 @@ impl Skater {
             if *t <= 0.0 {
                 self.regrind_block = None;
             }
-        }
-        self.read_wipe_buttons(pad, events);
-        self.toggle_board(park, pad, dt, events);
-        // A wipeout or a dismount asked for by the input (the bail buttons, the graphs' wipeout, Y's
-        // clip) is selected before this tick's movement, as Skate 3's input phase precedes its
-        // selection; the movement's facts then wait for the next tick's selection.
-        let early = self.states.facts.wipeout || self.states.facts.dismount;
-        if early {
-            self.select_state();
         }
         let flying = self.is_airborne();
         // SK8 input_phase/runtime.rs `update_time_on_ground`: the ticks in a ground state, and
@@ -1702,12 +1708,17 @@ impl Skater {
             self.update_prediction(park, self.air_time);
         }
         self.update_possession(park, dt, events);
-        // Skate 3's state selector picks the state from what the tick's movement published.
-        if !early {
+        // Getting on in the air (the graphs' landing on the board, or Y's air mount) is Skate 3's
+        // input: its processed bit is selected the tick the clips ask for it, which the graphs then
+        // see. Here the walker's movement took it, so it is selected now.
+        if self.states.facts.mount == Some(false) && self.walking() {
             self.select_state();
         }
+        // What the movement has published takes the selector to next tick: the tick's own upkeep
+        // follows it (a pop's tick flies the board, a touchdown's rides it).
+        let next = self.selects(|_| {});
         if !flying
-            && matches!(self.state(), State::PhysicsAir | State::KnownAir)
+            && matches!(next, State::PhysicsAir | State::KnownAir)
             && self.plan.is_none()
             && !self.selector.pending()
             && let Some((deck, v)) = deck_before
@@ -1719,7 +1730,8 @@ impl Skater {
             self.update_prediction(park, self.air_time);
             self.launch_from = None;
         }
-        if self.rolling() {
+        let next_flies = next.category() == 200 || next == State::Nonspecific;
+        if next.category() == 100 {
             // The board's up is the ground's under it (what is drawn is the physical deck; Skate 3
             // smooths the ground normal only in its reckoning); the velocity is the ground's.
             self.normal = self.contact_n;
@@ -1743,9 +1755,9 @@ impl Skater {
             // off-board reckonings clear the lean.
             self.wobble.reset();
             self.reckoning.lean = 0.0;
-            if self.hippie_air() {
+            if next_flies && self.takeoff.hippy {
                 self.roll_rig_alone(park);
-            } else if self.is_airborne() {
+            } else if next_flies {
                 // The take-off's tick (a jump leaves the ground before the board's ground step) and air
                 // ticks the flight didn't move (plants): the board goes where the flight is.
                 if !self.board_stepped {
@@ -4153,6 +4165,18 @@ mod tests {
         s.graph.pop = None;
     }
 
+    /// The state the next tick's selection picks from what this tick published (Skate 3's Logic
+    /// runs at the start of a tick, before its physics: a pop's or a touchdown's tick is still the
+    /// state it started in).
+    fn next_state(s: &Skater) -> State {
+        s.next_state()
+    }
+
+    /// The next tick's selection takes the board into the air (a pop's tick).
+    fn takes_off(s: &Skater) -> bool {
+        next_state(s).category() == 200
+    }
+
     /// `n` ticks; with `flick` the state graph pops it on the first.
     fn steps(
         s: &mut Skater,
@@ -4519,24 +4543,25 @@ mod tests {
         s.speed = 5.0;
         let mut ev = steps(&mut s, &park, &Pad::default(), None, 5);
         popped(&mut s, &park, &Pad::default(), Flick::OLLIE, &mut ev);
-        assert_eq!(s.state(), State::KnownAir);
+        assert_eq!(next_state(&s), State::KnownAir);
         let contact = s.plan.as_ref().map(|p| p.contact.time).unwrap();
         let mut ticks = 0;
         let mut follows = true;
-        while s.is_airborne() && ticks < 120 {
+        // The air's ticks, to the touchdown's (after which the selection takes it onto the ground).
+        while takes_off(&s) && ticks < 120 {
             let before = s
                 .plan
                 .map(|p| p.target(s.air_time + DT, s.tuning.traj_error_blend));
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
             ticks += 1;
             // The board is where the trajectory puts it (the deck over the flight's point).
-            if let (Some(p), true) = (before, s.is_airborne()) {
+            if let (Some(p), true) = (before, takes_off(&s)) {
                 let d = s.rig.as_ref().unwrap().board.deck().position - s.deck();
                 follows &= d.length() < 0.01 && (s.pos - p).length() < 0.01;
             }
         }
         assert!(follows, "the board follows the known air");
-        assert!(s.rolling(), "{ev:?}");
+        assert_eq!(next_state(&s).category(), 100, "{ev:?}");
         assert_eq!(landed(&ev), ["OLLIE"], "{ev:?}");
         // Down when the trajectory meets the ground, within a tick or two of the prediction.
         let air = ticks as f32 * DT;
@@ -5259,7 +5284,7 @@ mod tests {
                 if name.ends_with("BOARDSLIDE") || name.ends_with("LIPSLIDE")),
             "{ev:?}"
         );
-        assert!(s.is_airborne() && s.vel.y > 0.0);
+        assert!(takes_off(&s) && s.vel.y > 0.0);
         let ev = steps(&mut s, &park, &Pad::default(), None, 90);
         assert!(!ev.contains(&Event::Bailed), "{ev:?}");
     }
@@ -5275,7 +5300,7 @@ mod tests {
             steps(&mut s, &park, &Pad::default(), None, 20);
             s.tuning.grind.pop = [[9.0, 9.0], pair, [9.0, 9.0]];
             steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
-            assert!(s.is_airborne());
+            assert!(takes_off(&s));
             s.vel.y
         };
         let (strong, weak) = (pop([3.0, 3.0]), pop([1.0, 1.0]));
@@ -5630,7 +5655,7 @@ mod tests {
         let first = s.grind.as_ref().unwrap().rail;
         steps(&mut s, &park, &Pad::default(), None, 10);
         steps(&mut s, &park, &Pad::default(), Some(Flick::OLLIE), 1);
-        assert!(s.is_airborne());
+        assert!(takes_off(&s));
         // Straight onto the other rail on the next ticks: too soon.
         s.pos.x = 0.25;
         s.vel.y = -1.0;
@@ -5666,7 +5691,7 @@ mod tests {
         let mut ev = Vec::new();
         for _ in 0..120 {
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
-            if s.grinding() {
+            if s.grind.is_some() {
                 break;
             }
         }
@@ -5674,6 +5699,8 @@ mod tests {
             .grind
             .clone()
             .unwrap_or_else(|| panic!("{:?} {ev:?}", s.pos));
+        // The contact taken: the next tick's selection takes the board into the grind.
+        assert!(next_state(&s).is_grind());
         assert!(
             matches!(g.family, Family::FiftyFifty | Family::FiveO),
             "{:?}",
@@ -5710,11 +5737,12 @@ mod tests {
         s.air_time = 0.5;
         s.states.time = 0.5;
         let mut n = 0;
-        while !s.rolling() && n < 10 {
+        // The impact's tick: the next tick's selection takes the board onto the ground.
+        while next_state(&s).category() != 100 && n < 10 {
             steps(&mut s, &park, &Pad::default(), None, 1);
             n += 1;
         }
-        assert!(s.rolling());
+        assert_eq!(next_state(&s).category(), 100);
         let side = 5.7 * sinf(yaw) - LAND_SIDE_FRICTION * 6.1;
         assert!((s.slip.abs() - side).abs() < 0.25, "{} vs {side}", s.slip);
     }
@@ -6579,7 +6607,7 @@ mod tests {
         s.speed = 3.0;
         let mut ev = Vec::new();
         popped(&mut s, &park, &Pad::default(), Flick::OLLIE, &mut ev);
-        assert!(s.is_airborne(), "{ev:?}");
+        assert!(takes_off(&s), "{ev:?}");
         // Straight up (a little back in), not thrown out over the flat.
         assert!(s.vel.y > 2.5, "{:?}", s.vel);
         assert!(s.vel.z.abs() < 0.5, "{:?}", s.vel);
@@ -6600,7 +6628,7 @@ mod tests {
         let z = s.pos.z;
         let mut ev = Vec::new();
         popped(&mut s, &park, &Pad::default(), Flick::OLLIE, &mut ev);
-        assert!(s.is_airborne(), "{ev:?}");
+        assert!(takes_off(&s), "{ev:?}");
         // A tick's roll along the travel (the camera's anchor would read a stop otherwise).
         assert!(
             (s.pos.z - z - 4.0 * DT).abs() < 0.01,
@@ -6666,7 +6694,7 @@ mod tests {
             ..GraphControl::default()
         };
         let ev = steps(&mut s, &park, &Pad::default(), None, 1);
-        assert!(s.is_airborne());
+        assert!(takes_off(&s));
         assert!(
             ev.iter().any(
                 |e| matches!(e, Event::Popped(f) if f.trick == crate::gesture::Trick::Kickflip)
@@ -6876,7 +6904,7 @@ mod tests {
         }
         assert!(flat < 1e-3, "on the flat: {flat}");
         assert!(lip > 0.05, "over the lip: {lip}");
-        assert!(!s.rolling(), "it rolled off");
+        assert!(takes_off(&s), "it rolled off");
     }
 
     #[test]
@@ -6966,7 +6994,8 @@ mod tests {
         };
         let mut ev = steps(&mut s, &park, &Pad::default(), None, 1);
         let mut k = 0;
-        while s.is_airborne() && k < 300 {
+        // From the next tick (the selection takes the pop into the air) until one on the ground.
+        while (k == 0 || s.is_airborne()) && k < 300 {
             s.graph = air(k);
             ev.extend(steps(&mut s, &park, &Pad::default(), None, 1));
             k += 1;
@@ -7150,7 +7179,7 @@ mod tests {
                 ..GraphControl::default()
             };
             steps(&mut s, &park, &Pad::default(), None, 1);
-            assert!(s.is_airborne());
+            assert!(takes_off(&s));
             s.vel.y
         };
         assert!(pop(Difficulty::Easy, true) < pop(Difficulty::Easy, false) - 0.1);

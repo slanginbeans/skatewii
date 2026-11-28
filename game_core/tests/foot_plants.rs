@@ -144,7 +144,8 @@ fn the_graphs_boneless_holds_the_board_then_jumps_off_the_planted_foot() {
         ev.contains(&Event::FootJump(PlantKind::FsBoneless)),
         "{ev:?}"
     );
-    assert!(s.is_airborne());
+    // The next tick's selection takes it into the air.
+    assert_eq!(s.next_state().category(), 200);
     // Skate 3's FootJump on flat: 3 m/s up the normal, the speed along the ground scaled.
     assert!((s.vel.y - 3.0).abs() < 0.05, "{:?}", s.vel);
     assert!(s.vel.z > 3.5 && s.vel.z < 5.0, "{:?}", s.vel);
@@ -332,7 +333,8 @@ fn imported_graphs_play_the_boneless_and_jump_off_the_planted_foot() {
         }
         lifted |= g.skater.ground_plant.is_some_and(|p| p.lifted);
         jumped |= g.events.iter().any(|e| matches!(e, Event::FootJump(_)));
-        if jumped && g.skater.rolling() {
+        // Down again (not the jump's own tick, still the ground state's until the next selection).
+        if jumped && g.skater.rolling() && g.skater.next_state().category() == 100 {
             break;
         }
     }

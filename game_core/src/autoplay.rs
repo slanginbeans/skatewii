@@ -1038,7 +1038,9 @@ impl TrickTour {
                 if self.t > 50 && self.lined_up(s) {
                     (pad.cstick_x, pad.cstick_y) = self.wind_and_flick(game, BACK, 10, &[UP]);
                 }
-                if !rolling {
+                // Off the stick as soon as it has popped (the tick's selection takes it into the air
+                // only on the next tick: the flick held on would read as a board adjust there).
+                if !rolling || s.next_state().category() == 200 {
                     self.popped(Tour::LateAir, sw);
                 }
             }

@@ -84,7 +84,8 @@ fn hippie_jump(g: &mut Game) {
     g.place_rider(LANE, 0.0, 5.0);
     run(g, 40, [0, 0], [0, 0], 0);
     run(g, 30, [0, 0], [0, 0], btn::A | btn::B);
-    run(g, 1, [0, 0], [0, 0], 0);
+    // Let go, and the next tick's selection takes it into the air.
+    run(g, 2, [0, 0], [0, 0], 0);
     assert!(g.skater.hippie_air(), "the hippie jump is in the air");
 }
 

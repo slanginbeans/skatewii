@@ -1323,12 +1323,15 @@ impl Game {
         let to_world = self.roots.animation_to_world;
         let s = &self.skater;
         let animated = to_world.then(anim_board);
+        // Touched down this tick: the board is on its wheels (the rider turned to it) though the air
+        // state is selected away only next tick, so it is drawn as the ground's.
+        let landed = s.is_airborne() && s.next_state().category() == 100;
         // A hippie jump's board rolls on the ground on its own physics (Skate 3's LandingOnDeck).
-        let physical = s.hippie_air()
-            || ((s.rolling() || s.grinding())
+        let physical = (s.hippie_air() && !landed)
+            || ((s.rolling() || s.grinding() || landed)
                 && s.state() != crate::skater::State::GroundAnimation
                 && s.possession.hold == crate::skater::possession::Hold::Underfoot);
-        let air = s.is_airborne() && !s.hippie_air();
+        let air = s.is_airborne() && !s.hippie_air() && !landed;
         let st = &mut self.board_state;
         // The deck's wobble: on a landing and a take-off.
         if ran > 0 && air != st.air {

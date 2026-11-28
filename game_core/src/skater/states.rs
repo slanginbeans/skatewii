@@ -116,6 +116,13 @@ impl Skater {
         self.states.current
     }
 
+    /// The state the next tick's selection picks from what has been published so far (Skate 3's
+    /// selector runs at the start of a tick, after the animation and before the physics: a pop's or a
+    /// touchdown's tick is still the state it started in).
+    pub fn next_state(&self) -> State {
+        self.selects(|_| {})
+    }
+
     /// Seconds in the current state.
     pub fn state_time(&self) -> f32 {
         self.states.time
@@ -165,6 +172,9 @@ impl Skater {
     /// respawn and teleport set the state the same way), or the end of a runout.
     pub fn force_state(&mut self, state: State) {
         self.set_state(state);
+        // What the last tick published was for the state it was in: the next selection starts from
+        // the placing.
+        self.states.facts = Facts::default();
         // Not just out of a grind: past the selector's wait before another (its post-grind jump
         // counter, which counts from 0 only after a grind jump).
         let c = &mut self.states.selector.post_grind_jump_counter;
@@ -199,7 +209,9 @@ impl Skater {
         if on_foot || f.dismount {
             f2476 |= bit::ON_FOOT_2476;
         }
-        if self.walking() && self.biped.air.is_some() && f.mount != Some(true) {
+        // (Got on in the air last tick: the walker's flight is over, but it was the jump's.)
+        let in_air = self.biped.air.is_some() || f.mount == Some(false);
+        if self.walking() && in_air && f.mount != Some(true) {
             f2484 |= bit::ON_FOOT_AIR_2484;
         }
         if f.mount == Some(true) {
@@ -444,9 +456,14 @@ mod tests {
         // SK8: the jump starts the state frames over, and `field_2572 == 1` is the ground states' way
         // into the air; the jump launched the landing prediction, which is known that tick (on flat
         // ground), so the air is KnownAir from the take-off as SK8's ollie (GroundAnimation, KnownAir).
-        assert_eq!(s.state(), State::KnownAir);
+        // The pop's tick is the ground state's: the next tick's selection (Skate 3's Logic, before
+        // the physics) takes it into the air.
+        assert_eq!(s.state().category(), 100);
         assert!(s.plan.is_some());
-        assert_eq!(s.states.time, 0.0);
+        s.graph = GraphControl::default();
+        step(&mut s, &park, 1);
+        assert_eq!(s.state(), State::KnownAir);
+        assert_eq!(s.states.time, DT);
     }
 
     #[test]
